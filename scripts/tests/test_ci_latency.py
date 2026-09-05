@@ -761,13 +761,24 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn("retention-days: 14", upload)
         self.assertNotIn("continue-on-error", upload)
 
-    def test_presentation_command_routes_through_the_engine_xtask(self):
+    def test_presentation_command_uses_the_lightweight_xtask_dispatcher(self):
+        dispatcher = (REPOSITORY / "xtask" / "src" / "dispatcher.rs").read_text(
+            encoding="utf-8"
+        )
         engine_xtask = (REPOSITORY / "xtask" / "src" / "main.rs").read_text(
             encoding="utf-8"
         )
 
+        lightweight = (
+            'Some("presentation") => return xtask::presentation::command(&args[1..]),'
+        )
+        self.assertIn(lightweight, dispatcher)
+        self.assertLess(
+            dispatcher.index(lightweight),
+            dispatcher.index("Command::new(cargo)"),
+        )
         self.assertIn('Some("presentation") => {', engine_xtask)
-        self.assertIn("compat_profile::presentation_command(&tail)", engine_xtask)
+        self.assertIn("xtask::presentation::command(&tail)", engine_xtask)
         self.assertIn(
             "cargo xtask presentation verify-current --profile <p> --output-dir <dir>",
             engine_xtask,
