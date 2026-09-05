@@ -410,6 +410,70 @@ struct CachedPreparedObjectRenderPlan {
     plan: PreparedObjectRenderPlan,
 }
 
+/// Reusable object-ID index and effective painter order for mouse target
+/// lookups. The snapshot is immutable for the duration of a lookup, so storing
+/// indices keeps this cache independent of snapshot lifetimes while allowing
+/// its hash table and order buffers to be reused for the next pointer event.
+#[derive(Default)]
+struct MouseTargetObjectIndex {
+    by_id: HashMap<ObjectId, usize>,
+    back_to_front: Vec<usize>,
+    seen: HashSet<ObjectId>,
+}
+
+impl MouseTargetObjectIndex {
+    fn rebuild(&mut self, objects: &[ObjectSnapshot], render_order: &[ObjectId]) {
+        self.by_id.clear();
+        self.back_to_front.clear();
+        self.seen.clear();
+
+        // `SimulationSnapshot::object` returns the first object with a matching
+        // ID. Preserve that behavior for malformed snapshots with duplicates.
+        for (index, object) in objects.iter().enumerate() {
+            #[cfg(test)]
+            MOUSE_TARGET_OBJECT_INDEX_SCANS.with(|scans| {
+                scans.set(scans.get().saturating_add(1));
+            });
+            self.by_id.entry(object.id).or_insert(index);
+        }
+
+        if !render_order.is_empty() {
+            for id in render_order {
+                if self.seen.insert(*id) {
+                    if let Some(index) = self.index(*id) {
+                        self.back_to_front.push(index);
+                    }
+                }
+            }
+        }
+        for (index, object) in objects.iter().enumerate() {
+            #[cfg(test)]
+            MOUSE_TARGET_OBJECT_INDEX_SCANS.with(|scans| {
+                scans.set(scans.get().saturating_add(1));
+            });
+            if self.seen.insert(object.id) {
+                self.back_to_front.push(index);
+            }
+        }
+    }
+
+    fn index(&self, id: ObjectId) -> Option<usize> {
+        #[cfg(test)]
+        MOUSE_TARGET_OBJECT_INDEX_RESOLUTIONS.with(|resolutions| {
+            resolutions.set(resolutions.get().saturating_add(1));
+        });
+        self.by_id.get(&id).copied()
+    }
+
+    fn object<'snapshot>(
+        &self,
+        objects: &'snapshot [ObjectSnapshot],
+        id: ObjectId,
+    ) -> Option<&'snapshot ObjectSnapshot> {
+        self.index(id).and_then(|index| objects.get(index))
+    }
+}
+
 impl PreparedObjectRenderPlan {
     const ALL_PHASES: u8 = (1 << 4) - 1;
 
@@ -587,6 +651,10 @@ std::thread_local! {
     static OBJECT_VISIBILITY_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Canonically ordered objects examined while preparing viewport phase partitions.
     static OBJECT_RENDER_PLAN_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Snapshot entries examined while rebuilding the mouse target ID index.
+    static MOUSE_TARGET_OBJECT_INDEX_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Constant-time ID resolutions performed while rebuilding or querying the index.
+    static MOUSE_TARGET_OBJECT_INDEX_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Objects entering the construction-sign/TopFace drawing body.
     static TOP_FACE_DRAW_SETUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Object overlay ancestry sets allocated for recursive MODE_Object guards.
@@ -623,6 +691,22 @@ pub(crate) fn reset_object_render_plan_evaluations() {
 #[cfg(test)]
 pub(crate) fn object_render_plan_evaluations() -> usize {
     OBJECT_RENDER_PLAN_EVALUATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_mouse_target_object_index_scans() {
+    MOUSE_TARGET_OBJECT_INDEX_SCANS.with(|scans| scans.set(0));
+    MOUSE_TARGET_OBJECT_INDEX_RESOLUTIONS.with(|resolutions| resolutions.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn mouse_target_object_index_scans() -> usize {
+    MOUSE_TARGET_OBJECT_INDEX_SCANS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn mouse_target_object_index_resolutions() -> usize {
+    MOUSE_TARGET_OBJECT_INDEX_RESOLUTIONS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -1040,6 +1124,10 @@ pub struct GraphicsSystem {
     /// are rebuilt on the first use of each generation.
     object_render_plan_generation: u64,
     object_render_plan_cache: HashMap<i32, CachedPreparedObjectRenderPlan>,
+    /// Reused ID index and painter order for gameplay mouse target lookups.
+    /// Rebuilding on every lookup makes snapshot invalidation explicit while
+    /// retaining the hash table and vector allocations between pointer events.
+    mouse_target_object_index: std::cell::RefCell<MouseTargetObjectIndex>,
     /// C4ConfigGeneral::ScrollSmooth. Config plumbing lives above the
     /// frontend; retain the exact C++ default and clamp at use meanwhile.
     scroll_smooth: i32,
@@ -1179,6 +1267,7 @@ impl GraphicsSystem {
             object_render_plan_scratch: PreparedObjectRenderPlan::default(),
             object_render_plan_generation: 0,
             object_render_plan_cache: HashMap::new(),
+            mouse_target_object_index: std::cell::RefCell::new(MouseTargetObjectIndex::default()),
             scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             retained_lit_sky: None,
@@ -2973,24 +3062,11 @@ impl GraphicsSystem {
 
         // Reconstruct the renderer's effective back-to-front list first.
         // A partial sidecar is legal and draw_objects appends omitted objects
-        // canonically, so those omitted objects are the frontmost group.
-        let mut back_to_front = Vec::with_capacity(snapshot.objects.len());
-        let mut seen = HashSet::with_capacity(snapshot.objects.len());
-        if !snapshot.render_order.is_empty() {
-            for id in &snapshot.render_order {
-                if seen.insert(*id) {
-                    if let Some(object) = snapshot.object(*id) {
-                        back_to_front.push(object);
-                    }
-                }
-            }
-        }
-        back_to_front.extend(
-            snapshot
-                .objects
-                .iter()
-                .filter(|object| seen.insert(object.id)),
-        );
+        // canonically, so those omitted objects are the frontmost group. Keep
+        // the ID resolution linear by rebuilding one reusable index for the
+        // complete snapshot instead of searching `objects` for every ID.
+        let mut object_index = self.mouse_target_object_index.borrow_mut();
+        object_index.rebuild(&snapshot.objects, &snapshot.render_order);
         // A valid C++ player with no cursor cannot see a target through this
         // search: FindVisObject rejects every candidate before the shape
         // check, so right-up falls through to select-next.
@@ -3000,7 +3076,7 @@ impl GraphicsSystem {
             .find(|candidate| candidate.id == player)
             .map(|player| player.cursor);
         let cursor_layer = match player_cursor {
-            Some(Some(cursor)) => Some(snapshot.object(cursor)?.layer),
+            Some(Some(cursor)) => Some(object_index.object(&snapshot.objects, cursor)?.layer),
             Some(None) => {
                 return Some(MouseTargetLookupResult {
                     object: None,
@@ -3011,17 +3087,17 @@ impl GraphicsSystem {
                 .crew_selection
                 .get(&player)
                 .and_then(|selection| selection.cursor)
-                .and_then(|cursor| snapshot.object(cursor))
+                .and_then(|cursor| object_index.object(&snapshot.objects, cursor))
                 .map(|cursor| cursor.layer),
         };
 
-        let front_to_back = back_to_front.into_iter().rev().collect::<Vec<_>>();
         let mut find_next = query.find_next;
         // Native accidentally scans the master list for all three visual-list
         // passes. The first pass therefore decides ordinary searches; later
         // passes only matter when pFindNext is reached at the tail.
         for pass in 0..3 {
-            for object in &front_to_back {
+            for &index in object_index.back_to_front.iter().rev() {
+                let object = &snapshot.objects[index];
                 if find_next.is_none()
                     && object.status == ObjectStatus::Normal
                     && (pass != 1
@@ -3061,6 +3137,16 @@ impl GraphicsSystem {
             object: None,
             ocf: query.requested_ocf,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mouse_target_object_index_capacities(&self) -> (usize, usize, usize) {
+        let index = self.mouse_target_object_index.borrow();
+        (
+            index.by_id.capacity(),
+            index.back_to_front.capacity(),
+            index.seen.capacity(),
+        )
     }
 
     fn mouse_target_area_contains(
