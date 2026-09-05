@@ -575,7 +575,18 @@ class CiLatencyTests(unittest.TestCase):
             "--no-fail-fast --locked",
             engine_unit_and_parity,
         )
-        self.assertIn("cargo xtask parity verify", engine_unit_and_parity)
+        parity_filter = "test(/(^|::)parity_differential_matches_cpp_golden$/)"
+        self.assertNotIn("cargo xtask parity verify", engine_unit_and_parity)
+        self.assertEqual(engine_unit_and_parity.count(parity_filter), 2)
+        for package in ("clonk-engine-unit-tests", "clonk-frontend-unit-tests"):
+            self.assertIn(
+                f"package({package}) and {parity_filter}",
+                engine_unit_and_parity,
+            )
+        self.assertEqual(
+            engine_unit_and_parity.count("--no-tests=fail"),
+            2,
+        )
         self.assertNotIn("          - name: frontend unit\n", workflow)
         dedicated_packages = {
             "clonk-app",
@@ -635,7 +646,11 @@ class CiLatencyTests(unittest.TestCase):
         for entry in (unit_and_parity, quality):
             self.assertIn("failed=0", entry)
             self.assertIn('exit "$failed"', entry)
-        self.assertIn("cargo xtask parity verify || failed=1", unit_and_parity)
+        self.assertNotIn("cargo xtask parity verify", unit_and_parity)
+        self.assertEqual(
+            unit_and_parity.count("--no-tests=fail"),
+            2,
+        )
         self.assertIn("cargo clippy --version || failed=1", quality)
         self.assertIn("rustfmt --version || failed=1", quality)
         for command in (
@@ -837,7 +852,7 @@ class CiLatencyTests(unittest.TestCase):
         workflow = LANDING.read_text(encoding="utf-8")
         required = (
             "cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings",
-            "cargo xtask parity verify",
+            "package(clonk-engine-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)",
             "cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked",
             "cargo xtask engine-snapshots verify",
             "cargo xtask compat verify",
