@@ -3,6 +3,7 @@
 //! The verification itself is an engine test, but selecting that one test does
 //! not require linking the engine-backed release-tool binary first.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -38,7 +39,13 @@ pub fn command(args: &[String]) -> Result<()> {
             if args.len() > 1 {
                 bail!("`parity verify` does not take additional arguments");
             }
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            // Cargo rewrites CARGO to its own executable when it launches
+            // this binary. CI supplies a diagnostic wrapper separately so
+            // each native nextest child is retained too.
+            let cargo = cargo_program(
+                std::env::var_os("LC_CARGO_WRAPPER"),
+                std::env::var_os("CARGO"),
+            );
             for package in PARITY_PACKAGES {
                 let status = Command::new(&cargo)
                     .current_dir(&workspace_dir)
@@ -58,6 +65,10 @@ pub fn command(args: &[String]) -> Result<()> {
             other
         ),
     }
+}
+
+fn cargo_program(wrapper: Option<OsString>, cargo: Option<OsString>) -> OsString {
+    wrapper.or(cargo).unwrap_or_else(|| "cargo".into())
 }
 
 /// Test crates that may host a golden comparator.
@@ -164,5 +175,22 @@ mod tests {
 
         assert!(root.join("Cargo.toml").is_file());
         assert!(root.join("parity").is_dir());
+    }
+
+    #[test]
+    fn parity_prefers_the_diagnostic_wrapper_over_cargos_rewritten_path() {
+        assert_eq!(
+            cargo_program(Some("diagnostic-cargo".into()), Some("cargo".into())),
+            OsString::from("diagnostic-cargo")
+        );
+    }
+
+    #[test]
+    fn parity_uses_cargo_when_no_diagnostic_wrapper_is_configured() {
+        assert_eq!(
+            cargo_program(None, Some("cargo-from-environment".into())),
+            OsString::from("cargo-from-environment")
+        );
+        assert_eq!(cargo_program(None, None), OsString::from("cargo"));
     }
 }

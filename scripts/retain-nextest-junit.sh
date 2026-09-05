@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-source_path=${LC_NEXTEST_JUNIT_SOURCE:-target/nextest/default/junit.xml}
+source_path=${LC_NEXTEST_JUNIT_SOURCE:-${CARGO_TARGET_DIR:-target}/nextest/default/junit.xml}
 destination_dir=${LC_NEXTEST_JUNIT_DIR:?LC_NEXTEST_JUNIT_DIR must name the retained-report directory}
 
 if [[ ! -f "$source_path" ]]; then

@@ -42,6 +42,10 @@ jobs:
       cancel-in-progress: true
     env:
       CARGO_TARGET_DIR: target/coverage-build
+      # nextest resolves its relative JUnit path under CARGO_TARGET_DIR. Keep
+      # this alongside that setting so diagnostics follow the instrumented
+      # target instead of the ordinary Landing target.
+      JUNIT_SOURCE: target/coverage-build/nextest/default/junit.xml
       COVERAGE_IGNORE_REGEX: '/(main_tests|lib_tests)/|/(parity_differential|test_game_call_ex|test_support)\.rs$'
       LLVM_PROFILE_FILE_NAME: 'clonk-%8m.profraw'
     defaults:
@@ -149,7 +153,7 @@ jobs:
               "source_sha": os.environ["SOURCE_SHA"],
               "command": os.environ["SHARD_COMMAND"],
               "nextest_profile": "default",
-              "junit": "target/nextest/default/junit.xml",
+              "junit": os.environ["JUNIT_SOURCE"],
               "retained_junit": "junit/*.xml",
           }
           path = diagnostic_dir / "metadata.json"
@@ -269,9 +273,10 @@ jobs:
         if: always()
         run: |
           python3 - <<'PY'
+          import os
           from pathlib import Path
 
-          Path("target/nextest/default/junit.xml").unlink(missing_ok=True)
+          Path(os.environ["JUNIT_SOURCE"]).unlink(missing_ok=True)
           PY
 
       - name: Collect instrumented coverage fragment
@@ -280,17 +285,17 @@ jobs:
           DIAGNOSTIC_DIR: ${{ runner.temp }}/test-diagnostics
           LC_CAPTURE_VIRTUAL_PLAYER: '1'
           LC_TEST_ARTIFACT_DIR: ${{ runner.temp }}/test-diagnostics/replays
+          LC_NEXTEST_JUNIT_SOURCE: ${{ env.JUNIT_SOURCE }}
         run: |
           export LC_REAL_CARGO="$(command -v cargo)"
+          export LC_NEXTEST_JUNIT_HELPER="$GITHUB_WORKSPACE/scripts/retain-nextest-junit.sh"
           export LC_NEXTEST_JUNIT_DIR="$DIAGNOSTIC_DIR/junit"
-          cargo() {
-            local status=0
-            rm -f "${LC_NEXTEST_JUNIT_SOURCE:-target/nextest/default/junit.xml}"
-            "$LC_REAL_CARGO" "$@" || status=$?
-            bash scripts/retain-nextest-junit.sh || true
-            return "$status"
-          }
-          export -f cargo
+          cargo_wrapper_dir="$RUNNER_TEMP/nextest-cargo-wrapper"
+          mkdir -p "$cargo_wrapper_dir"
+          cp scripts/retain-nextest-cargo.sh "$cargo_wrapper_dir/cargo"
+          chmod 0755 "$cargo_wrapper_dir/cargo"
+          export LC_CARGO_WRAPPER="$cargo_wrapper_dir/cargo"
+          export PATH="$cargo_wrapper_dir:$PATH"
           cargo llvm-cov clean --workspace
           bash -euo pipefail -c "$SHARD_COMMAND"
           mkdir -p target/coverage-fragments
@@ -306,10 +311,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rust-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}-${{ inputs.source-sha }}
+          # Release merge-group runs execute the ordinary Landing shards and
+          # this instrumented lane in the same workflow run. Keep the lane in
+          # the artifact name so overlapping shard IDs cannot collide.
+          name: rust-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-coverage-${{ matrix.artifact }}-${{ inputs.source-sha }}
           path: |
             ${{ runner.temp }}/test-diagnostics
-            target/nextest/default/junit.xml
+            ${{ env.JUNIT_SOURCE }}
           if-no-files-found: warn
           retention-days: 14
 
