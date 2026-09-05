@@ -5,6 +5,115 @@
 
 use super::*;
 
+#[cfg(test)]
+struct HostCapabilityDispatchPause {
+    token: Arc<()>,
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct HostCapabilityDispatchPauseGuard {
+    client_name: Vec<u8>,
+    token: Arc<()>,
+}
+
+#[cfg(test)]
+fn host_capability_dispatch_pauses(
+) -> &'static Mutex<BTreeMap<Vec<u8>, HostCapabilityDispatchPause>> {
+    static PAUSES: std::sync::OnceLock<Mutex<BTreeMap<Vec<u8>, HostCapabilityDispatchPause>>> =
+        std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn pause_host_capability_dispatch(
+    client_name: &[u8],
+) -> (
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    HostCapabilityDispatchPauseGuard,
+) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let client_name = client_name.to_vec();
+    let token = Arc::new(());
+    let mut pauses = host_capability_dispatch_pauses()
+        .lock()
+        .expect("host capability dispatch pause lock poisoned");
+    let already_installed = pauses.contains_key(&client_name);
+    if already_installed {
+        drop(pauses);
+        panic!("host capability dispatch pause already installed for this client");
+    }
+    pauses.insert(
+        client_name.clone(),
+        HostCapabilityDispatchPause {
+            token: Arc::clone(&token),
+            reached: reached_tx,
+            resume: resume_rx,
+        },
+    );
+    (
+        reached_rx,
+        resume_tx,
+        HostCapabilityDispatchPauseGuard { client_name, token },
+    )
+}
+
+#[cfg(test)]
+impl Drop for HostCapabilityDispatchPauseGuard {
+    fn drop(&mut self) {
+        let mut pauses = host_capability_dispatch_pauses()
+            .lock()
+            .expect("host capability dispatch pause lock poisoned");
+        if pauses
+            .get(&self.client_name)
+            .is_some_and(|pause| Arc::ptr_eq(&pause.token, &self.token))
+        {
+            pauses.remove(&self.client_name);
+        }
+    }
+}
+
+#[cfg(test)]
+async fn wait_at_host_capability_dispatch_pause(state: &HostState, client_id: ClientId) {
+    let Some(client_name) = state
+        .client_cores
+        .get(&(client_id as i32))
+        .map(|core| core.name.as_bytes().to_vec())
+    else {
+        return;
+    };
+    let pause = host_capability_dispatch_pauses()
+        .lock()
+        .expect("host capability dispatch pause lock poisoned")
+        .remove(&client_name);
+    let Some(HostCapabilityDispatchPause {
+        reached, resume, ..
+    }) = pause
+    else {
+        return;
+    };
+    let _ = reached.send(());
+    let _ = resume.await;
+}
+
+#[cfg(test)]
+pub(crate) fn notify_peer_capability_waiters(state: &mut HostState) {
+    let waiters = std::mem::take(&mut state.peer_capability_waiters);
+    for waiter in waiters {
+        if state
+            .peer_capabilities
+            .peer_supports(waiter.client_id as i32, waiter.capability)
+        {
+            let _ = waiter.completion.send(());
+        } else {
+            state.peer_capability_waiters.push(waiter);
+        }
+    }
+}
+
 pub(crate) async fn handle_client_message_with_restart_fence(
     connection_id: u32,
     client_id: ClientId,
@@ -82,6 +191,8 @@ pub(crate) async fn handle_client_message(
                 .await;
                 return;
             }
+            #[cfg(test)]
+            wait_at_host_capability_dispatch_pause(state, client_id).await;
             // Record what this peer can do, and answer so it learns the same
             // about us. A stock C++ peer never sends this and never replies, so
             // it simply stays absent from the registry and keeps the
@@ -89,6 +200,8 @@ pub(crate) async fn handle_client_message(
             state
                 .peer_capabilities
                 .record(client_id as i32, capabilities);
+            #[cfg(test)]
+            notify_peer_capability_waiters(state);
             if let Some(route) = state.accepted_routes.get_mut(&connection_id) {
                 route.peer_is_port = true;
                 if state.config.voice_enabled && route.protocol == crate::NetworkProtocol::Udp {

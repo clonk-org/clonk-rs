@@ -1183,6 +1183,7 @@ mod tests {
                 },
             )]),
             accepted_route_waiters: Vec::new(),
+            peer_capability_waiters: Vec::new(),
             control_send_time_epoch: 0,
             closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
             pending_sync: Vec::new(),
@@ -2856,6 +2857,7 @@ mod tests {
         let mut host_events = host.take_event_receiver();
         let mut client = connect_test_player(address, "Alice").await;
         let client_id = client.client_id();
+        wait_for_host_round_restart_capability(&host, client_id).await;
         let before_routes = host
             .runtime_connections()
             .await
@@ -2924,8 +2926,36 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_rejects_a_second_round_restart_until_the_first_is_acknowledged() {
+        let client_name = b"Readiness fence";
+        // A flushed client route only proves that the announcement left the
+        // client's writer; register the readiness waiter first, then pause its
+        // host dispatch so the registry write remains pending.
+        let (capability_reached, capability_resume, _capability_pause) =
+            pause_host_capability_dispatch(client_name);
         let (address, host) = start_test_host(HostConfig::default()).await;
-        let mut client = connect_test_player(address, "Alice").await;
+        let readiness = host
+            .arm_peer_capability_waiter(1, crate::PortCapabilities::ROUND_RESTART_V2)
+            .await;
+        let mut client = connect_test_player(address, "Readiness fence").await;
+        assert_eq!(client.client_id(), 1);
+        timeout(EVENT_WAIT, capability_reached)
+            .await
+            .test_value()
+            .test_value();
+        {
+            tokio::pin!(readiness);
+            assert!(
+                timeout(Duration::from_millis(50), &mut readiness)
+                    .await
+                    .is_err(),
+                "host capability readiness completed while dispatch was paused"
+            );
+            capability_resume.send(()).test_value();
+            timeout(EVENT_WAIT, readiness)
+                .await
+                .test_value()
+                .test_value();
+        }
         let mut events = client.take_event_receiver();
         let mut first = HostConfig::default();
         first
@@ -3043,6 +3073,7 @@ mod tests {
         .await
         .test_value();
         wait_for_client_host_protocols(&client, route_wait).await;
+        wait_for_host_round_restart_capability(&host, client_id).await;
         while host_events.try_recv().is_ok() {}
 
         let mut events = client.take_event_receiver();
@@ -3092,6 +3123,7 @@ mod tests {
         let (address, mut host) = start_test_host(HostConfig::default()).await;
         let mut host_events = host.take_event_receiver();
         let mut modern = connect_test_player(address, "Alice").await;
+        wait_for_host_round_restart_capability(&host, modern.client_id()).await;
         let mut modern_events = modern.take_event_receiver();
         let (mut stock, _) = raw_client_transport(address, b"Legacy Bob").await;
         drain_raw_client(&mut stock).await;
@@ -3212,6 +3244,7 @@ mod tests {
         )
         .await
         .test_value();
+        wait_for_host_round_restart_capability(&host, client.client_id()).await;
         loop {
             match timeout(EVENT_WAIT, client.events().recv())
                 .await
@@ -4438,6 +4471,8 @@ mod tests {
         let removing_id = removing.client_id();
         let mut retained = connect_test_player(address, "Bob").await;
         let retained_id = retained.client_id();
+        wait_for_host_round_restart_capability(&host, removing_id).await;
+        wait_for_host_round_restart_capability(&host, retained_id).await;
         let mut removing_events = removing.take_event_receiver();
         let mut retained_events = retained.take_event_receiver();
         while host_events.try_recv().is_ok() {}
@@ -6732,6 +6767,15 @@ mod tests {
         })
         .await
         .expect("client did not install both accepted host routes");
+    }
+
+    async fn wait_for_host_round_restart_capability(host: &HostHandle, client_id: ClientId) {
+        timeout(
+            EVENT_WAIT,
+            host.wait_for_peer_capability(client_id, crate::PortCapabilities::ROUND_RESTART_V2),
+        )
+        .await
+        .expect("host did not observe the client's round-restart capability");
     }
 
     #[tokio::test(flavor = "multi_thread")]

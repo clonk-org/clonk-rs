@@ -105,6 +105,8 @@ pub(crate) struct HostState {
     pub(crate) accepted_routes: BTreeMap<u32, AcceptedConnectionRoute>,
     #[cfg(test)]
     pub(crate) accepted_route_waiters: Vec<AcceptedRouteWaiter>,
+    #[cfg(test)]
+    pub(crate) peer_capability_waiters: Vec<PeerCapabilityWaiter>,
     pub(crate) control_send_time_epoch: u64,
     pub(crate) closed_routes: crate::post_mortem::ClosedConnectionRouter,
     pub(crate) pending_sync: Vec<clonk_engine::ControlPacket>,
@@ -167,6 +169,14 @@ pub(crate) struct AcceptedRouteWaiter {
     pub(crate) initial_ids: BTreeSet<u32>,
     pub(crate) expected_count: usize,
     pub(crate) completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PeerCapabilityWaiter {
+    pub(crate) client_id: ClientId,
+    pub(crate) capability: u32,
+    pub(crate) completion: oneshot::Sender<()>,
 }
 
 impl HostState {
