@@ -994,9 +994,7 @@ impl GameApp {
                     false
                 };
                 if player_view_scrolled {
-                    let audio = std::mem::take(&mut self.snapshot.audio);
-                    self.snapshot = self.engine.snapshot();
-                    self.snapshot.audio = audio;
+                    self.refresh_snapshot_after_player_view_scroll();
                 }
                 if repeated_mouse_move {
                     if let Some(pointer) = self.live_input.ingame_pointer {

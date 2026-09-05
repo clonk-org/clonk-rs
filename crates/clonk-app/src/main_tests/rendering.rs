@@ -3741,6 +3741,14 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     let (before, _) = view_state(&app);
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
+    let retained_player = app
+        .snapshot
+        .players
+        .iter()
+        .find(|player| player.id == owner)
+        .test_value();
+    main_assert_eq!(retained_player.viewports[0].center => Vector2::new(before.x - 10, before.y));
+    main_assert_eq!(retained_player.view_mode => clonk_engine::PLAYER_VIEW_MODE_SCROLLING);
     let left_edge = app.live_input.ingame_edge_scroll.test_value().edge;
     main_assert_eq!(left_edge.delta => Vector2::new(-10, 0));
     main_assert_eq!(left_edge.cursor => clonk_frontend::MouseCursorPhase::Left);
@@ -3786,6 +3794,86 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
         .player_in_com(owner, clonk_engine::COM_RIGHT, 0)
         .test_value();
     main_assert_eq!(view_state(&app).1 => clonk_engine::PLAYER_VIEW_MODE_CURSOR);
+}
+
+#[test]
+fn construction_edge_scroll_preserves_ordered_scoreboard_lifecycle_requests() {
+    const CALLBACK_BOARD: &str = r#"global func Script0()
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       DoScoreboardShow(1);
+                       DoScoreboardShow(-1);
+                   }
+                   global func Script1()
+                   {
+                       DoScoreboardShow(1);
+                   }
+                   global func Script2()
+                   {
+                       DoScoreboardShow(-1);
+                   }"#;
+
+    let (app, owner, menu_point, valid_point, _invalid, _world, _c4id) =
+        construction_drag_fixture();
+    let mut app = configure_scoreboard_test_app(app, CALLBACK_BOARD);
+    app.engine.scenario_script_go = true;
+    while app.engine.frame() % 10 != 9 {
+        app.test_update();
+    }
+    begin_construction_drag(&mut app, menu_point, valid_point);
+
+    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let edge_point = (0..viewport.width as i32)
+        .map(|x| (viewport.x + x, viewport.y))
+        .chain((0..viewport.width as i32).map(|x| {
+            (
+                viewport.x + x,
+                viewport.y + viewport.height as i32 - 1,
+            )
+        }))
+        .chain((0..viewport.height as i32).map(|y| (viewport.x, viewport.y + y)))
+        .chain((0..viewport.height as i32).map(|y| {
+            (
+                viewport.x + viewport.width as i32 - 1,
+                viewport.y + y,
+            )
+        }))
+        .map(|(x, y)| GuiPoint::new(x as f32, y as f32))
+        .find(|point| {
+            app.graphics
+                .viewport_output_point_at(*point)
+                .is_some_and(|pointer| {
+                    pointer.owner == owner
+                        && app.ingame_viewport_region(owner, pointer.screen).is_none()
+                        && viewport_edge_scroll(viewport, pointer.screen).is_some()
+                })
+        })
+        .test_value();
+    let edge = PhysicalPosition::new(f64::from(edge_point.x), f64::from(edge_point.y));
+    app.test_cursor(edge);
+    main_assert!(app.live_input.ingame_edge_scroll.is_some());
+
+    app.test_update();
+
+    // Script0 runs in this frame and queues show then hide. The retained tick
+    // snapshot must deliver both requests in order while Execute scrolls the
+    // active construction viewport.
+    main_assert!(app.construction_menu_drag.is_some());
+    main_assert!(app.dialogs.scoreboard.is_none());
+    main_assert_eq!(app.snapshot.hud.scoreboard.show_count() => 0);
+    main_assert!(app.snapshot.hud.scoreboard_presentations.is_empty());
+
+    while app.engine.frame() % 10 != 9 {
+        app.test_update();
+    }
+    app.test_update();
+    main_assert!(app.dialogs.scoreboard.is_some(), "a show request survives edge scrolling");
+
+    while app.engine.frame() % 10 != 9 {
+        app.test_update();
+    }
+    app.test_update();
+    main_assert!(app.dialogs.scoreboard.is_none(), "a hide request survives edge scrolling");
 }
 
 #[test]

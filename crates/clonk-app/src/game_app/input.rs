@@ -8218,7 +8218,7 @@ impl GameApp {
                 })
             };
             if self.apply_ingame_edge_scroll()? {
-                self.snapshot = self.engine.snapshot();
+                self.refresh_snapshot_after_player_view_scroll();
             }
             self.advance_ingame_mouse_caption(
                 pointer,
