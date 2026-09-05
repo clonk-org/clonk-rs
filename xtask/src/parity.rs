@@ -86,15 +86,17 @@ const PARITY_PACKAGES: &[&str] = &[
 const PARITY_TEST_FILTER: &str = "test(/(^|::)parity_differential_matches_cpp_golden$/)";
 
 fn verify_nextest_args(package: &str) -> Vec<String> {
-    vec![
-        "nextest".to_string(),
-        "run".to_string(),
-        "-p".to_string(),
-        package.to_string(),
+    let mut args = vec!["nextest".to_string(), "run".to_string()];
+    for listed_package in PARITY_PACKAGES {
+        args.push("-p".to_string());
+        args.push((*listed_package).to_string());
+    }
+    args.extend([
         "--no-tests=fail".to_string(),
         "-E".to_string(),
-        PARITY_TEST_FILTER.to_string(),
-    ]
+        format!("package({package}) and {PARITY_TEST_FILTER}"),
+    ]);
+    args
 }
 
 pub fn workspace_dir() -> Result<PathBuf> {
@@ -124,22 +126,35 @@ mod tests {
     /// here, without touching the command construction.
     #[test]
     fn verify_requires_each_listed_package_independently() {
-        assert_eq!(PARITY_PACKAGES.len(), 3);
+        assert_eq!(
+            PARITY_PACKAGES,
+            &[
+                "clonk-app",
+                "clonk-engine-unit-tests",
+                "clonk-frontend-unit-tests",
+            ],
+            "the standalone inventory must retain every current comparator package"
+        );
         for package in PARITY_PACKAGES {
             let args = verify_nextest_args(package);
 
-            assert_eq!(&args[..2], &["nextest".to_string(), "run".to_string()]);
             assert_eq!(
-                args.iter().filter(|arg| *arg == "-p").count(),
-                1,
-                "each comparator gets its own package invocation"
+                args,
+                vec![
+                    "nextest".to_string(),
+                    "run".to_string(),
+                    "-p".to_string(),
+                    "clonk-app".to_string(),
+                    "-p".to_string(),
+                    "clonk-engine-unit-tests".to_string(),
+                    "-p".to_string(),
+                    "clonk-frontend-unit-tests".to_string(),
+                    "--no-tests=fail".to_string(),
+                    "-E".to_string(),
+                    format!("package({package}) and {PARITY_TEST_FILTER}"),
+                ],
+                "each comparator must share the complete compile graph and remain independently fail-closed"
             );
-            assert_eq!(args[3], *package);
-            assert!(
-                args.iter().any(|arg| arg == "--no-tests=fail"),
-                "missing {package} comparator must fail the inventory"
-            );
-            assert_eq!(args.last().map(String::as_str), Some(PARITY_TEST_FILTER));
         }
     }
 
