@@ -118,3 +118,42 @@ fn section_teardown_keeps_a_retained_object_whose_number_a_departing_object_reus
         "the survivor keeps its inactive-list membership"
     );
 }
+
+/// The departing section's `Objects.txt` must still carry an active object
+/// whose number a retained object also holds.
+///
+/// `preserve_ids` carries "these objects were inactive when the script asked"
+/// across the gap the deferred switch has and C++ does not
+/// (`FnLoadScenarioSection`, C4Script.cpp:5401-5408). Testing an active
+/// object's number against that list alone drops the object from the save
+/// whenever a retained object happens to share the number, even though native
+/// saves the active list and the two are separate links (C4Game.cpp:4173-4189).
+#[test]
+fn departing_section_saves_an_active_object_whose_number_a_retained_object_holds() {
+    let (mut engine, retained) = section_engine_with_duplicated_number();
+
+    assert!(
+        crate::TestValueExt::test_value(engine.load_scenario_section("Other", 2, vec![retained])),
+        "the target section is registered"
+    );
+
+    let frozen = engine
+        .scenario_section_state
+        .sections
+        .get("main")
+        .and_then(|section| section.frozen_group.clone())
+        .expect("the departing section froze a temporary group");
+    let group = crate::TestValueExt::test_value(clonk_resources::Group::from_raw_memory(
+        std::path::PathBuf::from("SectMain.c4g"),
+        frozen,
+    ));
+    let objects = String::from_utf8_lossy(&crate::TestValueExt::test_value(
+        group.load_entry_string("Objects.txt"),
+    ))
+    .into_owned();
+
+    assert!(
+        objects.contains(&format!("Number={}", retained.as_u64())),
+        "the departing active object is saved; got:\n{objects}"
+    );
+}

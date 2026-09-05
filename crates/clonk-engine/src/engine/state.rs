@@ -3264,11 +3264,27 @@ impl Engine {
             (changing_section && flags & 1 != 0).then(|| self.landscape_without_solid_masks());
         if changing_section && flags & 3 != 0 {
             let saved_objects = (flags & 2 != 0).then(|| {
+                // `preserved` records which numbers were inactive when the
+                // script asked, because this switch is deferred and C++'s is
+                // not. A number a live inactive object still carries belongs
+                // to *that* object: an active object sharing it is a separate
+                // link and native saves the whole active list
+                // (C4Game.cpp:4173-4189). Only a preserved number whose
+                // inactive holder is gone identifies a reactivation.
+                let still_inactive = state
+                    .objects
+                    .iter()
+                    .filter(|object| object.snapshot.status == ObjectStatus::Inactive)
+                    .map(|object| object.snapshot.id)
+                    .collect::<HashSet<_>>();
                 state
                     .objects
                     .iter()
                     .filter(|object| object.snapshot.status.is_active())
-                    .filter(|object| !preserved.contains(&object.snapshot.id))
+                    .filter(|object| {
+                        !preserved.contains(&object.snapshot.id)
+                            || still_inactive.contains(&object.snapshot.id)
+                    })
                     .filter(|object| !self.is_user_player_object_snapshot(&object.snapshot))
                     .cloned()
                     .collect::<Vec<_>>()
