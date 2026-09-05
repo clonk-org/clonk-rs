@@ -9,6 +9,7 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("dev-check") => return xtask::dev_check::command(&args[1..]),
         Some("parity") => return xtask::parity::command(&args[1..]),
+        Some("presentation") => return xtask::presentation::command(&args[1..]),
         _ => {}
     }
 
