@@ -17,8 +17,107 @@
 // that regime on macOS; measured -29% mean and -35% p99 tick time on MeltMe.
 // The win is allocator-relative, so platforms whose default allocator already
 // handles small-object churn well (glibc's tcache) may see much less.
+#[cfg(not(all(test, feature = "presentation-profile")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_ALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// The opt-in app-path probe keeps the shipped mimalloc allocator and wraps
+/// only its own test binary so each measured input/tick can report requested
+/// allocation calls and bytes. Ordinary tests retain the unwrapped allocator.
+#[cfg(all(test, feature = "presentation-profile"))]
+struct ProfileAllocator(mimalloc::MiMalloc);
+
+#[cfg(all(test, feature = "presentation-profile"))]
+#[global_allocator]
+static GLOBAL: ProfileAllocator = ProfileAllocator(mimalloc::MiMalloc);
+
+#[cfg(all(test, feature = "presentation-profile"))]
+unsafe impl std::alloc::GlobalAlloc for ProfileAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
+            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+            PROFILE_ALLOCATION_BYTES.fetch_add(
+                u64::try_from(layout.size()).unwrap_or(u64::MAX),
+                AtomicOrdering::Relaxed,
+            );
+        }
+        // SAFETY: the wrapped allocator receives the caller's original
+        // allocation contract unchanged.
+        unsafe { self.0.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
+            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+            PROFILE_ALLOCATION_BYTES.fetch_add(
+                u64::try_from(layout.size()).unwrap_or(u64::MAX),
+                AtomicOrdering::Relaxed,
+            );
+        }
+        // SAFETY: the wrapped allocator receives the caller's original
+        // allocation contract unchanged.
+        unsafe { self.0.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the pointer and layout came from this wrapped allocator.
+        unsafe { self.0.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(
+        &self,
+        pointer: *mut u8,
+        layout: std::alloc::Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
+            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+            PROFILE_ALLOCATION_BYTES.fetch_add(
+                u64::try_from(new_size).unwrap_or(u64::MAX),
+                AtomicOrdering::Relaxed,
+            );
+        }
+        // SAFETY: the pointer, old layout and new size are the caller's
+        // original reallocation contract.
+        unsafe { self.0.realloc(pointer, layout, new_size) }
+    }
+}
+
+#[cfg(all(test, feature = "presentation-profile"))]
+static EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(test, feature = "presentation-profile"))]
+fn reset_edge_scroll_profile_counters() {
+    EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT.store(0, AtomicOrdering::Relaxed);
+    PROFILE_ALLOCATION_CALLS.store(0, AtomicOrdering::Relaxed);
+    PROFILE_ALLOCATION_BYTES.store(0, AtomicOrdering::Relaxed);
+}
+
+#[cfg(all(test, feature = "presentation-profile"))]
+fn edge_scroll_profile_projection_count() -> u64 {
+    EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT.load(AtomicOrdering::Relaxed)
+}
+
+#[cfg(all(test, feature = "presentation-profile"))]
+fn measure_app_profile_allocations<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
+    PROFILE_ALLOCATION_CALLS.store(0, AtomicOrdering::Relaxed);
+    PROFILE_ALLOCATION_BYTES.store(0, AtomicOrdering::Relaxed);
+    PROFILE_COUNT_ALLOCATIONS.store(true, AtomicOrdering::SeqCst);
+    let result = operation();
+    PROFILE_COUNT_ALLOCATIONS.store(false, AtomicOrdering::SeqCst);
+    (
+        result,
+        PROFILE_ALLOCATION_CALLS.load(AtomicOrdering::Relaxed),
+        PROFILE_ALLOCATION_BYTES.load(AtomicOrdering::Relaxed),
+    )
+}
 
 mod accessibility;
 mod advanced_config;
@@ -5761,6 +5860,8 @@ impl GameApp {
             std::mem::take(&mut self.snapshot.hud.scoreboard_presentations);
         let menu_requests = std::mem::take(&mut self.snapshot.menu_requests);
         let audio = std::mem::take(&mut self.snapshot.audio);
+        #[cfg(all(test, feature = "presentation-profile"))]
+        EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
         self.snapshot = self.engine.snapshot();
         self.snapshot.hud.scoreboard_presentations = scoreboard_presentations;
         self.snapshot.menu_requests = menu_requests;

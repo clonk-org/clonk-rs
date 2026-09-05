@@ -17,6 +17,10 @@ presentation-capture = [
     "clonk-app-netplay/presentation-capture",
     "clonk-engine/presentation-capture",
 ]
+# Opt-in app-path measurement for the edge-scroll snapshot decision. The
+# feature keeps the counting allocator and 600-sample probe out of ordinary
+# application tests and production builds.
+presentation-profile = []
 app-test-shard-mode = []
 app-test-shard-1 = ["app-test-shard-mode"]
 app-test-shard-2 = ["app-test-shard-mode"]

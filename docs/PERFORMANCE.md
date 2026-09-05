@@ -141,6 +141,28 @@ when the event and tick paths both run in one frame. Use 20 warm-up frames and
 600 measured frames with a fixed seed, content revision, release profile, and
 machine fingerprint.
 
+The checked-in app-path probe is opt-in and ignored by the ordinary test
+suite. Run it with output capture disabled so the raw metadata and per-case
+samples can be retained:
+
+```sh
+cargo nextest run --release --offline --locked -p clonk-app \
+  --features presentation-profile --run-ignored all --no-capture \
+  -E 'test(/edge_scroll_snapshot_profile$/)'
+```
+
+The probe wraps the app test binary's existing mimalloc allocator only while a
+measured operation is running, and reports requested allocation calls and
+bytes alongside elapsed and projection p50/p95/p99 values. Its alternate
+horizontal edge points keep the camera away from map bounds; the workload is
+the real `GameApp` input and update path, without changing production
+scheduling. The probe runs each case with `busy_objects=0` (the original
+sandbox crew) and `busy_objects=256` (256 static synthetic `PRFB` objects);
+each metadata, state, and case line carries the workload count. Treat the
+output as a current measurement tied to its printed source/content/toolchain/
+machine fingerprints, and make any threshold decision from that run rather
+than from the older headless scenario table.
+
 ### Arso-Morf 1,000-Stippel simulation profile
 
 Run the checked-in Arso-Morf save with exactly 1,000 real-content ST5B objects:
