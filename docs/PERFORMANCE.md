@@ -121,6 +121,26 @@ The 25ms planning target leaves 3ms of headroom beneath the 28ms in-game
 cadence. Do not split it into arbitrary simulation/render limits before phase
 measurements show where time is spent.
 
+### Edge-scroll snapshot decision (clonk-org/clonk-rs#1486)
+
+Before changing the edge-scroll path, record the go/no-go threshold for its
+redundant `SimulationSnapshot` projection. Use the threshold established by
+the snapshot investigation in clonk-org/clonk-rs#756: the projection is
+material when its p95 cost is above either **2ms absolute** or **10% of the
+combined frame** on a supported workload. A result below both limits does not
+justify changing the snapshot contract for this path.
+
+The measurement must cover an interior pointer move, the first move into an
+edge, a stationary pointer that keeps scrolling on successive ticks, and an
+edge event that lands in the same frame as the tick refresh. Record full
+projection counts as well as p50, p95, and p99 projection and combined-frame
+times; retain allocation and byte counts when the profiler exposes them. The
+expected count baseline is zero extra projections for an interior move, one
+for an edge event, one per successful stationary-pointer tick, and at most two
+when the event and tick paths both run in one frame. Use 20 warm-up frames and
+600 measured frames with a fixed seed, content revision, release profile, and
+machine fingerprint.
+
 ### Arso-Morf 1,000-Stippel simulation profile
 
 Run the checked-in Arso-Morf save with exactly 1,000 real-content ST5B objects:

@@ -5752,6 +5752,21 @@ impl GameApp {
             || self.object_menu.is_some()
     }
 
+    /// Retake the full engine projection after a player camera move while
+    /// retaining presentation requests already attached to the app snapshot.
+    /// Engine snapshots deliberately leave these one-frame queues empty, but
+    /// the app still owns requests emitted by the tick that just completed.
+    fn refresh_snapshot_after_player_view_scroll(&mut self) {
+        let scoreboard_presentations =
+            std::mem::take(&mut self.snapshot.hud.scoreboard_presentations);
+        let menu_requests = std::mem::take(&mut self.snapshot.menu_requests);
+        let audio = std::mem::take(&mut self.snapshot.audio);
+        self.snapshot = self.engine.snapshot();
+        self.snapshot.hud.scoreboard_presentations = scoreboard_presentations;
+        self.snapshot.menu_requests = menu_requests;
+        self.snapshot.audio = audio;
+    }
+
     /// Apply one C4MouseControl::UpdateScrolling step. Pointer movement calls
     /// this immediately; the successful simulation path calls it once more
     /// after every engine tick while the retained border state remains live.
