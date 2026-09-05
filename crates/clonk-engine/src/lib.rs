@@ -14206,5 +14206,9 @@ mod effect_cursor_probe;
 #[path = "lib_tests/issue_62_scheduled_global_effect_callbacks.rs"]
 mod issue_62_scheduled_global_effect_callbacks;
 
+#[cfg(test)]
+#[path = "lib_tests/duplicate_object_id_identity_regression.rs"]
+mod duplicate_object_id_identity_regression;
+
 pub use definition::*;
 pub use object::*;

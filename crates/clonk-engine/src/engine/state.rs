@@ -3060,6 +3060,47 @@ impl Engine {
         Ok(())
     }
 
+    /// The deletion both scenario-section sweeps end with: drop every object
+    /// the departing section owned and prune it out of the object lists and
+    /// the sector index. `C4Game::LoadScenarioSection` and
+    /// `C4GameObjects::Clear(false)` differ only in what they run *before*
+    /// this (C4Game.cpp:4194-4201; C4GameObjects.cpp:313-331).
+    fn delete_non_inactive_objects_for_scenario_section(&mut self) {
+        // Native deletes the *list*, so identity here is the link, not the
+        // enumeration number. A restored payload may carry two objects sharing
+        // one number (`object_ids_are_unique`); deciding membership from a set
+        // of departing ids would delete the retained inactive twin along with
+        // the departing object. Keep each object on its own status instead,
+        // then prune the id-keyed lists against what actually survived.
+        let removed = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Inactive)
+            .map(|object| object.id)
+            .collect::<Vec<_>>();
+        self.objects
+            .retain(|object| object.state.status == ObjectStatus::Inactive);
+        let surviving = self
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        self.execution
+            .exec_list
+            .retain(|object| surviving.contains(object));
+        self.execution
+            .inactive
+            .retain(|object| surviving.contains(object));
+        if let Some(sectors) = self.sectors.as_mut() {
+            for object in removed.iter().filter(|id| !surviving.contains(id)) {
+                sectors.remove(*object);
+            }
+        }
+        if !removed.is_empty() {
+            self.note_objects_changed();
+        }
+    }
+
     /// `LoadScenarioSection`'s active-list teardown before global effect
     /// cleanup (C4Game.cpp:4190-4201). Objects already in the inactive list
     /// survive; objects created during a departing object's destruction are
@@ -3120,27 +3161,7 @@ impl Engine {
             }
         }
 
-        let removed = self
-            .objects
-            .iter()
-            .filter(|object| object.state.status != ObjectStatus::Inactive)
-            .map(|object| object.id)
-            .collect::<HashSet<_>>();
-        self.objects.retain(|object| !removed.contains(&object.id));
-        self.execution
-            .exec_list
-            .retain(|object| !removed.contains(object));
-        self.execution
-            .inactive
-            .retain(|object| !removed.contains(object));
-        if let Some(sectors) = self.sectors.as_mut() {
-            for object in &removed {
-                sectors.remove(*object);
-            }
-        }
-        if !removed.is_empty() {
-            self.note_objects_changed();
-        }
+        self.delete_non_inactive_objects_for_scenario_section();
         Ok(())
     }
 
@@ -3167,27 +3188,7 @@ impl Engine {
             }
         }
 
-        let removed = self
-            .objects
-            .iter()
-            .filter(|object| object.state.status != ObjectStatus::Inactive)
-            .map(|object| object.id)
-            .collect::<HashSet<_>>();
-        self.objects.retain(|object| !removed.contains(&object.id));
-        self.execution
-            .exec_list
-            .retain(|object| !removed.contains(object));
-        self.execution
-            .inactive
-            .retain(|object| !removed.contains(object));
-        if let Some(sectors) = self.sectors.as_mut() {
-            for object in &removed {
-                sectors.remove(*object);
-            }
-        }
-        if !removed.is_empty() {
-            self.note_objects_changed();
-        }
+        self.delete_non_inactive_objects_for_scenario_section();
         Ok(())
     }
 
@@ -3281,11 +3282,27 @@ impl Engine {
             (changing_section && flags & 1 != 0).then(|| self.landscape_without_solid_masks());
         if changing_section && flags & 3 != 0 {
             let saved_objects = (flags & 2 != 0).then(|| {
+                // `preserved` records which numbers were inactive when the
+                // script asked, because this switch is deferred and C++'s is
+                // not. A number a live inactive object still carries belongs
+                // to *that* object: an active object sharing it is a separate
+                // link and native saves the whole active list
+                // (C4Game.cpp:4173-4189). Only a preserved number whose
+                // inactive holder is gone identifies a reactivation.
+                let still_inactive = state
+                    .objects
+                    .iter()
+                    .filter(|object| object.snapshot.status == ObjectStatus::Inactive)
+                    .map(|object| object.snapshot.id)
+                    .collect::<HashSet<_>>();
                 state
                     .objects
                     .iter()
                     .filter(|object| object.snapshot.status.is_active())
-                    .filter(|object| !preserved.contains(&object.snapshot.id))
+                    .filter(|object| {
+                        !preserved.contains(&object.snapshot.id)
+                            || still_inactive.contains(&object.snapshot.id)
+                    })
                     .filter(|object| !self.is_user_player_object_snapshot(&object.snapshot))
                     .cloned()
                     .collect::<Vec<_>>()
