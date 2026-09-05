@@ -17499,6 +17499,36 @@ mod tests {
     }
 
     #[test]
+    fn empty_no_viewport_frame_releases_previous_particle_layers() {
+        let mut snapshot = make_snapshot();
+        let focus = snapshot.objects[0].clone();
+        snapshot.particles = vec![particle_fixture(
+            "Smoke",
+            FloatVector2::new(8.0, 8.0),
+            ParticleLayer::ObjectFront(focus.id),
+        )];
+        let mut graphics = test_graphics_with_sprites(
+            (64, 40, 120),
+            "empty viewport particle layers",
+            empty_sprites(),
+        );
+
+        graphics.render_frame_without_atlas(&snapshot, &[ViewportInput::from_focus(&focus)]);
+        front_assert_eq! {
+            graphics.particle_layer_index_layer_count() => 1,
+            "the first frame retains its live particle layer"
+        };
+
+        snapshot.objects.clear();
+        snapshot.particles.clear();
+        graphics.render_frame_without_atlas(&snapshot, &[]);
+        front_assert_eq! {
+            graphics.particle_layer_index_layer_count() => 0,
+            "an empty scene without viewports releases the previous layer cache"
+        };
+    }
+
+    #[test]
     fn normal_object_visibility_is_evaluated_only_in_the_normal_pass() {
         const OBJECTS: usize = 1_000;
 

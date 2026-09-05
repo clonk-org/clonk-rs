@@ -406,6 +406,12 @@ impl ParticleLayerIndex {
         self.source = None;
     }
 
+    fn clear(&mut self) {
+        self.invalidate();
+        self.layers.clear();
+        self.layers.shrink_to(0);
+    }
+
     fn offsets(&self, particles: &[ParticleSnapshot], layer: &ParticleLayer) -> Option<&[u32]> {
         (self.source == Some((particles.as_ptr() as usize, particles.len()))).then(|| {
             self.layers
@@ -4034,6 +4040,12 @@ impl GraphicsSystem {
                     gamma,
                     true,
                 );
+            } else {
+                // A no-viewport empty scene has no particle draw pass. Drop
+                // the previous frame's layer vectors and buckets so an
+                // empty/menu transition cannot retain a whole round's
+                // emitter history.
+                self.particle_layer_index.clear();
             }
             return;
         }
