@@ -5851,35 +5851,38 @@ impl GameApp {
             || self.object_menu.is_some()
     }
 
-    /// Retake the full engine projection after a player camera move while
-    /// retaining presentation requests already attached to the app snapshot.
-    /// Engine snapshots deliberately leave these one-frame queues empty, but
-    /// the app still owns requests emitted by the tick that just completed.
-    fn refresh_snapshot_after_player_view_scroll(&mut self) {
-        let scoreboard_presentations =
-            std::mem::take(&mut self.snapshot.hud.scoreboard_presentations);
-        let menu_requests = std::mem::take(&mut self.snapshot.menu_requests);
-        let audio = std::mem::take(&mut self.snapshot.audio);
-        #[cfg(all(test, feature = "presentation-profile"))]
-        EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-        self.snapshot = self.engine.snapshot();
-        self.snapshot.hud.scoreboard_presentations = scoreboard_presentations;
-        self.snapshot.menu_requests = menu_requests;
-        self.snapshot.audio = audio;
+    /// Refresh the camera fields after a player edge scroll without rebuilding
+    /// the simulation snapshot. `ScrollView` changes only the live player's
+    /// view mode, target, center and process-local viewports; app-owned
+    /// presentation requests and the rest of the previous tick snapshot stay
+    /// intact.
+    fn refresh_snapshot_after_player_view_scroll(&mut self, owner: i32) {
+        let Some(player) = self.engine.player(owner) else {
+            return;
+        };
+        let Some(snapshot_player) = self
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+        else {
+            return;
+        };
+        player.copy_view_state_to(snapshot_player);
     }
 
     /// Apply one C4MouseControl::UpdateScrolling step. Pointer movement calls
     /// this immediately; the successful simulation path calls it once more
     /// after every engine tick while the retained border state remains live.
-    /// The return value reports an engine mutation that needs a fresh app
-    /// snapshot; observer cameras are presentation-owned and return false.
-    fn apply_ingame_edge_scroll(&mut self) -> Result<bool, EngineError> {
+    /// The return value identifies the player whose camera was mutated;
+    /// observer cameras are presentation-owned and return `None`.
+    fn apply_ingame_edge_scroll(&mut self) -> Result<Option<i32>, EngineError> {
         if self.live_input.ingame_edge_scroll.is_none() {
-            return Ok(false);
+            return Ok(None);
         }
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
             self.live_input.ingame_edge_scroll = None;
-            return Ok(false);
+            return Ok(None);
         };
         self.live_input.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
@@ -5889,10 +5892,10 @@ impl GameApp {
     /// move was interior or suppressed by a viewport region. Reevaluate the
     /// retained VpX/VpY so disappearing regions and resized layouts take
     /// effect without a new platform motion event.
-    fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<bool, EngineError> {
+    fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<Option<i32>, EngineError> {
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
             self.live_input.ingame_edge_scroll = None;
-            return Ok(false);
+            return Ok(None);
         };
         self.live_input.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
@@ -6010,7 +6013,7 @@ impl GameApp {
         &mut self,
         scroll: ActiveViewportEdgeScroll,
         viewport: ActiveViewportProjection,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Option<i32>, EngineError> {
         if scroll.observer {
             for delta in scroll.edge.steps() {
                 if !self
@@ -6021,7 +6024,7 @@ impl GameApp {
                     break;
                 }
             }
-            return Ok(false);
+            return Ok(None);
         }
 
         for delta in scroll.edge.steps() {
@@ -6036,7 +6039,7 @@ impl GameApp {
                 true,
             )?;
         }
-        Ok(true)
+        Ok(Some(scroll.owner))
     }
 
     fn cancel_ingame_selection_for_region(&mut self, cancel_left: bool, cancel_right: bool) {

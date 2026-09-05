@@ -135,11 +135,12 @@ edge, a stationary pointer that keeps scrolling on successive ticks, and an
 edge event that lands in the same frame as the tick refresh. Record full
 projection counts as well as p50, p95, and p99 projection and combined-frame
 times; retain allocation and byte counts when the profiler exposes them. The
-expected count baseline is zero extra projections for an interior move, one
-for an edge event, one per successful stationary-pointer tick, and at most two
-when the event and tick paths both run in one frame. Use 20 warm-up frames and
-600 measured frames with a fixed seed, content revision, release profile, and
-machine fingerprint.
+pre-fix count baseline is zero extra projections for an interior move, one for
+an edge event, one per successful stationary-pointer tick, and at most two
+when the event and tick paths both run in one frame. The focused refresh should
+reduce each edge case to zero extra full projections while keeping the camera
+fields current. Use 20 warm-up frames and 600 measured frames with a fixed
+seed, content revision, release profile, and machine fingerprint.
 
 The checked-in app-path probe is opt-in and ignored by the ordinary test
 suite. Run it with output capture disabled so the raw metadata and per-case

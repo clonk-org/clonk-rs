@@ -146,6 +146,18 @@ fn edge_for(fixture: &ProfileFixture, index: usize) -> GuiPoint {
     }
 }
 
+fn profile_projection_time(
+    observed_count: u64,
+    required_count: u64,
+    snapshot_time: std::time::Duration,
+) -> std::time::Duration {
+    if observed_count >= required_count {
+        snapshot_time
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
 fn sample_interior(fixture: &mut ProfileFixture) -> ProfileSample {
     reset_edge_scroll_profile_counters();
     let ((elapsed, projection), allocation_calls, allocation_bytes) =
@@ -170,9 +182,14 @@ fn sample_interior_tick(fixture: &mut ProfileFixture) -> ProfileSample {
         measure_app_profile_allocations(|| {
             let started = std::time::Instant::now();
             fixture.app.test_update();
+            let projection_count = edge_scroll_profile_projection_count();
             (
                 started.elapsed(),
-                fixture.app.engine.snapshot_timings().total,
+                profile_projection_time(
+                    projection_count,
+                    1,
+                    fixture.app.engine.snapshot_timings().total,
+                ),
             )
         });
     ProfileSample {
@@ -193,9 +210,14 @@ fn sample_first_edge(fixture: &mut ProfileFixture, edge: GuiPoint) -> ProfileSam
         measure_app_profile_allocations(|| {
             let started = std::time::Instant::now();
             fixture.app.test_cursor(physical(edge));
+            let projection_count = edge_scroll_profile_projection_count();
             (
                 started.elapsed(),
-                fixture.app.engine.snapshot_timings().total,
+                profile_projection_time(
+                    projection_count,
+                    1,
+                    fixture.app.engine.snapshot_timings().total,
+                ),
             )
         });
     ProfileSample {
@@ -213,9 +235,14 @@ fn sample_stationary_tick(fixture: &mut ProfileFixture) -> ProfileSample {
         measure_app_profile_allocations(|| {
             let started = std::time::Instant::now();
             fixture.app.test_update();
+            let projection_count = edge_scroll_profile_projection_count();
             (
                 started.elapsed(),
-                fixture.app.engine.snapshot_timings().total,
+                profile_projection_time(
+                    projection_count,
+                    1,
+                    fixture.app.engine.snapshot_timings().total,
+                ),
             )
         });
     ProfileSample {
@@ -238,9 +265,19 @@ fn sample_same_frame(fixture: &mut ProfileFixture, edge: GuiPoint) -> ProfileSam
         measure_app_profile_allocations(|| {
             let started = std::time::Instant::now();
             fixture.app.test_cursor(physical(edge));
-            let event_projection = fixture.app.engine.snapshot_timings().total;
+            let event_projection_count = edge_scroll_profile_projection_count();
+            let event_projection = profile_projection_time(
+                event_projection_count,
+                1,
+                fixture.app.engine.snapshot_timings().total,
+            );
             fixture.app.test_update();
-            let tick_projection = fixture.app.engine.snapshot_timings().total;
+            let tick_projection_count = edge_scroll_profile_projection_count();
+            let tick_projection = profile_projection_time(
+                tick_projection_count,
+                2,
+                fixture.app.engine.snapshot_timings().total,
+            );
             (
                 started.elapsed(),
                 event_projection.saturating_add(tick_projection),
@@ -512,7 +549,7 @@ fn edge_scroll_snapshot_profile() {
             let edge = edge_for(&first_edge_fixture, index);
             first_edge_samples.push(sample_first_edge(&mut first_edge_fixture, edge));
         }
-        report_case("first_move_into_edge", &first_edge_samples, 1, busy_objects);
+        report_case("first_move_into_edge", &first_edge_samples, 0, busy_objects);
 
         let mut stationary_fixture = profile_fixture(busy_objects);
         stationary_fixture
@@ -531,7 +568,7 @@ fn edge_scroll_snapshot_profile() {
         report_case(
             "stationary_pointer_successive_tick",
             &stationary_samples,
-            1,
+            0,
             busy_objects,
         );
 
@@ -554,7 +591,7 @@ fn edge_scroll_snapshot_profile() {
         report_case(
             "edge_event_same_frame_as_tick",
             &same_frame_samples,
-            2,
+            0,
             busy_objects,
         );
     }
