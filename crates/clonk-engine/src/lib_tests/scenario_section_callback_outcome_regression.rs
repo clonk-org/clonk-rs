@@ -62,7 +62,9 @@ fn switching_engine() -> Engine {
         "SWCH",
         "Switching caller",
         "#strict 3\n\
-         func Plain() { return LoadScenarioSection(\"Other\", 0); }\n",
+         func Plain() { return LoadScenarioSection(\"Other\", 0); }\n\
+         func Retain() { SetObjectStatus(C4OS_INACTIVE, this()); \
+                         return LoadScenarioSection(\"Other\", 0); }\n",
     );
     engine
 }
@@ -89,5 +91,46 @@ fn a_section_switch_from_an_object_callback_leaves_no_stale_caller_slot() {
     assert!(
         engine.objects.is_empty(),
         "an empty target section installs no objects at all"
+    );
+}
+
+/// Deactivating before switching, in one callback, must retain the object.
+///
+/// `C4Object::StatusDeactivate` runs synchronously: by the time the script
+/// reaches `LoadScenarioSection` the object is already out of `Game.Objects`
+/// and in `InactiveObjects`, so the active-list teardown never touches it
+/// (C4Object.cpp:5987-6009; C4Game.cpp:4194-4201). Rust records the caller's
+/// own status update in the callback outcome and applies it *after* the player
+/// command carrying the switch, so the teardown still saw an active object and
+/// deleted the one the script asked to keep. `preserve_ids` — collected from
+/// the host context's preview, where the deactivation is already visible — is
+/// what carries that decision across the deferral.
+#[test]
+fn a_section_switch_retains_an_object_the_same_callback_deactivated() {
+    let mut engine = switching_engine();
+    let _peer = spawn_fixture!(engine, "PEER", with_position: Vector2::new(30, 50));
+    let caller = spawn_fixture!(engine, "SWCH", with_position: Vector2::new(60, 50));
+
+    let index = engine.test_object_index(caller);
+    let switched =
+        crate::TestValueExt::test_value(engine.call_object_function(index, "Retain", Vec::new()));
+
+    assert_eq!(switched, Value::Int(1), "the switch is accepted");
+    let index = engine
+        .find_object_index(caller)
+        .expect("the deactivated caller survives its own section switch");
+    assert_eq!(
+        engine.objects[index].state.status,
+        ObjectStatus::Inactive,
+        "it crosses as an inactive object"
+    );
+    assert!(
+        engine.execution.inactive.contains(&caller),
+        "and holds inactive-list membership on the other side"
+    );
+    assert_eq!(
+        engine.objects.len(),
+        1,
+        "the ordinary active peer is still removed"
     );
 }

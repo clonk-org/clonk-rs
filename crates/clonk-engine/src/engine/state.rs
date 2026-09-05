@@ -3248,6 +3248,46 @@ impl Engine {
         }
 
         let preserved = preserve_ids.into_iter().collect::<HashSet<_>>();
+        // `preserve_ids` is the host context's view of which objects were
+        // inactive when the script called `FnLoadScenarioSection`
+        // (C4Script.cpp:5401-5408). Native `StatusDeactivate` had already
+        // moved each of them out of `Game.Objects` by then, so the teardown
+        // below never sees them (C4Object.cpp:5987-6009). Rust applies the
+        // calling callback's own status update only after this command, so
+        // finish the transition here — otherwise the active-list walk deletes
+        // the very object the script asked to keep.
+        //
+        // Resolve by status rather than through `find_object_index`, which
+        // answers with the last of a duplicated number: a preserved number a
+        // live inactive object already holds names *that* object, and an
+        // active object sharing it is a separate link that must still depart.
+        let live_inactive = self
+            .objects
+            .iter()
+            .filter(|object| !object.destroyed && object.state.status == ObjectStatus::Inactive)
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        let deactivating = preserved
+            .iter()
+            .copied()
+            .filter(|id| !live_inactive.contains(id))
+            .collect::<Vec<_>>();
+        for id in deactivating {
+            let Some(index) = self.objects.iter().position(|object| {
+                object.id == id && !object.destroyed && object.state.status == ObjectStatus::Normal
+            }) else {
+                continue;
+            };
+            self.objects[index].state.status = ObjectStatus::Inactive;
+            // C4GameObjects::Remove drops an active object's sector links
+            // before the list manipulation (C4GameObjects.cpp:73-85).
+            self.update_sector_for_index(index);
+            self.update_inactive_list_for_status_change(
+                id,
+                ObjectStatus::Normal,
+                ObjectStatus::Inactive,
+            );
+        }
         let departing_pxs = self.pxs_system.clone();
         let departing_mass_movers = self.mass_movers.clone();
         let departing_key = self.scenario_section_state.current.to_ascii_lowercase();
