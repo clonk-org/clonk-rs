@@ -57,14 +57,21 @@ fn switching_engine() -> Engine {
     let mut engine = Engine::with_seed(0);
     engine.configure_scenario_sections(&[section("Main"), section("Other")]);
     engine.set_landscape(section_landscape(200, 100));
-    engine.register_test_script_definition("PEER", "Departing peer", "#strict 3\n");
+    engine.register_test_script_definition(
+        "PEER",
+        "Departing peer",
+        "#strict 3\nfunc Go() { return LoadScenarioSection(\"Other\", 0); }\n",
+    );
     engine.register_test_script_definition(
         "SWCH",
         "Switching caller",
         "#strict 3\n\
          func Plain() { return LoadScenarioSection(\"Other\", 0); }\n\
          func Retain() { SetObjectStatus(C4OS_INACTIVE, this()); \
-                         return LoadScenarioSection(\"Other\", 0); }\n",
+                         return LoadScenarioSection(\"Other\", 0); }\n\
+         func Arm() { return AddEffect(\"Switch\", this(), 10, 1, this()); }\n\
+         func FxSwitchTimer() { return LoadScenarioSection(\"Other\", 0); }\n\
+         func Delegate(object peer) { return peer->Go(); }\n",
     );
     engine
 }
@@ -132,5 +139,104 @@ fn a_section_switch_retains_an_object_the_same_callback_deactivated() {
         engine.objects.len(),
         1,
         "the ordinary active peer is still removed"
+    );
+}
+
+/// The effect-event fold reaches the same switch through its own player-command
+/// application, and holds the same stale `idx` across it.
+///
+/// `C4Effect`'s timer is an ordinary script frame, so it may call
+/// `LoadScenarioSection` exactly as a definition callback can
+/// (`C4Script.cpp:5401-5408`). Native runs the switch synchronously and the
+/// effect's own object is simply gone afterwards; Rust read
+/// `self.objects[idx]` for the post-callback container comparison after the
+/// section had already rebuilt the list.
+#[test]
+fn a_section_switch_from_an_effect_timer_leaves_no_stale_caller_slot() {
+    let mut engine = switching_engine();
+    let _peer = spawn_fixture!(engine, "PEER", with_position: Vector2::new(30, 50));
+    let caller = spawn_fixture!(engine, "SWCH", with_position: Vector2::new(60, 50));
+
+    let index = engine.test_object_index(caller);
+    crate::TestValueExt::test_value(engine.call_object_function(index, "Arm", Vec::new()));
+
+    let index = engine.test_object_index(caller);
+    let switch = crate::TestValueExt::test_value(
+        engine.objects[index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Switch")
+            .cloned(),
+    );
+    let definition_id = engine.objects[index].definition_id.clone();
+    crate::TestValueExt::test_value(engine.dispatch_object_effect_events(
+        index,
+        &definition_id,
+        vec![EffectEvent::timer(switch)],
+    ));
+
+    assert!(
+        engine.find_object_index(caller).is_none(),
+        "the effect's own object departs with the section"
+    );
+    assert!(
+        engine.objects.is_empty(),
+        "an empty target section installs no objects at all"
+    );
+}
+
+/// The ordinary frame walk reaches the switch too, holding the same slot.
+///
+/// An effect timer running inside `advance_tick` is where content actually
+/// calls `LoadScenarioSection`. That fold applies the resulting player command
+/// and then keeps using the index it captured beforehand.
+#[test]
+fn a_section_switch_from_a_ticked_effect_leaves_no_stale_caller_slot() {
+    let mut engine = switching_engine();
+    let _peer = spawn_fixture!(engine, "PEER", with_position: Vector2::new(30, 50));
+    let caller = spawn_fixture!(engine, "SWCH", with_position: Vector2::new(60, 50));
+
+    let index = engine.test_object_index(caller);
+    crate::TestValueExt::test_value(engine.call_object_function(index, "Arm", Vec::new()));
+
+    crate::TestValueExt::test_value(engine.tick());
+
+    assert!(
+        engine.find_object_index(caller).is_none(),
+        "the ticking caller departs with the section"
+    );
+    assert!(
+        engine.objects.is_empty(),
+        "an empty target section installs no objects at all"
+    );
+}
+
+/// A switch requested by a *foreign* object reaches the caller's outcome too.
+///
+/// `peer->Go()` runs in the peer's context and comes back as a nested object
+/// outcome, whose fold applies player commands and then reads that foreign
+/// object's slot for the post-callback container comparison — after the object
+/// departed with its section.
+#[test]
+fn a_section_switch_from_a_delegated_call_leaves_no_stale_foreign_slot() {
+    let mut engine = switching_engine();
+    let peer = spawn_fixture!(engine, "PEER", with_position: Vector2::new(30, 50));
+    let caller = spawn_fixture!(engine, "SWCH", with_position: Vector2::new(60, 50));
+
+    let index = engine.test_object_index(caller);
+    crate::TestValueExt::test_value(engine.call_object_function(
+        index,
+        "Delegate",
+        vec![object_reference_value(peer)],
+    ));
+
+    assert!(
+        engine.find_object_index(peer).is_none(),
+        "the delegated callee departs with the section"
+    );
+    assert!(
+        engine.objects.is_empty(),
+        "an empty target section installs no objects at all"
     );
 }
