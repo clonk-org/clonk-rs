@@ -240,3 +240,78 @@ fn a_section_switch_from_a_delegated_call_leaves_no_stale_foreign_slot() {
         "an empty target section installs no objects at all"
     );
 }
+
+/// A `TimerCall` definition callback reaches `advance_tick`'s other folds.
+///
+/// `C4Object::Execute` runs `Def->TimerCall` after the effect walk
+/// (`C4Object.cpp:1085-1091`), so this is a second, independent way for
+/// ordinary content to request the switch from inside the frame walk — and it
+/// lands in a different fold than an effect timer does. A definition built
+/// through `register_script_definition` cannot reach it: its `Timer` interval
+/// defaults to 35 (`C4Def.cpp:298`) and it declares no `TimerCall`.
+#[test]
+fn a_section_switch_from_a_definition_timer_call_leaves_no_stale_caller_slot() {
+    let mut engine = switching_engine();
+    let mut definition = crate::TestValueExt::test_value(Definition::from_script(
+        "TIMR",
+        "Timer caller",
+        "#strict 3\nfunc Tick() { return LoadScenarioSection(\"Other\", 0); }\n",
+    ));
+    definition.set_timer(1);
+    definition.set_timer_call(Some("Tick".to_string()));
+    crate::TestValueExt::test_value(engine.register_definition(definition));
+
+    let _peer = spawn_fixture!(engine, "PEER", with_position: Vector2::new(30, 50));
+    let caller = spawn_fixture!(engine, "TIMR", with_position: Vector2::new(60, 50));
+
+    crate::TestValueExt::test_value(engine.tick());
+
+    assert!(
+        engine.find_object_index(caller).is_none(),
+        "the TimerCall caller departs with the section"
+    );
+    assert!(
+        engine.objects.is_empty(),
+        "an empty target section installs no objects at all"
+    );
+}
+
+/// An action `PhaseCall` is the third frame-walk route to the switch.
+///
+/// `C4Object::ExecAction` runs the phase callback before the effect walk and
+/// TimerCall (`C4Object.cpp:1069-1091`), so its outcome is folded in a
+/// different place again.
+#[test]
+fn a_section_switch_from_an_action_phase_call_leaves_no_stale_caller_slot() {
+    let mut engine = switching_engine();
+    let probe = ActionSpec::default()
+        .with_delay(1)
+        .with_length(100)
+        .with_phase_call("Switch");
+    let mut definition = crate::TestValueExt::test_value(Definition::from_script(
+        "ACTS",
+        "Action caller",
+        "#strict 3\n\
+         func Switch() { return LoadScenarioSection(\"Other\", 0); }\n\
+         func Begin() { return SetAction(\"Probe\"); }\n",
+    ));
+    definition.set_c4_callback_convention(true);
+    definition.configure_actions(None, HashMap::from([("Probe".to_string(), probe)]));
+    crate::TestValueExt::test_value(engine.register_definition(definition));
+
+    let _peer = spawn_fixture!(engine, "PEER", with_position: Vector2::new(30, 50));
+    let caller = spawn_fixture!(engine, "ACTS", with_position: Vector2::new(60, 50));
+    let index = engine.test_object_index(caller);
+    crate::TestValueExt::test_value(engine.call_object_function(index, "Begin", Vec::new()));
+
+    crate::TestValueExt::test_value(engine.tick());
+
+    assert!(
+        engine.find_object_index(caller).is_none(),
+        "the action-callback caller departs with the section"
+    );
+    assert!(
+        engine.objects.is_empty(),
+        "an empty target section installs no objects at all"
+    );
+}

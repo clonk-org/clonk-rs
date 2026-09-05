@@ -826,6 +826,13 @@ impl Engine {
                             self.apply_global_effect_commands(&global_cmds);
                         }
                         self.apply_particle_commands(emitted_particles);
+                        // `apply_player_commands` above may have run
+                        // `LoadScenarioSection`, rebuilding the object list
+                        // (C4Game.cpp:4194-4208); an object that departed with
+                        // its section has no container change to reconcile.
+                        let Some(idx) = self.find_object_index(object_id) else {
+                            return Ok(());
+                        };
                         let new_container = self.objects[idx].state.container;
                         if previous_container != new_container {
                             if effect_host_container_change {
@@ -990,6 +997,16 @@ impl Engine {
                         )?;
                     }
                 }
+
+                // A PhaseCall is an ordinary script frame and may have run
+                // `LoadScenarioSection`, which rebuilds the object list
+                // (C4Game.cpp:4194-4208). Resolve the slot again before
+                // reading the live action; an object that departed with its
+                // section has no `SetAction(NextAction)` left to make.
+                let Some(current) = self.find_object_index(current_id) else {
+                    continue;
+                };
+                idx = current;
 
                 // Only after PhaseCall returns does C++ compare the LIVE
                 // phase against the stale pAction Length and call ordinary
@@ -1237,7 +1254,7 @@ impl Engine {
             }
             // The same walk may have switched section, so resolve the slot
             // again rather than trusting the one the loop entered with.
-            let Some(idx) = self.find_object_index(current_id) else {
+            let Some(mut idx) = self.find_object_index(current_id) else {
                 continue;
             };
             if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
@@ -1285,6 +1302,15 @@ impl Engine {
                 if let Some(callback) = timer_call {
                     tolerate_script_error(self.call_object_callback(idx, &callback, Vec::new()))?;
                 }
+                // `Def->TimerCall` is an ordinary script frame and may have run
+                // `LoadScenarioSection`, which rebuilds the object list
+                // (C4Game.cpp:4194-4208). Resolve the slot again before
+                // reading it; a caller that departed with its section has no
+                // remaining `C4Object::Execute` tail.
+                let Some(current) = self.find_object_index(current_id) else {
+                    continue;
+                };
+                idx = current;
                 if self.objects[idx].destroyed
                     || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
                 {
@@ -1668,6 +1694,13 @@ impl Engine {
                         if !physics_delta.is_empty() {
                             self.apply_physics_delta(physics_delta);
                         }
+                        // `apply_player_commands` above may have run
+                        // `LoadScenarioSection`, rebuilding the object list
+                        // (C4Game.cpp:4194-4208); an object that departed with
+                        // its section has no container change to reconcile.
+                        let Some(idx) = self.find_object_index(object_id) else {
+                            return Ok(());
+                        };
                         let new_container = self.objects[idx].state.container;
                         if !global_cmds.is_empty() {
                             self.apply_global_effect_commands(&global_cmds);
@@ -3278,7 +3311,7 @@ impl Engine {
         // that call therefore no longer identifies this object — it may hold a
         // different one, or nothing. Re-resolve it, and when the switch removed
         // the caller, apply only the world-scoped remainder.
-        let Some(index) = self.find_object_index(object_id) else {
+        let Some(mut index) = self.find_object_index(object_id) else {
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
@@ -3565,15 +3598,25 @@ impl Engine {
                 self.apply_global_effect_commands(&global_cmds);
             }
             self.apply_particle_commands(emitted_particles);
-            let new_container = self.objects[index].state.container;
-            if previous_container != new_container {
-                container_changes.push((
-                    previous_container,
-                    new_container,
-                    effect_host_container_change,
-                ));
+            // A nested effect callback may have switched section, rebuilding
+            // the object list (C4Game.cpp:4194-4208). Resolve the slot again
+            // before reading it; a departed object has no container change to
+            // record.
+            if let Some(current) = self.find_object_index(object_id) {
+                index = current;
+                let new_container = self.objects[index].state.container;
+                if previous_container != new_container {
+                    container_changes.push((
+                        previous_container,
+                        new_container,
+                        effect_host_container_change,
+                    ));
+                }
             }
         }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
         if sector_state_before_effects.is_some_and(|previous| {
             let object = &self.objects[index];
             previous
@@ -3700,7 +3743,7 @@ impl Engine {
                 continue;
             }
             let requested_death = outcome.assign_death;
-            let Some(index) = self.find_object_index(outcome.object_id) else {
+            let Some(mut index) = self.find_object_index(outcome.object_id) else {
                 retained.push(outcome);
                 continue;
             };
@@ -3986,15 +4029,25 @@ impl Engine {
                     self.apply_global_effect_commands(&global_cmds);
                 }
                 self.apply_particle_commands(emitted_particles);
-                let new_container = self.objects[index].state.container;
-                if previous_container != new_container {
-                    container_changes.push((
-                        previous_container,
-                        new_container,
-                        effect_host_container_change,
-                    ));
+                // A nested effect callback may have switched section, rebuilding
+                // the object list (C4Game.cpp:4194-4208). Resolve the slot again
+                // before reading it; a departed object has no container change
+                // to record.
+                if let Some(current) = self.find_object_index(outcome.object_id) {
+                    index = current;
+                    let new_container = self.objects[index].state.container;
+                    if previous_container != new_container {
+                        container_changes.push((
+                            previous_container,
+                            new_container,
+                            effect_host_container_change,
+                        ));
+                    }
                 }
             }
+            let Some(index) = self.find_object_index(outcome.object_id) else {
+                continue;
+            };
             self.update_sector_for_index(index);
 
             for (previous, new, host_executed) in container_changes {
