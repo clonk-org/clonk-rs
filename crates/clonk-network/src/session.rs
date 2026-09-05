@@ -1759,6 +1759,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_restart_retries_an_alternate_route_after_an_accepted_tcp_flush_fails() {
+        let client_id = 7;
+        let (primary, mut primary_rx) = HostOutboundSender::channel();
+        let (fallback, mut fallback_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, primary);
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 13,
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: fallback,
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
+            },
+        );
+
+        let (primary_accepted, primary_accepted_rx) = oneshot::channel();
+        let (drop_flush, drop_flush_rx) = oneshot::channel();
+        let primary_task = tokio::spawn(async move {
+            assert!(matches!(
+                primary_rx.recv().await,
+                Some(HostOutboundMessage::Message(
+                    ControlMessage::HostRestarting { .. }
+                ))
+            ));
+            primary_accepted.send(()).test_value();
+            drop_flush_rx.await.test_value();
+            assert!(matches!(
+                primary_rx.recv().await,
+                Some(HostOutboundMessage::Flush(_))
+            ));
+            // The route accepted the notice, but its writer failed before
+            // completing the barrier. A retry must not enqueue it here again.
+            assert!(timeout(Duration::from_millis(100), primary_rx.recv())
+                .await
+                .is_err());
+        });
+        let (fallback_message, fallback_message_rx) = oneshot::channel();
+        let mut fallback_message = Some(fallback_message);
+        let fallback_task = tokio::spawn(async move {
+            while let Some(command) = fallback_rx.recv().await {
+                match command {
+                    HostOutboundMessage::Message(message) => {
+                        fallback_message
+                            .take()
+                            .test_value()
+                            .send(message)
+                            .test_value();
+                    }
+                    HostOutboundMessage::Flush(completion) => {
+                        completion.send(()).test_value();
+                        break;
+                    }
+                    HostOutboundMessage::Raw(_) => {
+                        panic!("restart fallback queued a raw packet")
+                    }
+                }
+            }
+        });
+
+        let mut broadcast = Box::pin(broadcast_host_restarting(30, &mut state));
+        let accepted = poll_fn(|context| match broadcast.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(()) => Poll::Ready(false),
+        })
+        .await;
+        assert!(
+            accepted,
+            "TCP notice did not reach its pending flush barrier"
+        );
+        timeout(EVENT_WAIT, primary_accepted_rx)
+            .await
+            .test_value()
+            .test_value();
+        drop_flush.send(()).test_value();
+        broadcast.await;
+
+        assert_eq!(
+            timeout(EVENT_WAIT, fallback_message_rx)
+                .await
+                .test_value()
+                .test_value(),
+            ControlMessage::HostRestarting { rejoin_seconds: 30 }
+        );
+        primary_task.await.test_value();
+        fallback_task.await.test_value();
+    }
+
+    #[tokio::test]
+    async fn host_restart_retries_an_alternate_route_after_an_accepted_udp_flush_fails() {
+        let client_id = 7;
+        let udp = crate::udp_session::ReliableUdpRouteSender::test_sender();
+        let primary = HostOutboundSender::from_udp(udp.clone());
+        let (fallback, mut fallback_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, primary);
+        state.accepted_routes.get_mut(&1).test_value().protocol = crate::NetworkProtocol::Udp;
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 13,
+                peer_addr: "127.0.0.1:11113".parse().test_value(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: fallback,
+                voice_auth: crate::voice::VoiceRouteAuthentication::default(),
+                peer_is_port: false,
+            },
+        );
+
+        let (fallback_message, fallback_message_rx) = oneshot::channel();
+        let mut fallback_message = Some(fallback_message);
+        let fallback_task = tokio::spawn(async move {
+            while let Some(command) = fallback_rx.recv().await {
+                match command {
+                    HostOutboundMessage::Message(message) => {
+                        fallback_message
+                            .take()
+                            .test_value()
+                            .send(message)
+                            .test_value();
+                    }
+                    HostOutboundMessage::Flush(completion) => {
+                        completion.send(()).test_value();
+                        break;
+                    }
+                    HostOutboundMessage::Raw(_) => {
+                        panic!("restart fallback queued a raw packet")
+                    }
+                }
+            }
+        });
+
+        let mut broadcast = Box::pin(broadcast_host_restarting(30, &mut state));
+        let accepted = poll_fn(|context| match broadcast.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(()) => Poll::Ready(false),
+        })
+        .await;
+        assert!(
+            accepted,
+            "UDP notice did not reach its pending flush barrier"
+        );
+        udp.test_fail();
+        broadcast.await;
+
+        assert_eq!(
+            timeout(EVENT_WAIT, fallback_message_rx)
+                .await
+                .test_value()
+                .test_value(),
+            ControlMessage::HostRestarting { rejoin_seconds: 30 }
+        );
+        fallback_task.await.test_value();
+    }
+
+    #[tokio::test]
     async fn client_control_send_time_publishes_only_after_route_or_topology_changes() {
         let mut routes = ClientRouteManager::new();
         let _host_tcp =

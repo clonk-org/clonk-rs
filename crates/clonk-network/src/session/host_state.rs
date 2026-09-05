@@ -1028,7 +1028,7 @@ fn try_send_host_message_with_route(
     }
 }
 
-fn try_send_host_message_with_route_excluding(
+pub(crate) fn try_send_host_message_with_route_excluding(
     state: &HostState,
     client_id: ClientId,
     traffic: ConnectionTrafficClass,

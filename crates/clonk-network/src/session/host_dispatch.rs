@@ -2022,14 +2022,36 @@ pub(crate) async fn broadcast_league_round_results(
 }
 
 pub(crate) async fn broadcast_host_restarting(rejoin_seconds: u16, state: &mut HostState) {
+    let message = ControlMessage::HostRestarting { rejoin_seconds };
     let routes = broadcast_host_message_with_routes(
         state,
         ConnectionTrafficClass::Message,
-        ControlMessage::HostRestarting { rejoin_seconds },
+        message.clone(),
         None,
     );
-    for (_, outbound) in routes {
-        let _ = outbound.flush().await;
+    for (client_id, outbound) in routes {
+        if outbound.flush().await.is_ok() {
+            continue;
+        }
+        // The logical send was accepted before this route's barrier failed.
+        // Exclude that route from the retry so a late writer cannot receive a
+        // duplicate, then try each independent live route at most once.
+        let mut excluded = vec![outbound];
+        while let Some(fallback) = try_send_host_message_with_route_excluding(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            message.clone(),
+            &mut excluded,
+        ) {
+            // Exclude every route whose send was accepted before its barrier
+            // failed. A late writer may still complete, so never enqueue the
+            // notice twice on that route while walking the remaining options.
+            excluded.push(fallback.clone());
+            if fallback.flush().await.is_ok() {
+                break;
+            }
+        }
     }
 }
 
