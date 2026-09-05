@@ -1787,6 +1787,14 @@ impl Engine {
                 self.apply_global_effect_commands(&global_cmds);
             }
             self.apply_particle_commands(emitted_particles);
+            // `apply_player_commands` above may have run `LoadScenarioSection`,
+            // which rebuilds the object list (C4Game.cpp:4194-4208). The
+            // captured `idx` is then some other object's slot, or none — and an
+            // object that departed with its section has no container change
+            // left to reconcile.
+            let Some(idx) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
             let new_container = self.objects[idx].state.container;
             if previous_container != new_container {
                 if effect_host_container_change {

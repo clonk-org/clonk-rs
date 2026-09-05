@@ -874,7 +874,7 @@ impl Engine {
                 }
             }
 
-            let Some(idx) = self.find_object_index(current_id) else {
+            let Some(mut idx) = self.find_object_index(current_id) else {
                 continue;
             };
 
@@ -1180,7 +1180,12 @@ impl Engine {
             // later node or insert a new upper node that must execute in
             // this same frame (C4Effect.cpp:319-363).
             let mut effect_cursor = None;
-            loop {
+            // A timer callback may have run `LoadScenarioSection`, which
+            // rebuilds the object list (C4Game.cpp:4194-4208). Re-resolve this
+            // object's slot on every pass before reading it again; if the
+            // switch removed it, C++ has no object left to walk either.
+            while let Some(current) = self.find_object_index(current_id) {
+                idx = current;
                 if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
                     break;
                 }
@@ -1230,6 +1235,11 @@ impl Engine {
                     self.dispatch_object_effect_events(idx, &definition_id, stop_events)?;
                 }
             }
+            // The same walk may have switched section, so resolve the slot
+            // again rather than trusting the one the loop entered with.
+            let Some(idx) = self.find_object_index(current_id) else {
+                continue;
+            };
             if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
                 // pEffects->Execute may remove the object; C++ returns
                 // before ExecLife/ExecBase/Timer (C4Object.cpp:1087-1090).
