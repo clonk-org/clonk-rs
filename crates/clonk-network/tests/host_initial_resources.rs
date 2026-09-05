@@ -1039,7 +1039,10 @@ fn dynamic_metadata_that_disagrees_with_the_packed_bytes_is_refused() {
         let scenario = packed_source(&sources, "Scenario.c4s", "OracleHost", b"scenario");
         let system = packed_source(&sources, "System.c4g", "OracleHost", b"system");
 
-        let mut dynamic = composed_dynamic();
+        // Reuse the packed baseline: MutableGroup stamps the raw C4Group
+        // header with the current Unix time, so recomposing here can change
+        // the file CRC between the honest snapshot and this corruption case.
+        let mut dynamic = honest.clone();
         corrupt(&mut dynamic);
 
         let error = publish_host_initial_resources(HostInitialResourcePublicationSpec {
