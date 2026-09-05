@@ -35,6 +35,8 @@ pub enum VirtualPlayerError {
         milestone: String,
         frame: u64,
         diagnostics: String,
+        artifacts: Option<PathBuf>,
+        artifact_warning: Option<String>,
     },
     Timeout {
         milestone: String,
@@ -79,11 +81,20 @@ impl fmt::Display for VirtualPlayerError {
                 milestone,
                 frame,
                 diagnostics,
+                artifacts,
+                artifact_warning,
             } => {
                 write!(
                     formatter,
                     "milestone `{milestone}` was not reached at frame {frame}; {diagnostics}"
-                )
+                )?;
+                if let Some(path) = artifacts {
+                    write!(formatter, "; artifacts: {}", path.display())?;
+                }
+                if let Some(warning) = artifact_warning {
+                    write!(formatter, "; artifact capture failed: {warning}")?;
+                }
+                Ok(())
             }
             Self::Timeout {
                 milestone,
@@ -149,7 +160,9 @@ impl From<EngineError> for VirtualPlayerError {
 impl VirtualPlayerError {
     pub fn artifact_dir(&self) -> Option<&Path> {
         match self {
-            Self::Timeout { artifacts, .. } => artifacts.as_deref(),
+            Self::MilestoneNotReached { artifacts, .. } | Self::Timeout { artifacts, .. } => {
+                artifacts.as_deref()
+            }
             _ => None,
         }
     }
@@ -157,16 +170,17 @@ impl VirtualPlayerError {
 
 impl<'engine> VirtualPlayer<'engine> {
     pub fn new(engine: &'engine mut Engine, owner: i32) -> Self {
+        let feedback = DevFeedbackCapture::from_virtual_player_env(engine, owner);
         Self {
             engine,
             owner,
-            feedback: None,
+            feedback,
         }
     }
 
     /// Enable deterministic input recording and timeout artifact capture.
-    /// The ordinary constructor remains allocation-free for tests that do
-    /// not need replay forensics.
+    /// The ordinary constructor remains allocation-free unless the CI route
+    /// capture environment is explicitly enabled.
     pub fn with_dev_feedback(
         engine: &'engine mut Engine,
         owner: i32,
@@ -351,11 +365,15 @@ impl<'engine> VirtualPlayer<'engine> {
             // observable state a timeout would have reported.
             let mut recent = VecDeque::with_capacity(1);
             self.remember_observable_state(&mut recent);
-            Err(VirtualPlayerError::MilestoneNotReached {
+            let mut error = VirtualPlayerError::MilestoneNotReached {
                 milestone: milestone.into(),
                 frame: self.engine.frame(),
                 diagnostics: self.timeout_diagnostics(recent),
-            })
+                artifacts: None,
+                artifact_warning: None,
+            };
+            self.capture_milestone_artifact(&mut error);
+            Err(error)
         }
     }
 
@@ -485,6 +503,26 @@ impl<'engine> VirtualPlayer<'engine> {
             return;
         };
         match feedback.capture_timeout(self.engine, milestone, *max_ticks, diagnostics) {
+            Ok(path) => *artifacts = path,
+            Err(error) => *artifact_warning = Some(error.to_string()),
+        }
+    }
+
+    fn capture_milestone_artifact(&self, error: &mut VirtualPlayerError) {
+        let VirtualPlayerError::MilestoneNotReached {
+            milestone,
+            diagnostics,
+            artifacts,
+            artifact_warning,
+            ..
+        } = error
+        else {
+            return;
+        };
+        let Some(feedback) = &self.feedback else {
+            return;
+        };
+        match feedback.capture_milestone(self.engine, milestone, diagnostics) {
             Ok(path) => *artifacts = path,
             Err(error) => *artifact_warning = Some(error.to_string()),
         }

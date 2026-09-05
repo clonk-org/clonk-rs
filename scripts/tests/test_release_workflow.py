@@ -480,6 +480,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("--commit 0123456789abcdef", commands)
         self.assertNotIn("--branch", commands)
 
+    def test_resolver_ignores_run_scoped_shard_diagnostics(self):
+        self._stub(
+            'if [[ "$1 $2" == "run list" ]]; then\n'
+            '  printf "91\\t%s\\tcompleted\\tsuccess\\n" "$CI_SHA"\n'
+            'elif [[ "$1" == "api" ]]; then\n'
+            '  printf "%s\\n" "$ARTIFACTS"\n'
+            "else exit 1; fi\n"
+        )
+        completed, output = self.run_artifact_resolver(
+            ARTIFACTS=self.artifact_inventory(
+                extra="rust-test-diagnostics-91-1-app-1-0123456789abcdef"
+            )
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(output, "run-id=91\n")
+
     def test_resolver_fails_closed_on_missing_or_expired_coverage_artifacts(self):
         self._stub(
             'if [[ "$1 $2" == "run list" ]]; then\n'

@@ -16,7 +16,7 @@ on:
         required: true
         type: boolean
       upload-diagnostics:
-        description: Whether to retain coverage and developer-feedback reports
+        description: Whether to retain post-merge coverage and developer-feedback reports
         required: true
         type: boolean
 
@@ -116,6 +116,45 @@ jobs:
         with:
           ref: ${{ inputs.source-sha }}
           persist-credentials: false
+
+      # Create the shard identity before setup or compilation. The diagnostic
+      # upload below runs even when coverage collection fails, so a failed
+      # release qualification still exposes the exact source and shard.
+      - name: Prepare shard diagnostics
+        env:
+          DIAGNOSTIC_DIR: ${{ runner.temp }}/test-diagnostics
+          MATRIX_NAME: ${{ matrix.name }}
+          SHARD_ID: ${{ matrix.artifact }}
+          SHARD_COMMAND: ${{ matrix.command }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          diagnostic_dir = Path(os.environ["DIAGNOSTIC_DIR"])
+          if diagnostic_dir.exists():
+              shutil.rmtree(diagnostic_dir)
+          diagnostic_dir.mkdir(parents=True)
+          metadata = {
+              "schema_version": 1,
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "shard": os.environ["SHARD_ID"],
+              "name": os.environ["MATRIX_NAME"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "command": os.environ["SHARD_COMMAND"],
+              "nextest_profile": "default",
+              "junit": "target/nextest/default/junit.xml",
+              "retained_junit": "junit/*.xml",
+          }
+          path = diagnostic_dir / "metadata.json"
+          path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+          PY
 
       # `submodules: recursive` fetched content unbounded inside checkout, so a
       # stalled transfer spent the whole 15-minute budget there and took the row
@@ -226,10 +265,32 @@ jobs:
           shared-key: coverage-registry
           save-if: ${{ inputs.upload-diagnostics && matrix.artifact == 'app-1-10' }}
 
+      - name: Reset stale JUnit report
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          Path("target/nextest/default/junit.xml").unlink(missing_ok=True)
+          PY
+
       - name: Collect instrumented coverage fragment
         env:
           SHARD_COMMAND: ${{ matrix.command }}
+          DIAGNOSTIC_DIR: ${{ runner.temp }}/test-diagnostics
+          LC_CAPTURE_VIRTUAL_PLAYER: '1'
+          LC_TEST_ARTIFACT_DIR: ${{ runner.temp }}/test-diagnostics/replays
         run: |
+          export LC_REAL_CARGO="$(command -v cargo)"
+          export LC_NEXTEST_JUNIT_DIR="$DIAGNOSTIC_DIR/junit"
+          cargo() {
+            local status=0
+            rm -f "${LC_NEXTEST_JUNIT_SOURCE:-target/nextest/default/junit.xml}"
+            "$LC_REAL_CARGO" "$@" || status=$?
+            bash scripts/retain-nextest-junit.sh || true
+            return "$status"
+          }
+          export -f cargo
           cargo llvm-cov clean --workspace
           bash -euo pipefail -c "$SHARD_COMMAND"
           mkdir -p target/coverage-fragments
@@ -237,6 +298,20 @@ jobs:
             --output-path "target/coverage-fragments/${{ matrix.artifact }}.lcov" \
             --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
           gzip --best "target/coverage-fragments/${{ matrix.artifact }}.lcov"
+
+      # Coverage fragments remain a success-only handoff. Diagnostics have a
+      # separate always-run upload so a failed test keeps its JUnit output and
+      # bounded virtual-player trace while the qualification job stays failed.
+      - name: Upload shard test diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}-${{ inputs.source-sha }}
+          path: |
+            ${{ runner.temp }}/test-diagnostics
+            target/nextest/default/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload coverage fragment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

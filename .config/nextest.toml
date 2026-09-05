@@ -12,6 +12,16 @@ final-status-level = "fail"
 path = "junit.xml"
 store-success-output = false
 
+# Keep a compact report for every CI shard, including a failed one. Failure
+# output is retained in the report while successful test output stays in the
+# normal nextest stream, so uploading diagnostics does not turn each shard into
+# an unbounded log archive.
+[profile.default.junit]
+path = "junit.xml"
+report-name = "nextest-run"
+store-success-output = false
+store-failure-output = true
+
 [[profile.default.overrides]]
 filter = '(package(clonk-app) and test(/(app_virtual_keyboard_(completes_real_tutorial(0[13])_route|delivers_tutorial08_surface_wipfs_to_hut)|harpoonrace_invalid_live_seed_is_ended_before_the_host_can_launch)$/)) or (package(clonk-app-netplay) and test(/(regicide_assigns_the_initial_host_player_before_publishing_join_data|tutorial01_builds_the_exact_supported_initial_host_bootstrap)$/)) or (package(clonk-engine-integration-tests) and test(/(tutorial0(4|6|7|9)_virtual_player_completes|tutorial10_virtual_player_completes_)/))'
 # These allocation- and memory-bandwidth-heavy tests slow down by several times

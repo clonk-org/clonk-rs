@@ -275,15 +275,19 @@ jobs:
           - name: app 1/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-1 --no-fail-fast --locked
+            artifact: app-1
           - name: app 12/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-12 --no-fail-fast --locked
+            artifact: app-12
           - name: app 3+10/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-3,app-test-shard-10 --no-fail-fast --locked
+            artifact: app-3-10
           - name: app 2+7/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
+            artifact: app-2-7
           - name: app 4+9/12
             apt: libasound2-dev libudev-dev
             command: |
@@ -295,24 +299,32 @@ jobs:
               # check.
               cargo nextest run -p clonk-app --features app-test-shard-4,app-test-shard-9 --locked --no-tests=fail -E 'test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
               exit "$failed"
+            artifact: app-4-9
           - name: app 5/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
+            artifact: app-5
           - name: app 11/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-11 --no-fail-fast --locked
+            artifact: app-11
           - name: app 6/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-6 --no-fail-fast --locked
+            artifact: app-6
           - name: app 8/12
             apt: libasound2-dev libudev-dev
             command: cargo nextest run -p clonk-app --features app-test-shard-8 --no-fail-fast --locked
+            artifact: app-8
           - name: engine integration 1/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
+            artifact: engine-1
           - name: engine integration 2/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2 --no-fail-fast --locked
+            artifact: engine-2
           - name: engine integration 3/3
             command: cargo nextest run -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-3 --no-fail-fast --locked
+            artifact: engine-3
           - name: engine and frontend unit and parity
             apt: libasound2-dev libudev-dev
             command: |
@@ -325,11 +337,14 @@ jobs:
               cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-engine-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
               cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --locked --features clonk-engine-unit-tests/ffi --no-tests=fail -E 'package(clonk-frontend-unit-tests) and test(/(^|::)parity_differential_matches_cpp_golden$/)' || failed=1
               exit "$failed"
+            artifact: engine-and-frontend-units
           - name: remaining workspace 1/2
             command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
+            artifact: remaining-1
           - name: remaining workspace 2/2
             apt: libasound2-dev libxmp4 mesa-vulkan-drivers
             command: cargo nextest run -p clonk-app-menus -p clonk-app-render -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+            artifact: remaining-2
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
             oracle: true
@@ -354,22 +369,64 @@ jobs:
               python3 -m unittest discover --buffer -s scripts/tests -p 'test_*.py' || failed=1
               cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings || failed=1
               exit "$failed"
+            artifact: workspace-quality
           - name: presentation captures
             apt: libasound2-dev libudev-dev
             oracle: true
             timeout: 30
             command: cargo xtask presentation verify-current --profile release --output-dir "$RUNNER_TEMP/presentation-current"
+            artifact: presentation-captures
           - name: engine contracts
             oracle: true
             command: |
               cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
               cargo xtask engine-snapshots verify
               cargo xtask compat verify
+            artifact: engine-contracts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      # Leave an identity record before any setup work can fail. The report
+      # upload below is unconditional, so a compile or test failure still has
+      # a downloadable shard record even when nextest did not create JUnit.
+      - name: Prepare shard diagnostics
+        env:
+          DIAGNOSTIC_DIR: ${{ runner.temp }}/test-diagnostics
+          MATRIX_NAME: ${{ matrix.name }}
+          SHARD_ID: ${{ matrix.artifact }}
+          SHARD_COMMAND: ${{ matrix.command }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          diagnostic_dir = Path(os.environ["DIAGNOSTIC_DIR"])
+          if diagnostic_dir.exists():
+              shutil.rmtree(diagnostic_dir)
+          diagnostic_dir.mkdir(parents=True)
+          metadata = {
+              "schema_version": 1,
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "shard": os.environ["SHARD_ID"],
+              "name": os.environ["MATRIX_NAME"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "command": os.environ["SHARD_COMMAND"],
+              "nextest_profile": "default",
+              "junit": "target/nextest/default/junit.xml",
+              "retained_junit": "junit/*.xml",
+          }
+          path = diagnostic_dir / "metadata.json"
+          path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+          PY
 
       - name: Fetch pinned LegacyClonk oracle commit
         if: matrix.oracle == true
@@ -485,10 +542,47 @@ jobs:
           shared-key: full-parity
           save-if: false
 
+      - name: Reset stale JUnit report
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          Path("target/nextest/default/junit.xml").unlink(missing_ok=True)
+          PY
+
       - name: Run ${{ matrix.name }}
         env:
           SHARD_COMMAND: ${{ matrix.command }}
-        run: bash -euo pipefail -c "$SHARD_COMMAND"
+          DIAGNOSTIC_DIR: ${{ runner.temp }}/test-diagnostics
+          LC_CAPTURE_VIRTUAL_PLAYER: '1'
+          LC_TEST_ARTIFACT_DIR: ${{ runner.temp }}/test-diagnostics/replays
+        run: |
+          export LC_REAL_CARGO="$(command -v cargo)"
+          export LC_NEXTEST_JUNIT_DIR="$DIAGNOSTIC_DIR/junit"
+          cargo() {
+            local status=0
+            rm -f "${LC_NEXTEST_JUNIT_SOURCE:-target/nextest/default/junit.xml}"
+            "$LC_REAL_CARGO" "$@" || status=$?
+            bash scripts/retain-nextest-junit.sh || true
+            return "$status"
+          }
+          export -f cargo
+          bash -euo pipefail -c "$SHARD_COMMAND"
+
+      # Keep this separate from presentation and release payload handoffs: a
+      # failed shard must publish its JUnit failure output and any bounded
+      # virtual-player trace even though the required row remains failed.
+      - name: Upload shard test diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/test-diagnostics
+            target/nextest/default/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload presentation capture failure
         if: failure() && matrix.name == 'presentation captures'
