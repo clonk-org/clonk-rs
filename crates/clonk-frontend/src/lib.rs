@@ -15881,6 +15881,181 @@ mod tests {
     }
 
     #[test]
+    fn select_marks_use_the_live_shape_for_normal_and_mouse_selection() {
+        // C4Object::DrawSelectMark reads the live Shape rect for both normal
+        // and mouse-local selection marks (src/C4Object.cpp:3865-3870). A
+        // script SetShape override must therefore move every corner away
+        // from the definition's original shape.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].current_shape = Some(DefinitionRect::new(-14, -8, 28, 16));
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(snapshot.objects[0].id),
+            control: clonk_engine::PlayerControlState {
+                select_flash: 30,
+                ..Default::default()
+            },
+            ..PlayerState::default()
+        });
+
+        let corner_colors = [
+            [200u8, 10, 10, 255],
+            [10, 200, 10, 255],
+            [10, 10, 200, 255],
+            [200, 200, 10, 255],
+        ];
+        let mut mark_pixels = Vec::new();
+        for _y in 0..5 {
+            for x in 0..20 {
+                mark_pixels.extend_from_slice(&corner_colors[(x / 5) as usize]);
+            }
+        }
+        let hud =
+            hud_graphics_fixture(|hud| hud.select_mark = Some(ImageData::new(20, 5, mark_pixels)));
+        let sprite = test_shaped_sprite(
+            ImageData::new(4, 4, vec![0; 4 * 4 * 4]),
+            DefinitionRect::new(-2, -2, 4, 4),
+        );
+        let mut graphics = test_graphics_with(
+            (80, 60, 60),
+            "Live select mark shape",
+            test_sprites([("TestObject", sprite)]),
+            empty_cursor_atlas(),
+            Arc::new(hud),
+        );
+        let focus = &snapshot.objects[0];
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = snapshot.objects[0].position.x - viewport_x;
+        let sy = snapshot.objects[0].position.y - viewport_y;
+        let shape = snapshot.objects[0]
+            .current_shape
+            .expect("the fixture carries a SetShape override");
+        let expected = [
+            (sx + shape.x - 2, sy + shape.y - 2, corner_colors[0]),
+            (
+                sx + shape.x + shape.width - 2,
+                sy + shape.y - 2,
+                corner_colors[1],
+            ),
+            (
+                sx + shape.x - 2,
+                sy + shape.y + shape.height - 2,
+                corner_colors[2],
+            ),
+            (
+                sx + shape.x + shape.width - 2,
+                sy + shape.y + shape.height - 2,
+                corner_colors[3],
+            ),
+        ];
+        for (px, py, color) in expected {
+            front_assert_eq! {
+                graphics.surface().get_pixel(px as u32, py as u32) =>
+                Some(Color::new(color[0], color[1], color[2], color[3])),
+                "normal selection corner at ({px}, {py})"
+            };
+        }
+
+        // The definition shape is deliberately different; old resolution
+        // would put its top-left corner at (sx - 4, sy - 4).
+        front_assert_ne! {
+            graphics.surface().get_pixel((sx - 4) as u32, (sy - 4) as u32) =>
+            Some(Color::new(corner_colors[0][0], corner_colors[0][1], corner_colors[0][2], corner_colors[0][3])),
+            "normal marks do not retain the definition shape"
+        };
+
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        front_assert! {
+            graphics.draw_mouse_selection_marks(&snapshot, 1, &[snapshot.objects[0].id], None,),
+            "mouse-local selection has an active viewport"
+        };
+        for (px, py, color) in expected {
+            front_assert_eq! {
+                graphics.surface().get_pixel(px as u32, py as u32) =>
+                Some(Color::new(color[0], color[1], color[2], color[3])),
+                "mouse selection corner at ({px}, {py})"
+            };
+        }
+    }
+
+    #[test]
+    fn select_marks_follow_construction_scaled_and_rotated_shapes() {
+        // C4Object::DrawSelectMark consumes the Shape built by UpdateShape,
+        // including construction scaling and rotation bounds
+        // (src/C4Object.cpp:3865-3870; src/C4Object.cpp:320-343).
+        let render = |construction, rotation, shape: DefinitionRect| {
+            let mut snapshot = make_snapshot();
+            snapshot.objects[0].position = Vector2::new(40, 40);
+            snapshot.objects[0].definition_id = "ScaledSelectMark".to_string();
+            snapshot.objects[0].owner = 1;
+            snapshot.objects[0].construction = construction;
+            snapshot.objects[0].rotation = rotation;
+            snapshot.landscape = Some(Landscape::flat(128, 80));
+            snapshot.players.push(PlayerState {
+                id: 1,
+                cursor: Some(snapshot.objects[0].id),
+                control: clonk_engine::PlayerControlState {
+                    select_flash: 30,
+                    ..Default::default()
+                },
+                ..PlayerState::default()
+            });
+
+            let mark = Color::opaque(200, 10, 10);
+            let hud = hud_graphics_fixture(|hud| {
+                hud.select_mark = Some(ImageData::new(
+                    20,
+                    5,
+                    (0..100).flat_map(|_| [200, 10, 10, 255]).collect(),
+                ))
+            });
+            let sprite = DefinitionSprite {
+                shape: Some(DefinitionRect::new(-6, -4, 12, 8)),
+                rotateable: 1,
+                ..test_sprite(ImageData::new(12, 8, vec![0; 12 * 8 * 4]))
+            };
+            let mut graphics = test_graphics_with(
+                (80, 60, 60),
+                "Scaled and rotated select mark",
+                test_sprites([("ScaledSelectMark", sprite)]),
+                empty_cursor_atlas(),
+                Arc::new(hud),
+            );
+            let focus = &snapshot.objects[0];
+            graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+
+            let (viewport_x, viewport_y) = graphics.viewport();
+            let sx = snapshot.objects[0].position.x - viewport_x;
+            let sy = snapshot.objects[0].position.y - viewport_y;
+            for (x, y) in [
+                (sx + shape.x - 2, sy + shape.y - 2),
+                (sx + shape.x + shape.width - 2, sy + shape.y - 2),
+                (sx + shape.x - 2, sy + shape.y + shape.height - 2),
+                (
+                    sx + shape.x + shape.width - 2,
+                    sy + shape.y + shape.height - 2,
+                ),
+            ] {
+                front_assert_eq! {
+                    graphics.surface().get_pixel(x as u32, y as u32) => Some(mark),
+                    "selection corner at ({x}, {y})"
+                };
+            }
+        };
+
+        // C4Shape::Jolt changes only y/Hgt for a non-stretching definition.
+        render(FULL_CON / 2, 0, DefinitionRect::new(-6, -2, 12, 4));
+        // The rotated live shape uses the radius of the construction-scaled
+        // rect, yielding radius 8 for (-6,-2,12,4).
+        render(FULL_CON / 2, 90, DefinitionRect::new(-8, -8, 16, 16));
+    }
+
+    #[test]
     fn select_marks_stay_hidden_without_select_flash() {
         // `Game.Players.Get(Owner)->SelectFlash` gate (src/C4Object.cpp:2501).
         let mut snapshot = make_snapshot();
