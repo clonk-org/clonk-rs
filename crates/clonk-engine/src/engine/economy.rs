@@ -1731,47 +1731,177 @@ impl Engine {
             return Ok(change);
         }
         let object_id = self.objects[idx].id;
+        let carrier_instance_token = self.object_instance_token(object_id);
         let mut current_number = self.objects[idx].state.effects[0].number;
+        let mut resumed_effect = self.objects[idx].state.effects[0].clone();
+        let mut resume: Option<EffectScriptResume> = None;
+        // Keep the callback owner across a successful section switch. The
+        // carrier can disappear (and its numeric ID can be reused), so the
+        // resumed frame must never rediscover a definition from the
+        // destination object or an arbitrary map entry.
+        let mut dispatch_definition_id: Option<DefinitionId> = None;
         let mut first_effect = true;
         loop {
             // C4Effect::DoDamage is a do/while: even an initial zero visits
             // the head node once, then zero stops the suffix.
-            if change == 0 && !first_effect {
+            if change == 0 && !first_effect && resume.is_none() {
                 break;
             }
             first_effect = false;
-            let Some(current_idx) = self.find_object_index(object_id) else {
-                break;
-            };
-            let Some(effect) = self.objects[current_idx]
-                .state
-                .effects
-                .iter()
-                .find(|effect| effect.number == current_number)
-                .cloned()
-            else {
-                break;
+            // A destination section may reuse the same numeric ID. Only the
+            // original carrier can continue the effect walk; a replacement
+            // must be treated as an absent receiver until the suspended VM
+            // frame has completed against its detached state.
+            let current_idx = self
+                .find_object_index(object_id)
+                .filter(|_| self.object_instance_token(object_id) == carrier_instance_token);
+            let effect = match current_idx.and_then(|index| {
+                self.objects[index]
+                    .state
+                    .effects
+                    .iter()
+                    .find(|effect| effect.number == current_number)
+                    .cloned()
+            }) {
+                Some(effect) => {
+                    resumed_effect = effect.clone();
+                    effect
+                }
+                None if resume.is_some() => resumed_effect.clone(),
+                None => break,
             };
 
             if effect.priority != 0 {
+                let Some(current_idx) = current_idx else {
+                    // A section switch may have removed the old carrier while
+                    // its suspended FxDamage frame is still resumable. The
+                    // continuation driver passes a nil receiver in this case;
+                    // keep the pre-switch definition metadata for the callback
+                    // and let the suffix decide its returned damage value.
+                    if resume.is_none() {
+                        break;
+                    }
+                    let Some(dispatch_id) = dispatch_definition_id.clone() else {
+                        break;
+                    };
+                    let Some(definition) = self.definitions.get(&dispatch_id) else {
+                        break;
+                    };
+                    let world = self.host_world_context();
+                    let callback = definition.call_effect_damage_with_continuation(
+                        None,
+                        &resumed_effect,
+                        change,
+                        cause,
+                        caused_by,
+                        self.rng.clone(),
+                        &self.global_effects,
+                        self.physics,
+                        self.environment,
+                        self.frame,
+                        world,
+                        self.game_over_triggered,
+                        self.audio_registry.clone(),
+                        resume.take(),
+                    )?;
+                    match callback {
+                        EffectCallbackResult::Complete {
+                            value,
+                            outcome,
+                            audio,
+                            rng,
+                        } => {
+                            self.rng = rng;
+                            self.audio_registry = audio;
+                            self.apply_detached_callback_outcome(outcome)?;
+                            change = value.as_ref().map(compat::value_as_i32).unwrap_or_default();
+                        }
+                        EffectCallbackResult::Suspended {
+                            resume: mut next_resume,
+                            outcome,
+                            audio,
+                            rng,
+                        } => {
+                            let request = next_resume
+                                .suspension
+                                .request::<compat::ScenarioSectionSwitchRequest>()
+                                .cloned()
+                                .ok_or_else(|| {
+                                    EngineError::invalid_script_output(
+                                        dispatch_id.clone(),
+                                        "FxDamage",
+                                        "script yielded an unsupported host continuation"
+                                            .to_owned(),
+                                    )
+                                })?;
+                            let mut outcome = outcome;
+                            self.capture_effect_script_context_identity(&mut next_resume);
+                            let (suspension, switched) = self.with_suspended_script_boundary(
+                                next_resume.suspension,
+                                Some(next_resume.cells.clone()),
+                                |engine| {
+                                    engine.rng = rng;
+                                    engine.audio_registry = audio;
+                                    consume_section_switch_command(
+                                        &mut outcome.player_commands,
+                                        &request,
+                                    );
+                                    engine.apply_detached_callback_outcome(outcome)?;
+                                    engine.load_scenario_section(
+                                        &request.name,
+                                        request.flags,
+                                        request.preserve_ids,
+                                    )
+                                },
+                            )?;
+                            next_resume.suspension = suspension;
+                            next_resume.value = Value::Int(i32::from(switched));
+                            next_resume.receiver_available = false;
+                            self.refresh_effect_script_context_identity(&mut next_resume);
+                            resume = Some(next_resume);
+                            // Retry this same effect with the owned VM frame.
+                            // Advancing to the successor here would either
+                            // skip the suffix when the carrier was removed or
+                            // resume the frame against the wrong effect.
+                            continue;
+                        }
+                    }
+                    continue;
+                };
                 let host_definition_id = self.objects[current_idx].definition_id.clone();
-                let dispatch_id = effect
-                    .command_target
-                    .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
-                    .map(|target_idx| self.objects[target_idx].definition_id.clone())
-                    .or_else(|| {
-                        effect
-                            .command_id
-                            .as_ref()
-                            .filter(|id| self.definitions.contains_key(*id))
-                            .cloned()
-                    })
-                    .unwrap_or_else(|| host_definition_id.clone());
-                let world = self.host_world_context();
+                let dispatch_id = if resume.is_some() {
+                    dispatch_definition_id.clone().ok_or_else(|| {
+                        EngineError::invalid_script_output(
+                            host_definition_id.clone(),
+                            "FxDamage",
+                            "missing callback definition for suspended damage frame".to_owned(),
+                        )
+                    })?
+                } else {
+                    let dispatch_id = effect
+                        .command_target
+                        .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
+                        .map(|target_idx| self.objects[target_idx].definition_id.clone())
+                        .or_else(|| {
+                            effect
+                                .command_id
+                                .as_ref()
+                                .filter(|id| self.definitions.contains_key(*id))
+                                .cloned()
+                        })
+                        .unwrap_or_else(|| host_definition_id.clone());
+                    dispatch_definition_id = Some(dispatch_id.clone());
+                    dispatch_id
+                };
+                // Seed the carrier into the callback world before resolving
+                // its command-target script.  DoDamage is entered outside
+                // the object Execute loop, so the lazy world alone does not
+                // publish the live carrier's script state to effect lookup.
+                let world = self.host_world_context_for_object(current_idx);
                 let callback_name = format!("Fx{}Damage", effect.name);
                 let has_callback =
                     resolve_effect_script_callback(&effect, &callback_name, &world).is_some();
-                if has_callback {
+                if has_callback || resume.is_some() {
                     let action_library = self
                         .definitions
                         .get(&host_definition_id)
@@ -1781,7 +1911,7 @@ impl Engine {
                     let rng_state = self.rng.clone();
                     let global_view = self.global_effects.clone();
                     if let Some(definition) = self.definitions.get(&dispatch_id) {
-                        let callback = definition.call_effect_damage(
+                        let callback = definition.call_effect_damage_with_continuation(
                             Some((&state_snapshot, object_id)),
                             &effect,
                             change,
@@ -1795,31 +1925,108 @@ impl Engine {
                             world,
                             self.game_over_triggered,
                             self.audio_registry.clone(),
+                            resume.take(),
                         );
                         match tolerate_script_error(callback)? {
-                            Some((outcome, audio_state, new_rng, result)) => {
-                                self.rng = new_rng;
-                                self.audio_registry = audio_state;
-                                self.apply_action_callback_outcome(
-                                    current_idx,
-                                    outcome,
-                                    &action_library,
-                                    object_id,
-                                    &host_definition_id,
-                                )?;
-                                change = result
-                                    .as_ref()
-                                    .map(compat::value_as_i32)
-                                    .unwrap_or_default();
+                            None => continue,
+                            Some(EffectCallbackResult::Complete {
+                                value,
+                                outcome,
+                                audio,
+                                rng,
+                            }) => {
+                                self.rng = rng;
+                                self.audio_registry = audio;
+                                if self.object_instance_token(object_id) == carrier_instance_token {
+                                    self.apply_action_callback_outcome(
+                                        current_idx,
+                                        outcome,
+                                        &action_library,
+                                        object_id,
+                                        &host_definition_id,
+                                    )?;
+                                } else {
+                                    self.apply_detached_callback_outcome(outcome)?;
+                                    break;
+                                }
+                                change =
+                                    value.as_ref().map(compat::value_as_i32).unwrap_or_default();
                             }
-                            // C4Value::getInt() on a fail-safe Exec error is 0.
-                            None => change = 0,
+                            Some(EffectCallbackResult::Suspended {
+                                resume: mut next_resume,
+                                mut outcome,
+                                audio,
+                                rng,
+                            }) => {
+                                let request = next_resume
+                                    .suspension
+                                    .request::<compat::ScenarioSectionSwitchRequest>()
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        EngineError::invalid_script_output(
+                                            dispatch_id.clone(),
+                                            "FxDamage",
+                                            "script yielded an unsupported host continuation"
+                                                .to_owned(),
+                                        )
+                                    })?;
+                                self.capture_effect_script_context_identity(&mut next_resume);
+                                let (suspension, switched) = self.with_suspended_script_boundary(
+                                    next_resume.suspension,
+                                    Some(next_resume.cells.clone()),
+                                    |engine| {
+                                        consume_section_switch_command(
+                                            &mut outcome.player_commands,
+                                            &request,
+                                        );
+                                        engine.rng = rng;
+                                        engine.audio_registry = audio;
+                                        if engine.object_instance_token(object_id)
+                                            == carrier_instance_token
+                                        {
+                                            if let Some(live_index) =
+                                                engine.find_object_index(object_id)
+                                            {
+                                                engine.apply_action_callback_outcome(
+                                                    live_index,
+                                                    outcome,
+                                                    &action_library,
+                                                    object_id,
+                                                    &host_definition_id,
+                                                )?;
+                                            } else {
+                                                engine.apply_detached_callback_outcome(outcome)?;
+                                            }
+                                        } else {
+                                            engine.apply_detached_callback_outcome(outcome)?;
+                                        }
+                                        engine.load_scenario_section(
+                                            &request.name,
+                                            request.flags,
+                                            request.preserve_ids,
+                                        )
+                                    },
+                                )?;
+                                next_resume.suspension = suspension;
+                                next_resume.value = Value::Int(i32::from(switched));
+                                next_resume.receiver_available =
+                                    self.object_instance_token(object_id) == carrier_instance_token;
+                                self.refresh_effect_script_context_identity(&mut next_resume);
+                                resume = Some(next_resume);
+                                // The continuation belongs to this effect;
+                                // resume it before reading a successor from
+                                // the (possibly replaced) effect list.
+                                continue;
+                            }
                         }
                     }
                 }
             }
 
-            let Some(current_idx) = self.find_object_index(object_id) else {
+            let Some(current_idx) = self
+                .find_object_index(object_id)
+                .filter(|_| self.object_instance_token(object_id) == carrier_instance_token)
+            else {
                 break;
             };
             if self.objects[current_idx].destroyed
@@ -1853,23 +2060,38 @@ impl Engine {
         cause: i32,
         caused_by: i32,
     ) -> Result<(), EngineError> {
+        let object_id = self.objects[idx].id;
+        let carrier_instance_token = self.object_instance_token(object_id);
+        let mut target_idx = idx;
         let change =
             if !self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty() {
                 let modified = self.call_effects_do_damage(idx, change, cause, caused_by)?;
                 if modified == 0 {
                     return Ok(());
                 }
+                // A synchronous section switch can remove the carrier or
+                // reuse its numeric ID while Fx*Damage is suspended. Native
+                // DoDamage continues only with the original C4Object; never
+                // apply the resumed change through the caller's stale vector
+                // index (C4Object.cpp:1330-1343).
+                let Some(live_idx) = self
+                    .find_object_index(object_id)
+                    .filter(|_| self.object_instance_token(object_id) == carrier_instance_token)
+                else {
+                    return Ok(());
+                };
+                target_idx = live_idx;
                 modified
             } else {
                 change
             };
         {
-            let object = &mut self.objects[idx];
+            let object = &mut self.objects[target_idx];
             object.state.damage = object.state.damage.saturating_add(change).max(0);
         }
         // Engine script call (C4Object.cpp:1342).
         let _ = tolerate_script_error(self.call_object_function(
-            idx,
+            target_idx,
             "Damage",
             vec![Value::Int(change), Value::Int(caused_by)],
         ))?;
@@ -1921,6 +2143,9 @@ impl Engine {
         cause: i32,
         caused_by: i32,
     ) -> Result<(), EngineError> {
+        let object_id = self.objects[idx].id;
+        let carrier_instance_token = self.object_instance_token(object_id);
+        let mut target_idx = idx;
         // C++ captures this before damage effects and GetPhysical callbacks
         // (C4Object.cpp:1375-1377).
         let was_zero = self.objects[idx].state.energy == 0;
@@ -1935,18 +2160,32 @@ impl Engine {
             if modified == 0 {
                 return Ok(());
             }
+            // Fx*Damage can synchronously switch sections. The old C++ object
+            // owns this energy transfer; a destination object with the same
+            // numeric ID must not receive it through the stale caller index
+            // (C4Object.cpp:1345-1365).
+            let Some(live_idx) = self
+                .find_object_index(object_id)
+                .filter(|_| self.object_instance_token(object_id) == carrier_instance_token)
+            else {
+                return Ok(());
+            };
+            target_idx = live_idx;
             modified
         } else {
             change
         };
-        let max_energy = self.object_physical(idx).energy;
+        let max_energy = self.object_physical(target_idx).energy;
         {
-            let object = &mut self.objects[idx];
+            let object = &mut self.objects[target_idx];
             object.state.energy =
                 bound_energy(object.state.energy.saturating_add(change), max_energy);
         }
-        if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
-            let _ = tolerate_script_error(self.assign_death(idx, false))?;
+        if self.objects[target_idx].state.alive
+            && self.objects[target_idx].state.energy == 0
+            && !was_zero
+        {
+            let _ = tolerate_script_error(self.assign_death(target_idx, false))?;
         }
         Ok(())
     }

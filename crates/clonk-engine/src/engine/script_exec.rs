@@ -1021,35 +1021,13 @@ impl Engine {
         function_label: &str,
         strict_level: Option<u8>,
     ) -> Result<Value, EngineError> {
-        let world = self.host_world_context();
-        let (value, batch, audio_state, rng, script_error) =
-            ScenarioScript::direct_exec_value_for_script(
-                script_name,
-                script,
-                source,
-                function_label,
-                strict_level,
-                world,
-                self.rng.clone(),
-                self.frame,
-                &self.global_effects.clone(),
-                self.physics,
-                self.environment,
-                self.audio_registry.clone(),
-                self.game_over_triggered,
-            );
-        self.rng = rng;
-        self.audio_registry = audio_state;
-        self.apply_scenario_batch(batch)?;
-        if let Some(error) = script_error {
-            // The raw-value seam records ordinary script failures here after
-            // preserving their staged side effects. Fatal engine errors are
-            // still surfaced rather than being converted to `nil`.
-            if !matches!(error, EngineError::Script { .. }) {
-                return Err(error);
-            }
-        }
-        Ok(value.unwrap_or(Value::Nil))
+        self.run_direct_exec_script_control(
+            script_name,
+            script,
+            source,
+            function_label,
+            strict_level,
+        )
     }
 
     pub fn set_control_host(&mut self, control_host: bool) {

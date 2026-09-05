@@ -341,6 +341,7 @@ impl Engine {
             object.state.action.phase,
             object.state.container,
         )
+        .with_instance_token((object.instance_token != 0).then_some(object.instance_token))
         .with_action_index(object.state.action.act_map_index)
         .with_unsorted(object.unsorted)
         .with_fixed_motion(object.fixed_position, object.fixed_velocity)
@@ -423,6 +424,49 @@ impl Engine {
         }
         let definitions = unsafe { &*std::ptr::addr_of!((*engine).definitions) };
         Some((index, Self::host_world_object(definitions, object)))
+    }
+
+    /// Resolve one callback-visible object allocation token without cloning
+    /// its full state. The token table is interior mutable and remains stable
+    /// while the Engine is synchronously paused inside the host callback.
+    ///
+    /// # Safety
+    ///
+    /// Same source-lifetime contract as [`Self::lazy_host_world_object`].
+    unsafe fn lazy_host_world_object_instance_token(
+        source: *const (),
+        id: ObjectId,
+    ) -> Option<u64> {
+        let engine = source.cast::<Self>();
+        // SAFETY: the token registry is disjoint from every mutable object
+        // field that a callback may hold. `note_objects_changed` keeps this
+        // table synchronized at each object-vector mutation boundary, so the
+        // provider never needs to inspect the vector while that borrow is
+        // active.
+        let tokens = unsafe { &*std::ptr::addr_of!((*engine).object_instance_tokens) };
+        tokens.borrow().get(&id).copied()
+    }
+
+    /// Reserve a transient allocation token for a callback-created object
+    /// before its SpawnConfig is materialized. This uses the Engine's shared
+    /// monotonic allocator, so pending and already-live objects cannot reuse
+    /// an identity even when their numeric ObjectId is reused.
+    ///
+    /// # Safety
+    ///
+    /// Same source-lifetime contract as [`Self::lazy_host_world_object`].
+    unsafe fn lazy_host_world_allocate_instance_token(source: *const ()) -> u64 {
+        let engine = source.cast::<Self>();
+        // SAFETY: this field-only access does not create a reference to the
+        // Engine or alias any object/definition field held by the callback.
+        let next_token = unsafe { &*std::ptr::addr_of!((*engine).next_object_instance_token) };
+        let token = next_token.get().max(1);
+        next_token.set(
+            token
+                .checked_add(1)
+                .expect("object instance token overflow"),
+        );
+        token
     }
 
     /// Test the scalar fields read by legacy C4Game::FindObject without
@@ -836,6 +880,7 @@ impl Engine {
                 .map(|section| section.name.as_str()),
         )
         .with_scenario_section_switch_in_flight(self.scenario_section_state.switch_in_flight)
+        .with_suspended_script_registrations(Rc::clone(&self.suspended_script_registrations))
         .with_scenario_section_landscape_extents(self.scenario_section_state.sections.values().map(
             |section| {
                 (
@@ -964,6 +1009,8 @@ impl Engine {
                 Self::lazy_host_world_objects,
                 Self::lazy_host_world_landscape,
             )
+            .with_object_instance_token(Self::lazy_host_world_object_instance_token)
+            .with_object_instance_token_allocator(Self::lazy_host_world_allocate_instance_token)
             .with_pointer_referrers(Self::lazy_host_world_pointer_referrers)
             .with_script_value_referrers(Self::lazy_host_world_script_value_referrers)
             // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
@@ -1286,57 +1333,85 @@ impl Engine {
         let Some(c4_args) = self.scenario_script.as_ref().map(|script| script.c4_args) else {
             return Ok(Vec::new());
         };
-        let snapshot = self.snapshot();
-        let world = self.host_world_context();
         // The `random` Initialize argument is the command-DSL fixture
         // convention — real content (c4_args) burns no synced draw
         // (C++ passes no such argument).
         let random = if c4_args { 0 } else { self.next_random_i32() };
-        let rng_state = self.rng.clone();
-        let global_effects = self.global_effects.clone();
-        let physics = self.physics;
-        let environment = self.environment;
-        let audio_registry = self.audio_registry.clone();
-        let particle_defs = self.particle_system.def_names();
-        let definition_scripts = self.definition_script_table();
-        let definition_metadata_table = self.definition_metadata_table();
-        let definition_order = Rc::clone(&self.definition_order.runtime_order);
-        let network_game = self.network_game;
-        let next_object_id = self.next_object_id;
-        let scenario_script_counter = self.scenario_script_counter;
-        let scoreboard = Rc::clone(&self.scoreboard);
-        let materials = self.materials_shared();
-        let Some(script) = self.scenario_script.as_mut() else {
-            return Ok(Vec::new());
+        let mut resume = None;
+        let created = loop {
+            let snapshot = self.snapshot();
+            let world = self.host_world_context();
+            let result = {
+                let global_effects = self.global_effects.clone();
+                let physics = self.physics;
+                let environment = self.environment;
+                let audio_registry = self.audio_registry.clone();
+                let particle_defs = self.particle_system.def_names();
+                let definition_scripts = self.definition_script_table();
+                let definition_metadata_table = self.definition_metadata_table();
+                let definition_order = Rc::clone(&self.definition_order.runtime_order);
+                let network_game = self.network_game;
+                let next_object_id = self.next_object_id;
+                let scenario_script_counter = self.scenario_script_counter;
+                let scoreboard = Rc::clone(&self.scoreboard);
+                let materials = self.materials_shared();
+                let Some(script) = self.scenario_script.as_mut() else {
+                    return Ok(Vec::new());
+                };
+                script.initialize(
+                    &snapshot,
+                    world,
+                    scoreboard,
+                    materials,
+                    self.rng.clone(),
+                    random,
+                    &global_effects,
+                    physics,
+                    environment,
+                    audio_registry,
+                    particle_defs,
+                    definition_scripts,
+                    definition_metadata_table,
+                    definition_order,
+                    network_game,
+                    next_object_id,
+                    scenario_script_counter,
+                    resume.take(),
+                )?
+            };
+            self.rng = result.rng;
+            self.audio_registry = result.audio;
+            let mut batch = result.batch;
+            let Some(continuation) = result.continuation else {
+                let created = self.apply_scenario_batch(batch)?;
+                if let Some(error) = result.script_error {
+                    tolerate_script_error::<()>(Err(error))?;
+                }
+                break created;
+            };
+            let request = continuation.request;
+            // Keep the frame registered while its already-produced batch is
+            // materialized and while the section switch tears down objects.
+            // AssignRemoval must clear the detached frame at the native tail.
+            let (suspension, (created, switched)) =
+                self.with_suspended_script_boundary(continuation.suspension, None, |engine| {
+                    consume_section_switch_command(&mut batch.player_commands, &request);
+                    let created = engine.apply_scenario_batch(batch)?;
+                    let switched = engine.load_scenario_section(
+                        &request.name,
+                        request.flags,
+                        request.preserve_ids,
+                    )?;
+                    Ok((created, switched))
+                })?;
+            resume = Some((suspension, Value::Int(i32::from(switched))));
         };
-        let (batch, audio_state, new_rng, script_error) = script.initialize(
-            &snapshot,
-            world,
-            scoreboard,
-            materials,
-            rng_state,
-            random,
-            &global_effects,
-            physics,
-            environment,
-            audio_registry,
-            particle_defs,
-            definition_scripts,
-            definition_metadata_table,
-            definition_order,
-            network_game,
-            next_object_id,
-            scenario_script_counter,
-        )?;
         // Initialize is a game call: a script error logs and the scenario
         // still runs WITH its script installed (C++ fail-safe exec,
         // C4AulExec.cpp:1318-1342). Host mutations made before the error
         // already happened and therefore apply before the error is logged.
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        let created = self.apply_scenario_batch(batch)?;
-        if let Some(error) = script_error {
-            tolerate_script_error::<()>(Err(error))?;
+        if self.scenario_script.is_none() {
+            return Ok(Vec::new());
         }
         self.game_over_triggered = false;
         self.game_evaluated = false;
@@ -1414,76 +1489,93 @@ impl Engine {
     pub fn call_scenario_script_function(
         &mut self,
         function: &str,
-        mut extra_args: Vec<Value>,
+        extra_args: Vec<Value>,
     ) -> Result<(), EngineError> {
         if self.scenario_script.is_none() {
             return Ok(());
         }
-        let snapshot = self.snapshot();
-        let world = self.host_world_context();
-        let c4_args = self
-            .scenario_script
-            .as_ref()
-            .map(|script| script.c4_args)
-            .unwrap_or(false);
-        let mut args = Vec::with_capacity(extra_args.len() + 1);
-        // GRBroadcast passes the C++ argument list as-is (e.g.
-        // PSF_InitializePlayer starts with the player number,
-        // C4Player.cpp:769-775); the state proplist is fixture-only.
-        if !c4_args {
-            args.push(build_scenario_state_value(&snapshot));
-        }
-        args.append(&mut extra_args);
-        let rng_state = self.rng.clone();
-        let env_frame = self.frame;
-        let global_effects = self.global_effects.clone();
-        let physics = self.physics;
-        let environment = self.environment;
-        let audio_state = self.audio_registry.clone();
-        let particle_defs = self.particle_system.def_names();
-        let definition_scripts = self.definition_script_table();
-        let definition_metadata_for_call = self.definition_metadata_table();
-        let definition_order = Rc::clone(&self.definition_order.runtime_order);
-        let network_game = self.network_game;
-        let engine_next_object_id = self.next_object_id;
-        let scenario_script_counter = self.scenario_script_counter;
-        let scoreboard = Rc::clone(&self.scoreboard);
-        let materials = self.materials_shared();
-        let script = match self.scenario_script.as_mut() {
-            Some(script) if script.has_function(function) => script,
-            Some(_) => return Ok(()),
-            None => unreachable!("scenario script must be present"),
-        };
-        let (batch, audio_state, new_rng, script_error) = script.call_raw(
-            function,
-            args,
-            &snapshot,
-            world,
-            scoreboard,
-            materials,
-            rng_state,
-            env_frame,
-            &global_effects,
-            physics,
-            environment,
-            audio_state,
-            particle_defs,
-            definition_scripts,
-            definition_metadata_for_call,
-            definition_order,
-            network_game,
-            engine_next_object_id,
-            scenario_script_counter,
-        )?;
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        // Partial side effects fold BEFORE the error surfaces: C++
-        // mutates live state as the script runs — GoldRush's Script1
-        // creates the intro Talker before any later line can fail.
-        let _ = self.apply_scenario_batch(batch)?;
-        match script_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+        let mut resume = None;
+        loop {
+            let snapshot = self.snapshot();
+            let world = self.host_world_context();
+            let c4_args = self
+                .scenario_script
+                .as_ref()
+                .map(|script| script.c4_args)
+                .unwrap_or(false);
+            let mut args = Vec::with_capacity(extra_args.len() + 1);
+            // GRBroadcast passes the C++ argument list as-is (e.g.
+            // PSF_InitializePlayer starts with the player number,
+            // C4Player.cpp:769-775); the state proplist is fixture-only.
+            if !c4_args {
+                args.push(build_scenario_state_value(&snapshot));
+            }
+            args.extend(extra_args.iter().cloned());
+            let rng_state = self.rng.clone();
+            let env_frame = self.frame;
+            let global_effects = self.global_effects.clone();
+            let physics = self.physics;
+            let environment = self.environment;
+            let audio_state = self.audio_registry.clone();
+            let particle_defs = self.particle_system.def_names();
+            let definition_scripts = self.definition_script_table();
+            let definition_metadata_for_call = self.definition_metadata_table();
+            let definition_order = Rc::clone(&self.definition_order.runtime_order);
+            let network_game = self.network_game;
+            let engine_next_object_id = self.next_object_id;
+            let scenario_script_counter = self.scenario_script_counter;
+            let scoreboard = Rc::clone(&self.scoreboard);
+            let materials = self.materials_shared();
+            let result = {
+                let script = match self.scenario_script.as_mut() {
+                    Some(script) if script.has_function(function) => script,
+                    Some(_) => return Ok(()),
+                    None => unreachable!("scenario script must be present"),
+                };
+                script.call_raw(
+                    function,
+                    args,
+                    &snapshot,
+                    world,
+                    scoreboard,
+                    materials,
+                    rng_state,
+                    env_frame,
+                    &global_effects,
+                    physics,
+                    environment,
+                    audio_state,
+                    particle_defs,
+                    definition_scripts,
+                    definition_metadata_for_call,
+                    definition_order,
+                    network_game,
+                    engine_next_object_id,
+                    scenario_script_counter,
+                    resume.take(),
+                )?
+            };
+            self.rng = result.rng;
+            self.audio_registry = result.audio;
+            // Partial side effects fold BEFORE the error surfaces: C++
+            // mutates live state as the script runs — GoldRush's Script1
+            // creates the intro Talker before any later line can fail.
+            let mut batch = result.batch;
+            let Some(continuation) = result.continuation else {
+                let _ = self.apply_scenario_batch(batch)?;
+                return match result.script_error {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                };
+            };
+            let request = continuation.request;
+            let (suspension, switched) =
+                self.with_suspended_script_boundary(continuation.suspension, None, |engine| {
+                    consume_section_switch_command(&mut batch.player_commands, &request);
+                    engine.apply_scenario_batch(batch)?;
+                    engine.load_scenario_section(&request.name, request.flags, request.preserve_ids)
+                })?;
+            resume = Some((suspension, Value::Int(i32::from(switched))));
         }
     }
 

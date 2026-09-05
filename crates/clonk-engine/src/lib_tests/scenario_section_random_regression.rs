@@ -48,6 +48,94 @@ fn vehicle_section(name: &str, landscape: Landscape) -> scenario::ScenarioSectio
     }
 }
 
+#[test]
+fn initialize_section_switch_resumes_after_pending_materialization() {
+    // C4Game::NewObject links the object before Construction/Initialize, and
+    // LoadScenarioSection removes that linked object before the call resumes
+    // (oracle-src-pinned src/C4Game.cpp:1100-1142,4190-4208). The prefix and
+    // suffix of Initialize therefore both run in order, while a destination
+    // object reusing the number remains the new receiver. C4AulExec keeps the
+    // host mutations made before and after the synchronous call
+    // (src/C4AulExec.cpp:1318-1342).
+    let mut next = section("next", 120, true);
+    next.objects.push(scenario::ScenarioSpawn {
+        handle: Some("1".to_string()),
+        container_handle: None,
+        contents_handles: Vec::new(),
+        info_name: None,
+        config: SpawnConfig::new("REPL")
+            .with_id(ObjectId::new(1))
+            .with_loaded(true),
+    });
+
+    let mut engine = Engine::with_seed(7);
+    engine.configure_scenario_sections(&[section("main", 80, true), next]);
+    engine.set_landscape(vehicle_section_landscape(80, 40));
+    engine.register_test_definition(test_definition("REPL", "Replacement", ""));
+    let observer = r#"#strict 3
+static trace;
+
+global func ResetTrace()
+{
+    trace = 0;
+    return true;
+}
+
+global func RecordTrace(int value)
+{
+    trace = trace * 10 + value;
+    return true;
+}
+
+global func ReadTrace()
+{
+    return trace;
+}
+"#;
+    assert_eq!(
+        engine
+            .install_global_scripts(&[("System.c4g/ContinuationOrder.c".into(), observer.into())]),
+        1
+    );
+    crate::TestValueExt::test_value(engine.call_engine_global_function("ResetTrace", &[]));
+
+    let mut carrier = test_definition(
+        "INIT",
+        "Switching initializer",
+        r#"#strict 3
+func Initialize()
+{
+    RecordTrace(1);
+    var switched = LoadScenarioSection("next");
+    RecordTrace(switched);
+    RecordTrace(3);
+    return 0;
+}
+"#,
+    );
+    carrier.set_c4_callback_convention(true);
+    engine.register_test_definition(carrier);
+
+    crate::TestValueExt::test_value(
+        engine.spawn_object(SpawnConfig::new("INIT").with_id(ObjectId::new(1))),
+    );
+
+    assert_eq!(
+        engine.debug_current_scenario_section(),
+        "next",
+        "Initialize's synchronous request must commit before its suffix",
+    );
+    assert_eq!(
+        crate::TestValueExt::test_value(engine.call_engine_global_function("ReadTrace", &[])),
+        Value::Int(113),
+        "the resumed Initialize suffix observes LoadScenarioSection's actual result",
+    );
+    let replacement = engine
+        .object_snapshot(ObjectId::new(1))
+        .expect("the destination replacement remains materialized");
+    assert_eq!(replacement.definition_id, "REPL");
+}
+
 fn two_pixel_solid_mask_definition(id: &str, second_alpha: u8) -> Definition {
     let mut definition = test_definition(id, "Capture mask", "");
     definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 1)));

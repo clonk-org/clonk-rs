@@ -1,5 +1,6 @@
 use indexmap::IndexSet;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -15,10 +16,10 @@ use crate::ast::{
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::{
-    EvalDirectExecHook, GlobalCallContextHook, GlobalSlots, GlobalVariables, HostFunction,
-    HostReferenceFunction, RegisteredHostFunction,
+    EvalDirectExecContinuationHook, EvalDirectExecHook, GlobalCallContextHook, GlobalSlots,
+    GlobalVariables, HostFunction, HostReferenceFunction, RegisteredHostFunction,
 };
-use crate::error::{RuntimeCallFrame, RuntimeError};
+use crate::error::{RuntimeCallFrame, RuntimeControl, RuntimeError};
 use crate::lookup_profile;
 use crate::value::{
     c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4StringValue, C4VType,
@@ -61,11 +62,29 @@ enum ResolvedHostFunction<'a> {
     Reference(&'a HostReferenceFunction),
 }
 
-#[derive(Clone, Copy)]
-enum CompiledCallTarget<'a> {
-    Host(ResolvedHostFunction<'a>),
-    Script(ScriptFunctionTarget<'a>),
+#[derive(Clone)]
+enum CompiledCallTarget {
+    /// A compiled frame owns the selected native callback.  C++ bytecode
+    /// stores the `C4AulFunc *` in `AB_FUNC`; resolving the name again after a
+    /// synchronous section switch can select a different overload or no
+    /// function at all.
+    Host(CompiledHostTarget),
+    /// Keep the selected script body alive for the same reason.  The Arc is a
+    /// queue-time snapshot, so unlink/relink of the destination host cannot
+    /// invalidate a suspended child call.
+    Script(CompiledScriptTarget),
     LegacyConstant,
+}
+
+#[derive(Clone)]
+enum CompiledHostTarget {
+    Value(RegisteredHostFunction),
+}
+
+#[derive(Clone)]
+struct CompiledScriptTarget {
+    function: Arc<Function>,
+    validate_compiled_source: bool,
 }
 
 /// Whether a C4Aul entry point treats a failed script-parameter conversion as
@@ -210,11 +229,15 @@ fn reset_compiled_executor_heap_spills() {
 
 struct ValueStackReservation {
     count: usize,
+    attached: bool,
 }
 
 impl ValueStackReservation {
     fn empty() -> Self {
-        Self { count: 0 }
+        Self {
+            count: 0,
+            attached: true,
+        }
     }
 
     fn reserve(count: usize) -> Result<Self, RuntimeError> {
@@ -241,28 +264,79 @@ impl ValueStackReservation {
         if count == 0 {
             return Ok(());
         }
-        Self::check(count)?;
-        VALUE_STACK_SIZE.with(|size| size.set(size.get() + count));
+        if self.attached {
+            Self::check(count)?;
+            VALUE_STACK_SIZE.with(|size| size.set(size.get() + count));
+        }
         self.count += count;
         Ok(())
     }
 
     fn shrink(&mut self, count: usize) {
         debug_assert!(self.count >= count);
-        VALUE_STACK_SIZE.with(|size| {
-            debug_assert!(size.get() >= count);
-            size.set(size.get().saturating_sub(count));
-        });
+        if self.attached {
+            VALUE_STACK_SIZE.with(|size| {
+                debug_assert!(size.get() >= count);
+                size.set(size.get().saturating_sub(count));
+            });
+        }
         self.count = self.count.saturating_sub(count);
+    }
+
+    fn resize_to(&mut self, count: usize) -> Result<(), RuntimeError> {
+        if count > self.count {
+            self.grow(count - self.count)
+        } else {
+            self.shrink(self.count - count);
+            Ok(())
+        }
+    }
+
+    fn detach(&mut self) {
+        if !self.attached {
+            return;
+        }
+        VALUE_STACK_SIZE.with(|size| {
+            debug_assert!(size.get() >= self.count);
+            size.set(size.get().saturating_sub(self.count));
+        });
+        self.attached = false;
+    }
+
+    fn attach_unchecked(&mut self) {
+        if self.attached || self.count == 0 {
+            self.attached = true;
+            return;
+        }
+        VALUE_STACK_SIZE.with(|size| size.set(size.get() + self.count));
+        self.attached = true;
+    }
+
+    fn attach(&mut self) -> Result<(), RuntimeError> {
+        if !self.attached {
+            Self::check(self.count)?;
+            self.attach_unchecked();
+        }
+        Ok(())
+    }
+
+    fn is_attached(&self) -> bool {
+        self.attached
+    }
+
+    fn count(&self) -> usize {
+        self.count
     }
 }
 
 impl Drop for ValueStackReservation {
     fn drop(&mut self) {
-        VALUE_STACK_SIZE.with(|size| {
-            debug_assert!(size.get() >= self.count);
-            size.set(size.get().saturating_sub(self.count));
-        });
+        if self.attached {
+            VALUE_STACK_SIZE.with(|size| {
+                debug_assert!(size.get() >= self.count);
+                size.set(size.get().saturating_sub(self.count));
+            });
+        }
     }
 }
 
@@ -472,6 +546,13 @@ fn clear_map_for_object_reference_sweeps(map: &mut ValueMap, cursor: usize) {
         unreachable!("a reference-swept map remains a map");
     };
     *map = cleared;
+}
+
+fn clear_proplist_values_for_object_reference_sweeps(values: &mut [(Value, Value)], cursor: usize) {
+    for (key, value) in values {
+        clear_value_for_object_reference_sweeps(key, cursor);
+        clear_value_for_object_reference_sweeps(value, cursor);
+    }
 }
 
 fn object_target_id(value: &Value) -> Option<u64> {
@@ -906,6 +987,15 @@ impl ObjectState {
         slot_cell(&self.local_slots, index)
     }
 
+    fn clear_object_reference(&self, object_id: u64) {
+        for cell in self.named_locals.borrow().values() {
+            cell.borrow_mut().clear_object_reference(object_id);
+        }
+        for cell in self.local_slots.borrow().values() {
+            cell.borrow_mut().clear_object_reference(object_id);
+        }
+    }
+
     fn to_local_vars(&self, var_decls: &[VarDecl]) -> HashMap<String, Value> {
         let mut updated_locals = HashMap::new();
         let named_locals = self.named_locals.borrow();
@@ -963,6 +1053,14 @@ impl LocalCells {
         }
         out
     }
+
+    /// Clear object references from the live cells shared with an embedding
+    /// engine. Suspended callbacks keep this handle outside the VM frame, so
+    /// AssignRemoval must visit it before the host tears down the old object
+    /// list (C4Object.cpp:312).
+    pub fn clear_object_references(&self, object_id: u64) {
+        self.state.clear_object_reference(object_id);
+    }
 }
 
 fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
@@ -980,6 +1078,17 @@ fn frame_slot_cell(frame: &FrameLocals, index: i32) -> ValueCell {
         .entry(index.max(0))
         .or_insert_with(|| value_cell(Value::Nil))
         .clone()
+}
+
+impl FrameLocals {
+    fn clear_object_reference(&self, object_id: u64) {
+        for cell in self.var_slots.borrow().values() {
+            cell.borrow_mut().clear_object_reference(object_id);
+        }
+        for binding in self.function_vars.borrow_mut().values_mut() {
+            binding.clear_object_reference(object_id);
+        }
+    }
 }
 
 /// The script frame immediately calling a native host function. C++ exposes
@@ -1013,6 +1122,12 @@ pub(crate) struct ScriptCallerContext {
     /// `C4AulScript::TemporaryScript` on the immediate caller frame.
     /// DirectExec/eval expressions set this; ordinary function calls do not.
     temporary_script: bool,
+}
+
+impl ScriptCallerContext {
+    fn clear_object_reference(&self, object_id: u64) {
+        self.frame_locals.clear_object_reference(object_id);
+    }
 }
 
 /// Process-local identity of one compiled script host. It is meaningful only
@@ -1067,6 +1182,7 @@ enum DiagnosticFrameKind {
     DirectExec(DirectExecDiagnosticFrame),
 }
 
+#[derive(Clone)]
 struct DirectExecDiagnosticFrame {
     script_display: String,
     object_id: Option<u64>,
@@ -1096,6 +1212,21 @@ impl DirectExecDiagnosticFrame {
             .or_else(|| self.object_fallback.clone())
             .unwrap_or_else(|| id.to_string());
         format!("{} (obj {object})", self.script_display)
+    }
+}
+
+#[derive(Clone)]
+struct DirectExecContinuationContext {
+    frame: DirectExecDiagnosticFrame,
+    profile_on_error: bool,
+}
+
+impl DirectExecContinuationContext {
+    fn new(frame: DirectExecDiagnosticFrame, profile_on_error: bool) -> Self {
+        Self {
+            frame,
+            profile_on_error,
+        }
     }
 }
 
@@ -2006,6 +2137,10 @@ impl TrackedValue {
     fn clear_object_reference_sweeps(&mut self, cursor: usize) {
         clear_value_for_object_reference_sweeps(&mut self.value, cursor);
     }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        self.value.clear_object_reference(object_id);
+    }
 }
 
 fn c4_set_copy_is_zero_id(value: &Value) -> bool {
@@ -2173,6 +2308,22 @@ impl Binding {
         }
     }
 
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::Direct { value, .. } => {
+                value.borrow_mut().clear_object_reference(object_id);
+            }
+            Self::Inline(inline) => {
+                if let Some((value, _)) = inline.promoted.get() {
+                    value.borrow_mut().clear_object_reference(object_id);
+                } else {
+                    inline.initial.clear_object_reference(object_id);
+                }
+            }
+            Self::Reference(reference) => reference.clear_object_reference(object_id),
+        }
+    }
+
     fn tracked(tracked: TrackedValue) -> Self {
         #[cfg(test)]
         DIRECT_BINDING_ALLOCATIONS.with(|count| count.set(count.get() + 1));
@@ -2307,6 +2458,45 @@ impl LValueRef {
             Self::Cell { value, .. } => cells.push(Rc::downgrade(value)),
             Self::Path { root, .. } => cells.push(Rc::downgrade(root)),
             Self::HostPath { .. } => {}
+        }
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::Cell { value, .. } => {
+                value.borrow_mut().clear_object_reference(object_id);
+            }
+            Self::Path {
+                root, legacy_pin, ..
+            } => {
+                root.borrow_mut().clear_object_reference(object_id);
+                if let Some(legacy_pin) = legacy_pin {
+                    if let Some(resolved) = legacy_pin.borrow_mut().resolved.as_mut() {
+                        resolved.clear_object_reference(object_id);
+                    }
+                }
+            }
+            Self::HostPath {
+                args,
+                caller,
+                legacy_pin,
+                ..
+            } => {
+                caller.clear_object_reference(object_id);
+                for arg in args {
+                    arg.clear_object_reference(object_id);
+                }
+                if let Some(legacy_pin) = legacy_pin {
+                    let mut legacy_pin = legacy_pin.borrow_mut();
+                    legacy_pin.root.clear_object_reference(object_id);
+                    for arg in &mut legacy_pin.args {
+                        arg.clear_object_reference(object_id);
+                    }
+                    if let Some(resolved) = legacy_pin.resolved.as_mut() {
+                        resolved.clear_object_reference(object_id);
+                    }
+                }
+            }
         }
     }
 
@@ -3579,6 +3769,13 @@ impl CallArg {
         }
     }
 
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::Value(tracked) => tracked.clear_object_reference(object_id),
+            Self::Reference(reference) => reference.clear_object_reference(object_id),
+        }
+    }
+
     fn into_value(self) -> Result<Value, RuntimeError> {
         match self {
             CallArg::Value(tracked) => Ok(tracked.value),
@@ -3913,6 +4110,14 @@ impl ReturnValue {
         self.into_value()
     }
 
+    fn into_set_tracked_on_stack(self) -> Result<TrackedValue, RuntimeError> {
+        let _result_slot = ValueStackReservation::reserve(1)?;
+        match self {
+            Self::Value(value) => Ok(value),
+            Self::Reference(reference) => reference.read_tracked().map(TrackedValue::set_copy),
+        }
+    }
+
     fn into_tracked_on_stack(self) -> Result<TrackedValue, RuntimeError> {
         let _result_slot = ValueStackReservation::reserve(1)?;
         self.into_tracked()
@@ -3921,6 +4126,13 @@ impl ReturnValue {
     fn clear_object_reference_sweeps(&mut self, cursor: usize) {
         if let Self::Value(tracked) = self {
             tracked.clear_object_reference_sweeps(cursor);
+        }
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::Value(tracked) => tracked.clear_object_reference(object_id),
+            Self::Reference(reference) => reference.clear_object_reference(object_id),
         }
     }
 }
@@ -3946,6 +4158,7 @@ impl Drop for GlobalCallContextGuard<'_> {
     }
 }
 
+#[derive(Clone)]
 pub struct Vm<'a> {
     functions: &'a FxHashMap<String, Function>,
     host_identity: ScriptHostIdentity,
@@ -4009,6 +4222,8 @@ pub struct Vm<'a> {
     global_call_context_hook: Option<&'a GlobalCallContextHook>,
     /// Embedding-engine receiver selection and DirectExec for FnEval.
     eval_direct_exec_hook: Option<&'a EvalDirectExecHook>,
+    /// Continuation-capable twin used by the AST scheduler's nested `eval`.
+    eval_direct_exec_continuation_hook: Option<&'a EvalDirectExecContinuationHook>,
     /// References returned from a global callee may outlive its temporary
     /// null Obj/Def context. Lazy host-backed references must recreate it.
     retain_global_call_context_for_host_paths: bool,
@@ -4104,6 +4319,7 @@ impl<'a> Vm<'a> {
             direct_call_function_probe: None,
             global_call_context_hook: None,
             eval_direct_exec_hook: None,
+            eval_direct_exec_continuation_hook: None,
             retain_global_call_context_for_host_paths: false,
             globals_named: None,
             globals_numbered: None,
@@ -4249,6 +4465,14 @@ impl<'a> Vm<'a> {
 
     pub fn with_eval_direct_exec_hook(mut self, hook: Option<&'a EvalDirectExecHook>) -> Self {
         self.eval_direct_exec_hook = hook;
+        self
+    }
+
+    pub fn with_eval_direct_exec_continuation_hook(
+        mut self,
+        hook: Option<&'a crate::engine::EvalDirectExecContinuationHook>,
+    ) -> Self {
+        self.eval_direct_exec_continuation_hook = hook;
         self
     }
 
@@ -4552,6 +4776,112 @@ impl<'a> Vm<'a> {
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::external).collect();
         self.invoke_value(name, args, 0, ObjectState::default(), None)
+    }
+
+    pub(crate) fn call_with_continuation(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::external).collect();
+        self.call_args_with_continuation(name, args)
+    }
+
+    pub(crate) fn call_args_with_continuation(
+        &self,
+        name: &str,
+        args: CallArgs,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        match self.invoke_value(name, args, 0, ObjectState::default(), None) {
+            Ok(value) => Ok(ScriptCallOutcome::Complete(value)),
+            Err(error) => self.script_call_outcome_from_error(error),
+        }
+    }
+
+    fn script_call_outcome_from_error(
+        &self,
+        mut error: RuntimeError,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        let Some(control) = error.take_control() else {
+            return Err(error);
+        };
+        let (request, resume_value, continuation) = match control {
+            RuntimeControl::HostContinuation {
+                request,
+                resume_value,
+                continuation,
+            } => (request, resume_value, continuation),
+        };
+        let Some(continuation) = continuation else {
+            return Err(error.with_control(RuntimeControl::HostContinuation {
+                request,
+                resume_value,
+                continuation: None,
+            }));
+        };
+        let mut continuation = match continuation.downcast::<ScriptContinuation>() {
+            Ok(continuation) => continuation,
+            Err(continuation) => {
+                return Err(error.with_control(RuntimeControl::HostContinuation {
+                    request,
+                    resume_value,
+                    continuation: Some(continuation),
+                }));
+            }
+        };
+        // A continuation owns its logical operand state, but an ordinary
+        // standalone host call must not leave that state charged in the
+        // process-local executor after the call has unwound. Inline engine
+        // work can explicitly reattach it through the public context guard.
+        continuation.detach_value_stack();
+        Ok(ScriptCallOutcome::Suspended(ScriptSuspension {
+            request,
+            resume_value,
+            continuation,
+            this_value: self.this_value.clone(),
+        }))
+    }
+
+    pub(crate) fn call_with_cells_with_continuation(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::external).collect();
+        self.call_args_with_cells_with_continuation(name, args, cells)
+    }
+
+    pub(crate) fn call_args_with_cells_with_continuation(
+        &self,
+        name: &str,
+        args: CallArgs,
+        cells: &LocalCells,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        match self.invoke_value(name, args, 0, cells.state.clone(), None) {
+            Ok(value) => Ok(ScriptCallOutcome::Complete(value)),
+            Err(error) => self.script_call_outcome_from_error(error),
+        }
+    }
+
+    pub(crate) fn call_resolved_with_cells_with_continuation(
+        &self,
+        resolution: &crate::engine::ScriptFunctionResolution,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::external).collect();
+        match self.invoke_resolved_script_value(
+            &resolution.function.name,
+            ScriptFunctionTarget::resolved(resolution),
+            args,
+            0,
+            cells.state.clone(),
+            None,
+        ) {
+            Ok(value) => Ok(ScriptCallOutcome::Complete(value)),
+            Err(error) => self.script_call_outcome_from_error(error),
+        }
     }
 
     /// Call with caller-prepared arguments (reference cells included) — the
@@ -4883,6 +5213,143 @@ impl<'a> Vm<'a> {
         Ok(value)
     }
 
+    /// Continuation-capable C4Aul DirectExec. The expression is wrapped in a
+    /// temporary one-statement function so the AST machine can retain every
+    /// operand and task after a host callback yields. The temporary function
+    /// is borrowed for the initial run and is copied only by `suspend` when a
+    /// continuation must outlive this call.
+    pub(crate) fn direct_exec_with_cells_in_context_with_continuation(
+        &self,
+        source: &str,
+        cells: &LocalCells,
+        strict_level: Option<u8>,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        if diagnostics {
+            start_direct_exec_profile();
+        }
+        let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+            .parse_direct_exec_expression()
+        else {
+            return Ok(ScriptCallOutcome::Complete(Value::Nil));
+        };
+
+        let direct_exec_context = diagnostics.then(|| {
+            DirectExecContinuationContext::new(self.direct_exec_diagnostic_frame(context), true)
+        });
+        self.run_direct_exec_with_continuation(
+            expr,
+            cells,
+            strict_level,
+            0,
+            true,
+            direct_exec_context,
+        )
+    }
+
+    /// FnEval's continuation-capable DirectExec. It keeps the same diagnostic
+    /// identity and depth as the synchronous eval path; in particular,
+    /// `profile_on_error` stays false because the enclosing native frame owns
+    /// the runtime-error profile interval.
+    pub(crate) fn eval_direct_exec_with_cells_with_continuation(
+        &self,
+        source: &str,
+        cells: &LocalCells,
+        strict_level: Option<u8>,
+        depth: usize,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        start_direct_exec_profile();
+        let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+            .parse_direct_exec_expression()
+        else {
+            return Ok(ScriptCallOutcome::Complete(Value::Nil));
+        };
+        let has_object = matches!(&self.this_value, Value::Object(id) if *id != 0);
+        let direct_exec_context = Some(DirectExecContinuationContext::new(
+            self.eval_direct_exec_diagnostic_frame(self.definition_context),
+            false,
+        ));
+        self.run_direct_exec_with_continuation(
+            expr,
+            cells,
+            strict_level,
+            depth,
+            has_object,
+            direct_exec_context,
+        )
+    }
+
+    fn run_direct_exec_with_continuation(
+        &self,
+        expr: Expr,
+        cells: &LocalCells,
+        strict_level: Option<u8>,
+        depth: usize,
+        define_var_decls: bool,
+        direct_exec_context: Option<DirectExecContinuationContext>,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
+        let mut env = Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
+        env.temporary_script = true;
+        env.definition_context = matches!(&self.this_value, Value::Object(id) if *id != 0);
+        env.engine_scope = self.retain_global_call_context_for_host_paths;
+        env.global_call_context = self.retain_global_call_context_for_host_paths;
+        if define_var_decls {
+            for var_decl in self.var_decls {
+                let cell = env.object_state.named_local_cell(&var_decl.name);
+                env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
+            }
+        }
+        _object_reference_cells.register_environment(&env, self);
+
+        let function = Self::direct_exec_function(expr, strict_level);
+        let result = self.execute_ast_with_continuation(
+            &function,
+            &mut env,
+            depth,
+            false,
+            None,
+            0,
+            0,
+            direct_exec_context,
+        );
+        match result {
+            Ok(ControlFlow::Return(value)) => {
+                value.into_value_on_stack().map(ScriptCallOutcome::Complete)
+            }
+            Ok(ControlFlow::Normal) => Ok(ScriptCallOutcome::Complete(Value::Nil)),
+            Ok(ControlFlow::Break | ControlFlow::LoopContinue) => Err(RuntimeError::new(
+                "internal error: loop control escaped DirectExec",
+            )),
+            Err(error) => self.script_call_outcome_from_error(error),
+        }
+    }
+
+    fn direct_exec_function(expr: Expr, strict_level: Option<u8>) -> Function {
+        Function {
+            name: String::new(),
+            params: Vec::new(),
+            body: vec![Stmt::Return(Some(expr))],
+            access: AccessLevel::Public,
+            returns_reference: false,
+            description: None,
+            strict_level,
+            source_host: None,
+            source_name: None,
+            source_line: 0,
+            global_link_host: None,
+            overloaded: None,
+            hard_inherited_line: None,
+            hard_inherited_column: None,
+            hard_inherited_stmt_index: None,
+            global_local_candidates: Vec::new(),
+            global_local_reference: None,
+            compiled: std::sync::OnceLock::new(),
+            resolved_snapshot: std::sync::OnceLock::new(),
+        }
+    }
+
     /// FnEval's DirectExec entry. Unlike host-initiated DirectExec, an eval
     /// runtime error is profiled when its enclosing native frame unwinds, so
     /// this temporary frame must not record the same interval a second time.
@@ -5117,6 +5584,12 @@ impl<'a> Vm<'a> {
             .filter(|found| found.access == AccessLevel::Global)
     }
 
+    fn inherited_target(&self, env: &Environment) -> Option<Arc<Function>> {
+        self.inherited_engine_hop(env)
+            .map(|function| Arc::new(function.clone()))
+            .or_else(|| env.inherited_target.clone())
+    }
+
     fn invoke_engine_global_raw(
         &self,
         name: &str,
@@ -5197,6 +5670,7 @@ impl<'a> Vm<'a> {
             direct_call_function_probe: self.direct_call_function_probe,
             global_call_context_hook: self.global_call_context_hook,
             eval_direct_exec_hook: self.eval_direct_exec_hook,
+            eval_direct_exec_continuation_hook: self.eval_direct_exec_continuation_hook,
             retain_global_call_context_for_host_paths: true,
             globals_named: self.globals_named,
             globals_numbered: self.globals_numbered,
@@ -5502,6 +5976,7 @@ impl<'a> Vm<'a> {
         env.inherited_target = function.owner_overloaded().cloned();
         env.function_name = function.name.clone();
         env.engine_scope = function.access == AccessLevel::Global;
+        env.global_call_context = self.retain_global_call_context_for_host_paths;
         let explicit_definition_context = match &self.this_value {
             Value::Object(id) => *id != 0,
             Value::C4Id(id) => crate::value::c4_id_raw(id) != 0,
@@ -5602,7 +6077,15 @@ impl<'a> Vm<'a> {
         _object_reference_cells.register_environment(&env, self);
 
         let result = if let Some(compiled) = compiled {
-            match compiled.execute(self, &env, depth)? {
+            match compiled.execute(
+                self,
+                &env,
+                depth,
+                function,
+                caller.clone(),
+                Arc::new(compiled.clone()),
+                value_stack.count,
+            )? {
                 Some(result) => {
                     crate::execution_profile::record_compiled();
                     #[cfg(test)]
@@ -5611,18 +6094,31 @@ impl<'a> Vm<'a> {
                 }
                 None => {
                     crate::execution_profile::record_ast_after_runtime_guard();
-                    self.execute_statements(
-                        &function.body,
+                    self.execute_ast_with_continuation(
+                        function,
                         &mut env,
                         depth,
                         function.returns_reference,
+                        caller.clone(),
+                        value_stack.count,
+                        0,
+                        None,
                     )?
                 }
             }
         } else {
             #[cfg(any(test, feature = "execution-profile"))]
             crate::execution_profile::record_ast_without_plan(&compiled_cache.fallback_reasons);
-            self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?
+            self.execute_ast_with_continuation(
+                function,
+                &mut env,
+                depth,
+                function.returns_reference,
+                caller.clone(),
+                value_stack.count,
+                0,
+                None,
+            )?
         };
         let value = match result {
             ControlFlow::Return(v) => v,
@@ -6002,7 +6498,10 @@ impl<'a> Vm<'a> {
         let args = self.prepare_registered_host_call_args(name, function, args)?;
         let destination_is_zero_id = args.first().is_some_and(CallArg::value_slot_is_zero_id);
         let values = self.call_args_into_values(args)?;
-        let result = self.invoke_host_function_raw(name, function, &values)?;
+        let result = match self.invoke_host_function_raw(name, function, &values) {
+            Ok(result) => result,
+            Err(error) => return Err(error.with_host_parameter_slots(parameter_slots)),
+        };
         if matches!(caller_origin_strictness(), HostCallerStrictness::NoCaller) {
             return Ok(result);
         }
@@ -6064,7 +6563,10 @@ impl<'a> Vm<'a> {
             }
         }
 
-        let result = function.call(&args)?;
+        let result = match function.call(&args) {
+            Ok(result) => result,
+            Err(error) => return Err(error.with_host_parameter_slots(parameter_slots)),
+        };
 
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_return() {
@@ -6072,6 +6574,1371 @@ impl<'a> Vm<'a> {
             }
         }
         Ok(materialize_internal_native_call_result(result, &call_args))
+    }
+
+    /// Execute the tree-walking path one top-level statement at a time. A
+    /// host boundary can therefore return an owned frame instead of forcing
+    /// the caller to replay the function body after it commits the request.
+    ///
+    /// The ordinary AST evaluator remains recursive for expression and block
+    /// semantics; the continuation boundary is established only after an
+    /// entire top-level statement has unwound. This is the same granularity
+    /// at which C4Aul's callback adapters observe a synchronous host request,
+    /// and it keeps the suspended frame free of borrowed AST/VM state.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_ast_with_continuation(
+        &self,
+        function: &Function,
+        env: &mut Environment,
+        depth: usize,
+        returns_reference: bool,
+        caller: Option<ScriptCallerContext>,
+        frame_value_stack: usize,
+        start_statement: usize,
+        direct_exec_context: Option<DirectExecContinuationContext>,
+    ) -> Result<ControlFlow, RuntimeError> {
+        let statements = Arc::new(function.body.clone());
+        let state = AstMachineState {
+            tasks: vec![AstTask::Statements {
+                statements,
+                index: start_statement,
+                pop_scope: false,
+            }],
+            values: Vec::new(),
+            legacy_path_pin_scope_depth: 0,
+            frame_value_stack,
+        };
+        self.run_ast_machine(
+            state,
+            env,
+            depth,
+            returns_reference,
+            function,
+            caller,
+            direct_exec_context.as_ref(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_ast_machine(
+        &self,
+        state: AstMachineState,
+        env: &mut Environment,
+        depth: usize,
+        returns_reference: bool,
+        function: &Function,
+        caller: Option<ScriptCallerContext>,
+        direct_exec_context: Option<&DirectExecContinuationContext>,
+    ) -> Result<ControlFlow, RuntimeError> {
+        let mut diagnostic = direct_exec_context.map(|context| {
+            ScriptDiagnosticGuard::enter_direct(context.frame.clone(), context.profile_on_error)
+        });
+        let result = state.run(
+            self,
+            env,
+            depth,
+            returns_reference,
+            function,
+            caller,
+            direct_exec_context,
+        );
+        if let Ok(flow) = &result {
+            let value = match flow {
+                ControlFlow::Return(value) => Some(value.as_value()?),
+                ControlFlow::Normal => Some(Value::Nil),
+                ControlFlow::Break | ControlFlow::LoopContinue => None,
+            };
+            if let (Some(diagnostic), Some(value)) = (&mut diagnostic, value) {
+                diagnostic.returned(&value);
+            }
+        }
+        result
+    }
+
+    fn expression_may_suspend(expr: &Expr) -> bool {
+        match expr {
+            Expr::Call { .. } => true,
+            // The call itself can cross a host boundary even when it has no
+            // operands.  Keeping zero-argument globals on the scheduler is
+            // required for the same reason as ordinary `Expr::Call` above.
+            Expr::GlobalCall { .. } => true,
+            Expr::Unary(_, value)
+            | Expr::ArrayAppend(value)
+            | Expr::PreIncrement(value)
+            | Expr::PreDecrement(value)
+            | Expr::PostIncrement(value)
+            | Expr::PostDecrement(value) => Self::expression_may_suspend(value),
+            Expr::Binary(left, _, right) => {
+                Self::expression_may_suspend(left) || Self::expression_may_suspend(right)
+            }
+            Expr::LegacyParameterList { args, .. } | Expr::Array(args) => {
+                args.iter().any(Self::expression_may_suspend)
+            }
+            Expr::Proplist(entries) => entries.iter().any(|(key, value)| {
+                Self::expression_may_suspend(key) || Self::expression_may_suspend(value)
+            }),
+            Expr::Index(base, index) => {
+                Self::expression_may_suspend(base)
+                    || matches!(index, IndexOperand::Dynamic(index)
+                        if Self::expression_may_suspend(index))
+            }
+            Expr::Property(base, _) => Self::expression_may_suspend(base),
+            Expr::ArrayAppendAssignment { target, value, .. }
+            | Expr::CompoundAssignment { target, value, .. } => {
+                Self::assignment_target_may_suspend(target) || Self::expression_may_suspend(value)
+            }
+            Expr::SafeNavigation { receiver, steps } => {
+                Self::expression_may_suspend(receiver)
+                    || steps.iter().any(|step| match &step.operation {
+                        NavigationOperation::Index(IndexOperand::Dynamic(index)) => {
+                            Self::expression_may_suspend(index)
+                        }
+                        // Safe method dispatch is a suspension point in its
+                        // own right; zero-argument methods must retain the
+                        // remaining navigation/expression suffix too.
+                        NavigationOperation::MethodCall { .. } => true,
+                        _ => false,
+                    })
+            }
+            Expr::Assignment(target, value) => {
+                Self::assignment_target_may_suspend(target) || Self::expression_may_suspend(value)
+            }
+            Expr::Literal(_) | Expr::Variable(_) | Expr::This => false,
+        }
+    }
+
+    fn assignment_target_may_suspend(target: &AssignmentTarget) -> bool {
+        match target {
+            AssignmentTarget::InvalidValue { expression, .. }
+            | AssignmentTarget::ArrayAppend(expression)
+            | AssignmentTarget::LocalSlot(expression)
+            | AssignmentTarget::VarSlot(expression) => Self::expression_may_suspend(expression),
+            AssignmentTarget::Property(base, _) => Self::assignment_target_may_suspend(base),
+            AssignmentTarget::Index(base, index) => {
+                Self::assignment_target_may_suspend(base)
+                    || matches!(index, IndexOperand::Dynamic(index)
+                        if Self::expression_may_suspend(index))
+            }
+            AssignmentTarget::PrefixChange { target, .. } => {
+                Self::assignment_target_may_suspend(target)
+            }
+            AssignmentTarget::EffectSlot(args) => args.iter().any(Self::expression_may_suspend),
+            // Resolving the lvalue may invoke an object method.  Its target
+            // operation must stay in the continuation even when object and
+            // arguments are all immediate.
+            AssignmentTarget::MethodSlot { .. } => true,
+            AssignmentTarget::FunctionCall { .. } | AssignmentTarget::GlobalFunctionCall { .. } => {
+                // A call target can yield a host continuation even when all
+                // of its arguments are immediate.  C++ has already emitted
+                // AB_CALL before the assignment's RHS, so the target itself
+                // must be retained across that boundary.  The continuation
+                // scheduler dispatches VM builtins through their raw entry as
+                // well, which keeps this predicate independent of name
+                // collisions with installed script or host functions.
+                true
+            }
+            AssignmentTarget::Variable(_) => false,
+        }
+    }
+
+    fn ast_direct_call_target(
+        &self,
+        name: &str,
+        env: &Environment,
+        argument_count: usize,
+    ) -> AstCallTarget {
+        // A parameter or local named `this` shadows both a script function
+        // with that name and the context-function fallback. Keep the bound
+        // call on the builtin arm so dispatch reports C4Aul's bound-variable
+        // error instead of escaping through `func &this`.
+        if name == "this" && self.has_bound_this(env) {
+            return AstCallTarget::Builtin;
+        }
+        if let Some(target) = self.resolved_script_function(name, env.engine_scope) {
+            return AstCallTarget::Script(CompiledScriptTarget {
+                // The AST continuation must own the exact function selected
+                // before its first argument runs. This is a fresh execution
+                // snapshot, separate from the VM's borrowed lookup view.
+                function: Arc::new(target.function.clone()),
+                validate_compiled_source: target.validate_compiled_source,
+            });
+        }
+        if let Some(target) = self.resolved_host_function(name) {
+            return match target {
+                ResolvedHostFunction::Value(function) => AstCallTarget::Host(function.clone()),
+                ResolvedHostFunction::Reference(function) => {
+                    AstCallTarget::HostReference(function.clone())
+                }
+            };
+        }
+        if matches!(name, "inherited" | "_inherited") {
+            if let Some(function) = self.inherited_target(env) {
+                return AstCallTarget::Script(CompiledScriptTarget {
+                    function,
+                    validate_compiled_source: true,
+                });
+            }
+        }
+        // The context-function fallback for `this()` takes precedence over
+        // legacy constants. A same-named constant is only a fallback when no
+        // context-function builtin was selected (C4Script.cpp:220-223).
+        if name == "this" {
+            return AstCallTarget::Builtin;
+        }
+        if env.strict_level.unwrap_or(0) < 2
+            && argument_count == 0
+            && (self.global_constant_cell(name).is_some()
+                || self
+                    .constants
+                    .is_some_and(|constants| constants.contains_key(name)))
+        {
+            if let Some(value) = self.legacy_constant_tracked(name, env.strict_level) {
+                return AstCallTarget::LegacyConstant(value);
+            }
+        }
+        if Self::is_global_vm_builtin(name) {
+            AstCallTarget::Builtin
+        } else {
+            AstCallTarget::Dynamic
+        }
+    }
+
+    fn ast_global_call_target(&self, name: &str) -> AstCallTarget {
+        if let Some(function) = self.engine_global_script_function(name) {
+            return AstCallTarget::Script(CompiledScriptTarget {
+                function: Arc::new(function.clone()),
+                validate_compiled_source: self.global_functions.is_some(),
+            });
+        }
+        if let Some(target) = self.resolved_host_function(name) {
+            return match target {
+                ResolvedHostFunction::Value(function) => AstCallTarget::Host(function.clone()),
+                ResolvedHostFunction::Reference(function) => {
+                    AstCallTarget::HostReference(function.clone())
+                }
+            };
+        }
+        if Self::is_global_vm_builtin(name) {
+            AstCallTarget::Builtin
+        } else {
+            AstCallTarget::Dynamic
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_ast_direct_target(
+        &self,
+        target: AstCallTarget,
+        name: &str,
+        args: CallArgs,
+        depth: usize,
+        env: &mut Environment,
+        caller: Option<ScriptCallerContext>,
+        return_reference: bool,
+    ) -> Result<ReturnValue, RuntimeError> {
+        match target {
+            AstCallTarget::Script(target) => self.invoke_resolved_script_raw(
+                name,
+                ScriptFunctionTarget {
+                    function: &target.function,
+                    validate_compiled_source: target.validate_compiled_source,
+                },
+                args,
+                depth + 1,
+                env.object_state.clone(),
+                caller,
+            ),
+            AstCallTarget::Host(function) => {
+                if return_reference && name == "EffectVar" {
+                    // The call target was captured before the argument list
+                    // ran. Keep that exact native callback in the lvalue so a
+                    // host yield cannot make the resumed path re-resolve a
+                    // different EffectVar overload.
+                    return self.effect_slot_from_registered_host_call_args(&function, args, env);
+                }
+                let _guard = CallerContextGuard::enter(caller);
+                self.invoke_host_function_call_args(name, &function, args)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value)
+            }
+            AstCallTarget::HostReference(function) => {
+                let _guard = CallerContextGuard::enter(caller);
+                self.invoke_host_reference_function(name, &function, args)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value)
+            }
+            AstCallTarget::LegacyConstant(value) => {
+                if args.is_empty() {
+                    Ok(ReturnValue::Value(value))
+                } else {
+                    Err(RuntimeError::new(
+                        "parameters not allowed in functional usage of constants",
+                    ))
+                }
+            }
+            AstCallTarget::Builtin => {
+                if name == "this" && self.has_bound_this(env) {
+                    return Err(RuntimeError::new("cannot call bound variable 'this'"));
+                }
+                if name == "this" {
+                    return Ok(ReturnValue::Value(TrackedValue::runtime(
+                        self.this_value.clone(),
+                    )));
+                }
+                if let Some(value) =
+                    self.invoke_direct_vm_builtin_call_args(name, &args, env, return_reference)?
+                {
+                    return Ok(value);
+                }
+                self.invoke_global_builtin_raw(name, &args, env, depth + 1)
+            }
+            AstCallTarget::Dynamic => Err(RuntimeError::new(
+                "internal error: dynamic AST call target was dispatched as retained",
+            )),
+        }
+    }
+
+    fn invoke_ast_global_target(
+        &self,
+        target: AstCallTarget,
+        name: &str,
+        args: CallArgs,
+        depth: usize,
+        env: &mut Environment,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<ReturnValue, RuntimeError> {
+        match target {
+            AstCallTarget::Script(target) => self.invoke_resolved_script_raw(
+                name,
+                ScriptFunctionTarget {
+                    function: &target.function,
+                    validate_compiled_source: target.validate_compiled_source,
+                },
+                args,
+                depth + 1,
+                ObjectState::default(),
+                caller,
+            ),
+            AstCallTarget::Host(function) => {
+                let _guard = CallerContextGuard::enter(caller);
+                self.invoke_host_function_call_args(name, &function, args)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value)
+            }
+            AstCallTarget::HostReference(function) => {
+                let _guard = CallerContextGuard::enter(caller);
+                self.invoke_host_reference_function(name, &function, args)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value)
+            }
+            AstCallTarget::Builtin => self.invoke_global_builtin_raw(name, &args, env, depth + 1),
+            AstCallTarget::LegacyConstant(_) | AstCallTarget::Dynamic => Err(RuntimeError::new(
+                "internal error: non-global AST call target was dispatched as retained",
+            )),
+        }
+    }
+
+    fn ast_call_argument_wants_reference(
+        &self,
+        call: &AstCallState,
+        index: usize,
+        env: &Environment,
+    ) -> bool {
+        let script_wants_reference = match &call.kind {
+            AstCallKind::Direct => match call.selected_target.as_ref() {
+                Some(AstCallTarget::Script(target)) => target
+                    .function
+                    .params
+                    .get(index)
+                    .is_some_and(|parameter| parameter.is_reference),
+                Some(AstCallTarget::HostReference(function)) => function.wants_reference(index),
+                Some(AstCallTarget::Host(_))
+                | Some(AstCallTarget::LegacyConstant(_))
+                | Some(AstCallTarget::Builtin) => false,
+                Some(AstCallTarget::Dynamic) | None => {
+                    let target = if matches!(call.name.as_str(), "inherited" | "_inherited") {
+                        self.inherited_target(env)
+                    } else {
+                        self.resolved_script_function(&call.name, env.engine_scope)
+                            .map(|target| Arc::new(target.function.clone()))
+                    };
+                    target
+                        .as_deref()
+                        .and_then(|target| target.params.get(index))
+                        .is_some_and(|parameter| parameter.is_reference)
+                }
+            },
+            AstCallKind::Global => match call.selected_target.as_ref() {
+                Some(AstCallTarget::Script(target)) => target
+                    .function
+                    .params
+                    .get(index)
+                    .is_some_and(|parameter| parameter.is_reference),
+                Some(AstCallTarget::HostReference(function)) => function.wants_reference(index),
+                Some(AstCallTarget::Host(_))
+                | Some(AstCallTarget::LegacyConstant(_))
+                | Some(AstCallTarget::Builtin) => false,
+                Some(AstCallTarget::Dynamic) | None => self
+                    .engine_global_script_function(&call.name)
+                    .and_then(|function| function.params.get(index))
+                    .is_some_and(|parameter| parameter.is_reference),
+            },
+            AstCallKind::EffectSlot => false,
+            AstCallKind::Property { .. } | AstCallKind::MethodReference { .. } => self
+                .functions
+                .get(&call.name)
+                .and_then(|function| function.params.get(index))
+                .is_some_and(|parameter| parameter.is_reference),
+        };
+        // Parse_Params unions the selected callee with every same-name
+        // engine function when deciding whether an argument stays a live
+        // reference. Carry that engine-wide probe through the continuation
+        // scheduler just as the recursive build_call_args path does.
+        let engine_wants_reference = matches!(
+            call.kind,
+            AstCallKind::Direct
+                | AstCallKind::Global
+                | AstCallKind::Property { .. }
+                | AstCallKind::MethodReference { .. }
+        ) && self
+            .reference_parameter_probe
+            .is_some_and(|probe| probe(&call.name, index));
+        let host_name = match &call.kind {
+            AstCallKind::Direct if matches!(call.name.as_str(), "inherited" | "_inherited") => {
+                Some(env.function_name.as_str())
+            }
+            AstCallKind::Direct => Some(call.name.as_str()),
+            AstCallKind::Global
+            | AstCallKind::EffectSlot
+            | AstCallKind::MethodReference { .. }
+            | AstCallKind::Property { .. } => None,
+        };
+        let retained_host_wants_reference = call.selected_target.as_ref().is_some_and(|target| {
+            matches!(target, AstCallTarget::HostReference(function) if function.wants_reference(index))
+        });
+        let dynamic_host_wants_reference = call
+            .selected_target
+            .as_ref()
+            .is_none_or(|target| matches!(target, AstCallTarget::Dynamic))
+            && host_name
+                .and_then(|name| self.host_reference_function(name))
+                .is_some_and(|function| function.wants_reference(index));
+        let host_wants_reference = retained_host_wants_reference || dynamic_host_wants_reference;
+        script_wants_reference || engine_wants_reference || host_wants_reference
+    }
+
+    fn schedule_ast_reference_expression(
+        &self,
+        state: &mut AstMachineState,
+        expr: Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        match expr {
+            Expr::Variable(name) => {
+                if let Some(reference) = env.lvalue(&name).or_else(|| {
+                    self.global_variable_cell(&name)
+                        .map(|cell| self.tracked_cell(cell))
+                }) {
+                    state
+                        .values
+                        .push(AstValue::Return(ReturnValue::Reference(reference)));
+                    Ok(())
+                } else {
+                    Err(RuntimeError::new(format!("undefined variable '{name}'")))
+                }
+            }
+            Expr::Property(base, property) => {
+                state
+                    .tasks
+                    .push(AstTask::AssignmentPropertyAfterBase { property });
+                state.tasks.push(AstTask::EvalReference(*base));
+                Ok(())
+            }
+            Expr::Index(base, index) => {
+                state
+                    .tasks
+                    .push(AstTask::AssignmentIndexAfterBase { index });
+                state.tasks.push(if Self::expr_can_be_lvalue(&base) {
+                    AstTask::EvalReference(*base)
+                } else {
+                    AstTask::EvalValue(*base)
+                });
+                Ok(())
+            }
+            Expr::PreIncrement(value) => {
+                let target = Self::expr_to_assignment_target(&value)?;
+                state.tasks.push(AstTask::AssignmentPrefixAfterTarget {
+                    delta: 1,
+                    return_old: false,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::PreDecrement(value) => {
+                let target = Self::expr_to_assignment_target(&value)?;
+                state.tasks.push(AstTask::AssignmentPrefixAfterTarget {
+                    delta: -1,
+                    return_old: false,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::ArrayAppend(base) => {
+                state.tasks.push(AstTask::ArrayAppendAfterBase);
+                state.tasks.push(AstTask::EvalReference(*base));
+                Ok(())
+            }
+            Expr::Binary(left, operation, right)
+                if matches!(operation, BinaryOp::NilCoalescing)
+                    || env.strict_level.unwrap_or(0) >= 2
+                        && matches!(operation, BinaryOp::And | BinaryOp::Or) =>
+            {
+                state.tasks.push(AstTask::ShortCircuitAfterLeft {
+                    operation,
+                    right: *right,
+                    return_reference: true,
+                });
+                state.tasks.push(AstTask::EvalReference(*left));
+                Ok(())
+            }
+            Expr::Call {
+                callee,
+                args,
+                is_optional: false,
+                forward_rest,
+            } => match *callee {
+                Expr::Variable(name) => {
+                    let selected_target = self.ast_direct_call_target(&name, env, args.len());
+                    state.tasks.push(AstTask::CallArgs(AstCallState {
+                        kind: AstCallKind::Direct,
+                        name,
+                        args: Arc::new(args),
+                        index: 0,
+                        evaluated: CallArgs::new(),
+                        value_stack: ValueStackReservation::empty(),
+                        forward_rest,
+                        failsafe: false,
+                        return_reference: true,
+                        sweep_cursor: 0,
+                        selected_target: Some(selected_target),
+                    }));
+                    Ok(())
+                }
+                callee => self.schedule_ast_expression(
+                    state,
+                    Expr::Call {
+                        callee: Box::new(callee),
+                        args,
+                        is_optional: false,
+                        forward_rest,
+                    },
+                    env,
+                    depth,
+                ),
+            },
+            Expr::Call {
+                callee,
+                args,
+                is_optional,
+                forward_rest,
+            } => self.schedule_ast_expression(
+                state,
+                Expr::Call {
+                    callee,
+                    args,
+                    is_optional,
+                    forward_rest,
+                },
+                env,
+                depth,
+            ),
+            Expr::Assignment(target, value)
+                if !matches!(target, AssignmentTarget::InvalidValue { .. }) =>
+            {
+                state.tasks.push(AstTask::AssignmentExprAfterTarget {
+                    value: *value,
+                    return_reference: true,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => {
+                state.tasks.push(AstTask::CompoundAssignmentAfterTarget {
+                    operation,
+                    operator,
+                    value: *value,
+                    return_reference: true,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::ArrayAppendAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => {
+                state.tasks.push(AstTask::ArrayAppendAssignmentAfterTarget {
+                    operation,
+                    operator,
+                    value: *value,
+                    return_reference: true,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => {
+                if !self.global_call_may_return_reference(&name) {
+                    return self.schedule_ast_expression(
+                        state,
+                        Expr::GlobalCall {
+                            name,
+                            args,
+                            failsafe,
+                            forward_rest,
+                        },
+                        env,
+                        depth,
+                    );
+                }
+                let selected_target = self.ast_global_call_target(&name);
+                let mut value_stack = ValueStackReservation::empty();
+                value_stack.grow(1)?;
+                state.tasks.push(AstTask::CallArgs(AstCallState {
+                    kind: AstCallKind::Global,
+                    name,
+                    args: Arc::new(args),
+                    index: 0,
+                    evaluated: CallArgs::new(),
+                    value_stack,
+                    forward_rest,
+                    failsafe,
+                    return_reference: true,
+                    sweep_cursor: 0,
+                    selected_target: Some(selected_target),
+                }));
+                Ok(())
+            }
+            other if !Self::expression_may_suspend(&other) => self
+                .evaluate_reference_or_value(&other, env, depth)
+                .map(|value| state.values.push(AstValue::Return(value))),
+            other => self.schedule_ast_expression(state, other, env, depth),
+        }
+    }
+
+    fn schedule_ast_expression(
+        &self,
+        state: &mut AstMachineState,
+        expr: Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        match expr {
+            Expr::Call {
+                callee,
+                args,
+                is_optional,
+                forward_rest,
+            } => match *callee {
+                Expr::Variable(name) => {
+                    if is_optional {
+                        return Err(RuntimeError::new(
+                            "optional calls only support property access",
+                        ));
+                    }
+                    let selected_target = self.ast_direct_call_target(&name, env, args.len());
+                    let _returns_reference = self.call_expression_returns_reference(
+                        &Expr::Call {
+                            callee: Box::new(Expr::Variable(name.clone())),
+                            args: args.clone(),
+                            is_optional: false,
+                            forward_rest,
+                        },
+                        env,
+                    );
+                    state.tasks.push(AstTask::CallArgs(AstCallState {
+                        kind: AstCallKind::Direct,
+                        name,
+                        args: Arc::new(args),
+                        index: 0,
+                        evaluated: CallArgs::new(),
+                        value_stack: ValueStackReservation::empty(),
+                        forward_rest,
+                        failsafe: false,
+                        // The interpreted call still needs the same
+                        // reference-result decision as the recursive
+                        // evaluator. Keep this query at the call boundary so
+                        // the ordinary assignment path does not silently
+                        // erase a reference-returning result.
+                        return_reference: false,
+                        sweep_cursor: 0,
+                        selected_target: Some(selected_target),
+                    }));
+                    Ok(())
+                }
+                Expr::Property(base, name) => {
+                    state.tasks.push(AstTask::PropertyCallAfterTarget {
+                        name: name.clone(),
+                        args: Arc::new(args.clone()),
+                        is_optional,
+                        forward_rest,
+                        return_reference: self.call_expression_returns_reference(
+                            &Expr::Call {
+                                callee: Box::new(Expr::Property(base.clone(), name.clone())),
+                                args: args.clone(),
+                                is_optional,
+                                forward_rest,
+                            },
+                            env,
+                        ),
+                    });
+                    state.tasks.push(AstTask::EvalValue(*base));
+                    Ok(())
+                }
+                callee => Err(RuntimeError::new(format!(
+                    "cannot call non-function expression: {callee:?}"
+                ))),
+            },
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => {
+                let selected_target = self.ast_global_call_target(&name);
+                let mut value_stack = ValueStackReservation::empty();
+                value_stack.grow(1)?;
+                state.tasks.push(AstTask::CallArgs(AstCallState {
+                    kind: AstCallKind::Global,
+                    name,
+                    args: Arc::new(args),
+                    index: 0,
+                    evaluated: CallArgs::new(),
+                    value_stack,
+                    forward_rest,
+                    failsafe,
+                    return_reference: false,
+                    sweep_cursor: 0,
+                    selected_target: Some(selected_target),
+                }));
+                Ok(())
+            }
+            Expr::Unary(operation, value) => {
+                state.tasks.push(AstTask::ApplyUnary(operation));
+                state.tasks.push(AstTask::EvalValue(*value));
+                Ok(())
+            }
+            Expr::Binary(left, operation, right) => {
+                let short_circuit = matches!(operation, BinaryOp::NilCoalescing)
+                    || env.strict_level.unwrap_or(0) >= 2
+                        && matches!(operation, BinaryOp::And | BinaryOp::Or);
+                if short_circuit {
+                    state.tasks.push(AstTask::ShortCircuitAfterLeft {
+                        operation,
+                        right: *right,
+                        return_reference: false,
+                    });
+                } else {
+                    state.tasks.push(AstTask::BinaryAfterLeft {
+                        operation,
+                        sweep_cursor: object_reference_sweep_cursor(),
+                        right: *right,
+                    });
+                }
+                state.tasks.push(AstTask::EvalValue(*left));
+                Ok(())
+            }
+            Expr::Array(elements) => {
+                state.tasks.push(AstTask::ArrayBuild {
+                    elements: Arc::new(elements),
+                    index: 0,
+                    values: Vec::new(),
+                    value_stack: ValueStackReservation::empty(),
+                    sweep_cursor: object_reference_sweep_cursor(),
+                });
+                Ok(())
+            }
+            Expr::Proplist(entries) => {
+                state.tasks.push(AstTask::ProplistBuild {
+                    entries: Arc::new(entries),
+                    index: 0,
+                    values: Vec::new(),
+                    value_stack: ValueStackReservation::empty(),
+                    sweep_cursor: object_reference_sweep_cursor(),
+                });
+                Ok(())
+            }
+            Expr::LegacyParameterList { args, forward_rest } => {
+                let args = Arc::new(args);
+                if args.len() == 1 && !forward_rest && !Self::expression_may_suspend(&args[0]) {
+                    // Parse_If/Parse_While and the legacy `return(expr)`
+                    // spelling collapse an exact-one list to an ordinary
+                    // value expression. Keeping the reference-preserving
+                    // surplus path here would try to schedule a binary or
+                    // host-call operand as a reference even though C++ emits
+                    // only its SetNoRef result (C4AulParse.cpp:2311-2344).
+                    state.tasks.push(AstTask::EvalValue(args[0].clone()));
+                    return Ok(());
+                }
+                if args.is_empty() {
+                    let value = if forward_rest {
+                        env.call_args
+                            .get(env.named_param_count)
+                            .map(Binding::read)
+                            .transpose()?
+                            .unwrap_or(Value::Nil)
+                    } else {
+                        Value::Nil
+                    };
+                    state.values.push(AstValue::Value(value));
+                } else {
+                    // The C++ parser keeps the `AB_CONDN` reference registry
+                    // alive until every surplus operand has been evaluated.
+                    // The AST scheduler crosses host continuations between
+                    // those operands, so carry the scope in owned state.
+                    state.legacy_path_pin_scope_depth += 1;
+                    state.tasks.push(AstTask::LegacyAfterFirst {
+                        args: Arc::clone(&args),
+                        index: 1,
+                        forward_rest,
+                    });
+                    state.tasks.push(AstTask::EvalReference(args[0].clone()));
+                }
+                Ok(())
+            }
+            Expr::Property(base, name) => {
+                state.tasks.push(AstTask::PropertyAfterBase { name });
+                state.tasks.push(AstTask::EvalValue(*base));
+                Ok(())
+            }
+            Expr::Index(base, index) => {
+                state.tasks.push(AstTask::IndexAfterReferenceBase { index });
+                state.tasks.push(if Self::expr_can_be_lvalue(&base) {
+                    AstTask::EvalReference(*base)
+                } else {
+                    AstTask::EvalValue(*base)
+                });
+                Ok(())
+            }
+            Expr::PreIncrement(value) => {
+                let target = Self::expr_to_assignment_target(&value)?;
+                state.tasks.push(AstTask::AssignmentPrefixAfterTarget {
+                    delta: 1,
+                    return_old: false,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::PreDecrement(value) => {
+                let target = Self::expr_to_assignment_target(&value)?;
+                state.tasks.push(AstTask::AssignmentPrefixAfterTarget {
+                    delta: -1,
+                    return_old: false,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::PostIncrement(value) => {
+                let target = Self::expr_to_assignment_target(&value)?;
+                state.tasks.push(AstTask::AssignmentPrefixAfterTarget {
+                    delta: 1,
+                    return_old: true,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::PostDecrement(value) => {
+                let target = Self::expr_to_assignment_target(&value)?;
+                state.tasks.push(AstTask::AssignmentPrefixAfterTarget {
+                    delta: -1,
+                    return_old: true,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::ArrayAppend(base) => {
+                state.tasks.push(AstTask::ArrayAppendAfterBase);
+                state.tasks.push(AstTask::EvalReference(*base));
+                Ok(())
+            }
+            Expr::SafeNavigation { receiver, steps } => {
+                state.tasks.push(AstTask::SafeNavigationAfterReceiver {
+                    steps: Arc::new(steps),
+                });
+                state.tasks.push(AstTask::EvalValue(*receiver));
+                Ok(())
+            }
+            Expr::Assignment(AssignmentTarget::Variable(name), value) => {
+                let reference = env
+                    .lvalue(&name)
+                    .or_else(|| {
+                        self.global_variable_cell(&name)
+                            .map(|cell| self.tracked_cell(cell))
+                    })
+                    .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'")))?;
+                state.tasks.push(AstTask::StoreAssignmentExpr(reference));
+                state.tasks.push(AstTask::EvalValue(*value));
+                Ok(())
+            }
+            Expr::Assignment(target, value) => {
+                if let AssignmentTarget::InvalidValue { operator, .. } = &target {
+                    state.tasks.push(AstTask::InvalidAssignmentAfterLeft {
+                        operator,
+                        value: *value,
+                        return_value: true,
+                    });
+                } else {
+                    state.tasks.push(AstTask::AssignmentExprAfterTarget {
+                        value: *value,
+                        return_reference: false,
+                    });
+                }
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::CompoundAssignment {
+                target: AssignmentTarget::Variable(name),
+                operation,
+                operator,
+                value,
+            } => {
+                let reference = env
+                    .lvalue(&name)
+                    .or_else(|| {
+                        self.global_variable_cell(&name)
+                            .map(|cell| self.tracked_cell(cell))
+                    })
+                    .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'")))?;
+                state.tasks.push(AstTask::CompoundAfterRight {
+                    reference,
+                    operation,
+                    operator,
+                    return_reference: false,
+                });
+                state.tasks.push(AstTask::EvalValue(*value));
+                Ok(())
+            }
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => {
+                state.tasks.push(AstTask::CompoundAssignmentAfterTarget {
+                    operation,
+                    operator,
+                    value: *value,
+                    return_reference: false,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            Expr::ArrayAppendAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => {
+                state.tasks.push(AstTask::ArrayAppendAssignmentAfterTarget {
+                    operation,
+                    operator,
+                    value: *value,
+                    return_reference: false,
+                });
+                self.schedule_ast_assignment_target(state, target, env, depth)
+            }
+            other if !Self::expression_may_suspend(&other) => self
+                .evaluate_tracked(&other, env, depth)
+                .map(|value| state.values.push(AstValue::Tracked(value))),
+            _ => Err(RuntimeError::new(
+                "suspended expression form is unavailable in the interpreted VM",
+            )),
+        }
+    }
+
+    fn schedule_ast_assignment_target(
+        &self,
+        state: &mut AstMachineState,
+        target: AssignmentTarget,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        match target {
+            AssignmentTarget::InvalidValue { expression, .. } => {
+                state.tasks.push(AstTask::EvalValue(*expression));
+                Ok(())
+            }
+            AssignmentTarget::Variable(name) => {
+                let reference = env
+                    .lvalue(&name)
+                    .or_else(|| {
+                        self.global_variable_cell(&name)
+                            .map(|cell| self.tracked_cell(cell))
+                    })
+                    .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'")))?;
+                state
+                    .values
+                    .push(AstValue::Return(ReturnValue::Reference(reference)));
+                Ok(())
+            }
+            AssignmentTarget::Property(base, property) => {
+                state
+                    .tasks
+                    .push(AstTask::AssignmentPropertyAfterBase { property });
+                self.schedule_ast_assignment_target(state, *base, env, depth)
+            }
+            AssignmentTarget::Index(base, index) => {
+                state
+                    .tasks
+                    .push(AstTask::AssignmentIndexAfterBase { index });
+                self.schedule_ast_assignment_target(state, *base, env, depth)
+            }
+            AssignmentTarget::ArrayAppend(base) => {
+                state.tasks.push(AstTask::AssignmentAppendAfterBase);
+                state.tasks.push(AstTask::EvalReference(*base));
+                Ok(())
+            }
+            AssignmentTarget::LocalSlot(index) if Self::expression_may_suspend(&index) => {
+                state.tasks.push(AstTask::SlotAfterIndex { local: true });
+                state.tasks.push(AstTask::EvalValue(*index));
+                Ok(())
+            }
+            AssignmentTarget::VarSlot(index) if Self::expression_may_suspend(&index) => {
+                state.tasks.push(AstTask::SlotAfterIndex { local: false });
+                state.tasks.push(AstTask::EvalValue(*index));
+                Ok(())
+            }
+            AssignmentTarget::EffectSlot(args) if args.iter().any(Self::expression_may_suspend) => {
+                state.tasks.push(AstTask::CallArgs(AstCallState {
+                    kind: AstCallKind::EffectSlot,
+                    name: "EffectVar".to_string(),
+                    args: Arc::new(args),
+                    index: 0,
+                    evaluated: CallArgs::new(),
+                    value_stack: ValueStackReservation::empty(),
+                    forward_rest: false,
+                    failsafe: false,
+                    return_reference: true,
+                    sweep_cursor: 0,
+                    selected_target: None,
+                }));
+                Ok(())
+            }
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                mut args,
+                is_arrow: false,
+            } => {
+                // The parser stores `Fn(arg, object)` as a method slot so
+                // reference assignment can use the same path as
+                // `object->Fn(arg)`.  Rebuild that direct call with the
+                // object last: C++ evaluates the ordinary arguments before
+                // the explicit object operand.
+                args.push(*object);
+                self.schedule_ast_reference_expression(
+                    state,
+                    Expr::Call {
+                        callee: Box::new(Expr::Variable(method)),
+                        args,
+                        is_optional: false,
+                        forward_rest: false,
+                    },
+                    env,
+                    depth,
+                )
+            }
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+                is_arrow: true,
+            } => {
+                // Arrow lvalues resolve their target first, then their
+                // arguments. The dedicated call kind below preserves the
+                // reference returned by the method bridge.
+                state.tasks.push(AstTask::MethodSlotAfterObject {
+                    method,
+                    args: Arc::new(args),
+                });
+                state.tasks.push(AstTask::EvalValue(*object));
+                Ok(())
+            }
+            AssignmentTarget::PrefixChange { target, delta } => {
+                state.tasks.push(AstTask::AssignmentPrefixAfterTarget {
+                    delta,
+                    return_old: false,
+                });
+                self.schedule_ast_assignment_target(state, *target, env, depth)
+            }
+            AssignmentTarget::FunctionCall { name, args } => {
+                let expression = Expr::Call {
+                    callee: Box::new(Expr::Variable(name)),
+                    args,
+                    is_optional: false,
+                    forward_rest: false,
+                };
+                if self.call_expression_returns_reference(&expression, env) {
+                    self.schedule_ast_reference_expression(state, expression, env, depth)
+                } else {
+                    self.schedule_ast_expression(state, expression, env, depth)
+                }
+            }
+            AssignmentTarget::GlobalFunctionCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => {
+                let returns_reference = self.global_call_may_return_reference(&name);
+                let expression = Expr::GlobalCall {
+                    name,
+                    args,
+                    failsafe,
+                    forward_rest,
+                };
+                if returns_reference {
+                    self.schedule_ast_reference_expression(state, expression, env, depth)
+                } else {
+                    self.schedule_ast_expression(state, expression, env, depth)
+                }
+            }
+            other if !Self::assignment_target_may_suspend(&other) => self
+                .assignment_target_to_reference_or_value(env, &other, depth)
+                .map(|value| state.values.push(AstValue::Return(value))),
+            _ => Err(RuntimeError::new(
+                "suspended assignment target is unavailable in the interpreted VM",
+            )),
+        }
+    }
+
+    fn statement_may_suspend(statement: &Stmt) -> bool {
+        match statement {
+            Stmt::VarDecl { init, .. } => init.as_ref().is_some_and(Self::expression_may_suspend),
+            Stmt::Assignment { target, value } => {
+                Self::assignment_target_may_suspend(target) || Self::expression_may_suspend(value)
+            }
+            Stmt::LegacyGoto { call, expression } => {
+                Self::expression_may_suspend(call) || Self::expression_may_suspend(expression)
+            }
+            Stmt::Return(value) => value.as_ref().is_some_and(Self::expression_may_suspend),
+            Stmt::Expr(expr) => Self::expression_may_suspend(expr),
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                Self::expression_may_suspend(condition)
+                    || then_branch.iter().any(Self::statement_may_suspend)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|branch| branch.iter().any(Self::statement_may_suspend))
+            }
+            Stmt::While { condition, body } => {
+                Self::expression_may_suspend(condition)
+                    || body.iter().any(Self::statement_may_suspend)
+            }
+            Stmt::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                init.as_ref().is_some_and(|init| match init {
+                    ForInit::VarDecls(declarations) => declarations
+                        .iter()
+                        .any(|(_, value)| value.as_ref().is_some_and(Self::expression_may_suspend)),
+                    ForInit::Expr(expr) => Self::expression_may_suspend(expr),
+                }) || condition.as_ref().is_some_and(Self::expression_may_suspend)
+                    || increment.as_ref().is_some_and(Self::expression_may_suspend)
+                    || body.iter().any(Self::statement_may_suspend)
+            }
+            Stmt::ForIn { iterable, body, .. } => {
+                Self::expression_may_suspend(iterable)
+                    || body.iter().any(Self::statement_may_suspend)
+            }
+            Stmt::Block(body) | Stmt::Sequence(body) => {
+                body.iter().any(Self::statement_may_suspend)
+            }
+            Stmt::Break | Stmt::Continue | Stmt::ParseError { .. } => false,
+        }
+    }
+
+    fn run_ast_statement(
+        &self,
+        state: &mut AstMachineState,
+        statement: Stmt,
+        env: &mut Environment,
+        depth: usize,
+        returns_reference: bool,
+    ) -> Result<(), RuntimeError> {
+        match statement {
+            Stmt::ParseError {
+                message,
+                line,
+                column,
+            } => Err(RuntimeError::new(format!(
+                "parse error at {line}:{column}: {message}"
+            ))),
+            Stmt::VarDecl { name, init } => {
+                if let Some(init) = init {
+                    state.tasks.push(AstTask::StoreFunctionVar(name));
+                    state.tasks.push(AstTask::EvalValue(init));
+                }
+                Ok(())
+            }
+            Stmt::Assignment { target, value } => {
+                if let AssignmentTarget::InvalidValue {
+                    expression,
+                    operator,
+                } = &target
+                {
+                    state.tasks.push(AstTask::InvalidAssignmentAfterLeft {
+                        operator,
+                        value,
+                        return_value: false,
+                    });
+                    state.tasks.push(AstTask::EvalValue(*expression.clone()));
+                    return Ok(());
+                }
+                if Self::assignment_target_may_suspend(&target) {
+                    state.tasks.push(AstTask::AssignmentAfterTarget { value });
+                    return self.schedule_ast_assignment_target(state, target, env, depth);
+                }
+                let _pin_creation = LegacyPathPinCreationGuard::enter();
+                let reference =
+                    match self.assignment_target_to_reference_or_value(env, &target, depth)? {
+                        ReturnValue::Reference(reference) => reference,
+                        ReturnValue::Value(left) => {
+                            if Self::expression_may_suspend(&value) {
+                                return Err(RuntimeError::new(format!(
+                                    "operator \"=\" left side: got \"{}\", but expected \"&\"!",
+                                    Self::c4v_type_name(left.value.c4v_type())
+                                )));
+                            }
+                            self.evaluate(&value, env, depth)?;
+                            return Ok(());
+                        }
+                    };
+                state.tasks.push(AstTask::StoreAssignment(reference));
+                state.tasks.push(AstTask::EvalValue(value));
+                Ok(())
+            }
+            Stmt::LegacyGoto { call, expression } => {
+                let goto_is_bound = env.lvalue("goto").is_some()
+                    || self.global_variable_cell("goto").is_some()
+                    || self.global_constant_cell("goto").is_some();
+                if env.strict_level.is_none() && !goto_is_bound {
+                    state.tasks.push(AstTask::MakeReturn {
+                        reference: returns_reference,
+                    });
+                    state.tasks.push(if returns_reference {
+                        AstTask::EvalReference(call)
+                    } else {
+                        AstTask::EvalValue(call)
+                    });
+                } else {
+                    state.tasks.push(AstTask::DropValue);
+                    state.tasks.push(AstTask::EvalValue(expression));
+                }
+                Ok(())
+            }
+            Stmt::Return(expression) => {
+                state.tasks.push(AstTask::MakeReturn {
+                    reference: returns_reference,
+                });
+                state.tasks.push(match (returns_reference, expression) {
+                    (true, Some(expression)) => AstTask::EvalReference(expression),
+                    (false, Some(expression)) => AstTask::EvalValue(expression),
+                    (_, None) => AstTask::EvalValue(Expr::Literal(Literal::Nil)),
+                });
+                Ok(())
+            }
+            Stmt::Break => {
+                state.values.push(AstValue::Flow(ControlFlow::Break));
+                Ok(())
+            }
+            Stmt::Continue => {
+                state.values.push(AstValue::Flow(ControlFlow::LoopContinue));
+                Ok(())
+            }
+            Stmt::Expr(expression) => {
+                state.tasks.push(AstTask::DropValue);
+                state.tasks.push(AstTask::EvalValue(expression));
+                Ok(())
+            }
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                state.tasks.push(AstTask::IfAfterCondition {
+                    then_branch: Arc::new(then_branch),
+                    else_branch: else_branch.map(Arc::new),
+                });
+                state.tasks.push(AstTask::EvalValue(condition));
+                Ok(())
+            }
+            Stmt::While { condition, body } => {
+                state.tasks.push(AstTask::WhileCheck {
+                    condition,
+                    body: Arc::new(body),
+                });
+                Ok(())
+            }
+            Stmt::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                state.tasks.push(AstTask::ForInit {
+                    init,
+                    condition,
+                    increment,
+                    body: Arc::new(body),
+                });
+                Ok(())
+            }
+            Stmt::ForIn {
+                variable,
+                value_variable,
+                iterable,
+                body,
+                ..
+            } => {
+                // AB_FOREACH keeps the iterable and its stable key/value
+                // snapshot live while each body runs.  Save the sweep cursor
+                // before evaluating the iterable so a removal in that
+                // expression also clears the retained container.
+                let sweep_cursor = object_reference_sweep_cursor();
+                state.tasks.push(AstTask::ForInAfterIterable {
+                    variable,
+                    value_variable,
+                    body: Arc::new(body),
+                    sweep_cursor,
+                });
+                state.tasks.push(AstTask::EvalValue(iterable));
+                Ok(())
+            }
+            Stmt::Block(statements) => {
+                env.push_scope();
+                state.tasks.push(AstTask::Statements {
+                    statements: Arc::new(statements),
+                    index: 0,
+                    pop_scope: true,
+                });
+                Ok(())
+            }
+            Stmt::Sequence(statements) => {
+                state.tasks.push(AstTask::Statements {
+                    statements: Arc::new(statements),
+                    index: 0,
+                    pop_scope: false,
+                });
+                Ok(())
+            }
+        }
     }
 
     fn execute_statements(
@@ -6344,6 +8211,27 @@ impl<'a> Vm<'a> {
     fn global_constant(&self, name: &str) -> Option<Value> {
         self.global_constant_cell(name)
             .map(|cell| cell.borrow().clone())
+    }
+
+    fn legacy_constant_tracked(
+        &self,
+        name: &str,
+        strict_level: Option<u8>,
+    ) -> Option<TrackedValue> {
+        if strict_level.unwrap_or(0) >= 2 {
+            return None;
+        }
+        if let Some(cell) = self.global_constant_cell(name) {
+            return Some(Self::fold_legacy_zero_tracked(
+                self.read_tracked_named_cell(name, &cell),
+                strict_level,
+            ));
+        }
+        self.constants
+            .and_then(|constants| constants.get(name).cloned())
+            .map(|value| {
+                Self::fold_legacy_zero_tracked(self.tracked_constant(name, value), strict_level)
+            })
     }
 
     fn global_constant_cell(&self, name: &str) -> Option<ValueCell> {
@@ -6962,6 +8850,8 @@ impl<'a> Vm<'a> {
                                 env.object_state.clone(),
                             )?;
                             exec_env.temporary_script = true;
+                            // DirectExec chooses its diagnostic host from the caller,
+                            // but its temporary Def belongs to the object receiver.
                             exec_env.definition_context =
                                 matches!(&self.this_value, Value::Object(id) if *id != 0);
                             for var_decl in self.var_decls {
@@ -8710,6 +10600,119 @@ impl<'a> Vm<'a> {
         )
     }
 
+    /// Dispatch a VM builtin from an unqualified call after its arguments have
+    /// already been evaluated by the continuation machine. The global raw
+    /// entry point deliberately has a nil object target for `global->...`; an
+    /// ordinary direct call instead uses the executing frame/object, just as
+    /// the recursive evaluator does above (C4Script.cpp:3390-3433,
+    /// 4591-4617).
+    fn invoke_direct_vm_builtin_call_args(
+        &self,
+        name: &str,
+        args: &CallArgs,
+        env: &mut Environment,
+        return_reference: bool,
+    ) -> Result<Option<ReturnValue>, RuntimeError> {
+        let value = |value| ReturnValue::Value(TrackedValue::runtime(value));
+        let result = match name {
+            "this" => None,
+            "Var" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                let reference = self.tracked_cell(frame_slot_cell(&env.frame_locals, index));
+                Some(if return_reference {
+                    ReturnValue::Reference(reference)
+                } else {
+                    ReturnValue::Value(reference.read_tracked()?)
+                })
+            }
+            "VarN" => {
+                let local_name = self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
+                Some(match env.function_var_lvalue(&local_name) {
+                    Some(reference) if return_reference => ReturnValue::Reference(reference),
+                    Some(reference) => ReturnValue::Value(reference.read_tracked()?),
+                    None => value(Value::Nil),
+                })
+            }
+            "Global" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                let reference = self.tracked_cell(self.numbered_global_cell(index)?);
+                Some(if return_reference {
+                    ReturnValue::Reference(reference)
+                } else {
+                    ReturnValue::Value(reference.read_tracked()?)
+                })
+            }
+            "GlobalN" => {
+                let local_name = self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
+                Some(match self.global_variable_cell(&local_name) {
+                    Some(cell) if return_reference => {
+                        ReturnValue::Reference(self.tracked_cell(cell))
+                    }
+                    Some(cell) => ReturnValue::Value(self.read_tracked_cell(&cell)),
+                    None => value(Value::Nil),
+                })
+            }
+            "Local" if args.len() <= 1 => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                if self.retain_global_call_context_for_host_paths || index < 0 {
+                    Some(value(Value::Nil))
+                } else {
+                    let reference = self.tracked_cell(env.object_state.local_slot_cell(index));
+                    Some(if return_reference {
+                        ReturnValue::Reference(reference)
+                    } else {
+                        ReturnValue::Value(reference.read_tracked()?)
+                    })
+                }
+            }
+            "Local" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                if index < 0 {
+                    Some(value(Value::Nil))
+                } else {
+                    let target = args.get(1).map(CallArg::read).transpose()?;
+                    let reference = self.tracked_cell(self.numbered_local_cell(env, index, target));
+                    Some(if return_reference {
+                        ReturnValue::Reference(reference)
+                    } else {
+                        ReturnValue::Value(reference.read_tracked()?)
+                    })
+                }
+            }
+            "LocalN" if (1..=2).contains(&args.len()) => {
+                let local_name = self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
+                let target = args.get(1).map(CallArg::read).transpose()?;
+                let target_is_falsy = target.as_ref().is_none_or(|target| {
+                    matches!(
+                        target,
+                        Value::Nil
+                            | Value::Int(0)
+                            | Value::Bool(false)
+                            | Value::RawBool(0)
+                            | Value::Object(0)
+                    )
+                });
+                if self.retain_global_call_context_for_host_paths && target_is_falsy {
+                    Some(value(Value::Nil))
+                } else {
+                    let reference = self.tracked_cell(self.localn_cell(env, &local_name, target));
+                    Some(if return_reference {
+                        ReturnValue::Reference(reference)
+                    } else {
+                        ReturnValue::Value(reference.read_tracked()?)
+                    })
+                }
+            }
+            "SetLocal" => Some(
+                self.set_local_evaluated_tracked(args, None, env, 3)
+                    .map(ReturnValue::Value)?,
+            ),
+            "SetGlobal" => Some(self.invoke_global_builtin_raw(name, args, env, 0)?),
+            _ => None,
+        };
+        Ok(result)
+    }
+
     fn invoke_global_builtin_raw(
         &self,
         name: &str,
@@ -8807,43 +10810,77 @@ impl<'a> Vm<'a> {
                     Some(Value::String(code)) => code,
                     _ => return Ok(value(Value::Nil)),
                 };
-                let cells = LocalCells::default();
-                if let Some(result) = self
-                    .eval_direct_exec_hook
-                    .and_then(|hook| hook(&code, &cells, Value::Nil, env.strict_level, depth + 1))
-                {
+                let cells = LocalCells {
+                    state: env.object_state.clone(),
+                };
+                if let Some(result) = self.eval_direct_exec_continuation_hook.and_then(|hook| {
+                    hook(
+                        &code,
+                        &cells,
+                        self.this_value.clone(),
+                        env.strict_level,
+                        depth + 1,
+                    )
+                }) {
+                    return match result {
+                        Ok(ScriptCallOutcome::Complete(value)) => {
+                            Ok(ReturnValue::Value(TrackedValue::runtime(value)))
+                        }
+                        Ok(ScriptCallOutcome::Suspended(suspension)) => {
+                            let (request, resume_value, continuation) = suspension.into_parts();
+                            Err(RuntimeError::new(
+                                "script execution suspended by nested host callback",
+                            )
+                            .with_control(
+                                RuntimeControl::HostContinuation {
+                                    request,
+                                    resume_value,
+                                    continuation: Some(continuation),
+                                },
+                            ))
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+                if let Some(result) = self.eval_direct_exec_hook.and_then(|hook| {
+                    hook(
+                        &code,
+                        &cells,
+                        self.this_value.clone(),
+                        env.strict_level,
+                        depth + 1,
+                    )
+                }) {
                     return result.map(|value| ReturnValue::Value(TrackedValue::runtime(value)));
                 }
-                start_direct_exec_profile();
-                let Ok(expr) =
-                    crate::parser::Parser::with_strict_level_c4_string(&code, env.strict_level)
-                        .parse_direct_exec_expression()
-                else {
-                    return Ok(value(Value::Nil));
-                };
-                let mut diagnostic = ScriptDiagnosticGuard::enter_direct(
-                    DirectExecDiagnosticFrame::new(
-                        format!(
-                            "eval in {}",
-                            self.game_script_name.unwrap_or(self.script_name)
-                        ),
-                        None,
-                    ),
-                    false,
-                );
-                let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
-                let mut exec_env = Environment::new_with_params(
-                    &[],
-                    &[],
+                let (eval_cells, definition_context) =
+                    if self.retain_global_call_context_for_host_paths {
+                        (LocalCells::default(), false)
+                    } else {
+                        (cells, env.definition_context)
+                    };
+                let direct_vm = self.clone().with_definition_context(definition_context);
+                match direct_vm.eval_direct_exec_with_cells_with_continuation(
+                    &code,
+                    &eval_cells,
                     env.strict_level,
-                    ObjectState::default(),
-                )?;
-                exec_env.engine_scope = true;
-                exec_env.temporary_script = true;
-                _object_reference_cells.register_environment(&exec_env, self);
-                let tracked = self.evaluate_tracked(&expr, &mut exec_env, depth + 1)?;
-                diagnostic.returned(&tracked.value);
-                Ok(ReturnValue::Value(tracked))
+                    depth + 1,
+                )? {
+                    ScriptCallOutcome::Complete(value) => {
+                        Ok(ReturnValue::Value(TrackedValue::runtime(value)))
+                    }
+                    ScriptCallOutcome::Suspended(suspension) => {
+                        let (request, resume_value, continuation) = suspension.into_parts();
+                        Err(
+                            RuntimeError::new("script execution suspended by nested host callback")
+                                .with_control(RuntimeControl::HostContinuation {
+                                    request,
+                                    resume_value,
+                                    continuation: Some(continuation),
+                                }),
+                        )
+                    }
+                }
             }
             _ => Err(RuntimeError::new(format!("unknown function '{name}'"))),
         }
@@ -9251,6 +11288,356 @@ impl<'a> Vm<'a> {
                         None,
                     )
                 }
+            }
+        }
+    }
+
+    fn effect_slot_from_registered_host_call_args(
+        &self,
+        function: &RegisteredHostFunction,
+        evaluated_args: CallArgs,
+        env: &mut Environment,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let _parameter_slots =
+            ValueStackReservation::reserve(function.parameter_count().unwrap_or(3))?;
+        let caller = env.caller_context();
+        let _guard = CallerContextGuard::enter(Some(caller.clone()));
+        let prepared_args =
+            self.prepare_registered_host_call_args("EffectVar", function, evaluated_args)?;
+        let args = self.call_args_to_values(&prepared_args)?.into_vec();
+        Ok(ReturnValue::Reference(LValueRef::HostPath {
+            function: function.callback().clone(),
+            args,
+            caller,
+            global_call_context_hook: self
+                .retain_global_call_context_for_host_paths
+                .then(|| self.global_call_context_hook.cloned())
+                .flatten(),
+            segments: Vec::new(),
+            legacy_pin: None,
+        }))
+    }
+
+    fn effect_slot_from_call_args(
+        &self,
+        evaluated_args: CallArgs,
+        env: &mut Environment,
+    ) -> Result<ReturnValue, RuntimeError> {
+        if let Some(function) = self.host_functions.get("EffectVar") {
+            return self.effect_slot_from_registered_host_call_args(function, evaluated_args, env);
+        }
+
+        let _parameter_slots = ValueStackReservation::reserve(3)?;
+        let raw_arg_values = evaluated_args
+            .iter()
+            .map(CallArg::read)
+            .collect::<Result<CallValues, _>>()?;
+        let slot_name = format!(
+            "__effect_{}",
+            raw_arg_values
+                .iter()
+                .map(|value| match value {
+                    Value::Int(value) => value.to_string(),
+                    Value::String(value) => value.to_string(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join("_")
+        );
+        if env.get(&slot_name)?.is_none() {
+            env.define(&slot_name, Value::Nil);
+        }
+        let reference = env
+            .lvalue(&slot_name)
+            .ok_or_else(|| RuntimeError::new("EffectVar slot disappeared"))?;
+        Ok(ReturnValue::Reference(reference))
+    }
+
+    /// Arrow method lvalue entry for the continuation executor. Its argument
+    /// task has already evaluated every operand exactly once, so this path
+    /// must preserve the method's reference result without reconstructing an
+    /// expression after a host boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_method_reference_call_args_raw(
+        &self,
+        mut target: Value,
+        name: &str,
+        evaluated_args: CallArgs,
+        target_sweep_cursor: usize,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        if let Value::Proplist(map) = &target {
+            if let Some(Value::Int(id)) = map.get("id") {
+                if *id > 0 {
+                    target = Value::Object(*id as u64);
+                }
+            }
+        }
+        clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+        if matches!(
+            &target,
+            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0) | Value::Object(0)
+        ) || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+        {
+            return Err(RuntimeError::new("Object call: target is zero!"));
+        }
+
+        if matches!(&target, Value::Object(_)) && !self.object_target_available(&target) {
+            return Err(RuntimeError::new("Object call: target is zero!"));
+        }
+
+        // FnLocal/LocalN return the selected object's live C4Value cell
+        // (C4Script.cpp:3423-3433,4591-4605), including through an arrow.
+        if evaluated_args.len() == 1 && name == "LocalN" {
+            let local_name = match evaluated_args[0].read()? {
+                Value::String(name) => name,
+                other => {
+                    return Err(RuntimeError::new(format!(
+                        "LocalN: expected string for name, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            return Ok(ReturnValue::Reference(self.tracked_cell(self.localn_cell(
+                env,
+                &local_name,
+                Some(target),
+            ))));
+        }
+        if evaluated_args.len() == 1 && name == "Local" {
+            let index = Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
+            return Ok(ReturnValue::Reference(
+                self.tracked_cell(self.numbered_local_cell(env, index, Some(target))),
+            ));
+        }
+
+        if let Some(dispatch) = self.method_reference_dispatch {
+            let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
+            dispatch_args.push(target);
+            dispatch_args.push(Value::String(name.to_owned().into()));
+            dispatch_args.push(Value::Bool(false));
+            for arg in &evaluated_args {
+                dispatch_args.push(arg.read()?);
+            }
+            let _guard = CallerContextGuard::enter(Some(env.caller_context()));
+            let _parameter_override = CallParameterOverrideGuard::enter(0);
+            return dispatch(&dispatch_args)
+                .map(ValueReference::into_lvalue)
+                .map(ReturnValue::Reference);
+        }
+
+        // Without a host method bridge, an arrow call can still select a
+        // script `func &` from the executing object context. The continuation
+        // call-result task owns the target and ten parameter slots already.
+        let _parameter_override = CallParameterOverrideGuard::enter(0);
+        self.invoke_reference(
+            name,
+            evaluated_args,
+            depth + 1,
+            env.object_state.clone(),
+            Some(env.caller_context()),
+        )
+        .map(ReturnValue::Reference)
+    }
+
+    /// Object-call entry for the continuation executor. Its argument task has
+    /// already evaluated every operand exactly once, so this path must never
+    /// call `build_call_args` (doing so would replay side effects after a
+    /// resumed nested host call). The ordinary recursive evaluator above uses
+    /// `invoke_property_call_with_target_raw` and remains responsible for
+    /// constructing the call arguments itself.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_property_call_with_target_call_args_raw(
+        &self,
+        mut target: Value,
+        name: &str,
+        evaluated_args: CallArgs,
+        failsafe: bool,
+        return_reference: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let target_sweep_cursor = object_reference_sweep_cursor();
+        if let Value::Proplist(map) = &target {
+            if let Some(Value::Int(id)) = map.get("id") {
+                if *id > 0 {
+                    target = Value::Object(*id as u64);
+                }
+            }
+        }
+        if failsafe && !self.direct_call_function_known(name) {
+            // An unresolved `->~name` was compiled without AB_CALLFS. Its
+            // explicit operands have already run in the continuation path;
+            // the zero target is therefore discarded with a nil result
+            // (C4AulParse.cpp:3215-3231).
+            return Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)));
+        }
+
+        if matches!(&target, Value::Object(id) if *id != 0)
+            && name == "LocalN"
+            && evaluated_args.len() == 1
+            && !self.functions.contains_key(name)
+        {
+            clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+            if !self.object_target_available(&target) {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
+            let local_name = match evaluated_args[0].read()? {
+                Value::String(local_name) => local_name,
+                other => {
+                    return Err(RuntimeError::new(format!(
+                        "LocalN: expected string for name, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            return Ok(ReturnValue::Value(TrackedValue::runtime(
+                self.localn_cell(env, &local_name, Some(target))
+                    .borrow()
+                    .clone(),
+            )));
+        }
+
+        if matches!(&target, Value::Object(id) if *id != 0)
+            && name == "Local"
+            && evaluated_args.len() == 1
+            && !self.functions.contains_key(name)
+            && !self.has_host_function(name)
+        {
+            clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+            if !self.object_target_available(&target) {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
+            let index = Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
+            if index < 0 {
+                return Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)));
+            }
+            return Ok(ReturnValue::Value(TrackedValue::runtime(
+                self.numbered_local_cell(env, index, Some(target))
+                    .borrow()
+                    .clone(),
+            )));
+        }
+
+        if matches!(&target, Value::Object(id) if *id != 0)
+            && name == "SetLocal"
+            && !self.functions.contains_key(name)
+            && !self.has_host_function(name)
+        {
+            clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+            if !self.object_target_available(&target) {
+                return Err(RuntimeError::new("Object call: target is zero!"));
+            }
+            let index = Self::slot_index_from_value(
+                "SetLocal()",
+                evaluated_args
+                    .first()
+                    .map(CallArg::read)
+                    .transpose()?
+                    .unwrap_or(Value::Nil),
+            )?;
+            let value = evaluated_args
+                .get(1)
+                .map(CallArg::read_tracked)
+                .transpose()?
+                .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
+            let explicit_target = evaluated_args.get(2).map(CallArg::read).transpose()?;
+            let target = explicit_target
+                .filter(|value| {
+                    !matches!(
+                        value,
+                        Value::Nil
+                            | Value::Int(0)
+                            | Value::Bool(false)
+                            | Value::RawBool(0)
+                            | Value::Object(0)
+                    )
+                })
+                .unwrap_or(target);
+            self.tracked_cell(self.numbered_local_cell(env, index, Some(target)))
+                .write_tracked(value.clone())?;
+            return Ok(ReturnValue::Value(value));
+        }
+
+        if matches!(
+            &target,
+            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0) | Value::Object(0)
+        ) || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+        {
+            return Err(RuntimeError::new("Object call: target is zero!"));
+        }
+
+        match &target {
+            Value::Object(_) | Value::C4Id(_) if self.method_dispatch.is_some() => {
+                clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
+                if !self.object_target_available(&target) {
+                    return Err(RuntimeError::new("Object call: target is zero!"));
+                }
+                let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
+                dispatch_args.push(target.clone());
+                dispatch_args.push(Value::String(name.to_owned().into()));
+                dispatch_args.push(Value::Bool(failsafe));
+                for arg in &evaluated_args {
+                    dispatch_args.push(arg.read()?);
+                }
+                let references_out = evaluated_args
+                    .iter()
+                    .any(|arg| matches!(arg, CallArg::Reference(_)))
+                    .then_some(self.method_ref_args_dispatch)
+                    .flatten();
+                let dispatch = self
+                    .method_dispatch
+                    .ok_or_else(|| RuntimeError::new("method dispatch vanished"))?;
+                let _guard = CallerContextGuard::enter(Some(env.caller_context()));
+                let _parameter_override = CallParameterOverrideGuard::enter(0);
+                let Some(references_out) = references_out else {
+                    return dispatch(&dispatch_args)
+                        .map(|value| ReturnValue::Value(TrackedValue::runtime(value)));
+                };
+                let (result, finals) = references_out(&dispatch_args)?;
+                for (arg, settled) in evaluated_args.iter().zip(finals) {
+                    if let CallArg::Reference(reference) = arg {
+                        if reference.read()? != settled {
+                            reference.write(settled)?;
+                        }
+                    }
+                }
+                Ok(ReturnValue::Value(TrackedValue::runtime(result)))
+            }
+            Value::Object(_) | Value::C4Id(_) => {
+                let _parameter_override = CallParameterOverrideGuard::enter(0);
+                let result = self.invoke_raw(
+                    name,
+                    evaluated_args,
+                    depth + 1,
+                    env.object_state.clone(),
+                    Some(env.caller_context()),
+                )?;
+                Ok(if return_reference {
+                    result
+                } else {
+                    materialize_target_call_result(result)
+                })
+            }
+            other if self.method_dispatch.is_some() => Err(RuntimeError::new(format!(
+                "Object call: Invalid target type {}, expected object or id!",
+                other.type_name()
+            ))),
+            _ => {
+                let _parameter_override = CallParameterOverrideGuard::enter(0);
+                let result = self.invoke_raw(
+                    name,
+                    evaluated_args,
+                    depth + 1,
+                    env.object_state.clone(),
+                    Some(env.caller_context()),
+                )?;
+                Ok(if return_reference {
+                    result
+                } else {
+                    materialize_target_call_result(result)
+                })
             }
         }
     }
@@ -10966,6 +13353,19 @@ impl<'a> Vm<'a> {
         // then pads/truncates to the selected call layout before FnSetLocal
         // can mutate the destination.
         let evaluated_args = self.build_call_args(None, None, args, env, depth)?;
+        self.set_local_evaluated_tracked(&evaluated_args, default_target, env, parameter_slots)
+    }
+
+    fn set_local_evaluated_tracked(
+        &self,
+        evaluated_args: &CallArgs,
+        default_target: Option<Value>,
+        env: &mut Environment,
+        parameter_slots: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        // The argument expressions have already run. This helper is shared by
+        // the continuation dispatcher so an explicit target expression is not
+        // evaluated a second time after the call frame is assembled.
         let _parameter_slots = ValueStackReservation::reserve(parameter_slots)?;
         let index = match evaluated_args
             .first()
@@ -11139,6 +13539,3182 @@ enum ControlFlow {
     Return(ReturnValue),
 }
 
+impl ControlFlow {
+    fn clear_object_reference(&mut self, object_id: u64) {
+        if let Self::Return(value) = self {
+            value.clear_object_reference(object_id);
+        }
+    }
+}
+
+/// Result of a script call that may cross an embedding-owned synchronous
+/// boundary. A suspension owns the complete compiled frame state; the VM and
+/// its host tables are borrowed only while one run step is active.
+pub enum ScriptCallOutcome {
+    Complete(Value),
+    Suspended(ScriptSuspension),
+}
+
+/// Result of a native callback that resumed a nested script call.  The
+/// suspended child stays attached to the native phase machine until the host
+/// completes that child's request; this prevents the VM from treating the
+/// child as the native callback's final return value and replaying the native
+/// prefix on the next call.
+pub enum NativeCallOutcome {
+    Complete(Value),
+    Suspended {
+        child: ScriptSuspension,
+        continuation: Box<dyn NativeContinuation>,
+    },
+}
+
+/// Owned suffix of a native callback that started a nested script call.
+///
+/// Implementations must retain only owned state.  In particular, an engine
+/// adapter must reacquire its host context around every `resume_child` call;
+/// retaining `&mut Engine`, a host-context borrow, or a TLS guard here would
+/// let a section switch resume through stale state.  `resume` consumes the
+/// adapter so a completed suffix cannot be invoked a second time.
+pub trait NativeContinuation: 'static {
+    /// Consume the native phase machine after the child completed (or failed)
+    /// and either finish the native call or park its next child suspension.
+    fn resume(
+        self: Box<Self>,
+        child_result: Result<Value, RuntimeError>,
+    ) -> Result<NativeCallOutcome, RuntimeError>;
+
+    /// Resume one retained child frame using the embedding engine that owns
+    /// that child.  The implementation must enter and leave a fresh host
+    /// context around this one slice, including when the child yields again.
+    fn resume_child(
+        &mut self,
+        child: ScriptSuspension,
+        value: Value,
+    ) -> Result<ScriptCallOutcome, RuntimeError>;
+
+    /// Sweep object references held by the native suffix at the real removal
+    /// boundary.  The default is correct for adapters with no object-bearing
+    /// state; engine adapters override it for child cells and retained IDs.
+    fn clear_object_references(&mut self, _object_id: u64) {}
+
+    /// Additional C4Value slots owned by the native suffix while it is parked.
+    /// The child frame's own slots are counted by the VM recursively.
+    fn value_stack_slots(&self) -> usize {
+        0
+    }
+}
+
+/// Lift a nested script call into the surrounding native callback's
+/// `Result<Value, RuntimeError>` ABI.
+///
+/// A completed child immediately enters the native suffix.  A suspended
+/// child becomes a host continuation containing both the child frame and the
+/// owned suffix, so the outer script resumes the suffix exactly once after
+/// the embedding commits the child's request.  A suffix may park another
+/// child, allowing section switches (or other host boundaries) to repeat.
+pub fn lift_native_continuation(
+    child: ScriptCallOutcome,
+    continuation: Box<dyn NativeContinuation>,
+) -> Result<Value, RuntimeError> {
+    match child {
+        ScriptCallOutcome::Complete(value) => match continuation.resume(Ok(value))? {
+            NativeCallOutcome::Complete(value) => Ok(value),
+            NativeCallOutcome::Suspended {
+                child,
+                continuation,
+            } => Err(native_continuation_error(child, continuation)),
+        },
+        ScriptCallOutcome::Suspended(child) => Err(native_continuation_error(child, continuation)),
+    }
+}
+
+fn native_continuation_error(
+    child: ScriptSuspension,
+    continuation: Box<dyn NativeContinuation>,
+) -> RuntimeError {
+    RuntimeError::new("script execution suspended by nested native callback").with_control(
+        RuntimeControl::HostContinuation {
+            request: Rc::clone(&child.request),
+            resume_value: child.resume_value.clone(),
+            continuation: Some(Box::new(NativeContinuationState {
+                child,
+                continuation,
+            })),
+        },
+    )
+}
+
+/// Internal result used while one suspended script frame resumes another.
+/// A public call materializes a reference return into [`Value`], but a nested
+/// caller must receive the original `ReturnValue` so an assignment can still
+/// write through the same lvalue after the child crosses a host boundary.
+enum ContinuationResult {
+    Complete(ReturnValue),
+    Suspended(ScriptSuspension),
+}
+
+pub struct ScriptSuspension {
+    request: Rc<dyn Any>,
+    resume_value: Value,
+    continuation: Box<ScriptContinuation>,
+    this_value: Value,
+}
+
+impl ScriptSuspension {
+    pub fn request<T: Any>(&self) -> Option<&T> {
+        self.request.as_ref().downcast_ref()
+    }
+
+    /// Clear a removed object's references from every owned frame, operand,
+    /// argument and lvalue before the host performs its synchronous removal.
+    /// Suspensions deliberately outlive the active-reference TLS registry, so
+    /// this direct walk is the ownership boundary used by embedding engines.
+    pub fn clear_object_references(&mut self, object_id: u64) {
+        self.resume_value.clear_object_reference(object_id);
+        self.this_value.clear_object_reference(object_id);
+        self.continuation.clear_object_reference(object_id);
+    }
+
+    /// Reserve the complete captured C4Aul value-stack context while an
+    /// embedding engine performs work synchronous with the yielding native
+    /// call. The returned guard owns the TLS charge and borrows no part of
+    /// this suspension, so the engine may release its suspension registry
+    /// borrow, run nested callbacks, and clear object references before the
+    /// guard is dropped. Stored continuation reservations remain detached.
+    pub fn attach_value_stack_context(&self) -> Result<ScriptValueStackContext, RuntimeError> {
+        self.continuation.attach_value_stack_context()
+    }
+
+    fn into_parts(self) -> (Rc<dyn Any>, Value, Box<ScriptContinuation>) {
+        (self.request, self.resume_value, self.continuation)
+    }
+
+    pub(crate) fn resume(self, vm: &Vm<'_>) -> Result<ScriptCallOutcome, RuntimeError> {
+        let vm = vm.clone().with_this(self.this_value);
+        match self
+            .continuation
+            .resume_with_value(&vm, self.resume_value)?
+        {
+            ContinuationResult::Complete(value) => {
+                value.into_value_on_stack().map(ScriptCallOutcome::Complete)
+            }
+            ContinuationResult::Suspended(suspension) => {
+                Ok(ScriptCallOutcome::Suspended(suspension))
+            }
+        }
+    }
+
+    pub(crate) fn resume_with_value(
+        self,
+        vm: &Vm<'_>,
+        value: Value,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        let vm = vm.clone().with_this(self.this_value);
+        match self.continuation.resume_with_value(&vm, value)? {
+            ContinuationResult::Complete(value) => {
+                value.into_value_on_stack().map(ScriptCallOutcome::Complete)
+            }
+            ContinuationResult::Suspended(suspension) => {
+                Ok(ScriptCallOutcome::Suspended(suspension))
+            }
+        }
+    }
+
+    /// Resume a frame with an embedding-selected receiver. The original
+    /// receiver is retained for standalone suspension users, but an engine
+    /// section switch can remove that object before the suffix runs. In that
+    /// case the C++ callback resumes without the stale `this` object.
+    pub(crate) fn resume_with_value_and_this(
+        self,
+        vm: &Vm<'_>,
+        value: Value,
+        this_value: Value,
+    ) -> Result<ScriptCallOutcome, RuntimeError> {
+        let vm = vm.clone().with_this(this_value);
+        let this_value = vm.this_value.clone();
+        match self
+            .continuation
+            .resume_with_value_and_this(&vm, value, this_value)?
+        {
+            ContinuationResult::Complete(value) => {
+                value.into_value_on_stack().map(ScriptCallOutcome::Complete)
+            }
+            ContinuationResult::Suspended(suspension) => {
+                Ok(ScriptCallOutcome::Suspended(suspension))
+            }
+        }
+    }
+}
+
+/// Owned value-stack charge for synchronous work performed while a
+/// [`ScriptSuspension`] remains detached. It intentionally carries no borrow
+/// of the suspension so an embedding engine can reacquire or remove that
+/// suspension during the guarded operation.
+#[must_use = "drop the context after synchronous host work completes"]
+pub struct ScriptValueStackContext {
+    _reservation: ValueStackReservation,
+}
+
+struct ScriptContinuation {
+    frame: ContinuationFrame,
+    /// Receiver selected by the frame that yielded. A nested object call can
+    /// be resumed through an outer VM after that outer host scope has been
+    /// restored, so the child must carry its own `this` value.
+    this_value: Value,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum ContinuationFrame {
+    Compiled(CompiledContinuationFrame),
+    Ast(AstContinuationFrame),
+}
+
+/// A suspended child and the native suffix that owns its next phase.  The
+/// complete [`ScriptSuspension`] is retained so its request, receiver, cells,
+/// and object-bearing operands remain sweepable while the parent is parked.
+struct NativeContinuationState {
+    child: ScriptSuspension,
+    continuation: Box<dyn NativeContinuation>,
+}
+
+enum NativeResumeOutcome {
+    Complete(Value),
+    Suspended {
+        request: Rc<dyn Any>,
+        resume_value: Value,
+        pending: PendingContinuation,
+    },
+}
+
+fn resume_native_continuation(
+    state: NativeContinuationState,
+    resume_value: Value,
+    parameter_slots: usize,
+) -> Result<NativeResumeOutcome, RuntimeError> {
+    let NativeContinuationState {
+        child,
+        mut continuation,
+    } = state;
+    // The callback's native frame was detached when the parent suspension was
+    // handed to the host. Reacquire both that frame and the adapter-owned
+    // slots for this one child-resume slice; both guards drop before a new
+    // suspension is returned to the host.
+    let _native_value_stack = ValueStackReservation::reserve(
+        parameter_slots.saturating_add(continuation.value_stack_slots()),
+    )?;
+    let child_result = match continuation.resume_child(child, resume_value) {
+        Ok(ScriptCallOutcome::Complete(value)) => Ok(value),
+        Ok(ScriptCallOutcome::Suspended(child)) => {
+            return Ok(native_resume_outcome(
+                NativeCallOutcome::Suspended {
+                    child,
+                    continuation,
+                },
+                parameter_slots,
+            ));
+        }
+        Err(error) => Err(error),
+    };
+    Ok(native_resume_outcome(
+        continuation.resume(child_result)?,
+        parameter_slots,
+    ))
+}
+
+fn native_resume_outcome(
+    outcome: NativeCallOutcome,
+    parameter_slots: usize,
+) -> NativeResumeOutcome {
+    match outcome {
+        NativeCallOutcome::Complete(value) => NativeResumeOutcome::Complete(value),
+        NativeCallOutcome::Suspended {
+            child,
+            continuation,
+        } => {
+            let request = Rc::clone(&child.request);
+            let resume_value = child.resume_value.clone();
+            NativeResumeOutcome::Suspended {
+                request,
+                resume_value,
+                pending: PendingContinuation::Native {
+                    state: NativeContinuationState {
+                        child,
+                        continuation,
+                    },
+                    parameter_slots,
+                },
+            }
+        }
+    }
+}
+
+enum PendingContinuation {
+    Host {
+        value: Value,
+        /// Native callback parameter slots remain live while the embedding
+        /// engine completes the requested operation synchronously. They are
+        /// counted by the inline context guard and are not reattached for
+        /// ordinary script resumption.
+        parameter_slots: usize,
+    },
+    Child(Box<ScriptContinuation>),
+    Native {
+        state: NativeContinuationState,
+        /// The native callback's own parameter slots remain live while its
+        /// suffix resumes the child.  The callback's reservation unwinds when
+        /// the host takes ownership of the continuation, so this count must
+        /// travel with the pending native state and be reacquired per slice.
+        parameter_slots: usize,
+    },
+}
+
+struct CompiledContinuationFrame {
+    function: Arc<Function>,
+    compiled: Arc<CompiledFunction>,
+    call_targets: SmallVec<[CompiledCallTarget; 32]>,
+    env: Environment,
+    depth: usize,
+    caller: Option<ScriptCallerContext>,
+    returns_reference: bool,
+    instruction: usize,
+    stack: SmallVec<[TrackedValue; 16]>,
+    registered_slots: SmallVec<[bool; 16]>,
+    assignment_targets: SmallVec<[(usize, LValueRef); 4]>,
+    /// The callee's ten parameter slots plus hoisted function vars remain
+    /// live across a C++ host boundary. Re-acquire them only while this
+    /// continuation is executing; dropping a standalone suspension must not
+    /// charge an unrelated later call.
+    frame_value_stack: usize,
+    /// Operand prefix retained after the yielding call's arguments were
+    /// removed. This reservation is detached while the host owns the
+    /// continuation and reattached only for resume or inline work.
+    stack_value_stack: ValueStackReservation,
+    pending: PendingContinuation,
+}
+
+/// Owned tree-walking execution state.  The AST evaluator normally borrows
+/// its environment and operand stack for one call, but a host continuation may
+/// leave from any nested expression.  Keep the remaining tasks and values
+/// beside the cloned environment so resumption cannot replay the statement or
+/// borrow the old VM.
+struct AstContinuationFrame {
+    function: Arc<Function>,
+    env: Environment,
+    depth: usize,
+    caller: Option<ScriptCallerContext>,
+    returns_reference: bool,
+    tasks: Vec<AstTask>,
+    values: Vec<AstValue>,
+    /// Number of legacy parameter-list scopes whose first reference must stay
+    /// pinned while later operands run.  The synchronous evaluator keeps the
+    /// equivalent registry guard over the whole list; an AST continuation
+    /// needs to recreate that TLS scope for each resumed task.
+    legacy_path_pin_scope_depth: usize,
+    /// Base C4Aul parameter/function-var slots owned by this frame.
+    frame_value_stack: usize,
+    /// DirectExec/eval diagnostic state is recreated around every active
+    /// resume slice; the guard itself never crosses the host boundary.
+    direct_exec_context: Option<DirectExecContinuationContext>,
+    pending: PendingContinuation,
+}
+
+/// Values that survive an interpreted execution step.  References are kept
+/// as lvalues until a call/assignment consumes them; ordinary expressions use
+/// the value arm.  The frame owns this stack, so section switching never
+/// leaves a borrow into the active VM on the host side.
+enum AstValue {
+    Value(Value),
+    /// A value result whose backing identity must survive until a later
+    /// equality or container operation. The ordinary `Value` arm remains
+    /// useful for synthesized scalar results, while calls and direct
+    /// expression evaluation carry their `TrackedValue` metadata through the
+    /// suspended scheduler.
+    Tracked(TrackedValue),
+    Return(ReturnValue),
+    /// A reference result whose operation slot remains live until its parent
+    /// consumes the value.  Prefix increment/decrement leaves the lvalue on
+    /// C4Aul's stack, so a host-backed read during materialization must still
+    /// see that slot after the task that performed the write has returned.
+    Held(ReturnValue, ValueStackReservation),
+    Flow(ControlFlow),
+}
+
+impl AstValue {
+    fn detached_value_stack_count(&self) -> usize {
+        match self {
+            Self::Held(_, value_stack) if !value_stack.is_attached() => value_stack.count(),
+            _ => 0,
+        }
+    }
+
+    fn detach_value_stack(&mut self) {
+        if let Self::Held(_, value_stack) = self {
+            value_stack.detach();
+        }
+    }
+
+    fn attach_value_stack(&mut self) {
+        if let Self::Held(_, value_stack) = self {
+            value_stack.attach_unchecked();
+        }
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::Value(value) => {
+                value.clear_object_reference(object_id);
+            }
+            Self::Tracked(value) => value.clear_object_reference(object_id),
+            Self::Return(value) => value.clear_object_reference(object_id),
+            Self::Held(value, value_stack) => {
+                value.clear_object_reference(object_id);
+                // The reservation is owned by the held value and must remain
+                // live until that value is consumed. Reading the binding here
+                // keeps the field intentionally accounted for without
+                // attempting to drop a mutable reference to it.
+                let _ = value_stack;
+            }
+            Self::Flow(flow) => flow.clear_object_reference(object_id),
+        }
+    }
+}
+
+enum AstCallKind {
+    Direct,
+    Global,
+    EffectSlot,
+    MethodReference { target: Value, sweep_cursor: usize },
+    Property { target: Value, sweep_cursor: usize },
+}
+
+/// Queue-time resolution retained by an interpreted call. A C4Aul `AB_CALL`
+/// stores its selected function pointer in the bytecode frame; resolving the
+/// same name after an argument callback yields could otherwise observe a
+/// later host registration or overload.
+#[derive(Clone)]
+enum AstCallTarget {
+    Script(CompiledScriptTarget),
+    Host(RegisteredHostFunction),
+    HostReference(HostReferenceFunction),
+    LegacyConstant(TrackedValue),
+    Builtin,
+    Dynamic,
+}
+
+struct AstCallState {
+    kind: AstCallKind,
+    name: String,
+    args: Arc<Vec<Expr>>,
+    index: usize,
+    evaluated: CallArgs,
+    value_stack: ValueStackReservation,
+    forward_rest: bool,
+    failsafe: bool,
+    return_reference: bool,
+    sweep_cursor: usize,
+    selected_target: Option<AstCallTarget>,
+}
+
+impl AstCallKind {
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::MethodReference { target, .. } | Self::Property { target, .. } => {
+                target.clear_object_reference(object_id);
+            }
+            Self::Direct | Self::Global | Self::EffectSlot => {}
+        }
+    }
+}
+
+impl AstCallState {
+    fn direct_parameter_limit(&self, vm: &Vm<'_>, env: &Environment) -> usize {
+        match self.selected_target.as_ref() {
+            // The target was retained before argument evaluation. Derive the
+            // forwarding/truncation limit from that same signature so a host
+            // re-registration during a yielding argument cannot change which
+            // slots reach the captured callback.
+            Some(AstCallTarget::Script(_)) => MAX_CALL_PARAMETERS,
+            Some(AstCallTarget::Host(function)) => {
+                function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS)
+            }
+            Some(AstCallTarget::HostReference(function)) => {
+                function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS)
+            }
+            Some(AstCallTarget::LegacyConstant(_)) => 0,
+            Some(AstCallTarget::Builtin) => MAX_CALL_PARAMETERS,
+            Some(AstCallTarget::Dynamic) | None => vm.direct_call_parameter_limit(
+                &self.name,
+                vm.resolved_script_function(&self.name, env.engine_scope)
+                    .map(|target| target.function),
+            ),
+        }
+    }
+
+    fn detached_value_stack_count(&self) -> usize {
+        if self.value_stack.is_attached() {
+            0
+        } else {
+            self.value_stack.count()
+        }
+    }
+
+    fn detach_value_stack(&mut self) {
+        self.value_stack.detach();
+    }
+
+    fn attach_value_stack(&mut self) {
+        self.value_stack.attach_unchecked();
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        self.kind.clear_object_reference(object_id);
+        for arg in &mut self.evaluated {
+            arg.clear_object_reference(object_id);
+        }
+    }
+}
+
+enum AstTask {
+    Statements {
+        statements: Arc<Vec<Stmt>>,
+        index: usize,
+        pop_scope: bool,
+    },
+    Statement(Stmt),
+    EvalValue(Expr),
+    EvalReference(Expr),
+    CollectCallArg(AstCallState),
+    CallArgs(AstCallState),
+    /// Finishes a call after its selected target returns. The reservation is
+    /// the callee's target/parameter frame, which must survive a nested host
+    /// suspension but be released before the caller consumes the result.
+    CallResult {
+        value_stack: ValueStackReservation,
+        return_reference: bool,
+        materialize_target: bool,
+    },
+    MethodSlotAfterObject {
+        method: String,
+        args: Arc<Vec<Expr>>,
+    },
+    PropertyCallAfterTarget {
+        name: String,
+        args: Arc<Vec<Expr>>,
+        is_optional: bool,
+        forward_rest: bool,
+        return_reference: bool,
+    },
+    PropertyAfterBase {
+        name: String,
+    },
+    IndexAfterReferenceBase {
+        index: IndexOperand,
+    },
+    IndexAfterReferenceIndex {
+        base: ReturnValue,
+        sweep_cursor: usize,
+    },
+    ArrayAppendAfterBase,
+    ProplistBuild {
+        entries: Arc<Vec<(Expr, Expr)>>,
+        index: usize,
+        values: Vec<(Value, Value)>,
+        value_stack: ValueStackReservation,
+        sweep_cursor: usize,
+    },
+    ProplistAfterKey {
+        entries: Arc<Vec<(Expr, Expr)>>,
+        index: usize,
+        values: Vec<(Value, Value)>,
+        value_stack: ValueStackReservation,
+        sweep_cursor: usize,
+    },
+    ProplistAfterValue {
+        entries: Arc<Vec<(Expr, Expr)>>,
+        index: usize,
+        values: Vec<(Value, Value)>,
+        key: Value,
+        value_stack: ValueStackReservation,
+        entry_sweep_cursor: usize,
+        value_sweep_cursor: usize,
+    },
+    LegacyAfterFirst {
+        args: Arc<Vec<Expr>>,
+        index: usize,
+        forward_rest: bool,
+    },
+    LegacyCollectDiscarded {
+        args: Arc<Vec<Expr>>,
+        index: usize,
+        first: ReturnValue,
+        discarded: Vec<ReturnValue>,
+        value_stack: ValueStackReservation,
+    },
+    SafeNavigationAfterReceiver {
+        steps: Arc<Vec<SafeNavigationStep>>,
+    },
+    SafeNavigationStep {
+        steps: Arc<Vec<SafeNavigationStep>>,
+        index: usize,
+        current: Value,
+    },
+    SafeNavigationAfterIndex {
+        steps: Arc<Vec<SafeNavigationStep>>,
+        index: usize,
+        current: Value,
+    },
+    SafeNavigationAfterCall {
+        steps: Arc<Vec<SafeNavigationStep>>,
+        index: usize,
+    },
+    AssignmentAfterTarget {
+        value: Expr,
+    },
+    AssignmentExprAfterTarget {
+        value: Expr,
+        return_reference: bool,
+    },
+    InvalidAssignmentAfterLeft {
+        operator: &'static str,
+        value: Expr,
+        return_value: bool,
+    },
+    AssignmentPropertyAfterBase {
+        property: String,
+    },
+    AssignmentIndexAfterBase {
+        index: IndexOperand,
+    },
+    AssignmentIndexAfterIndex {
+        base: ReturnValue,
+    },
+    AssignmentAppendAfterBase,
+    AssignmentPrefixAfterTarget {
+        delta: i32,
+        return_old: bool,
+    },
+    SlotAfterIndex {
+        local: bool,
+    },
+    RejectAssignmentValue {
+        operator: &'static str,
+        type_name: &'static str,
+    },
+    CompoundAssignmentAfterTarget {
+        operation: BinaryOp,
+        operator: &'static str,
+        value: Expr,
+        return_reference: bool,
+    },
+    ArrayAppendAssignmentAfterTarget {
+        operation: Option<BinaryOp>,
+        operator: &'static str,
+        value: Expr,
+        return_reference: bool,
+    },
+    StoreFunctionVar(String),
+    StoreAssignment(LValueRef),
+    StoreAssignmentExpr(LValueRef),
+    StoreAssignmentResult {
+        reference: LValueRef,
+        operator: &'static str,
+        return_reference: bool,
+    },
+    CompoundAfterRight {
+        reference: LValueRef,
+        operation: BinaryOp,
+        operator: &'static str,
+        return_reference: bool,
+    },
+    DropValue,
+    MakeReturn {
+        reference: bool,
+    },
+    ApplyUnary(UnaryOp),
+    BinaryAfterLeft {
+        operation: BinaryOp,
+        sweep_cursor: usize,
+        right: Expr,
+    },
+    BinaryAfterRight {
+        operation: BinaryOp,
+        left: TrackedValue,
+        sweep_cursor: usize,
+        value_stack: ValueStackReservation,
+    },
+    ShortCircuitAfterLeft {
+        operation: BinaryOp,
+        right: Expr,
+        return_reference: bool,
+    },
+    ShortCircuitAfterRight {
+        return_reference: bool,
+    },
+    ArrayBuild {
+        elements: Arc<Vec<Expr>>,
+        index: usize,
+        values: Vec<Value>,
+        value_stack: ValueStackReservation,
+        sweep_cursor: usize,
+    },
+    IfAfterCondition {
+        then_branch: Arc<Vec<Stmt>>,
+        else_branch: Option<Arc<Vec<Stmt>>>,
+    },
+    WhileCheck {
+        condition: Expr,
+        body: Arc<Vec<Stmt>>,
+    },
+    WhileAfterCondition {
+        condition: Expr,
+        body: Arc<Vec<Stmt>>,
+    },
+    WhileAfterBody {
+        condition: Expr,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForInit {
+        init: Option<ForInit>,
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForInitDecls {
+        declarations: Arc<Vec<(String, Option<Expr>)>>,
+        index: usize,
+        pending_name: Option<String>,
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForAfterInitExpr {
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForCheck {
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForAfterCondition {
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForAfterBody {
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForAfterIncrement {
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Arc<Vec<Stmt>>,
+    },
+    ForInAfterIterable {
+        variable: String,
+        value_variable: Option<String>,
+        body: Arc<Vec<Stmt>>,
+        sweep_cursor: usize,
+    },
+    ForInNext {
+        variable: String,
+        value_variable: Option<String>,
+        body: Arc<Vec<Stmt>>,
+        iterable: Value,
+        items: Vec<(Value, Option<Value>)>,
+        value_stack: ValueStackReservation,
+        index: usize,
+        sweep_cursor: usize,
+    },
+    ForInAfterBody {
+        variable: String,
+        value_variable: Option<String>,
+        body: Arc<Vec<Stmt>>,
+        iterable: Value,
+        items: Vec<(Value, Option<Value>)>,
+        value_stack: ValueStackReservation,
+        index: usize,
+        sweep_cursor: usize,
+    },
+}
+
+impl AstTask {
+    fn detached_value_stack_count(&self) -> usize {
+        match self {
+            Self::CollectCallArg(call) | Self::CallArgs(call) => call.detached_value_stack_count(),
+            Self::CallResult { value_stack, .. } if !value_stack.is_attached() => {
+                value_stack.count()
+            }
+            Self::ProplistBuild { value_stack, .. }
+            | Self::ProplistAfterKey { value_stack, .. }
+            | Self::ProplistAfterValue { value_stack, .. }
+            | Self::LegacyCollectDiscarded { value_stack, .. }
+            | Self::ArrayBuild { value_stack, .. }
+            | Self::ForInNext { value_stack, .. }
+            | Self::ForInAfterBody { value_stack, .. }
+            | Self::BinaryAfterRight { value_stack, .. }
+                if !value_stack.is_attached() =>
+            {
+                value_stack.count()
+            }
+            _ => 0,
+        }
+    }
+
+    fn detach_value_stack(&mut self) {
+        match self {
+            Self::CollectCallArg(call) | Self::CallArgs(call) => call.detach_value_stack(),
+            Self::CallResult { value_stack, .. } => value_stack.detach(),
+            Self::ProplistBuild { value_stack, .. }
+            | Self::ProplistAfterKey { value_stack, .. }
+            | Self::ProplistAfterValue { value_stack, .. }
+            | Self::LegacyCollectDiscarded { value_stack, .. }
+            | Self::ArrayBuild { value_stack, .. }
+            | Self::ForInNext { value_stack, .. }
+            | Self::ForInAfterBody { value_stack, .. }
+            | Self::BinaryAfterRight { value_stack, .. } => value_stack.detach(),
+            _ => {}
+        }
+    }
+
+    fn attach_value_stack(&mut self) {
+        match self {
+            Self::CollectCallArg(call) | Self::CallArgs(call) => call.attach_value_stack(),
+            Self::CallResult { value_stack, .. } => value_stack.attach_unchecked(),
+            Self::ProplistBuild { value_stack, .. }
+            | Self::ProplistAfterKey { value_stack, .. }
+            | Self::ProplistAfterValue { value_stack, .. }
+            | Self::LegacyCollectDiscarded { value_stack, .. }
+            | Self::ArrayBuild { value_stack, .. }
+            | Self::ForInNext { value_stack, .. }
+            | Self::ForInAfterBody { value_stack, .. }
+            | Self::BinaryAfterRight { value_stack, .. } => value_stack.attach_unchecked(),
+            _ => {}
+        }
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::CollectCallArg(call) | Self::CallArgs(call) => {
+                call.clear_object_reference(object_id);
+            }
+            Self::SafeNavigationStep {
+                current: collection,
+                ..
+            }
+            | Self::SafeNavigationAfterIndex {
+                current: collection,
+                ..
+            } => {
+                collection.clear_object_reference(object_id);
+            }
+            Self::ProplistBuild { values, .. } | Self::ProplistAfterKey { values, .. } => {
+                for (key, value) in values {
+                    key.clear_object_reference(object_id);
+                    value.clear_object_reference(object_id);
+                }
+            }
+            Self::ProplistAfterValue { values, key, .. } => {
+                for (value_key, value) in values {
+                    value_key.clear_object_reference(object_id);
+                    value.clear_object_reference(object_id);
+                }
+                key.clear_object_reference(object_id);
+            }
+            Self::LegacyCollectDiscarded {
+                first, discarded, ..
+            } => {
+                first.clear_object_reference(object_id);
+                for value in discarded {
+                    value.clear_object_reference(object_id);
+                }
+            }
+            Self::AssignmentIndexAfterIndex { base } => {
+                base.clear_object_reference(object_id);
+            }
+            Self::IndexAfterReferenceIndex { base, .. } => {
+                base.clear_object_reference(object_id);
+            }
+            Self::StoreAssignment(reference)
+            | Self::StoreAssignmentExpr(reference)
+            | Self::StoreAssignmentResult { reference, .. }
+            | Self::CompoundAfterRight { reference, .. } => {
+                reference.clear_object_reference(object_id);
+            }
+            Self::BinaryAfterRight { left, .. } => {
+                left.clear_object_reference(object_id);
+            }
+            Self::ArrayBuild { values, .. } => {
+                for value in values {
+                    value.clear_object_reference(object_id);
+                }
+            }
+            Self::ForInNext {
+                iterable, items, ..
+            }
+            | Self::ForInAfterBody {
+                iterable, items, ..
+            } => {
+                iterable.clear_object_reference(object_id);
+                for (key_or_item, map_value) in items {
+                    key_or_item.clear_object_reference(object_id);
+                    if let Some(map_value) = map_value {
+                        map_value.clear_object_reference(object_id);
+                    }
+                }
+            }
+            Self::Statement(_)
+            | Self::Statements { .. }
+            | Self::EvalValue(_)
+            | Self::EvalReference(_)
+            | Self::CallResult { .. }
+            | Self::MethodSlotAfterObject { .. }
+            | Self::PropertyCallAfterTarget { .. }
+            | Self::PropertyAfterBase { .. }
+            | Self::IndexAfterReferenceBase { .. }
+            | Self::ArrayAppendAfterBase
+            | Self::LegacyAfterFirst { .. }
+            | Self::SafeNavigationAfterReceiver { .. }
+            | Self::SafeNavigationAfterCall { .. }
+            | Self::AssignmentAfterTarget { .. }
+            | Self::AssignmentExprAfterTarget { .. }
+            | Self::InvalidAssignmentAfterLeft { .. }
+            | Self::AssignmentPropertyAfterBase { .. }
+            | Self::AssignmentIndexAfterBase { .. }
+            | Self::AssignmentAppendAfterBase
+            | Self::AssignmentPrefixAfterTarget { .. }
+            | Self::SlotAfterIndex { .. }
+            | Self::RejectAssignmentValue { .. }
+            | Self::CompoundAssignmentAfterTarget { .. }
+            | Self::ArrayAppendAssignmentAfterTarget { .. }
+            | Self::StoreFunctionVar(_)
+            | Self::DropValue
+            | Self::MakeReturn { .. }
+            | Self::ApplyUnary(_)
+            | Self::BinaryAfterLeft { .. }
+            | Self::ShortCircuitAfterLeft { .. }
+            | Self::ShortCircuitAfterRight { .. }
+            | Self::IfAfterCondition { .. }
+            | Self::WhileCheck { .. }
+            | Self::WhileAfterCondition { .. }
+            | Self::WhileAfterBody { .. }
+            | Self::ForInit { .. }
+            | Self::ForInitDecls { .. }
+            | Self::ForAfterInitExpr { .. }
+            | Self::ForCheck { .. }
+            | Self::ForAfterCondition { .. }
+            | Self::ForAfterBody { .. }
+            | Self::ForAfterIncrement { .. }
+            | Self::ForInAfterIterable { .. } => {}
+        }
+    }
+}
+
+impl PendingContinuation {
+    fn total_value_stack_count(&self) -> usize {
+        match self {
+            Self::Host {
+                parameter_slots, ..
+            } => *parameter_slots,
+            Self::Child(child) => child.total_value_stack_count(),
+            Self::Native {
+                state,
+                parameter_slots,
+            } => parameter_slots
+                .saturating_add(state.child.continuation.total_value_stack_count())
+                .saturating_add(state.continuation.value_stack_slots()),
+        }
+    }
+
+    fn detach_value_stack(&mut self) {
+        match self {
+            Self::Child(child) => child.detach_value_stack(),
+            Self::Native { state, .. } => state.child.continuation.detach_value_stack(),
+            Self::Host { .. } => {}
+        }
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::Host { value, .. } => {
+                value.clear_object_reference(object_id);
+            }
+            Self::Child(child) => {
+                child.clear_object_reference(object_id);
+            }
+            Self::Native { state, .. } => {
+                state.child.clear_object_references(object_id);
+                state.continuation.clear_object_references(object_id);
+            }
+        }
+    }
+}
+
+impl ScriptContinuation {
+    fn clear_object_reference(&mut self, object_id: u64) {
+        self.this_value.clear_object_reference(object_id);
+        self.frame.clear_object_reference(object_id);
+    }
+}
+
+impl ContinuationFrame {
+    fn total_value_stack_count(&self) -> usize {
+        match self {
+            Self::Compiled(frame) => {
+                let stack = if frame.stack_value_stack.is_attached() {
+                    0
+                } else {
+                    frame.stack_value_stack.count()
+                };
+                frame.frame_value_stack + stack + frame.pending.total_value_stack_count()
+            }
+            Self::Ast(frame) => {
+                frame.frame_value_stack
+                    + frame
+                        .tasks
+                        .iter()
+                        .map(AstTask::detached_value_stack_count)
+                        .sum::<usize>()
+                    + frame
+                        .values
+                        .iter()
+                        .map(AstValue::detached_value_stack_count)
+                        .sum::<usize>()
+                    + frame.pending.total_value_stack_count()
+            }
+        }
+    }
+
+    fn detach_value_stack(&mut self) {
+        match self {
+            Self::Compiled(frame) => frame.detach_value_stack(),
+            Self::Ast(frame) => {
+                for task in &mut frame.tasks {
+                    task.detach_value_stack();
+                }
+                for value in &mut frame.values {
+                    value.detach_value_stack();
+                }
+                frame.pending.detach_value_stack();
+            }
+        }
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        match self {
+            Self::Compiled(frame) => frame.clear_object_reference(object_id),
+            Self::Ast(frame) => frame.clear_object_reference(object_id),
+        }
+    }
+}
+
+impl CompiledContinuationFrame {
+    fn detach_value_stack(&mut self) {
+        self.stack_value_stack.detach();
+        self.pending.detach_value_stack();
+    }
+
+    fn clear_object_reference(&mut self, object_id: u64) {
+        self.env.clear_object_reference(object_id);
+        if let Some(caller) = &self.caller {
+            caller.clear_object_reference(object_id);
+        }
+        for value in &mut self.stack {
+            value.clear_object_reference(object_id);
+        }
+        for (_, reference) in &mut self.assignment_targets {
+            reference.clear_object_reference(object_id);
+        }
+        self.pending.clear_object_reference(object_id);
+    }
+}
+
+impl AstContinuationFrame {
+    fn clear_object_reference(&mut self, object_id: u64) {
+        self.env.clear_object_reference(object_id);
+        if let Some(caller) = &self.caller {
+            caller.clear_object_reference(object_id);
+        }
+        for task in &mut self.tasks {
+            task.clear_object_reference(object_id);
+        }
+        for value in &mut self.values {
+            value.clear_object_reference(object_id);
+        }
+        self.pending.clear_object_reference(object_id);
+    }
+}
+
+struct AstMachineState {
+    tasks: Vec<AstTask>,
+    values: Vec<AstValue>,
+    legacy_path_pin_scope_depth: usize,
+    frame_value_stack: usize,
+}
+
+impl AstMachineState {
+    fn detach_value_stack(&mut self) {
+        for task in &mut self.tasks {
+            task.detach_value_stack();
+        }
+        for value in &mut self.values {
+            value.detach_value_stack();
+        }
+    }
+
+    fn attach_value_stack(&mut self) -> Result<(), RuntimeError> {
+        let detached = self
+            .tasks
+            .iter()
+            .map(AstTask::detached_value_stack_count)
+            .sum::<usize>()
+            + self
+                .values
+                .iter()
+                .map(AstValue::detached_value_stack_count)
+                .sum::<usize>();
+        ValueStackReservation::check(detached)?;
+        for task in &mut self.tasks {
+            task.attach_value_stack();
+        }
+        for value in &mut self.values {
+            value.attach_value_stack();
+        }
+        Ok(())
+    }
+
+    fn pop_value(&mut self) -> Result<Value, RuntimeError> {
+        match self.values.pop() {
+            Some(AstValue::Value(value)) => Ok(value),
+            Some(AstValue::Tracked(value)) => Ok(value.value),
+            Some(AstValue::Return(value)) => value.into_value(),
+            Some(AstValue::Held(value, value_stack)) => {
+                let result = value.into_value();
+                drop(value_stack);
+                result
+            }
+            Some(AstValue::Flow(_)) => Err(RuntimeError::new(
+                "internal interpreted stack flow/value mismatch",
+            )),
+            None => Err(RuntimeError::new(
+                "internal interpreted value stack underflow",
+            )),
+        }
+    }
+
+    fn pop_return(&mut self) -> Result<ReturnValue, RuntimeError> {
+        match self.values.pop() {
+            Some(AstValue::Return(value)) => Ok(value),
+            Some(AstValue::Value(value)) => Ok(ReturnValue::Value(TrackedValue::runtime(value))),
+            Some(AstValue::Tracked(value)) => Ok(ReturnValue::Value(value)),
+            Some(AstValue::Held(value, value_stack)) => {
+                let result = Ok(value);
+                drop(value_stack);
+                result
+            }
+            Some(AstValue::Flow(_)) => Err(RuntimeError::new(
+                "internal interpreted stack flow/reference mismatch",
+            )),
+            None => Err(RuntimeError::new(
+                "internal interpreted value stack underflow",
+            )),
+        }
+    }
+
+    fn pop_tracked(&mut self) -> Result<TrackedValue, RuntimeError> {
+        match self.values.pop() {
+            Some(AstValue::Tracked(value)) => Ok(value),
+            Some(AstValue::Value(value)) => Ok(TrackedValue::runtime(value)),
+            Some(AstValue::Return(value)) => value.into_tracked(),
+            Some(AstValue::Held(value, value_stack)) => {
+                let result = value.into_tracked();
+                drop(value_stack);
+                result
+            }
+            Some(AstValue::Flow(_)) => Err(RuntimeError::new(
+                "internal interpreted value stack flow/tracked mismatch",
+            )),
+            None => Err(RuntimeError::new(
+                "internal interpreted value stack underflow",
+            )),
+        }
+    }
+
+    fn push_flow(&mut self, flow: ControlFlow) {
+        self.values.push(AstValue::Flow(flow));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn suspend(
+        self,
+        mut error: RuntimeError,
+        this_value: Value,
+        function: &Function,
+        env: &Environment,
+        depth: usize,
+        caller: Option<ScriptCallerContext>,
+        returns_reference: bool,
+        direct_exec_context: Option<&DirectExecContinuationContext>,
+    ) -> RuntimeError {
+        let host_parameter_slots = error.take_host_parameter_slots();
+        let Some(control) = error.take_control() else {
+            return error;
+        };
+        let RuntimeControl::HostContinuation {
+            request,
+            resume_value,
+            continuation,
+        } = control;
+        let pending = match continuation {
+            None => PendingContinuation::Host {
+                value: resume_value.clone(),
+                parameter_slots: host_parameter_slots.unwrap_or(0),
+            },
+            Some(continuation) => match continuation.downcast::<ScriptContinuation>() {
+                Ok(continuation) => PendingContinuation::Child(continuation),
+                Err(continuation) => match continuation.downcast::<NativeContinuationState>() {
+                    Ok(state) => PendingContinuation::Native {
+                        state: *state,
+                        parameter_slots: host_parameter_slots.unwrap_or(0),
+                    },
+                    Err(continuation) => {
+                        return error.with_control(RuntimeControl::HostContinuation {
+                            request,
+                            resume_value,
+                            continuation: Some(continuation),
+                        });
+                    }
+                },
+            },
+        };
+        let mut state = self;
+        state.detach_value_stack();
+        error.with_control(RuntimeControl::HostContinuation {
+            request,
+            resume_value,
+            continuation: Some(Box::new(ScriptContinuation {
+                frame: ContinuationFrame::Ast(AstContinuationFrame {
+                    // Ordinary AST execution borrows the installed function;
+                    // retain an owned copy only once a callback actually
+                    // suspends and the frame must outlive this invocation.
+                    function: Arc::new(function.clone()),
+                    env: env.clone(),
+                    depth,
+                    caller,
+                    returns_reference,
+                    tasks: state.tasks,
+                    values: state.values,
+                    legacy_path_pin_scope_depth: state.legacy_path_pin_scope_depth,
+                    frame_value_stack: state.frame_value_stack,
+                    direct_exec_context: direct_exec_context.cloned(),
+                    pending,
+                }),
+                this_value,
+            })),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        mut self,
+        vm: &Vm<'_>,
+        env: &mut Environment,
+        depth: usize,
+        returns_reference: bool,
+        function: &Function,
+        caller: Option<ScriptCallerContext>,
+        direct_exec_context: Option<&DirectExecContinuationContext>,
+    ) -> Result<ControlFlow, RuntimeError> {
+        loop {
+            let Some(task) = self.tasks.pop() else {
+                return match self.values.pop() {
+                    Some(AstValue::Flow(flow)) => Ok(flow),
+                    Some(other) => {
+                        self.values.push(other);
+                        Ok(ControlFlow::Normal)
+                    }
+                    None => Ok(ControlFlow::Normal),
+                };
+            };
+            // `LEGACY_PATH_PINS` is thread-local because ordinary evaluation
+            // borrows the active VM. A continuation owns its first lvalue
+            // across host callbacks, so re-enter the equivalent C++ scope for
+            // every task while a comma/legacy parameter list is live.
+            let _legacy_pin_registry =
+                (self.legacy_path_pin_scope_depth > 0).then(LegacyPathPinRegistryGuard::enter);
+            match task {
+                AstTask::Statements {
+                    statements,
+                    index,
+                    pop_scope,
+                } => {
+                    match self.values.pop() {
+                        Some(AstValue::Flow(flow)) => {
+                            if pop_scope {
+                                env.pop_scope();
+                            }
+                            self.push_flow(flow);
+                            continue;
+                        }
+                        Some(value) => self.values.push(value),
+                        None => {}
+                    }
+                    if index >= statements.len() {
+                        if pop_scope {
+                            env.pop_scope();
+                        }
+                        continue;
+                    }
+                    self.tasks.push(AstTask::Statements {
+                        statements: Arc::clone(&statements),
+                        index: index + 1,
+                        pop_scope,
+                    });
+                    self.tasks
+                        .push(AstTask::Statement(statements[index].clone()));
+                }
+                AstTask::Statement(statement) => {
+                    if !Vm::statement_may_suspend(&statement) {
+                        match vm.execute_statement(&statement, env, depth, returns_reference) {
+                            Ok(ControlFlow::Normal) => {}
+                            Ok(flow) => self.push_flow(flow),
+                            Err(error) => {
+                                return Err(self.suspend(
+                                    error,
+                                    vm.this_value.clone(),
+                                    function,
+                                    env,
+                                    depth,
+                                    caller.clone(),
+                                    returns_reference,
+                                    direct_exec_context,
+                                ));
+                            }
+                        }
+                    } else if let Err(error) =
+                        vm.run_ast_statement(&mut self, statement, env, depth, returns_reference)
+                    {
+                        return Err(self.suspend(
+                            error,
+                            vm.this_value.clone(),
+                            function,
+                            env,
+                            depth,
+                            caller.clone(),
+                            returns_reference,
+                            direct_exec_context,
+                        ));
+                    }
+                }
+                AstTask::EvalValue(expr) => {
+                    if Vm::expression_may_suspend(&expr) {
+                        vm.schedule_ast_expression(&mut self, expr, env, depth)?;
+                    } else {
+                        match vm.evaluate_tracked(&expr, env, depth) {
+                            Ok(value) => self.values.push(AstValue::Tracked(value)),
+                            Err(error) => {
+                                return Err(self.suspend(
+                                    error,
+                                    vm.this_value.clone(),
+                                    function,
+                                    env,
+                                    depth,
+                                    caller.clone(),
+                                    returns_reference,
+                                    direct_exec_context,
+                                ));
+                            }
+                        }
+                    }
+                }
+                AstTask::EvalReference(expr) => {
+                    if Vm::expression_may_suspend(&expr) {
+                        vm.schedule_ast_reference_expression(&mut self, expr, env, depth)?;
+                    } else {
+                        let _pin_registry = LegacyPathPinRegistryGuard::enter();
+                        let _pin_creation = LegacyPathPinCreationGuard::enter();
+                        match vm.evaluate_reference_or_value(&expr, env, depth) {
+                            Ok(value) => self.values.push(AstValue::Return(value)),
+                            Err(error) => {
+                                return Err(self.suspend(
+                                    error,
+                                    vm.this_value.clone(),
+                                    function,
+                                    env,
+                                    depth,
+                                    caller.clone(),
+                                    returns_reference,
+                                    direct_exec_context,
+                                ));
+                            }
+                        }
+                    }
+                }
+                AstTask::CallResult {
+                    value_stack,
+                    return_reference,
+                    materialize_target,
+                } => {
+                    let value = self.pop_return()?;
+                    // Global-call result materialization is a property of the
+                    // AB_CALLGLOBAL destination slot, even when the caller
+                    // requested a reference result. A malformed or legacy
+                    // `func &` may still return a value; C++ copies that value
+                    // into the target slot before the reference-aware parent
+                    // consumes it. Actual references pass through unchanged.
+                    let value = if materialize_target {
+                        materialize_target_call_result(value)
+                    } else {
+                        value
+                    };
+                    self.values.push(if return_reference {
+                        AstValue::Return(value)
+                    } else {
+                        AstValue::Tracked(value.into_set_tracked_on_stack()?)
+                    });
+                    // The callee frame/target prefix is no longer live once
+                    // its result has been converted onto the caller stack.
+                    drop(value_stack);
+                }
+                AstTask::MethodSlotAfterObject { method, args } => {
+                    let target = self.pop_value()?;
+                    let mut value_stack = ValueStackReservation::empty();
+                    // Keep the arrow target resident while its arguments are
+                    // evaluated, matching the target slot left by AB_CALL.
+                    value_stack.grow(1)?;
+                    self.tasks.push(AstTask::CallArgs(AstCallState {
+                        kind: AstCallKind::MethodReference {
+                            target,
+                            sweep_cursor: object_reference_sweep_cursor(),
+                        },
+                        name: method,
+                        args,
+                        index: 0,
+                        evaluated: CallArgs::new(),
+                        value_stack,
+                        forward_rest: false,
+                        failsafe: false,
+                        return_reference: true,
+                        sweep_cursor: 0,
+                        selected_target: None,
+                    }));
+                }
+                AstTask::PropertyCallAfterTarget {
+                    name,
+                    args,
+                    is_optional,
+                    forward_rest,
+                    return_reference,
+                } => {
+                    let target = self.pop_value()?;
+                    let mut value_stack = ValueStackReservation::empty();
+                    value_stack.grow(1)?;
+                    self.tasks.push(AstTask::CallArgs(AstCallState {
+                        kind: AstCallKind::Property {
+                            target,
+                            sweep_cursor: object_reference_sweep_cursor(),
+                        },
+                        name,
+                        args,
+                        index: 0,
+                        evaluated: CallArgs::new(),
+                        value_stack,
+                        forward_rest,
+                        failsafe: is_optional,
+                        return_reference,
+                        sweep_cursor: 0,
+                        selected_target: None,
+                    }));
+                }
+                AstTask::PropertyAfterBase { name } => {
+                    let base = self.pop_value()?;
+                    self.values
+                        .push(AstValue::Value(vm.eval_property(base, &name, env)?));
+                }
+                AstTask::IndexAfterReferenceBase { index } => {
+                    let base = self.pop_return()?;
+                    match index {
+                        IndexOperand::EmbeddedString(index) => {
+                            let value = vm
+                                .index_value_reference_or_value(
+                                    base,
+                                    Value::String(vm.literal_string(&index)),
+                                    env,
+                                )?
+                                .into_value_on_stack()?;
+                            self.values.push(AstValue::Value(value));
+                        }
+                        IndexOperand::Dynamic(index) => {
+                            self.tasks.push(AstTask::IndexAfterReferenceIndex {
+                                base,
+                                sweep_cursor: object_reference_sweep_cursor(),
+                            });
+                            self.tasks.push(AstTask::EvalValue(*index));
+                        }
+                    }
+                }
+                AstTask::IndexAfterReferenceIndex {
+                    mut base,
+                    sweep_cursor,
+                } => {
+                    let index = self.pop_value()?;
+                    base.clear_object_reference_sweeps(sweep_cursor);
+                    let value = vm
+                        .index_value_reference_or_value(base, index, env)?
+                        .into_value_on_stack()?;
+                    self.values.push(AstValue::Value(value));
+                }
+                AstTask::ArrayAppendAfterBase => {
+                    let base = self.pop_return()?;
+                    let value = match base {
+                        ReturnValue::Reference(reference) => vm
+                            .append_array_slot(reference)
+                            .map(ReturnValue::Reference)?
+                            .into_value_on_stack()?,
+                        ReturnValue::Value(value) => {
+                            match &value.value {
+                                Value::Array(elements) if elements.len() < ARRAY_MAX_SIZE => {}
+                                Value::Array(_) => return Err(RuntimeError::new("out of memory")),
+                                Value::Nil => {
+                                    return Err(RuntimeError::new(
+                                        "array append accesss: can't access nil as an array!",
+                                    ));
+                                }
+                                other => {
+                                    return Err(RuntimeError::new(format!(
+                                        "array append accesss: can't access {} as an array!",
+                                        other.type_name()
+                                    )));
+                                }
+                            }
+                            Value::Nil
+                        }
+                    };
+                    self.values.push(AstValue::Value(value));
+                }
+                AstTask::ProplistBuild {
+                    entries,
+                    index,
+                    values,
+                    value_stack,
+                    sweep_cursor,
+                } => {
+                    if index >= entries.len() {
+                        let mut map = ValueMap::with_capacity(values.len());
+                        for (key, value) in values {
+                            c4_map_assign_set(&mut map, key, value);
+                        }
+                        self.values.push(AstValue::Value(Value::Proplist(map)));
+                    } else {
+                        self.tasks.push(AstTask::ProplistAfterKey {
+                            entries: Arc::clone(&entries),
+                            index,
+                            values,
+                            value_stack,
+                            sweep_cursor,
+                        });
+                        self.tasks
+                            // AB_MAP takes GetRefVal() for both operands and
+                            // lets the destination map slot apply its own
+                            // C4Value::Set. Preserve a reference-returning
+                            // expression so a retained zero C4ID reaches
+                            // `c4_map_assign_set` and can remove the fresh
+                            // map entry (C4AulExec.cpp:887-903).
+                            .push(AstTask::EvalReference(entries[index].0.clone()));
+                    }
+                }
+                AstTask::ProplistAfterKey {
+                    entries,
+                    index,
+                    mut values,
+                    mut value_stack,
+                    sweep_cursor,
+                } => {
+                    let key = self.pop_return()?.into_value_on_stack()?;
+                    value_stack.grow(1)?;
+                    clear_proplist_values_for_object_reference_sweeps(&mut values, sweep_cursor);
+                    let value_sweep_cursor = object_reference_sweep_cursor();
+                    self.tasks.push(AstTask::ProplistAfterValue {
+                        entries: Arc::clone(&entries),
+                        index,
+                        values,
+                        key,
+                        value_stack,
+                        entry_sweep_cursor: sweep_cursor,
+                        value_sweep_cursor,
+                    });
+                    self.tasks
+                        .push(AstTask::EvalReference(entries[index].1.clone()));
+                }
+                AstTask::ProplistAfterValue {
+                    entries,
+                    index,
+                    mut values,
+                    key,
+                    mut value_stack,
+                    entry_sweep_cursor,
+                    value_sweep_cursor,
+                } => {
+                    let value = self.pop_return()?.into_value_on_stack()?;
+                    value_stack.grow(1)?;
+                    clear_proplist_values_for_object_reference_sweeps(
+                        &mut values,
+                        entry_sweep_cursor,
+                    );
+                    let mut key = key;
+                    clear_value_for_object_reference_sweeps(&mut key, value_sweep_cursor);
+                    values.push((key, value));
+                    self.tasks.push(AstTask::ProplistBuild {
+                        entries,
+                        index: index + 1,
+                        values,
+                        value_stack,
+                        sweep_cursor: object_reference_sweep_cursor(),
+                    });
+                }
+                AstTask::LegacyAfterFirst {
+                    args,
+                    index,
+                    forward_rest,
+                } => {
+                    let first = self.pop_return()?;
+                    if index >= args.len() {
+                        self.legacy_path_pin_scope_depth =
+                            self.legacy_path_pin_scope_depth.saturating_sub(1);
+                        self.values.push(AstValue::Value(first.into_value()?));
+                    } else {
+                        let mut value_stack = ValueStackReservation::empty();
+                        value_stack.grow(1)?;
+                        self.tasks.push(AstTask::LegacyCollectDiscarded {
+                            args: Arc::clone(&args),
+                            index,
+                            first,
+                            discarded: Vec::new(),
+                            value_stack,
+                        });
+                        self.tasks.push(AstTask::EvalReference(args[index].clone()));
+                    }
+                    let _ = forward_rest;
+                }
+                AstTask::LegacyCollectDiscarded {
+                    args,
+                    index,
+                    first,
+                    mut discarded,
+                    mut value_stack,
+                } => {
+                    discarded.push(self.pop_return()?);
+                    value_stack.grow(1)?;
+                    if index + 1 < args.len() {
+                        self.tasks.push(AstTask::LegacyCollectDiscarded {
+                            args: Arc::clone(&args),
+                            index: index + 1,
+                            first,
+                            discarded,
+                            value_stack,
+                        });
+                        self.tasks
+                            .push(AstTask::EvalReference(args[index + 1].clone()));
+                    } else {
+                        drop(discarded);
+                        self.legacy_path_pin_scope_depth =
+                            self.legacy_path_pin_scope_depth.saturating_sub(1);
+                        self.values.push(AstValue::Value(first.into_value()?));
+                    }
+                }
+                AstTask::SafeNavigationAfterReceiver { steps } => {
+                    let current = self.pop_value()?;
+                    self.tasks.push(AstTask::SafeNavigationStep {
+                        steps,
+                        index: 0,
+                        current,
+                    });
+                }
+                AstTask::SafeNavigationStep {
+                    steps,
+                    index,
+                    current,
+                } => {
+                    let Some(step) = steps.get(index).cloned() else {
+                        self.values.push(AstValue::Value(current));
+                        continue;
+                    };
+                    if step.nil_guard && matches!(current, Value::Nil) {
+                        self.values.push(AstValue::Value(Value::Nil));
+                        continue;
+                    }
+                    match &step.operation {
+                        NavigationOperation::Index(IndexOperand::EmbeddedString(key)) => {
+                            let next =
+                                vm.eval_index(current, Value::String(vm.literal_string(key)), env)?;
+                            self.tasks.push(AstTask::SafeNavigationStep {
+                                steps,
+                                index: index + 1,
+                                current: next,
+                            });
+                        }
+                        NavigationOperation::Index(IndexOperand::Dynamic(key)) => {
+                            self.tasks.push(AstTask::SafeNavigationAfterIndex {
+                                steps,
+                                index,
+                                current,
+                            });
+                            self.tasks.push(AstTask::EvalValue((**key).clone()));
+                        }
+                        NavigationOperation::ArrayAppend => {
+                            let next = match current {
+                                Value::Array(elements) if elements.len() < ARRAY_MAX_SIZE => {
+                                    Value::Nil
+                                }
+                                Value::Array(_) => {
+                                    return Err(RuntimeError::new("out of memory"));
+                                }
+                                Value::Nil => {
+                                    return Err(RuntimeError::new(
+                                        "array append accesss: can't access nil as an array!",
+                                    ));
+                                }
+                                other => {
+                                    return Err(RuntimeError::new(format!(
+                                        "array append accesss: can't access {} as an array!",
+                                        other.type_name()
+                                    )));
+                                }
+                            };
+                            self.tasks.push(AstTask::SafeNavigationStep {
+                                steps,
+                                index: index + 1,
+                                current: next,
+                            });
+                        }
+                        NavigationOperation::Property(name) => {
+                            let next = vm.eval_property(current, name, env)?;
+                            self.tasks.push(AstTask::SafeNavigationStep {
+                                steps,
+                                index: index + 1,
+                                current: next,
+                            });
+                        }
+                        NavigationOperation::MethodCall {
+                            name,
+                            args,
+                            is_optional,
+                            forward_rest,
+                        } => {
+                            self.tasks
+                                .push(AstTask::SafeNavigationAfterCall { steps, index });
+                            let mut value_stack = ValueStackReservation::empty();
+                            value_stack.grow(1)?;
+                            self.tasks.push(AstTask::CallArgs(AstCallState {
+                                kind: AstCallKind::Property {
+                                    target: current,
+                                    sweep_cursor: object_reference_sweep_cursor(),
+                                },
+                                name: name.clone(),
+                                args: Arc::new(args.clone()),
+                                index: 0,
+                                evaluated: CallArgs::new(),
+                                value_stack,
+                                forward_rest: *forward_rest,
+                                failsafe: *is_optional,
+                                return_reference: false,
+                                sweep_cursor: 0,
+                                selected_target: None,
+                            }));
+                        }
+                    }
+                }
+                AstTask::SafeNavigationAfterIndex {
+                    steps,
+                    index,
+                    current,
+                } => {
+                    let key = self.pop_value()?;
+                    let next = vm.eval_index(current, key, env)?;
+                    self.tasks.push(AstTask::SafeNavigationStep {
+                        steps,
+                        index: index + 1,
+                        current: next,
+                    });
+                }
+                AstTask::SafeNavigationAfterCall { steps, index } => {
+                    let current = self.pop_value()?;
+                    self.tasks.push(AstTask::SafeNavigationStep {
+                        steps,
+                        index: index + 1,
+                        current,
+                    });
+                }
+                AstTask::AssignmentAfterTarget { value } => match self.pop_return()? {
+                    ReturnValue::Reference(reference) => {
+                        self.tasks.push(AstTask::StoreAssignmentResult {
+                            reference,
+                            operator: "=",
+                            return_reference: false,
+                        });
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                    ReturnValue::Value(left) => {
+                        let type_name = Vm::c4v_type_name(left.value.c4v_type());
+                        self.tasks.push(AstTask::RejectAssignmentValue {
+                            operator: "=",
+                            type_name,
+                        });
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                },
+                AstTask::AssignmentExprAfterTarget {
+                    value,
+                    return_reference,
+                } => match self.pop_return()? {
+                    ReturnValue::Reference(reference) => {
+                        self.tasks.push(AstTask::StoreAssignmentResult {
+                            reference,
+                            operator: "=",
+                            return_reference,
+                        });
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                    ReturnValue::Value(left) => {
+                        let type_name = Vm::c4v_type_name(left.value.c4v_type());
+                        self.tasks.push(AstTask::RejectAssignmentValue {
+                            operator: "=",
+                            type_name,
+                        });
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                },
+                AstTask::InvalidAssignmentAfterLeft {
+                    operator,
+                    value,
+                    return_value,
+                } => {
+                    let left = self.pop_value()?;
+                    if operator == "??=" && !matches!(left, Value::Nil) {
+                        if return_value {
+                            self.values.push(AstValue::Value(left));
+                        }
+                        continue;
+                    }
+                    let type_name = Vm::c4v_type_name(left.c4v_type());
+                    self.tasks.push(AstTask::RejectAssignmentValue {
+                        operator,
+                        type_name,
+                    });
+                    self.tasks.push(AstTask::EvalValue(value));
+                }
+                AstTask::AssignmentPropertyAfterBase { property } => {
+                    let _pin_registry = LegacyPathPinRegistryGuard::enter();
+                    let _pin_creation = LegacyPathPinCreationGuard::enter();
+                    let base = self.pop_return()?;
+                    self.values.push(AstValue::Return(
+                        vm.property_reference_or_value(base, &property, env)?,
+                    ));
+                }
+                AstTask::AssignmentIndexAfterBase { index } => {
+                    let _pin_registry = LegacyPathPinRegistryGuard::enter();
+                    let _pin_creation = LegacyPathPinCreationGuard::enter();
+                    let base = self.pop_return()?;
+                    match index {
+                        IndexOperand::EmbeddedString(index) => {
+                            self.values
+                                .push(AstValue::Return(vm.index_value_reference_or_value(
+                                    base,
+                                    Value::String(vm.literal_string(&index)),
+                                    env,
+                                )?))
+                        }
+                        IndexOperand::Dynamic(index) => {
+                            self.tasks.push(AstTask::AssignmentIndexAfterIndex { base });
+                            self.tasks.push(AstTask::EvalValue(*index));
+                        }
+                    }
+                }
+                AstTask::AssignmentIndexAfterIndex { base } => {
+                    let _pin_registry = LegacyPathPinRegistryGuard::enter();
+                    let _pin_creation = LegacyPathPinCreationGuard::enter();
+                    let index = self.pop_value()?;
+                    self.values.push(AstValue::Return(
+                        vm.index_value_reference_or_value(base, index, env)?,
+                    ));
+                }
+                AstTask::SlotAfterIndex { local } => {
+                    let index = Vm::slot_index_from_value(
+                        if local { "Local()" } else { "Var()" },
+                        self.pop_value()?,
+                    )?;
+                    let value =
+                        if local && (vm.retain_global_call_context_for_host_paths || index < 0) {
+                            ReturnValue::Value(TrackedValue::runtime(Value::Nil))
+                        } else if local {
+                            ReturnValue::Reference(
+                                vm.tracked_cell(env.object_state.local_slot_cell(index)),
+                            )
+                        } else {
+                            ReturnValue::Reference(
+                                vm.tracked_cell(frame_slot_cell(&env.frame_locals, index)),
+                            )
+                        };
+                    self.values.push(AstValue::Return(value));
+                }
+                AstTask::AssignmentAppendAfterBase => {
+                    let base = self.pop_return()?;
+                    self.values.push(AstValue::Return(match base {
+                        ReturnValue::Reference(reference) => {
+                            ReturnValue::Reference(vm.append_array_slot(reference)?)
+                        }
+                        ReturnValue::Value(value) => match &value.value {
+                            Value::Array(elements) if elements.len() < ARRAY_MAX_SIZE => {
+                                // A self-owned temporary array loses the
+                                // append reference, but AB_ARRAY_APPEND still
+                                // validates the collection before AB_Set.
+                                ReturnValue::Value(TrackedValue::runtime(Value::Nil))
+                            }
+                            Value::Array(_) => return Err(RuntimeError::new("out of memory")),
+                            Value::Nil => {
+                                return Err(RuntimeError::new(
+                                    "array append accesss: can't access nil as an array!",
+                                ))
+                            }
+                            other => {
+                                return Err(RuntimeError::new(format!(
+                                    "array append accesss: can't access {} as an array!",
+                                    other.type_name()
+                                )))
+                            }
+                        },
+                    }));
+                }
+                AstTask::AssignmentPrefixAfterTarget { delta, return_old } => {
+                    let reference = match self.pop_return()? {
+                        ReturnValue::Reference(reference) => reference,
+                        ReturnValue::Value(_) => {
+                            return Err(RuntimeError::new(
+                                "this assignment target is a value, not a reference",
+                            ));
+                        }
+                    };
+                    // AB_Dec1/AB_Inc1 keeps its lvalue result live while it
+                    // reads and writes a host-backed reference. Preserve the
+                    // operand slot across this scheduler boundary so an
+                    // EffectVar callback sees the same C++ stack shape as the
+                    // recursive evaluator.
+                    let operand_slot = ValueStackReservation::reserve(1)?;
+                    let operation = if delta > 0 { "increment" } else { "decrement" };
+                    let old_value = Vm::counter_operand(reference.read()?, operation)?;
+                    reference.write(Value::Int(old_value.wrapping_add(delta)))?;
+                    self.values.push(if return_old {
+                        drop(operand_slot);
+                        AstValue::Value(Value::Int(old_value))
+                    } else {
+                        AstValue::Held(ReturnValue::Reference(reference), operand_slot)
+                    });
+                }
+                AstTask::RejectAssignmentValue {
+                    operator,
+                    type_name,
+                } => {
+                    return Err(RuntimeError::new(format!(
+                        "operator \"{operator}\" left side: got \"{type_name}\", but expected \"&\"!"
+                    )));
+                }
+                AstTask::CompoundAssignmentAfterTarget {
+                    operation,
+                    operator,
+                    value,
+                    return_reference,
+                } => match self.pop_return()? {
+                    ReturnValue::Reference(reference) => {
+                        if operation == BinaryOp::NilCoalescing {
+                            let current = reference.read()?;
+                            if !matches!(current, Value::Nil) {
+                                self.values.push(if return_reference {
+                                    AstValue::Return(ReturnValue::Reference(reference))
+                                } else {
+                                    AstValue::Value(current)
+                                });
+                                continue;
+                            }
+                        }
+                        self.tasks.push(AstTask::CompoundAfterRight {
+                            reference,
+                            operation,
+                            operator,
+                            return_reference,
+                        });
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                    ReturnValue::Value(left) => {
+                        let type_name = Vm::c4v_type_name(left.value.c4v_type());
+                        self.tasks.push(AstTask::RejectAssignmentValue {
+                            operator,
+                            type_name,
+                        });
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                },
+                AstTask::ArrayAppendAssignmentAfterTarget {
+                    operation,
+                    operator,
+                    value,
+                    return_reference,
+                } => match self.pop_return()? {
+                    ReturnValue::Reference(reference) => {
+                        if let Some(operation) = operation {
+                            self.tasks.push(AstTask::CompoundAfterRight {
+                                reference,
+                                operation,
+                                operator,
+                                return_reference,
+                            });
+                        } else {
+                            self.tasks.push(AstTask::StoreAssignmentResult {
+                                reference,
+                                operator,
+                                return_reference,
+                            });
+                        }
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                    ReturnValue::Value(left) => {
+                        let type_name = Vm::c4v_type_name(left.value.c4v_type());
+                        self.tasks.push(AstTask::RejectAssignmentValue {
+                            operator,
+                            type_name,
+                        });
+                        self.tasks.push(AstTask::EvalValue(value));
+                    }
+                },
+                AstTask::StoreFunctionVar(name) => {
+                    let value = self.pop_value()?;
+                    env.assign_function_var_tracked(&name, TrackedValue::runtime(value))?;
+                }
+                AstTask::StoreAssignment(reference) => {
+                    let value = self.pop_value()?;
+                    reference.write(value)?;
+                }
+                AstTask::StoreAssignmentExpr(reference) => {
+                    let value = self.pop_value()?;
+                    reference.write(value.clone())?;
+                    self.values.push(AstValue::Value(value));
+                }
+                AstTask::StoreAssignmentResult {
+                    reference,
+                    operator,
+                    return_reference,
+                } => {
+                    let value = self.pop_value()?;
+                    if let Some(left) = reference.resolved_legacy_value() {
+                        return Err(RuntimeError::new(format!(
+                            "operator \"{operator}\" left side: got \"{}\", but expected \"&\"!",
+                            Vm::c4v_type_name(left.value.c4v_type())
+                        )));
+                    }
+                    reference.write(value.clone())?;
+                    self.values.push(if return_reference {
+                        AstValue::Return(ReturnValue::Reference(reference))
+                    } else {
+                        AstValue::Value(value)
+                    });
+                }
+                AstTask::CompoundAfterRight {
+                    reference,
+                    operation,
+                    operator,
+                    return_reference,
+                } => {
+                    let right = self.pop_value()?;
+                    if let Some(left) = reference.resolved_legacy_value() {
+                        let expected =
+                            if matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) {
+                                "&"
+                            } else {
+                                "int&"
+                            };
+                        return Err(RuntimeError::new(format!(
+                            "operator \"{operator}\" left side: got \"{}\", but expected \"{expected}\"!",
+                            Vm::c4v_type_name(left.value.c4v_type())
+                        )));
+                    }
+                    let left = reference.read()?;
+                    let value = if matches!(operation, BinaryOp::Concat) {
+                        vm.eval_concat(left, right, env.strict_level, operator)?
+                    } else {
+                        vm.eval_binary(left, &operation, right, env.strict_level, Some(operator))?
+                    };
+                    reference.write(value.clone())?;
+                    self.values.push(if return_reference {
+                        AstValue::Return(ReturnValue::Reference(reference))
+                    } else {
+                        AstValue::Value(value)
+                    });
+                }
+                AstTask::DropValue => {
+                    let _ = self.pop_value()?;
+                }
+                AstTask::MakeReturn { reference } => {
+                    let value = if reference {
+                        self.pop_return()?
+                    } else {
+                        ReturnValue::Value(TrackedValue::runtime(self.pop_value()?))
+                    };
+                    self.push_flow(ControlFlow::Return(value));
+                }
+                AstTask::ApplyUnary(operation) => {
+                    let value = self.pop_value()?;
+                    self.values
+                        .push(AstValue::Value(vm.eval_unary(&operation, value)?));
+                }
+                AstTask::BinaryAfterLeft {
+                    operation,
+                    sweep_cursor,
+                    right,
+                } => {
+                    let left = self.pop_tracked()?;
+                    let value_stack = ValueStackReservation::reserve(1)?;
+                    self.tasks.push(AstTask::BinaryAfterRight {
+                        operation,
+                        left,
+                        sweep_cursor,
+                        value_stack,
+                    });
+                    self.tasks.push(AstTask::EvalValue(right));
+                }
+                AstTask::BinaryAfterRight {
+                    operation,
+                    mut left,
+                    sweep_cursor,
+                    value_stack: _value_stack,
+                } => {
+                    let right = self.pop_tracked()?;
+                    left.clear_object_reference_sweeps(sweep_cursor);
+                    let value = if matches!(operation, BinaryOp::Equal | BinaryOp::NotEqual) {
+                        let equal = vm.values_equal(
+                            &left.value,
+                            &right.value,
+                            env.strict_level,
+                            left.identity.as_ref(),
+                            right.identity.as_ref(),
+                        );
+                        Value::Bool(if matches!(operation, BinaryOp::Equal) {
+                            equal
+                        } else {
+                            !equal
+                        })
+                    } else if matches!(operation, BinaryOp::And | BinaryOp::Or) {
+                        Value::Bool(match operation {
+                            BinaryOp::And => left.value.as_bool() && right.value.as_bool(),
+                            BinaryOp::Or => left.value.as_bool() || right.value.as_bool(),
+                            _ => unreachable!(),
+                        })
+                    } else {
+                        vm.eval_binary(left.value, &operation, right.value, env.strict_level, None)?
+                    };
+                    self.values.push(AstValue::Value(value));
+                }
+                AstTask::ShortCircuitAfterLeft {
+                    operation,
+                    right,
+                    return_reference,
+                } => {
+                    let left = self.pop_return()?;
+                    let left_value = left.as_value()?;
+                    let keep_left = match operation {
+                        BinaryOp::NilCoalescing => !matches!(left_value, Value::Nil),
+                        BinaryOp::And => !left_value.as_bool(),
+                        BinaryOp::Or => left_value.as_bool(),
+                        _ => false,
+                    };
+                    if keep_left {
+                        self.values.push(if return_reference {
+                            AstValue::Return(left)
+                        } else {
+                            AstValue::Tracked(left.into_set_tracked_on_stack()?)
+                        });
+                    } else {
+                        self.tasks
+                            .push(AstTask::ShortCircuitAfterRight { return_reference });
+                        self.tasks.push(if return_reference {
+                            AstTask::EvalReference(right)
+                        } else {
+                            AstTask::EvalValue(right)
+                        });
+                    }
+                }
+                AstTask::ShortCircuitAfterRight { return_reference } => {
+                    let value = self.pop_return()?;
+                    self.values.push(if return_reference {
+                        AstValue::Return(value)
+                    } else {
+                        AstValue::Tracked(value.into_set_tracked_on_stack()?)
+                    });
+                }
+                AstTask::ArrayBuild {
+                    elements,
+                    index,
+                    mut values,
+                    mut value_stack,
+                    sweep_cursor,
+                } => {
+                    if index > 0 {
+                        let value = self.pop_value()?;
+                        value_stack.grow(1)?;
+                        for retained in &mut values {
+                            clear_value_for_object_reference_sweeps(retained, sweep_cursor);
+                        }
+                        values.push(value);
+                    }
+                    if index < elements.len() {
+                        let sweep_cursor = object_reference_sweep_cursor();
+                        self.tasks.push(AstTask::ArrayBuild {
+                            elements: Arc::clone(&elements),
+                            index: index + 1,
+                            values,
+                            value_stack,
+                            sweep_cursor,
+                        });
+                        self.tasks.push(AstTask::EvalValue(elements[index].clone()));
+                    } else {
+                        self.values.push(AstValue::Value(Value::Array(values)));
+                    }
+                }
+                AstTask::IfAfterCondition {
+                    then_branch,
+                    else_branch,
+                } => {
+                    let condition = self.pop_value()?;
+                    let statements = if condition.as_bool() {
+                        Some(then_branch)
+                    } else {
+                        else_branch
+                    };
+                    if let Some(statements) = statements {
+                        env.push_scope();
+                        self.tasks.push(AstTask::Statements {
+                            statements,
+                            index: 0,
+                            pop_scope: true,
+                        });
+                    }
+                }
+                AstTask::WhileCheck { condition, body } => {
+                    self.tasks.push(AstTask::WhileAfterCondition {
+                        condition: condition.clone(),
+                        body: Arc::clone(&body),
+                    });
+                    self.tasks.push(AstTask::EvalValue(condition));
+                }
+                AstTask::WhileAfterCondition { condition, body } => {
+                    if self.pop_value()?.as_bool() {
+                        self.tasks.push(AstTask::WhileAfterBody {
+                            condition,
+                            body: Arc::clone(&body),
+                        });
+                        env.push_scope();
+                        self.tasks.push(AstTask::Statements {
+                            statements: body,
+                            index: 0,
+                            pop_scope: true,
+                        });
+                    }
+                }
+                AstTask::WhileAfterBody { condition, body } => match self.values.pop() {
+                    Some(AstValue::Flow(ControlFlow::Break)) => {}
+                    Some(AstValue::Flow(ControlFlow::LoopContinue)) | None => {
+                        self.tasks.push(AstTask::WhileCheck { condition, body });
+                    }
+                    Some(AstValue::Flow(ControlFlow::Return(value))) => {
+                        self.push_flow(ControlFlow::Return(value));
+                    }
+                    Some(other) => {
+                        self.values.push(other);
+                        self.tasks.push(AstTask::WhileCheck { condition, body });
+                    }
+                },
+                AstTask::ForInit {
+                    init,
+                    condition,
+                    increment,
+                    body,
+                } => match init {
+                    None => self.tasks.push(AstTask::ForCheck {
+                        condition,
+                        increment,
+                        body,
+                    }),
+                    Some(ForInit::Expr(expression)) => {
+                        self.tasks.push(AstTask::ForAfterInitExpr {
+                            condition,
+                            increment,
+                            body,
+                        });
+                        self.tasks.push(AstTask::EvalValue(expression));
+                    }
+                    Some(ForInit::VarDecls(declarations)) => {
+                        self.tasks.push(AstTask::ForInitDecls {
+                            declarations: Arc::new(declarations),
+                            index: 0,
+                            pending_name: None,
+                            condition,
+                            increment,
+                            body,
+                        });
+                    }
+                },
+                AstTask::ForInitDecls {
+                    declarations,
+                    index,
+                    pending_name,
+                    condition,
+                    increment,
+                    body,
+                } => {
+                    if let Some(name) = pending_name {
+                        let value = self.pop_value()?;
+                        env.assign_function_var_tracked(&name, TrackedValue::runtime(value))?;
+                    }
+                    if index >= declarations.len() {
+                        self.tasks.push(AstTask::ForCheck {
+                            condition,
+                            increment,
+                            body,
+                        });
+                    } else {
+                        let (name, initializer) = declarations[index].clone();
+                        self.tasks.push(AstTask::ForInitDecls {
+                            declarations,
+                            index: index + 1,
+                            pending_name: initializer.as_ref().map(|_| name),
+                            condition,
+                            increment,
+                            body,
+                        });
+                        if let Some(initializer) = initializer {
+                            self.tasks.push(AstTask::EvalValue(initializer));
+                        }
+                    }
+                }
+                AstTask::ForAfterInitExpr {
+                    condition,
+                    increment,
+                    body,
+                } => {
+                    let _ = self.pop_value()?;
+                    self.tasks.push(AstTask::ForCheck {
+                        condition,
+                        increment,
+                        body,
+                    });
+                }
+                AstTask::ForCheck {
+                    condition,
+                    increment,
+                    body,
+                } => match condition {
+                    Some(condition) => {
+                        self.tasks.push(AstTask::ForAfterCondition {
+                            condition: Some(condition.clone()),
+                            increment,
+                            body: Arc::clone(&body),
+                        });
+                        self.tasks.push(AstTask::EvalValue(condition));
+                    }
+                    None => {
+                        self.tasks.push(AstTask::ForAfterBody {
+                            condition: None,
+                            increment,
+                            body: Arc::clone(&body),
+                        });
+                        env.push_scope();
+                        self.tasks.push(AstTask::Statements {
+                            statements: body,
+                            index: 0,
+                            pop_scope: true,
+                        });
+                    }
+                },
+                AstTask::ForAfterCondition {
+                    condition,
+                    increment,
+                    body,
+                } => {
+                    if self.pop_value()?.as_bool() {
+                        self.tasks.push(AstTask::ForAfterBody {
+                            condition,
+                            increment,
+                            body: Arc::clone(&body),
+                        });
+                        env.push_scope();
+                        self.tasks.push(AstTask::Statements {
+                            statements: body,
+                            index: 0,
+                            pop_scope: true,
+                        });
+                    }
+                }
+                AstTask::ForAfterBody {
+                    condition,
+                    increment,
+                    body,
+                } => match self.values.pop() {
+                    Some(AstValue::Flow(ControlFlow::Break)) => {}
+                    Some(AstValue::Flow(ControlFlow::Return(value))) => {
+                        self.push_flow(ControlFlow::Return(value));
+                    }
+                    Some(AstValue::Flow(ControlFlow::LoopContinue))
+                    | Some(AstValue::Flow(ControlFlow::Normal))
+                    | None
+                    | Some(AstValue::Value(_))
+                    | Some(AstValue::Tracked(_))
+                    | Some(AstValue::Held(_, _)) => match increment {
+                        Some(increment) => {
+                            self.tasks.push(AstTask::ForAfterIncrement {
+                                condition,
+                                increment: Some(increment.clone()),
+                                body,
+                            });
+                            self.tasks.push(AstTask::EvalValue(increment));
+                        }
+                        None => self.tasks.push(AstTask::ForCheck {
+                            condition,
+                            increment: None,
+                            body,
+                        }),
+                    },
+                    Some(AstValue::Return(_)) => {
+                        return Err(RuntimeError::new(
+                            "internal interpreted loop flow/reference mismatch",
+                        ));
+                    }
+                },
+                AstTask::ForAfterIncrement {
+                    condition,
+                    increment,
+                    body,
+                } => {
+                    let _ = self.pop_value()?;
+                    self.tasks.push(AstTask::ForCheck {
+                        condition,
+                        increment,
+                        body,
+                    });
+                }
+                AstTask::ForInAfterIterable {
+                    variable,
+                    value_variable,
+                    body,
+                    sweep_cursor,
+                } => {
+                    let mut iterable = self.pop_value()?;
+                    clear_value_for_object_reference_sweeps(&mut iterable, sweep_cursor);
+                    let items: Vec<(Value, Option<Value>)> = if value_variable.is_some() {
+                        match &iterable {
+                            Value::Proplist(entries) => entries
+                                .iter()
+                                .map(|(key, value)| (key.clone(), Some(value.clone())))
+                                .collect(),
+                            other => {
+                                return Err(RuntimeError::new(format!(
+                                    "for: map expected, but got {}!",
+                                    other.type_name()
+                                )));
+                            }
+                        }
+                    } else {
+                        match &iterable {
+                            Value::Array(values) => {
+                                values.iter().cloned().map(|value| (value, None)).collect()
+                            }
+                            other => {
+                                return Err(RuntimeError::new(format!(
+                                    "for: array expected, but got {}!",
+                                    other.type_name()
+                                )));
+                            }
+                        }
+                    };
+                    // C4Aul keeps the collection in heap storage while
+                    // AB_FOREACH owns only its fixed iterator/control
+                    // prefix. The array form has the iterator and current
+                    // value (two slots); the map form adds the current map
+                    // value (three slots). Charging every snapshotted item
+                    // makes a large, otherwise legal host array consume the
+                    // 1,024-slot value stack (C4AulExec.cpp:1135-1210).
+                    let snapshot_slots = if value_variable.is_some() { 3 } else { 2 };
+                    let value_stack = ValueStackReservation::reserve(snapshot_slots)?;
+                    self.tasks.push(AstTask::ForInNext {
+                        variable,
+                        value_variable,
+                        body,
+                        iterable,
+                        items,
+                        value_stack,
+                        index: 0,
+                        sweep_cursor: object_reference_sweep_cursor(),
+                    });
+                }
+                AstTask::ForInNext {
+                    variable,
+                    value_variable,
+                    body,
+                    mut iterable,
+                    mut items,
+                    value_stack,
+                    index,
+                    sweep_cursor,
+                } => {
+                    clear_value_for_object_reference_sweeps(&mut iterable, sweep_cursor);
+                    for (key_or_item, map_value) in &mut items {
+                        clear_value_for_object_reference_sweeps(key_or_item, sweep_cursor);
+                        if let Some(map_value) = map_value {
+                            clear_value_for_object_reference_sweeps(map_value, sweep_cursor);
+                        }
+                    }
+                    let Some((key_or_item, map_value)) = items.get(index).cloned() else {
+                        continue;
+                    };
+                    env.assign_function_var_tracked(&variable, TrackedValue::runtime(key_or_item))?;
+                    if let (Some(value_variable), Some(map_value)) =
+                        (value_variable.as_ref(), map_value)
+                    {
+                        env.assign_function_var_tracked(
+                            value_variable,
+                            TrackedValue::runtime(map_value),
+                        )?;
+                    }
+                    let body_sweep_cursor = object_reference_sweep_cursor();
+                    self.tasks.push(AstTask::ForInAfterBody {
+                        variable,
+                        value_variable,
+                        body: Arc::clone(&body),
+                        iterable,
+                        items,
+                        value_stack,
+                        index,
+                        sweep_cursor: body_sweep_cursor,
+                    });
+                    env.push_scope();
+                    self.tasks.push(AstTask::Statements {
+                        statements: body,
+                        index: 0,
+                        pop_scope: true,
+                    });
+                }
+                AstTask::ForInAfterBody {
+                    variable,
+                    value_variable,
+                    body,
+                    mut iterable,
+                    mut items,
+                    value_stack,
+                    index,
+                    sweep_cursor,
+                } => {
+                    // The iterable and snapshot stay live until the body has
+                    // completed, including a body that resumed from a host
+                    // callback. Apply every sweep observed in that interval
+                    // before advancing the cursor.
+                    clear_value_for_object_reference_sweeps(&mut iterable, sweep_cursor);
+                    for (key_or_item, map_value) in &mut items {
+                        clear_value_for_object_reference_sweeps(key_or_item, sweep_cursor);
+                        if let Some(map_value) = map_value {
+                            clear_value_for_object_reference_sweeps(map_value, sweep_cursor);
+                        }
+                    }
+                    match self.values.pop() {
+                        Some(AstValue::Flow(ControlFlow::Break)) => {}
+                        Some(AstValue::Flow(ControlFlow::Return(value))) => {
+                            self.push_flow(ControlFlow::Return(value));
+                        }
+                        Some(AstValue::Flow(ControlFlow::LoopContinue))
+                        | Some(AstValue::Flow(ControlFlow::Normal))
+                        | None
+                        | Some(AstValue::Value(_))
+                        | Some(AstValue::Tracked(_))
+                        | Some(AstValue::Held(_, _)) => {
+                            self.tasks.push(AstTask::ForInNext {
+                                variable,
+                                value_variable,
+                                body,
+                                iterable,
+                                items,
+                                value_stack,
+                                index: index + 1,
+                                sweep_cursor: object_reference_sweep_cursor(),
+                            });
+                        }
+                        Some(AstValue::Return(_)) => {
+                            return Err(RuntimeError::new(
+                                "internal interpreted loop flow/reference mismatch",
+                            ));
+                        }
+                    }
+                }
+                AstTask::CollectCallArg(mut call) => {
+                    let argument = match self.values.pop() {
+                        Some(AstValue::Return(value)) => match value {
+                            ReturnValue::Reference(reference) => CallArg::Reference(reference),
+                            ReturnValue::Value(value) => CallArg::Value(value),
+                        },
+                        Some(AstValue::Tracked(value)) => CallArg::Value(value),
+                        Some(AstValue::Value(value)) => CallArg::runtime(value),
+                        Some(AstValue::Held(value, _)) => match value {
+                            ReturnValue::Reference(reference) => CallArg::Reference(reference),
+                            ReturnValue::Value(value) => CallArg::Value(value),
+                        },
+                        Some(AstValue::Flow(_)) | None => {
+                            return Err(RuntimeError::new(
+                                "internal interpreted call argument underflow",
+                            ));
+                        }
+                    };
+                    // Parse_Params keeps each completed argument on the
+                    // value stack while the next operand runs.  A callback
+                    // can remove an object in that interval, so replay the
+                    // FirstRef sweep over every retained argument before the
+                    // next one is scheduled (C4AulParse.cpp:2311-2344;
+                    // C4Object.cpp:312).
+                    for retained in &mut call.evaluated {
+                        retained.clear_object_reference_sweeps(call.sweep_cursor);
+                    }
+                    match &mut call.kind {
+                        AstCallKind::MethodReference {
+                            target,
+                            sweep_cursor,
+                        }
+                        | AstCallKind::Property {
+                            target,
+                            sweep_cursor,
+                        } => clear_value_for_object_reference_sweeps(target, *sweep_cursor),
+                        AstCallKind::Direct | AstCallKind::Global | AstCallKind::EffectSlot => {}
+                    }
+                    call.evaluated.push(argument);
+                    call.value_stack.grow(1)?;
+                    call.index += 1;
+                    self.tasks.push(AstTask::CallArgs(call));
+                }
+                AstTask::CallArgs(mut call) => {
+                    if call.index < call.args.len() {
+                        let argument = call.args[call.index].clone();
+                        let wants_reference =
+                            vm.ast_call_argument_wants_reference(&call, call.index, env);
+                        call.sweep_cursor = object_reference_sweep_cursor();
+                        self.tasks.push(AstTask::CollectCallArg(call));
+                        self.tasks.push(if wants_reference {
+                            AstTask::EvalReference(argument)
+                        } else {
+                            AstTask::EvalValue(argument)
+                        });
+                        continue;
+                    }
+                    let parameter_limit = match &call.kind {
+                        AstCallKind::Global
+                        | AstCallKind::MethodReference { .. }
+                        | AstCallKind::Property { .. } => MAX_CALL_PARAMETERS,
+                        AstCallKind::EffectSlot => 3,
+                        AstCallKind::Direct => call.direct_parameter_limit(vm, env),
+                    };
+                    if call.evaluated.len() > parameter_limit {
+                        let discarded = call.evaluated.len() - parameter_limit;
+                        call.evaluated.truncate(parameter_limit);
+                        call.value_stack.shrink(discarded);
+                    }
+                    if call.forward_rest {
+                        let limit = match &call.kind {
+                            AstCallKind::Global => MAX_CALL_PARAMETERS,
+                            AstCallKind::Direct => call.direct_parameter_limit(vm, env),
+                            AstCallKind::EffectSlot => 3,
+                            AstCallKind::MethodReference { .. } | AstCallKind::Property { .. } => {
+                                MAX_CALL_PARAMETERS
+                            }
+                        };
+                        let previous_len = call.evaluated.len();
+                        Vm::append_forwarded_args(&mut call.evaluated, env, limit)?;
+                        call.value_stack
+                            .grow(call.evaluated.len().saturating_sub(previous_len))?;
+                    }
+                    // Parse_Params leaves completed operands resident until
+                    // the call opcode transfers them into the callee frame.
+                    // The AST scheduler owns that prefix while evaluating the
+                    // operands, so normalize it at the same transfer point:
+                    // ordinary direct/effect calls hand all slots to their
+                    // boundary, while AB_CALL/AB_CALLGLOBAL retain the target
+                    // slot and the ten-slot parameter frame here. A direct VM
+                    // builtin has no separate callee frame in this scheduler;
+                    // preserve its evaluated operands (except SetLocal,
+                    // whose helper reserves its fixed three-slot frame). The
+                    // global frame is also what lets a nested host callback
+                    // observe a suspended global call without charging it
+                    // twice.
+                    let global_known = match &call.kind {
+                        AstCallKind::Global => match call.selected_target.as_ref() {
+                            Some(AstCallTarget::Dynamic) | None => {
+                                vm.engine_global_script_function(&call.name).is_some()
+                                    || vm.has_host_function(&call.name)
+                                    || (Vm::is_global_vm_builtin(&call.name)
+                                        && !vm.has_host_function(&call.name))
+                            }
+                            Some(_) => true,
+                        },
+                        AstCallKind::Direct
+                        | AstCallKind::EffectSlot
+                        | AstCallKind::MethodReference { .. }
+                        | AstCallKind::Property { .. } => true,
+                    };
+                    match &call.kind {
+                        AstCallKind::Global
+                        | AstCallKind::MethodReference { .. }
+                        | AstCallKind::Property { .. } => {
+                            call.value_stack.resize_to(1)?;
+                            if !matches!(&call.kind, AstCallKind::Global) || global_known {
+                                call.value_stack.grow(MAX_CALL_PARAMETERS)?;
+                            }
+                        }
+                        AstCallKind::Direct
+                            if matches!(
+                                call.selected_target.as_ref(),
+                                Some(AstCallTarget::Builtin)
+                            ) && call.name == "SetLocal" =>
+                        {
+                            call.value_stack.resize_to(0)?;
+                        }
+                        AstCallKind::Direct
+                            if matches!(
+                                call.selected_target.as_ref(),
+                                Some(AstCallTarget::Builtin)
+                            ) => {}
+                        AstCallKind::Direct | AstCallKind::EffectSlot => {
+                            call.value_stack.resize_to(0)?;
+                        }
+                    }
+                    let use_preallocated_global_frame = matches!(&call.kind, AstCallKind::Global)
+                        && global_known
+                        && !matches!(
+                            call.selected_target.as_ref(),
+                            Some(AstCallTarget::Builtin | AstCallTarget::LegacyConstant(_))
+                        );
+                    let _parameter_override =
+                        use_preallocated_global_frame.then(|| CallParameterOverrideGuard::enter(0));
+                    let return_reference = call.return_reference;
+                    let materialize_target = matches!(&call.kind, AstCallKind::Global);
+                    let mut value_stack = ValueStackReservation::empty();
+                    std::mem::swap(&mut value_stack, &mut call.value_stack);
+                    self.tasks.push(AstTask::CallResult {
+                        value_stack,
+                        return_reference,
+                        materialize_target,
+                    });
+                    let caller_context = Some(env.caller_context());
+                    let result = match call.kind {
+                        AstCallKind::Global => {
+                            let selected_target = call.selected_target.take();
+                            let known = global_known;
+                            if !known && !call.failsafe {
+                                Err(RuntimeError::new(format!(
+                                    "unknown function '{}'",
+                                    call.name
+                                )))
+                            } else if !known {
+                                Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)))
+                            } else {
+                                let _context =
+                                    GlobalCallContextGuard::enter(vm.global_call_context_hook);
+                                let global_vm = vm.engine_global_vm();
+                                match selected_target {
+                                    Some(target @ AstCallTarget::Script(_))
+                                    | Some(target @ AstCallTarget::Host(_))
+                                    | Some(target @ AstCallTarget::HostReference(_))
+                                    | Some(target @ AstCallTarget::Builtin) => {
+                                        global_vm.invoke_ast_global_target(
+                                            target,
+                                            &call.name,
+                                            call.evaluated,
+                                            depth,
+                                            env,
+                                            caller_context,
+                                        )
+                                    }
+                                    Some(AstCallTarget::Dynamic) | None => {
+                                        global_vm.invoke_engine_global_raw(
+                                            &call.name,
+                                            call.evaluated,
+                                            depth + 1,
+                                            caller_context,
+                                        )
+                                    }
+                                    Some(AstCallTarget::LegacyConstant(_)) => Err(
+                                        RuntimeError::new(
+                                            "internal error: legacy constant selected for global call",
+                                        ),
+                                    ),
+                                }
+                            }
+                        }
+                        AstCallKind::Direct => {
+                            match call.selected_target.take() {
+                                Some(
+                                    target @ (AstCallTarget::Script(_)
+                                    | AstCallTarget::Host(_)
+                                    | AstCallTarget::HostReference(_)
+                                    | AstCallTarget::LegacyConstant(_)),
+                                ) => vm.invoke_ast_direct_target(
+                                    target,
+                                    &call.name,
+                                    call.evaluated,
+                                    depth,
+                                    env,
+                                    caller_context,
+                                    call.return_reference,
+                                ),
+                                Some(AstCallTarget::Builtin)
+                                | Some(AstCallTarget::Dynamic)
+                                | None => {
+                                    if matches!(call.name.as_str(), "inherited" | "_inherited") {
+                                        // `inherited` is deliberately excluded from
+                                        // compiled calls, so a suspended/AST frame
+                                        // must reproduce the owner-chain selection
+                                        // before falling through to ordinary direct
+                                        // dispatch (C4AulParse.cpp:2775-2798).
+                                        let target = vm.inherited_target(env);
+                                        match target {
+                                            Some(target) => vm.invoke_resolved_script_raw(
+                                                &target.name,
+                                                ScriptFunctionTarget::validated(&target),
+                                                call.evaluated,
+                                                depth + 1,
+                                                env.object_state.clone(),
+                                                caller_context,
+                                            ),
+                                            None => {
+                                                let inherited_name = env.function_name.clone();
+                                                if let Some(host) =
+                                                    vm.host_functions.get(&inherited_name)
+                                                {
+                                                    let _guard = CallerContextGuard::enter(
+                                                        caller_context.clone(),
+                                                    );
+                                                    vm.invoke_host_function_call_args(
+                                                        &inherited_name,
+                                                        host,
+                                                        call.evaluated,
+                                                    )
+                                                    .map(TrackedValue::runtime)
+                                                    .map(ReturnValue::Value)
+                                                } else if let Some(host) =
+                                                    vm.host_reference_function(&inherited_name)
+                                                {
+                                                    let _guard = CallerContextGuard::enter(
+                                                        caller_context.clone(),
+                                                    );
+                                                    vm.invoke_host_reference_function(
+                                                        &inherited_name,
+                                                        host,
+                                                        call.evaluated,
+                                                    )
+                                                    .map(TrackedValue::runtime)
+                                                    .map(ReturnValue::Value)
+                                                } else if call.name == "_inherited" {
+                                                    Ok(ReturnValue::Value(TrackedValue::runtime(
+                                                        Value::Nil,
+                                                    )))
+                                                } else {
+                                                    Err(RuntimeError::new(format!(
+                                                        "inherited: no overloaded function (in {})",
+                                                        env.function_name
+                                                    )))
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // The context-function `this()` is resolved only
+                                        // when no local/global binding, script function,
+                                        // or host function wins.  The recursive evaluator
+                                        // performs the same precedence check before its
+                                        // fallback to `this_value` (C4AulParse.cpp:2824-2866;
+                                        // C4Script.cpp:220-223).  A suspended argument list
+                                        // reaches this dispatcher after evaluation, so do
+                                        // the bound-name check here as well; the global-call
+                                        // path deliberately keeps its nil target semantics.
+                                        if call.name == "this" && vm.has_bound_this(env) {
+                                            return Err(self.suspend(
+                                                RuntimeError::new(
+                                                    "cannot call bound variable 'this'",
+                                                ),
+                                                vm.this_value.clone(),
+                                                function,
+                                                env,
+                                                depth,
+                                                caller.clone(),
+                                                returns_reference,
+                                                direct_exec_context,
+                                            ));
+                                        }
+                                        let target = vm
+                                            .resolved_script_function(&call.name, env.engine_scope);
+                                        if let Some(target) = target {
+                                            vm.invoke_resolved_script_raw(
+                                                &call.name,
+                                                target,
+                                                call.evaluated,
+                                                depth + 1,
+                                                env.object_state.clone(),
+                                                caller_context,
+                                            )
+                                        } else if call.return_reference && call.name == "EffectVar"
+                                        {
+                                            vm.effect_slot_from_call_args(call.evaluated, env)
+                                        } else if let Some(target) =
+                                            vm.resolved_host_function(&call.name)
+                                        {
+                                            vm.invoke_resolved_host_raw(
+                                                &call.name,
+                                                target,
+                                                call.evaluated,
+                                                depth + 1,
+                                                caller_context,
+                                            )
+                                        } else if call.name == "this" {
+                                            // Resolve the context-function fallback
+                                            // before legacy constants, matching the
+                                            // ordinary evaluator and C4Script.cpp.
+                                            Ok(ReturnValue::Value(TrackedValue::runtime(
+                                                vm.this_value.clone(),
+                                            )))
+                                        } else if let Some(value) =
+                                            vm.legacy_constant_tracked(&call.name, env.strict_level)
+                                        {
+                                            if !call.evaluated.is_empty() {
+                                                Err(RuntimeError::new(
+                                            "parameters not allowed in functional usage of constants",
+                                        ))
+                                            } else {
+                                                Ok(ReturnValue::Value(value))
+                                            }
+                                        } else if let Some(value) = vm
+                                            .invoke_direct_vm_builtin_call_args(
+                                                &call.name,
+                                                &call.evaluated,
+                                                env,
+                                                call.return_reference,
+                                            )?
+                                        {
+                                            Ok(value)
+                                        } else if call.name == "Par" && call.evaluated.len() <= 1 {
+                                            // `Par(n)` reads the executing call's
+                                            // parameter slot, including its live
+                                            // reference when the surrounding expression
+                                            // asks for one (C4AulExec.cpp:1127-1140).
+                                            let index = call
+                                                .evaluated
+                                                .first()
+                                                .map(CallArg::read)
+                                                .transpose()?
+                                                .map(|value| match value {
+                                                    Value::Int(index) => Ok(index),
+                                                    Value::Nil => Ok(0),
+                                                    Value::Bool(flag) => Ok(i32::from(flag)),
+                                                    Value::RawBool(raw) => Ok(raw as u32 as i32),
+                                                    other => Err(RuntimeError::new(format!(
+                                                        "Par: index of type {}, int expected",
+                                                        other.type_name()
+                                                    ))),
+                                                })
+                                                .transpose()?
+                                                .unwrap_or(0);
+                                            let reference = usize::try_from(index)
+                                                .ok()
+                                                .filter(|index| *index < MAX_CALL_PARAMETERS)
+                                                .and_then(|index| env.call_args.get(index))
+                                                .map(Binding::lvalue)
+                                                .unwrap_or_else(|| {
+                                                    Binding::direct(Value::Nil).lvalue()
+                                                });
+                                            if call.return_reference {
+                                                Ok(ReturnValue::Reference(reference))
+                                            } else {
+                                                reference.read_tracked().map(ReturnValue::Value)
+                                            }
+                                        } else if Vm::is_global_vm_builtin(&call.name) {
+                                            vm.invoke_global_builtin_raw(
+                                                &call.name,
+                                                &call.evaluated,
+                                                env,
+                                                depth + 1,
+                                            )
+                                        } else if env.engine_scope {
+                                            vm.invoke_engine_raw(
+                                                &call.name,
+                                                call.evaluated,
+                                                depth + 1,
+                                                env.object_state.clone(),
+                                                caller_context,
+                                            )
+                                        } else {
+                                            vm.invoke_raw(
+                                                &call.name,
+                                                call.evaluated,
+                                                depth + 1,
+                                                env.object_state.clone(),
+                                                caller_context,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        AstCallKind::EffectSlot => {
+                            vm.effect_slot_from_call_args(call.evaluated, env)
+                        }
+                        AstCallKind::MethodReference {
+                            target,
+                            sweep_cursor,
+                        } => vm.invoke_method_reference_call_args_raw(
+                            target,
+                            &call.name,
+                            call.evaluated,
+                            sweep_cursor,
+                            env,
+                            depth,
+                        ),
+                        AstCallKind::Property { target, .. } => vm
+                            .invoke_property_call_with_target_call_args_raw(
+                                target,
+                                &call.name,
+                                call.evaluated,
+                                call.failsafe,
+                                call.return_reference,
+                                env,
+                                depth,
+                            ),
+                    };
+                    match result {
+                        Ok(value) => self.values.push(AstValue::Return(value)),
+                        Err(error) => {
+                            return Err(self.suspend(
+                                error,
+                                vm.this_value.clone(),
+                                function,
+                                env,
+                                depth,
+                                caller.clone(),
+                                returns_reference,
+                                direct_exec_context,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl ScriptContinuation {
+    fn total_value_stack_count(&self) -> usize {
+        self.frame.total_value_stack_count()
+    }
+
+    fn detach_value_stack(&mut self) {
+        self.frame.detach_value_stack();
+    }
+
+    fn attach_value_stack_context(&self) -> Result<ScriptValueStackContext, RuntimeError> {
+        let total = self.total_value_stack_count();
+        ValueStackReservation::check(total)?;
+        Ok(ScriptValueStackContext {
+            _reservation: ValueStackReservation::reserve(total)?,
+        })
+    }
+
+    // An AST child can yield again before its parent reaches the main task
+    // loop. Normalize that owned control transfer at every frame boundary so
+    // the caller retains its own suffix instead of unwinding past it.
+    fn normalize_resume_result(
+        vm: &Vm<'_>,
+        result: Result<ContinuationResult, RuntimeError>,
+    ) -> Result<ContinuationResult, RuntimeError> {
+        result.or_else(|error| match vm.script_call_outcome_from_error(error)? {
+            ScriptCallOutcome::Suspended(suspension) => {
+                Ok(ContinuationResult::Suspended(suspension))
+            }
+            ScriptCallOutcome::Complete(value) => Ok(ContinuationResult::Complete(
+                ReturnValue::Value(TrackedValue::runtime(value)),
+            )),
+        })
+    }
+
+    fn context_vm<'a>(&self, vm: &Vm<'a>) -> Vm<'a> {
+        let env = match &self.frame {
+            ContinuationFrame::Compiled(frame) => &frame.env,
+            ContinuationFrame::Ast(frame) => &frame.env,
+        };
+        let vm = if env.global_call_context {
+            vm.engine_global_vm()
+        } else {
+            vm.clone()
+        };
+        vm.with_definition_context(env.definition_context)
+    }
+
+    fn resume(self, vm: &Vm<'_>) -> Result<ContinuationResult, RuntimeError> {
+        let vm = self.context_vm(vm).with_this(self.this_value.clone());
+        let _context = GlobalCallContextGuard::enter(
+            vm.retain_global_call_context_for_host_paths
+                .then_some(vm.global_call_context_hook)
+                .flatten(),
+        );
+        Self::normalize_resume_result(
+            &vm,
+            match self.frame {
+                ContinuationFrame::Compiled(frame) => frame.resume(&vm),
+                ContinuationFrame::Ast(frame) => frame.resume(&vm),
+            },
+        )
+    }
+
+    fn resume_with_value(
+        self,
+        vm: &Vm<'_>,
+        value: Value,
+    ) -> Result<ContinuationResult, RuntimeError> {
+        let vm = self.context_vm(vm).with_this(self.this_value.clone());
+        let _context = GlobalCallContextGuard::enter(
+            vm.retain_global_call_context_for_host_paths
+                .then_some(vm.global_call_context_hook)
+                .flatten(),
+        );
+        Self::normalize_resume_result(
+            &vm,
+            match self.frame {
+                ContinuationFrame::Compiled(frame) => frame.resume_with_value(&vm, Some(value)),
+                ContinuationFrame::Ast(frame) => frame.resume_with_value(&vm, Some(value)),
+            },
+        )
+    }
+
+    fn resume_with_value_and_this(
+        self,
+        vm: &Vm<'_>,
+        value: Value,
+        this_value: Value,
+    ) -> Result<ContinuationResult, RuntimeError> {
+        let vm = self.context_vm(vm).with_this(this_value);
+        let _context = GlobalCallContextGuard::enter(
+            vm.retain_global_call_context_for_host_paths
+                .then_some(vm.global_call_context_hook)
+                .flatten(),
+        );
+        Self::normalize_resume_result(
+            &vm,
+            match self.frame {
+                ContinuationFrame::Compiled(frame) => frame.resume_with_value(&vm, Some(value)),
+                ContinuationFrame::Ast(frame) => frame.resume_with_value(&vm, Some(value)),
+            },
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum CompiledSlotKind {
     Bare,
@@ -11216,6 +16792,20 @@ pub(crate) struct CompiledFunction {
     uses_effect_slots: bool,
     diagnostic_name: Arc<str>,
     diagnostic_source_name: Option<Arc<str>>,
+}
+
+struct CompiledExecutionState {
+    instruction: usize,
+    stack: SmallVec<[TrackedValue; 16]>,
+    registered_slots: SmallVec<[bool; 16]>,
+    assignment_targets: SmallVec<[(usize, LValueRef); 4]>,
+    stack_value_stack: ValueStackReservation,
+    pending: Option<PendingContinuation>,
+    /// The embedding host may replace the value suggested by the native
+    /// callback when it commits a suspended request.  Keep that replacement
+    /// separate from `pending`: a nested child has to receive the same value
+    /// before its caller resumes.
+    resume_value: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -12413,22 +18003,12 @@ impl CompiledFunction {
         Some(bindings)
     }
 
-    fn execute(
+    fn resolve_call_targets(
         &self,
         vm: &Vm<'_>,
         env: &Environment,
-        depth: usize,
-    ) -> Result<Option<ControlFlow>, RuntimeError> {
-        let Some(bindings) = self.bindings(env) else {
-            return Ok(None);
-        };
-        if ValueStackReservation::check(self.max_stack).is_err() {
-            return Ok(None);
-        }
-        if self.uses_effect_slots && !vm.host_functions.contains_key("EffectVar") {
-            return Ok(None);
-        }
-        let mut call_targets = SmallVec::<[CompiledCallTarget<'_>; 32]>::new();
+    ) -> Option<SmallVec<[CompiledCallTarget; 32]>> {
+        let mut call_targets = SmallVec::<[CompiledCallTarget; 32]>::new();
         // Scoped to the resolution prelude alone: the executed body below
         // attributes its own lookups to whichever path it reaches.
         let profiled_prelude =
@@ -12440,7 +18020,7 @@ impl CompiledFunction {
                 vm.reference_parameter_probe
                     .is_some_and(|probe| probe(name, index))
             }) {
-                return Ok(None);
+                return None;
             }
             if let Some(target) = vm.resolved_script_function(name, env.engine_scope) {
                 if target.function.returns_reference
@@ -12450,9 +18030,12 @@ impl CompiledFunction {
                         .iter()
                         .any(|param| param.is_reference)
                 {
-                    return Ok(None);
+                    return None;
                 }
-                call_targets.push(CompiledCallTarget::Script(target));
+                call_targets.push(CompiledCallTarget::Script(CompiledScriptTarget {
+                    function: target.function.resolved_snapshot(),
+                    validate_compiled_source: target.validate_compiled_source,
+                }));
                 continue;
             }
             // One walk of the host tables serves both the reference guard and
@@ -12468,10 +18051,12 @@ impl CompiledFunction {
                     .and_then(|types| types.get(name))
                     .is_some_and(|types| types.contains(&C4VType::Ref))
             {
-                return Ok(None);
+                return None;
             }
-            if let Some(target @ ResolvedHostFunction::Value(_)) = host {
-                call_targets.push(CompiledCallTarget::Host(target));
+            if let Some(ResolvedHostFunction::Value(function)) = host {
+                call_targets.push(CompiledCallTarget::Host(CompiledHostTarget::Value(
+                    function.clone(),
+                )));
                 continue;
             }
             let legacy_constant = env.strict_level.unwrap_or(0) < 2
@@ -12484,22 +18069,224 @@ impl CompiledFunction {
                 call_targets.push(CompiledCallTarget::LegacyConstant);
                 continue;
             }
-            return Ok(None);
+            return None;
         }
         drop(profiled_prelude);
-        let mut stack = SmallVec::<[TrackedValue; 16]>::with_capacity(self.max_stack);
-        let mut registered_slots = SmallVec::<[bool; 16]>::from_elem(false, bindings.len());
-        let mut assignment_targets =
-            SmallVec::<[(usize, LValueRef, ValueStackReservation); 4]>::new();
+        Some(call_targets)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn suspend(
+        &self,
+        error: RuntimeError,
+        this_value: Value,
+        request: Rc<dyn Any>,
+        resume_value: Value,
+        function: &Function,
+        compiled: &Arc<CompiledFunction>,
+        call_targets: &[CompiledCallTarget],
+        env: &Environment,
+        depth: usize,
+        caller: &Option<ScriptCallerContext>,
+        instruction: usize,
+        stack: SmallVec<[TrackedValue; 16]>,
+        registered_slots: SmallVec<[bool; 16]>,
+        assignment_targets: SmallVec<[(usize, LValueRef); 4]>,
+        stack_value_stack: ValueStackReservation,
+        frame_value_stack: usize,
+        pending: PendingContinuation,
+    ) -> RuntimeError {
+        let frame = CompiledContinuationFrame {
+            // A compiled call normally borrows its installed function.  Only
+            // a real host boundary needs an owned C4Aul-style target for the
+            // continuation that outlives this invocation.
+            function: Arc::new(function.clone()),
+            compiled: Arc::clone(compiled),
+            call_targets: call_targets.iter().cloned().collect(),
+            env: env.clone(),
+            depth,
+            caller: caller.clone(),
+            returns_reference: function.returns_reference,
+            instruction,
+            stack,
+            registered_slots,
+            assignment_targets,
+            stack_value_stack,
+            frame_value_stack,
+            pending,
+        };
+        error.with_control(RuntimeControl::HostContinuation {
+            request,
+            resume_value,
+            continuation: Some(Box::new(ScriptContinuation {
+                frame: ContinuationFrame::Compiled(frame),
+                this_value,
+            })),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute(
+        &self,
+        vm: &Vm<'_>,
+        env: &Environment,
+        depth: usize,
+        function: &Function,
+        caller: Option<ScriptCallerContext>,
+        compiled: Arc<CompiledFunction>,
+        frame_value_stack: usize,
+    ) -> Result<Option<ControlFlow>, RuntimeError> {
+        let Some(bindings) = self.bindings(env) else {
+            return Ok(None);
+        };
+        if ValueStackReservation::check(self.max_stack).is_err() {
+            return Ok(None);
+        }
+        if self.uses_effect_slots && !vm.host_functions.contains_key("EffectVar") {
+            return Ok(None);
+        }
+        let Some(call_targets) = self.resolve_call_targets(vm, env) else {
+            return Ok(None);
+        };
+        let state = CompiledExecutionState {
+            instruction: 0,
+            stack: SmallVec::<[TrackedValue; 16]>::with_capacity(self.max_stack),
+            registered_slots: SmallVec::<[bool; 16]>::from_elem(false, bindings.len()),
+            assignment_targets: SmallVec::<[(usize, LValueRef); 4]>::new(),
+            stack_value_stack: ValueStackReservation::empty(),
+            pending: None,
+            resume_value: None,
+        };
         #[cfg(test)]
-        if stack.spilled() {
+        if state.stack.spilled() {
             COMPILED_STACK_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
         }
         #[cfg(test)]
-        if registered_slots.spilled() {
+        if state.registered_slots.spilled() {
             COMPILED_REGISTERED_SLOT_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
         }
-        let mut instruction = 0;
+        self.execute_state(
+            vm,
+            env,
+            depth,
+            function,
+            caller,
+            compiled,
+            bindings,
+            call_targets,
+            state,
+            frame_value_stack,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_state(
+        &self,
+        vm: &Vm<'_>,
+        env: &Environment,
+        depth: usize,
+        function: &Function,
+        caller: Option<ScriptCallerContext>,
+        compiled: Arc<CompiledFunction>,
+        bindings: SmallVec<[Binding; 16]>,
+        call_targets: SmallVec<[CompiledCallTarget; 32]>,
+        state: CompiledExecutionState,
+        frame_value_stack: usize,
+    ) -> Result<Option<ControlFlow>, RuntimeError> {
+        let CompiledExecutionState {
+            mut stack,
+            mut registered_slots,
+            mut assignment_targets,
+            mut stack_value_stack,
+            mut instruction,
+            pending,
+            resume_value,
+        } = state;
+        if let Some(pending) = pending {
+            match pending {
+                PendingContinuation::Host { value, .. } => {
+                    let value = TrackedValue::runtime(resume_value.unwrap_or(value)).set_copy();
+                    vm.register_runtime_value(&value.value);
+                    stack.push(value);
+                    instruction += 1;
+                }
+                PendingContinuation::Child(child) => match match resume_value {
+                    Some(value) => child.resume_with_value(vm, value),
+                    None => child.resume(vm),
+                }? {
+                    ContinuationResult::Complete(value) => {
+                        let value = value.into_tracked_on_stack()?.set_copy();
+                        vm.register_runtime_value(&value.value);
+                        stack.push(value);
+                        instruction += 1;
+                    }
+                    ContinuationResult::Suspended(suspension) => {
+                        let (request, resume_value, child) = suspension.into_parts();
+                        return Err(self.suspend(
+                            RuntimeError::new("script execution suspended by nested host callback"),
+                            vm.this_value.clone(),
+                            request,
+                            resume_value,
+                            function,
+                            &compiled,
+                            &call_targets,
+                            env,
+                            depth,
+                            &caller,
+                            instruction,
+                            stack,
+                            registered_slots,
+                            assignment_targets,
+                            stack_value_stack,
+                            frame_value_stack,
+                            PendingContinuation::Child(child),
+                        ));
+                    }
+                },
+                PendingContinuation::Native {
+                    state,
+                    parameter_slots,
+                } => match resume_native_continuation(
+                    state,
+                    resume_value.unwrap_or(Value::Nil),
+                    parameter_slots,
+                )? {
+                    NativeResumeOutcome::Complete(value) => {
+                        let value = TrackedValue::runtime(value).set_copy();
+                        vm.register_runtime_value(&value.value);
+                        stack.push(value);
+                        instruction += 1;
+                    }
+                    NativeResumeOutcome::Suspended {
+                        request,
+                        resume_value,
+                        pending,
+                    } => {
+                        return Err(self.suspend(
+                            RuntimeError::new(
+                                "script execution suspended by nested native callback",
+                            ),
+                            vm.this_value.clone(),
+                            request,
+                            resume_value,
+                            function,
+                            &compiled,
+                            &call_targets,
+                            env,
+                            depth,
+                            &caller,
+                            instruction,
+                            stack,
+                            registered_slots,
+                            assignment_targets,
+                            stack_value_stack,
+                            frame_value_stack,
+                            pending,
+                        ));
+                    }
+                },
+            }
+        }
         loop {
             match &self.instructions[instruction] {
                 CompiledInstruction::Literal(literal) => {
@@ -12565,8 +18352,13 @@ impl CompiledFunction {
                 }
                 CompiledInstruction::BeginAssignment(slot) => {
                     let reference = bindings[*slot].lvalue();
-                    let stack_slot = ValueStackReservation::reserve(1)?;
-                    assignment_targets.push((*slot, reference, stack_slot));
+                    // The retained target is represented by its owned
+                    // lvalue. The reservation is scoped to this instruction;
+                    // a suspended frame must not keep the thread-local value
+                    // stack occupied while the embedding engine switches
+                    // sections and runs fresh callbacks.
+                    ValueStackReservation::check(1)?;
+                    assignment_targets.push((*slot, reference));
                 }
                 CompiledInstruction::Store(slot) => {
                     let value = stack
@@ -12579,19 +18371,17 @@ impl CompiledFunction {
                     let value = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let (target_slot, reference, _stack_slot) =
-                        assignment_targets.pop().ok_or_else(|| {
-                            RuntimeError::new("internal compiled assignment target underflow")
-                        })?;
+                    let (target_slot, reference) = assignment_targets.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled assignment target underflow")
+                    })?;
                     debug_assert_eq!(target_slot, *slot);
                     reference.write_tracked(value)?;
                     registered_slots[*slot] = true;
                 }
                 CompiledInstruction::StoreKeep { slot, copy_result } => {
-                    let (target_slot, reference, _stack_slot) =
-                        assignment_targets.pop().ok_or_else(|| {
-                            RuntimeError::new("internal compiled assignment target underflow")
-                        })?;
+                    let (target_slot, reference) = assignment_targets.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled assignment target underflow")
+                    })?;
                     debug_assert_eq!(target_slot, *slot);
                     let value = stack
                         .last()
@@ -12668,10 +18458,9 @@ impl CompiledFunction {
                     let right = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let (target_slot, reference, _stack_slot) =
-                        assignment_targets.pop().ok_or_else(|| {
-                            RuntimeError::new("internal compiled assignment target underflow")
-                        })?;
+                    let (target_slot, reference) = assignment_targets.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled assignment target underflow")
+                    })?;
                     debug_assert_eq!(target_slot, *slot);
                     let left = reference.read_tracked()?;
                     let value = TrackedValue::runtime(vm.eval_binary(
@@ -12757,37 +18546,104 @@ impl CompiledFunction {
                         .len()
                         .checked_sub(argument_count)
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let _retained_stack = ValueStackReservation::reserve(argument_start)?;
+                    stack_value_stack.resize_to(stack.len())?;
                     let arguments = stack
                         .drain(argument_start..)
                         .map(CallArg::Value)
                         .collect::<CallArgs>();
+                    stack_value_stack.shrink(argument_count);
                     #[cfg(test)]
                     record_call_arg_heap_spill(arguments.spilled());
-                    let target = call_targets[*site];
+                    let target = &call_targets[*site];
                     let sweep_cursor = object_reference_sweep_cursor();
-                    let value = match target {
-                        CompiledCallTarget::Host(target) => {
-                            TrackedValue::runtime(vm.invoke_resolved_host_value(
+                    let result = match target {
+                        CompiledCallTarget::Host(CompiledHostTarget::Value(target)) => vm
+                            .invoke_resolved_host_value(
                                 name,
-                                target,
+                                ResolvedHostFunction::Value(target),
                                 arguments,
                                 depth + 1,
                                 Some(env.caller_context()),
-                            )?)
-                        }
-                        CompiledCallTarget::Script(target) => vm
-                            .invoke_resolved_script_tracked_value(
+                            )
+                            .map(TrackedValue::runtime),
+                        CompiledCallTarget::Script(target) => {
+                            let target = ScriptFunctionTarget {
+                                function: target.function.as_ref(),
+                                validate_compiled_source: target.validate_compiled_source,
+                            };
+                            vm.invoke_resolved_script_tracked_value(
                                 name,
                                 target,
                                 arguments,
                                 depth + 1,
                                 env.object_state.clone(),
                                 Some(env.caller_context()),
-                            )?,
+                            )
+                        }
                         CompiledCallTarget::LegacyConstant => {
                             debug_assert!(arguments.is_empty());
-                            vm.compiled_named_value(name, env)?
+                            vm.compiled_named_value(name, env)
+                        }
+                    };
+                    let value = match result {
+                        Ok(value) => value,
+                        Err(mut error) => {
+                            let host_parameter_slots = error.take_host_parameter_slots();
+                            let Some(control) = error.take_control() else {
+                                return Err(error);
+                            };
+                            let RuntimeControl::HostContinuation {
+                                request,
+                                resume_value,
+                                continuation,
+                            } = control;
+                            let pending = match continuation {
+                                None => PendingContinuation::Host {
+                                    value: resume_value.clone(),
+                                    parameter_slots: host_parameter_slots.unwrap_or(0),
+                                },
+                                Some(continuation) => match continuation
+                                    .downcast::<ScriptContinuation>()
+                                {
+                                    Ok(continuation) => PendingContinuation::Child(continuation),
+                                    Err(continuation) => {
+                                        match continuation.downcast::<NativeContinuationState>() {
+                                            Ok(state) => PendingContinuation::Native {
+                                                state: *state,
+                                                parameter_slots: host_parameter_slots.unwrap_or(0),
+                                            },
+                                            Err(continuation) => {
+                                                return Err(error.with_control(
+                                                    RuntimeControl::HostContinuation {
+                                                        request,
+                                                        resume_value,
+                                                        continuation: Some(continuation),
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                    }
+                                },
+                            };
+                            return Err(self.suspend(
+                                error,
+                                vm.this_value.clone(),
+                                request,
+                                resume_value,
+                                function,
+                                &compiled,
+                                &call_targets,
+                                env,
+                                depth,
+                                &caller,
+                                instruction,
+                                stack,
+                                registered_slots,
+                                assignment_targets,
+                                stack_value_stack,
+                                frame_value_stack,
+                                pending,
+                            ));
                         }
                     };
                     for retained in &mut stack {
@@ -12873,6 +18729,265 @@ impl CompiledFunction {
                 CompiledInstruction::Finish => return Ok(Some(ControlFlow::Normal)),
             }
             instruction += 1;
+        }
+    }
+}
+
+impl CompiledContinuationFrame {
+    fn resume(self, vm: &Vm<'_>) -> Result<ContinuationResult, RuntimeError> {
+        self.resume_with_value(vm, None)
+    }
+
+    fn resume_with_value(
+        self,
+        vm: &Vm<'_>,
+        resume_value: Option<Value>,
+    ) -> Result<ContinuationResult, RuntimeError> {
+        let CompiledContinuationFrame {
+            function,
+            compiled,
+            call_targets,
+            env,
+            depth,
+            caller,
+            returns_reference,
+            instruction,
+            stack,
+            registered_slots,
+            assignment_targets,
+            mut stack_value_stack,
+            frame_value_stack,
+            pending,
+        } = self;
+        if returns_reference {
+            return Err(RuntimeError::new(
+                "internal error: reference continuation reached compiled executor",
+            ));
+        }
+        stack_value_stack.attach()?;
+        // The original invocation's parameter/function-var reservation is
+        // dropped while the continuation is owned by the host. Reacquire the
+        // exact frame prefix for this execution slice so nested calls observe
+        // the same stack budget they saw before the boundary.
+        let _frame_value_stack = ValueStackReservation::reserve(frame_value_stack)?;
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
+        _object_reference_cells.register_environment(&env, vm);
+        let Some(bindings) = compiled.bindings(&env) else {
+            return Err(RuntimeError::new(
+                "internal error: suspended function bindings are unavailable",
+            ));
+        };
+        let state = CompiledExecutionState {
+            instruction,
+            stack,
+            registered_slots,
+            assignment_targets,
+            stack_value_stack,
+            pending: Some(pending),
+            resume_value,
+        };
+        match compiled.execute_state(
+            vm,
+            &env,
+            depth,
+            function.as_ref(),
+            caller,
+            Arc::clone(&compiled),
+            bindings,
+            call_targets,
+            state,
+            frame_value_stack,
+        ) {
+            Ok(Some(ControlFlow::Return(value))) => Ok(ContinuationResult::Complete(value)),
+            Ok(Some(ControlFlow::Normal)) => Ok(ContinuationResult::Complete(ReturnValue::Value(
+                TrackedValue::runtime(Value::Nil),
+            ))),
+            Ok(Some(ControlFlow::Break | ControlFlow::LoopContinue)) => Err(RuntimeError::new(
+                "internal error: loop control escaped suspended function",
+            )),
+            Ok(None) => Err(RuntimeError::new(
+                "internal error: suspended compiled function was not executable",
+            )),
+            Err(error) => match Vm::script_call_outcome_from_error(vm, error)? {
+                ScriptCallOutcome::Complete(value) => Ok(ContinuationResult::Complete(
+                    ReturnValue::Value(TrackedValue::runtime(value)),
+                )),
+                ScriptCallOutcome::Suspended(suspension) => {
+                    Ok(ContinuationResult::Suspended(suspension))
+                }
+            },
+        }
+    }
+}
+
+impl AstContinuationFrame {
+    fn resume(self, vm: &Vm<'_>) -> Result<ContinuationResult, RuntimeError> {
+        self.resume_with_value(vm, None)
+    }
+
+    fn resume_with_value(
+        self,
+        vm: &Vm<'_>,
+        resume_value: Option<Value>,
+    ) -> Result<ContinuationResult, RuntimeError> {
+        let AstContinuationFrame {
+            function,
+            mut env,
+            depth,
+            caller,
+            returns_reference,
+            tasks,
+            values,
+            legacy_path_pin_scope_depth,
+            frame_value_stack,
+            direct_exec_context,
+            pending,
+        } = self;
+        let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
+        _object_reference_cells.register_environment(&env, vm);
+        let mut state = AstMachineState {
+            tasks,
+            values,
+            legacy_path_pin_scope_depth,
+            frame_value_stack,
+        };
+        // Reattach retained operands before the frame prefix. The total is
+        // checked while all captured reservations are detached, so an
+        // over-limit continuation fails at the same boundary as a live call.
+        state.attach_value_stack()?;
+        // See the compiled continuation above. The reservation lives only
+        // for this resume slice and is transferred to a newly suspended
+        // frame if another host boundary is reached.
+        let _frame_value_stack = ValueStackReservation::reserve(frame_value_stack)?;
+        match pending {
+            PendingContinuation::Host { value, .. } => {
+                state
+                    .values
+                    .push(AstValue::Value(resume_value.unwrap_or(value)));
+            }
+            PendingContinuation::Child(child) => {
+                let child_result = match resume_value {
+                    Some(value) => child.resume_with_value(vm, value),
+                    None => child.resume(vm),
+                };
+                match child_result {
+                    Ok(ContinuationResult::Complete(value)) => {
+                        state.values.push(AstValue::Return(value));
+                    }
+                    Ok(ContinuationResult::Suspended(suspension)) => {
+                        let (request, suggested_value, child) = suspension.into_parts();
+                        let error =
+                            RuntimeError::new("script execution suspended by nested host callback")
+                                .with_control(RuntimeControl::HostContinuation {
+                                    request,
+                                    resume_value: suggested_value,
+                                    continuation: Some(child),
+                                });
+                        return Err(state.suspend(
+                            error,
+                            vm.this_value.clone(),
+                            function.as_ref(),
+                            &env,
+                            depth,
+                            caller,
+                            returns_reference,
+                            direct_exec_context.as_ref(),
+                        ));
+                    }
+                    Err(error) => {
+                        return if error.control.is_some() {
+                            Err(state.suspend(
+                                error,
+                                vm.this_value.clone(),
+                                function.as_ref(),
+                                &env,
+                                depth,
+                                caller,
+                                returns_reference,
+                                direct_exec_context.as_ref(),
+                            ))
+                        } else {
+                            Err(error)
+                        };
+                    }
+                }
+            }
+            PendingContinuation::Native {
+                state: native_state,
+                parameter_slots,
+            } => match resume_native_continuation(
+                native_state,
+                resume_value.unwrap_or(Value::Nil),
+                parameter_slots,
+            )? {
+                NativeResumeOutcome::Complete(value) => {
+                    state.values.push(AstValue::Value(value));
+                }
+                NativeResumeOutcome::Suspended {
+                    request,
+                    resume_value,
+                    pending:
+                        PendingContinuation::Native {
+                            state: native_state,
+                            parameter_slots,
+                        },
+                } => {
+                    let error =
+                        RuntimeError::new("script execution suspended by nested native callback")
+                            .with_control(RuntimeControl::HostContinuation {
+                                request,
+                                resume_value,
+                                continuation: Some(Box::new(native_state)),
+                            })
+                            .with_host_parameter_slots(parameter_slots);
+                    return Err(state.suspend(
+                        error,
+                        vm.this_value.clone(),
+                        function.as_ref(),
+                        &env,
+                        depth,
+                        caller,
+                        returns_reference,
+                        direct_exec_context.as_ref(),
+                    ));
+                }
+                NativeResumeOutcome::Suspended { .. } => {
+                    return Err(RuntimeError::new(
+                        "internal error: native continuation yielded a non-native pending state",
+                    ));
+                }
+            },
+        }
+
+        let result = match vm.run_ast_machine(
+            state,
+            &mut env,
+            depth,
+            returns_reference,
+            function.as_ref(),
+            caller,
+            direct_exec_context.as_ref(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                return match vm.script_call_outcome_from_error(error)? {
+                    ScriptCallOutcome::Complete(value) => Ok(ContinuationResult::Complete(
+                        ReturnValue::Value(TrackedValue::runtime(value)),
+                    )),
+                    ScriptCallOutcome::Suspended(suspension) => {
+                        Ok(ContinuationResult::Suspended(suspension))
+                    }
+                };
+            }
+        };
+        match result {
+            ControlFlow::Return(value) => Ok(ContinuationResult::Complete(value)),
+            ControlFlow::Normal => Ok(ContinuationResult::Complete(ReturnValue::Value(
+                TrackedValue::runtime(Value::Nil),
+            ))),
+            ControlFlow::Break | ControlFlow::LoopContinue => Err(RuntimeError::new(
+                "internal error: loop control escaped suspended function",
+            )),
         }
     }
 }
@@ -12963,6 +19078,7 @@ fn hoist_function_vars(body: &[Stmt], env: &mut Environment) {
     }
 }
 
+#[derive(Clone)]
 struct Environment {
     scopes: SmallVec<[FxHashMap<String, Binding>; 2]>,
     named_parameters: SmallVec<[(String, Binding); 4]>,
@@ -13007,6 +19123,7 @@ struct Environment {
     /// Dynamic `cthr->Def` presence. Unlike the VM's owning-script identity,
     /// this is cleared by a nil-object DirectExec and `global->`.
     definition_context: bool,
+    global_call_context: bool,
 }
 
 impl Environment {
@@ -13069,6 +19186,7 @@ impl Environment {
             engine_scope: false,
             temporary_script: false,
             definition_context: false,
+            global_call_context: false,
         })
     }
 
@@ -13135,6 +19253,29 @@ impl Environment {
             register_shared_object_reference_cells(globals.values().map(Rc::downgrade));
         }
         cells
+    }
+
+    /// Clear references held by this suspended frame before the embedding
+    /// engine removes an object. The active-reference registry is scoped to
+    /// one running call and is intentionally empty while a continuation is
+    /// owned by the host; walking the owned cells here keeps AssignRemoval
+    /// synchronous without storing an aliased VM pointer or TLS guard.
+    fn clear_object_reference(&mut self, object_id: u64) {
+        for binding in &mut self.call_args {
+            binding.clear_object_reference(object_id);
+        }
+        for binding in self.frame_locals.function_vars.borrow_mut().values_mut() {
+            binding.clear_object_reference(object_id);
+        }
+        for scope in &mut self.scopes {
+            for binding in scope.values_mut() {
+                binding.clear_object_reference(object_id);
+            }
+        }
+        for (_, binding) in &mut self.named_parameters {
+            binding.clear_object_reference(object_id);
+        }
+        self.object_state.clear_object_reference(object_id);
     }
 
     fn define_object_local(&mut self, name: &str, identity: RawIdentityCell) {

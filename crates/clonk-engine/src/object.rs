@@ -2013,6 +2013,12 @@ impl From<CrewSelectionState> for CrewSelection {
 pub struct Object {
     #[doc(hidden)]
     pub id: ObjectId,
+    /// Runtime identity of this C4Object allocation. Object numbers can be
+    /// reused by a section load, while a suspended callback still refers to
+    /// the departing allocation. The engine assigns this transient token
+    /// when the object enters its live list; it is deliberately absent from
+    /// snapshots and savegame state.
+    pub(crate) instance_token: u64,
     #[doc(hidden)]
     pub definition_id: DefinitionId,
     #[doc(hidden)]
@@ -2306,6 +2312,7 @@ impl Object {
         };
         Self {
             id,
+            instance_token: 0,
             definition_id,
             compiled_mass: None,
             compiled_mass_contents: Vec::new(),
@@ -3718,11 +3725,18 @@ pub(crate) fn script_execution_error(
     source: ScriptError,
     recovery: Option<Box<ScriptCallRecovery>>,
 ) -> EngineError {
-    EngineError::Script {
-        definition,
-        function,
-        source,
-        recovery,
+    match source.into_diagnostic() {
+        Ok(source) => EngineError::Script {
+            definition,
+            function,
+            source,
+            recovery,
+        },
+        Err(_) => EngineError::invalid_script_output(
+            definition,
+            function,
+            "unsupported host continuation escaped the script error boundary".into(),
+        ),
     }
 }
 
@@ -3764,7 +3778,7 @@ pub enum EngineError {
         definition: String,
         function: String,
         #[source]
-        source: ScriptError,
+        source: clonk_script::ScriptErrorDiagnostic,
         /// The failed call's PRE-ERROR outcome. C4AulExec errors abort the
         /// call but roll nothing back (C4AulExec.cpp:1318-1342) — C++
         /// already mutated the live objects — so the engine funnel applies
@@ -4072,6 +4086,11 @@ pub struct SpawnConfig {
     #[serde(skip)]
     #[doc(hidden)]
     pub solid_mask_instance_sequence: Option<u64>,
+    /// Runtime-only allocation identity reserved when C4Game::NewObject
+    /// links a callback-created object before deferred copy-out.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub instance_token: Option<u64>,
     /// Construction/Initialize already ran synchronously inside the
     /// creating host call (C4Game::NewObject semantics,
     /// C4Game.cpp:1117-1127) - materialization must not repeat them.
@@ -4162,6 +4181,7 @@ impl SpawnConfig {
             native_compiled_object_defaults: false,
             solid_mask: None,
             solid_mask_instance_sequence: None,
+            instance_token: None,
             initialized: false,
             position_adjusted: false,
         }

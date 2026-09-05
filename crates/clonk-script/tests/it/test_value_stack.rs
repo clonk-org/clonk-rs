@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use clonk_script::{Engine, ScriptError, Value};
+use clonk_script::{Engine, ScriptError, Value, ValueMap};
 
 const VALUE_STACK_OVERFLOW: &str = "internal error: value stack overflow!";
 
@@ -283,5 +283,92 @@ fn hoisted_locals_foreach_and_short_circuit_share_the_dynamic_budget() {
             .call("SkipsOversizedRhs", &[])
             .expect("an unexecuted oversized branch consumes no slots"),
         Value::Bool(false),
+    );
+}
+
+#[test]
+fn ast_call_releases_completed_arguments_before_entering_the_callee() {
+    // The unsupported loop-control marker keeps Probe on the AST scheduler.
+    // C4Aul drops the completed argument slots when AB_CALL transfers them to
+    // the callee's ten-slot frame (C4AulParse.cpp:1058-1065;
+    // C4AulExec.cpp:1216-1223). The final call must therefore fit alongside
+    // the 1,003 values already retained by the enclosing array.
+    let mut engine = Engine::new();
+    let values = repeated_values(1003);
+    engine
+        .load_script(&format!(
+            "#strict 3\n\
+             func Target(value) {{ return value; }}\n\
+             func Probe() {{ while (false) {{ continue; }} return [{values}, Target(1)]; }}\n"
+        ))
+        .expect("AST call budget script loads");
+
+    let Value::Array(values) = engine
+        .call("Probe", &[])
+        .expect("completed call arguments must not be double-counted")
+    else {
+        panic!("Probe must return an array");
+    };
+    assert_eq!(values.len(), 1004);
+    assert_eq!(values.last(), Some(&Value::Int(1)));
+}
+
+#[test]
+fn ast_global_call_keeps_cpp_target_slot_and_parameter_frame() {
+    // AB_CALLGLOBAL reserves one nil target slot before Parse_Params balances
+    // the ten parameter slots (C4AulParse.cpp:3207-3212;
+    // C4AulExec.cpp:1216-1223). With 1,004 retained array operands, omitting
+    // that target slot incorrectly makes this call appear to fit.
+    let mut engine = Engine::new();
+    let values = repeated_values(1003);
+    engine
+        .load_script(&format!(
+            "#strict 3\n\
+             global func GlobalTarget() {{ return 1; }}\n\
+             func Probe() {{ while (false) {{ continue; }} return [{values}, global->GlobalTarget()]; }}\n"
+        ))
+        .expect("AST global-call budget script loads");
+
+    assert_value_stack_overflow(
+        engine
+            .call("Probe", &[])
+            .expect_err("global target slot must count alongside the parameter frame"),
+    );
+}
+
+#[test]
+fn ast_foreach_charges_fixed_native_cursor_slots_for_heap_snapshots() {
+    // AB_FOREACH keeps only its iterator/control slots on C4AulExec::Values;
+    // the collection entries are heap data, not stack operands
+    // (C4AulExec.cpp:1135-1210). Both forms exceed the old Rust snapshot-size
+    // charge while remaining far below the 1,024-slot native limit.
+    let mut engine = Engine::new();
+    engine.register_host_function("LargeArray", |_| {
+        Ok(Value::Array((0..1024).map(Value::Int).collect()))
+    });
+    engine.register_host_function("LargeMap", |_| {
+        let mut map = ValueMap::new();
+        for index in 0..600 {
+            map.insert_key(Value::Int(index), Value::Int(index));
+        }
+        Ok(Value::Proplist(map))
+    });
+    engine
+        .load_script(
+            "#strict 3\n\
+             func ArrayCount() { var total = 0; for (var item in LargeArray()) total += 1; return total; }\n\
+             func MapCount() { var total = 0; for (var key, value in LargeMap()) total += 1; return total; }\n",
+        )
+        .expect("large native iterable script loads");
+
+    assert_eq!(
+        engine
+            .call("ArrayCount", &[])
+            .expect("large array iterates"),
+        Value::Int(1024)
+    );
+    assert_eq!(
+        engine.call("MapCount", &[]).expect("large map iterates"),
+        Value::Int(600)
     );
 }

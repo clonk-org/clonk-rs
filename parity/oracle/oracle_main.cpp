@@ -7915,6 +7915,488 @@ inline void run(const Case &c)
 
 } // namespace scenario_sections
 
+// Bounded section-switch host and object-lifecycle coverage.  This fixture
+// intentionally stops at the contracts that can be kept small and source
+// backed: FnLoadScenarioSection's string/bool host boundary, the synchronous
+// NewObject/CreateObject ordering, StatusDeactivate's move to the inactive
+// list, and LoadScenarioSection's active-object teardown block.  The full
+// LoadScenarioSection method still owns group, landscape, PXS, effects,
+// players, and InitGame state, and the C++ bytecode VM is not reproduced by a
+// primitive oracle.  Consequently these rows pin host return/tail ordering
+// and object retention/removal only; they do not claim full VM or complete
+// scenario-section parity.
+namespace scenario_section_host_lifecycle
+{
+
+using C4ValueInt = std::int32_t;
+using C4ID = unsigned long;
+
+inline constexpr C4ValueInt C4OS_DELETED = 0;
+inline constexpr C4ValueInt C4OS_NORMAL = 1;
+inline constexpr C4ValueInt C4OS_INACTIVE = 2;
+inline constexpr C4ValueInt FullCon = 100000;
+inline constexpr int32_t C4AUL_MAX_Par = 10;
+inline constexpr const char *PSF_Construction = "Construction";
+
+struct C4Object;
+struct C4Def;
+struct C4ObjectInfo
+{
+};
+
+struct C4Value
+{
+	C4Object *object{};
+};
+
+inline C4Value C4VObj(C4Object *object)
+{
+	return {object};
+}
+
+struct C4AulParSet
+{
+	C4Value Par[C4AUL_MAX_Par]{};
+
+	C4AulParSet() = default;
+	explicit C4AulParSet(const C4Value &par0) { Par[0] = par0; }
+};
+
+struct C4AulContext
+{
+	C4Object *Obj{};
+};
+
+struct C4String
+{
+	std::string value;
+};
+
+static const char *FnStringPar(C4String *string)
+{
+	return string ? string->value.c_str() : nullptr;
+}
+
+struct ParticleListStub
+{
+	bool live{};
+
+	explicit operator bool() const { return live; }
+	void Clear() { live = false; }
+};
+
+struct TransferZonesStub
+{
+	void ClearPointers(C4Object *) {}
+	void Clear() {}
+};
+
+struct C4ObjectLink
+{
+	C4Object *Obj{};
+	C4ObjectLink *Prev{};
+	C4ObjectLink *Next{};
+};
+
+class C4ObjectList
+{
+public:
+	enum SortType
+	{
+		stNone = 0,
+		stMain,
+		stContents,
+		stReverse,
+	};
+
+	C4ObjectLink *First{};
+	C4ObjectLink *Last{};
+	int32_t Mass{};
+
+	bool Add(C4Object *object, SortType sort = stNone);
+	bool Remove(C4Object *object);
+	void Clear();
+	void DeleteObjects();
+};
+
+struct C4GameObjects : C4ObjectList
+{
+	C4ObjectList InactiveObjects;
+};
+
+struct C4Object
+{
+	C4ID id{};
+	int32_t Number{};
+	int32_t Status{C4OS_NORMAL};
+	int32_t Owner{};
+	int32_t Mass{1};
+	C4Def *Def{};
+	C4Object *Contained{};
+	C4Fixed xdir{};
+	C4Fixed ydir{};
+	C4Fixed rdir{};
+	ParticleListStub FrontParticles;
+	ParticleListStub BackParticles;
+
+	bool Init(
+		C4Def *definition,
+		C4Object *creator,
+		int32_t owner,
+		C4ObjectInfo *info,
+		int32_t x,
+		int32_t y,
+		int32_t r,
+		C4Fixed xdir,
+		C4Fixed ydir,
+		C4Fixed rdir,
+		int32_t controller);
+	C4Value Call(const char *function, const C4AulParSet &parameters = {});
+	void DoCon(int32_t change, bool initial = false);
+	bool StatusActivate();
+	bool StatusDeactivate(bool clear_pointers);
+	void ClearContentsAndContained();
+	void AssignRemoval(bool exit_contents = false);
+};
+
+struct C4Def
+{
+	C4ID id{};
+};
+
+struct C4Game
+{
+	C4GameObjects Objects;
+	C4ObjectList BackObjects;
+	C4ObjectList ForeObjects;
+	TransferZonesStub TransferZones;
+	std::vector<C4Def *> definitions;
+	std::vector<std::string> lifecycle_trace;
+	std::vector<int32_t> removed_numbers;
+	std::vector<int32_t> host_trace;
+	uint32_t ObjectEnumerationIndex{};
+	int32_t native_init_count{};
+	int32_t construction_count{};
+	int32_t do_con_count{};
+	int32_t load_calls{};
+	std::string loaded_section;
+	bool load_result{};
+	bool section_available{true};
+	bool fResortAnyObject{};
+
+	C4Object *NewObject(
+		C4Def *definition,
+		C4Object *creator,
+		int32_t owner,
+		C4ObjectInfo *info,
+		int32_t x,
+		int32_t y,
+		int32_t r,
+		C4Fixed xdir,
+		C4Fixed ydir,
+		C4Fixed rdir,
+		int32_t con,
+		int32_t controller);
+	C4Object *CreateObject(
+		C4ID id,
+		C4Object *creator,
+		int32_t owner,
+		int32_t x,
+		int32_t y,
+		int32_t r,
+		C4Fixed xdir,
+		C4Fixed ydir,
+		C4Fixed rdir,
+		int32_t controller);
+	void DeleteObjects(bool delete_inactive);
+	void ClearPointers(C4Object *) {}
+	bool LoadScenarioSection(const char *section, uint32_t flags);
+	void Reset();
+};
+
+static C4Game Game;
+
+static C4Def *C4Id2Def(C4ID id)
+{
+	for (C4Def *definition : Game.definitions)
+		if (definition && definition->id == id) return definition;
+	return nullptr;
+}
+
+bool C4ObjectList::Add(C4Object *object, SortType)
+{
+	if (!object || !object->Def || !object->Status) return false;
+	if (First)
+	{
+		Last->Next = new C4ObjectLink{object, Last, nullptr};
+		Last = Last->Next;
+	}
+	else
+	{
+		First = Last = new C4ObjectLink{object, nullptr, nullptr};
+	}
+	return true;
+}
+
+bool C4ObjectList::Remove(C4Object *object)
+{
+	for (C4ObjectLink *link = First; link; link = link->Next)
+		if (link->Obj == object)
+		{
+			if (link->Prev) link->Prev->Next = link->Next; else First = link->Next;
+			if (link->Next) link->Next->Prev = link->Prev; else Last = link->Prev;
+			delete link;
+			return true;
+		}
+	return false;
+}
+
+void C4ObjectList::Clear()
+{
+	while (First)
+	{
+		C4ObjectLink *link = First;
+		First = link->Next;
+		delete link;
+	}
+	Last = nullptr;
+}
+
+bool C4Object::Init(
+	C4Def *definition,
+	C4Object *,
+	int32_t owner,
+	C4ObjectInfo *,
+	int32_t,
+	int32_t,
+	int32_t,
+	C4Fixed new_xdir,
+	C4Fixed new_ydir,
+	C4Fixed new_rdir,
+	int32_t)
+{
+	Def = definition;
+	id = definition ? definition->id : 0;
+	Owner = owner;
+	xdir = new_xdir;
+	ydir = new_ydir;
+	rdir = new_rdir;
+	Status = C4OS_NORMAL;
+	++Game.native_init_count;
+	Game.lifecycle_trace.emplace_back("native_init");
+	return definition != nullptr;
+}
+
+C4Value C4Object::Call(const char *function, const C4AulParSet &)
+{
+	if (std::strcmp(function, "Construction") == 0)
+	{
+		++Game.construction_count;
+		Game.lifecycle_trace.emplace_back("construction");
+	}
+	return {};
+}
+
+void C4Object::DoCon(int32_t, bool)
+{
+	++Game.do_con_count;
+	Game.lifecycle_trace.emplace_back("do_con");
+}
+
+bool C4Object::StatusActivate()
+{
+	Game.Objects.InactiveObjects.Remove(this);
+	Status = C4OS_NORMAL;
+	return Game.Objects.Add(this);
+}
+
+void C4Object::ClearContentsAndContained() {}
+
+void C4Object::AssignRemoval(bool)
+{
+	if (!Status) return;
+	Game.lifecycle_trace.emplace_back("assign_removal");
+	Game.removed_numbers.push_back(Number);
+	Status = C4OS_DELETED;
+}
+
+#include "object_list_delete_objects.inc"
+
+#include "game_new_object.inc"
+#include "game_create_object.inc"
+#include "game_delete_objects.inc"
+
+#include "object_status_deactivate.inc"
+
+#include "script_fn_load_scenario_section.inc"
+#include "script_fn_set_object_status.inc"
+
+bool C4Game::LoadScenarioSection(const char *section, uint32_t flags)
+{
+	++load_calls;
+	loaded_section = section ? section : "";
+	if (!section_available) return false;
+
+	// This is the exact active-object teardown block from
+	// C4Game::LoadScenarioSection (pinned C4Game.cpp:4190-4201). The rest of
+	// the loader is intentionally outside this primitive fixture's scope.
+#include "game_scenario_section_teardown.inc"
+	return load_result;
+}
+
+void C4Game::Reset()
+{
+	DeleteObjects(true);
+	Objects.Clear();
+	Objects.InactiveObjects.Clear();
+	BackObjects.Clear();
+	ForeObjects.Clear();
+	definitions.clear();
+	lifecycle_trace.clear();
+	removed_numbers.clear();
+	host_trace.clear();
+	ObjectEnumerationIndex = 0;
+	native_init_count = 0;
+	construction_count = 0;
+	do_con_count = 0;
+	load_calls = 0;
+	loaded_section.clear();
+	load_result = false;
+	section_available = true;
+	fResortAnyObject = false;
+}
+
+static void print_int_array(const std::vector<int32_t> &values)
+{
+	printf("[");
+	for (std::size_t index = 0; index < values.size(); ++index)
+	{
+		if (index) printf(",");
+		printf("%d", values[index]);
+	}
+	printf("]");
+}
+
+static std::vector<int32_t> list_numbers(const C4ObjectList &list)
+{
+	std::vector<int32_t> numbers;
+	for (C4ObjectLink *link = list.First; link; link = link->Next)
+		if (link->Obj) numbers.push_back(link->Obj->Number);
+	return numbers;
+}
+
+static void print_host_case(const char *name, bool result, bool available)
+{
+	Game.Reset();
+	Game.load_result = result;
+	Game.section_available = available;
+	C4AulContext context;
+	C4String section{"next"};
+	Game.host_trace.push_back(1);
+	const bool returned = FnLoadScenarioSection(&context, &section, 0);
+	Game.host_trace.push_back(returned ? 1 : 0);
+	Game.host_trace.push_back(3);
+
+	sep();
+	printf("{\"case\":\"%s\",\"return\":%s,\"trace\":",
+		name, returned ? "true" : "false");
+	print_int_array(Game.host_trace);
+	printf("}");
+}
+
+static void print_empty_host_case()
+{
+	Game.Reset();
+	C4AulContext context;
+	C4String section{""};
+	Game.host_trace.push_back(1);
+	const bool returned = FnLoadScenarioSection(&context, &section, 0);
+	Game.host_trace.push_back(returned ? 1 : 0);
+	Game.host_trace.push_back(3);
+
+	sep();
+	printf("{\"case\":\"empty_name\",\"return\":%s,\"trace\":",
+		returned ? "true" : "false");
+	print_int_array(Game.host_trace);
+	printf("}");
+}
+
+static void print_creation_retention_case()
+{
+	Game.Reset();
+	C4Def inactive_definition{0x494E4143UL};
+	C4Def active_definition{0x41435456UL};
+	Game.definitions = {&inactive_definition, &active_definition};
+
+	// The two CreateObject calls stand in for objects created immediately
+	// before the section callback reaches the host. NewObject itself is exact:
+	// native Init, enumeration/link, Construction, then DoCon(FullCon). Native
+	// Init and the abstract DoCon marker stay out of the cross-language row;
+	// only the shared Construction/list contract is persisted below.
+	C4Object *inactive = Game.CreateObject(
+		inactive_definition.id,
+		nullptr,
+		0,
+		0,
+		0,
+		0,
+		C4Fixed{},
+		C4Fixed{},
+		C4Fixed{},
+		0);
+	C4AulContext context{inactive};
+	const bool deactivated = FnSetObjectStatus(&context, C4OS_INACTIVE, inactive, false);
+	C4Object *active = Game.CreateObject(
+		active_definition.id,
+		nullptr,
+		0,
+		0,
+		0,
+		0,
+		C4Fixed{},
+		C4Fixed{},
+		C4Fixed{},
+		0);
+	C4String section{"next"};
+	// The extracted host boundary is configured to model a successful section
+	// transition; the loader's full body remains outside this bounded fixture.
+	Game.load_result = true;
+	const bool loaded = FnLoadScenarioSection(&context, &section, 0);
+
+	const auto inactive_numbers = list_numbers(Game.Objects.InactiveObjects);
+	const auto active_numbers = list_numbers(Game.Objects);
+	sep();
+	printf("{\"case\":\"inactive_retained_active_removed\","
+		"\"deactivated\":%s,\"loaded\":%s,"
+		"\"construction_count\":%d,"
+		"\"inactive_numbers\":",
+		deactivated ? "true" : "false", loaded ? "true" : "false",
+		Game.construction_count);
+	print_int_array(inactive_numbers);
+	printf(",\"active_numbers\":");
+	print_int_array(active_numbers);
+	printf(",\"removed_numbers\":");
+	print_int_array(Game.removed_numbers);
+	printf("}");
+
+	// `active` is deliberately never read after the exact teardown block. Keep
+	// the local alive only long enough to make the source-level callback shape
+	// obvious to a reader of this fixture.
+	(void)active;
+}
+
+static void print_cases()
+{
+	arr_begin("scenario_section_host_lifecycle");
+	print_host_case("success_prefix_suffix", true, true);
+	print_host_case("failure_prefix_suffix", false, true);
+	print_empty_host_case();
+	print_creation_retention_case();
+	arr_end();
+}
+
+} // namespace scenario_section_host_lifecycle
+
 // C4Config::AdaptToCurrentVersion, with the smallest set of fields the real
 // out-of-line definition touches. Field types and array widths match
 // C4Config.h so the lifted strncpy/SEqual calls behave identically
@@ -14496,6 +14978,11 @@ int main()
         for (const auto &c : cases) run(c);
     }
     arr_end();
+    printf(",\n");
+
+    // Bounded host/lifecycle section-switch coverage. See the namespace
+    // comment for the exact pinned source scope and its intentional VM limit.
+    scenario_section_host_lifecycle::print_cases();
     printf(",\n");
 
     // C4Group::Sort over the real linked group sources. See the namespace

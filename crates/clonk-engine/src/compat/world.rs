@@ -3,6 +3,10 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
     pub id: ObjectId,
+    /// Runtime identity of the C4Object allocation represented by this
+    /// callback projection. Object numbers may be reused by a section load;
+    /// this token is deliberately absent from script-visible/save state.
+    pub(crate) instance_token: Option<u64>,
     pub(crate) definition_id: DefinitionId,
     /// Runtime-only C4Object::Unsorted flag. It is intentionally absent
     /// from saves, but live Enter/Add calls must still see it.
@@ -841,6 +845,17 @@ impl HostSolidMaskMetadata {
     }
 }
 
+/// Owned request carried across the VM boundary for C++-ordered
+/// `FnLoadScenarioSection`. The caller applies the prefix outcome, materializes
+/// its pending creations, performs the section switch, and only then resumes
+/// the suspended script frame.
+#[derive(Debug, Clone)]
+pub(crate) struct ScenarioSectionSwitchRequest {
+    pub(crate) name: String,
+    pub(crate) flags: i32,
+    pub(crate) preserve_ids: Vec<ObjectId>,
+}
+
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub enum PlayerCommand {
@@ -1325,6 +1340,7 @@ impl HostWorldObject {
     ) -> Self {
         Self {
             id,
+            instance_token: None,
             definition_id: definition_id.into(),
             unsorted: false,
             status,
@@ -1464,6 +1480,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_full_state(mut self, state: Rc<ObjectState>) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    pub(crate) fn with_instance_token(mut self, instance_token: Option<u64>) -> Self {
+        self.instance_token = instance_token.filter(|token| *token != 0);
         self
     }
 
@@ -1831,6 +1852,8 @@ pub(crate) struct LazyHostWorldProvider {
     source: *const (),
     object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
     objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
+    object_instance_token: Option<unsafe fn(*const (), ObjectId) -> Option<u64>>,
+    allocate_object_instance_token: Option<unsafe fn(*const ()) -> u64>,
     pointer_referrers:
         Option<unsafe fn(*const (), ObjectId, &HashSet<usize>) -> Vec<(usize, ObjectId)>>,
     script_value_referrers:
@@ -1885,6 +1908,8 @@ impl LazyHostWorldProvider {
             source,
             object,
             objects,
+            object_instance_token: None,
+            allocate_object_instance_token: None,
             pointer_referrers: None,
             script_value_referrers: None,
             player: None,
@@ -1896,6 +1921,37 @@ impl LazyHostWorldProvider {
             legacy_find_object: None,
             find_condition: None,
         }
+    }
+
+    /// Supply the source engine's allocation-token lookup. Numeric object IDs
+    /// are reusable, so callbacks must carry the source allocation identity
+    /// across a section switch instead of deriving one from a projection.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`].
+    pub(crate) unsafe fn with_object_instance_token(
+        mut self,
+        object_instance_token: unsafe fn(*const (), ObjectId) -> Option<u64>,
+    ) -> Self {
+        self.object_instance_token = Some(object_instance_token);
+        self
+    }
+
+    /// Supply the source engine's monotonically increasing token allocator
+    /// for objects that are linked by a callback before authoritative
+    /// materialization.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`]. The allocator must
+    /// return a nonzero token that remains unique for the source engine.
+    pub(crate) unsafe fn with_object_instance_token_allocator(
+        mut self,
+        allocate_object_instance_token: unsafe fn(*const ()) -> u64,
+    ) -> Self {
+        self.allocate_object_instance_token = Some(allocate_object_instance_token);
+        self
     }
 
     /// Supply a scalar-only scan for objects whose native pointer fields may
@@ -2046,6 +2102,18 @@ impl LazyHostWorldProvider {
         unsafe { (self.object)(self.source, id) }
     }
 
+    fn object_instance_token(self, id: ObjectId) -> Option<u64> {
+        // SAFETY: see `object`; the provider is used only while its source
+        // engine remains synchronously paused.
+        unsafe { (self.object_instance_token?)(self.source, id) }
+    }
+
+    fn allocate_object_instance_token(self) -> Option<u64> {
+        // SAFETY: see `object`; the source allocator uses interior mutability
+        // and does not move or alias the engine's object storage.
+        Some(unsafe { (self.allocate_object_instance_token?)(self.source) })
+    }
+
     fn matches_find_condition(self, id: ObjectId, condition: &FindCondition) -> Option<bool> {
         // SAFETY: see `object`; this reads only callback-entry scalar fields.
         unsafe { (self.find_condition?)(self.source, id, condition) }
@@ -2183,6 +2251,14 @@ pub struct HostWorldContext {
     /// calls leave it empty and continue returning the Send copy-out outcome.
     effect_spawn_previews: Rc<RefCell<Vec<EffectSpawnPreview>>>,
     lazy_world: Option<LazyHostWorldProvider>,
+    /// Allocation tokens reserved by callback-local pending objects. The
+    /// map is shared by cloned contexts so nested callbacks see the same
+    /// allocation identity before copy-out materializes the object.
+    pending_instance_tokens: Rc<RefCell<HashMap<ObjectId, u64>>>,
+    /// Fallback allocator for standalone fixture contexts that do not have
+    /// an Engine-backed lazy provider. Engine contexts use their shared
+    /// authoritative allocator instead.
+    next_pending_instance_token: Rc<Cell<u64>>,
     /// `Game.Objects` from First -> Next. The engine's `exec_list` is this
     /// order reversed; only APIs such as C4Game::FindBase explicitly walk
     /// the forward master list (C4Game.cpp:3732-3744).
@@ -2208,6 +2284,11 @@ pub struct HostWorldContext {
     /// this callback is one native would have dispatched from within
     /// `FnLoadScenarioSection` (`ScenarioSectionState::switch_in_flight`).
     scenario_section_switch_in_flight: bool,
+    /// Weak registrations for VM frames that are suspended across an
+    /// engine-owned synchronous operation. The registry is shared with the
+    /// Engine, so live compat AssignRemoval can clear those frames at the
+    /// native removal tail while the continuation still owns them.
+    suspended_script_registrations: Option<Rc<RefCell<Vec<crate::SuspendedScriptRegistration>>>>,
     /// C4SolidMask pixels not already baked into the landscape plane.
     /// Grid worlds bake MCVehic directly; column fixtures retain the same
     /// overlay used by movement/contact checks.
@@ -2496,6 +2577,8 @@ impl Default for HostWorldContext {
             })),
             effect_spawn_previews: Rc::new(RefCell::new(Vec::new())),
             lazy_world: None,
+            pending_instance_tokens: Rc::new(RefCell::new(HashMap::new())),
+            next_pending_instance_token: Rc::new(Cell::new(1)),
             master_order: OnceCell::from(Rc::new(Vec::new())),
             inactive_order: Rc::new(Vec::new()),
             landscape: OnceCell::new(),
@@ -2504,6 +2587,7 @@ impl Default for HostWorldContext {
             scenario_section_landscape_extents: Rc::new(HashMap::new()),
             scenario_section_landscape_extent: None,
             scenario_section_switch_in_flight: false,
+            suspended_script_registrations: None,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -2953,6 +3037,8 @@ impl HostWorldContext {
             })),
             effect_spawn_previews: Rc::new(RefCell::new(Vec::new())),
             lazy_world: None,
+            pending_instance_tokens: Rc::new(RefCell::new(HashMap::new())),
+            next_pending_instance_token: Rc::new(Cell::new(1)),
             master_order: OnceCell::from(Rc::clone(&order)),
             inactive_order: Rc::new(Vec::new()),
             landscape: OnceCell::from(landscape.map(Arc::new)),
@@ -2961,6 +3047,7 @@ impl HostWorldContext {
             scenario_section_landscape_extents: Rc::new(HashMap::new()),
             scenario_section_landscape_extent: None,
             scenario_section_switch_in_flight: false,
+            suspended_script_registrations: None,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -3794,6 +3881,65 @@ impl HostWorldContext {
     /// stays permissive like particle_def_known).
     pub(crate) fn definition_known(&self, id: &str) -> Option<bool> {
         (!self.definitions.is_empty()).then(|| self.definitions.contains_key(id))
+    }
+
+    /// Return the stable allocation identity for a callback-visible object.
+    /// The callback projection carries the token when it has already been
+    /// materialized; otherwise the paused Engine provider supplies it without
+    /// cloning the object's full state. Pending callback-created objects are
+    /// checked before the provider so a newly allocated same-number object
+    /// cannot inherit the departing Engine object's identity.
+    pub(crate) fn object_instance_token(&self, id: ObjectId) -> Option<u64> {
+        let (removed, materialized) = {
+            let store = self.object_store.borrow();
+            (
+                store.removed.contains(&id),
+                store
+                    .objects
+                    .get(&id)
+                    .and_then(|object| object.instance_token),
+            )
+        };
+        if let Some(token) = self.pending_instance_tokens.borrow().get(&id).copied() {
+            return Some(token);
+        }
+        if removed {
+            return None;
+        }
+        if let Some(token) = materialized {
+            return Some(token);
+        }
+        self.lazy_world
+            .and_then(|provider| provider.object_instance_token(id))
+    }
+
+    /// Reserve one allocation identity for a callback-created object before
+    /// its SpawnConfig reaches the authoritative object vector. Engine-backed
+    /// contexts draw from the Engine's shared allocator; standalone fixture
+    /// contexts use a context-shared fallback only for local tests.
+    pub(crate) fn allocate_object_instance_token(&self) -> u64 {
+        if let Some(token) = self
+            .lazy_world
+            .and_then(|provider| provider.allocate_object_instance_token())
+        {
+            debug_assert_ne!(token, 0);
+            return token;
+        }
+        let token = self.next_pending_instance_token.get();
+        let next = token
+            .checked_add(1)
+            .expect("object instance token overflow");
+        self.next_pending_instance_token.set(next.max(1));
+        token.max(1)
+    }
+
+    pub(crate) fn register_object_instance_token(&self, id: ObjectId, token: u64) {
+        debug_assert_ne!(token, 0);
+        self.pending_instance_tokens.borrow_mut().insert(id, token);
+    }
+
+    pub(crate) fn remove_object_instance_token(&self, id: ObjectId) {
+        self.pending_instance_tokens.borrow_mut().remove(&id);
     }
 
     fn materialize_objects(&self) {
@@ -4819,6 +4965,57 @@ impl HostWorldContext {
     pub(crate) fn with_scenario_section_switch_in_flight(mut self, in_flight: bool) -> Self {
         self.scenario_section_switch_in_flight = in_flight;
         self
+    }
+
+    /// Share the engine-owned suspended-frame registry with live callback
+    /// contexts. The registry stores weak suspension handles, so cloning a
+    /// host world never extends a continuation's lifetime.
+    pub(crate) fn with_suspended_script_registrations(
+        mut self,
+        registrations: Rc<RefCell<Vec<crate::SuspendedScriptRegistration>>>,
+    ) -> Self {
+        self.suspended_script_registrations = Some(registrations);
+        self
+    }
+
+    /// Clear suspended VM frames and their live local cells at the actual
+    /// AssignRemoval tail. This runs through the same shared registry as the
+    /// engine fallback, covering removals initiated by compat host functions.
+    pub(crate) fn clear_suspended_script_references_for_removal(
+        &self,
+        target: ObjectId,
+    ) -> Result<(), RuntimeError> {
+        let Some(registrations) = self.suspended_script_registrations.as_ref() else {
+            return Ok(());
+        };
+        let mut borrow = registrations.try_borrow_mut().map_err(|_| {
+            RuntimeError::new(format!(
+                "AssignRemoval: suspended script registry was borrowed while removing object {}",
+                target.as_u64()
+            ))
+        })?;
+        let mut suspension_borrow_error = false;
+        borrow.retain(|registration| {
+            let Some(suspension) = registration.suspension.upgrade() else {
+                return false;
+            };
+            let Ok(mut suspension) = suspension.try_borrow_mut() else {
+                suspension_borrow_error = true;
+                return true;
+            };
+            suspension.clear_object_references(target.as_u64());
+            if let Some(cells) = registration.cells.as_ref() {
+                cells.clear_object_references(target.as_u64());
+            }
+            true
+        });
+        if suspension_borrow_error {
+            return Err(RuntimeError::new(format!(
+                "AssignRemoval: suspended script frame was borrowed while removing object {}",
+                target.as_u64()
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn scenario_section_known(&self, name: &str) -> bool {
@@ -5995,26 +6192,7 @@ pub(crate) fn load_scenario_section(args: &[Value]) -> Result<Value, RuntimeErro
         if !context.world.scenario_section_known(&name) {
             return Ok(Value::Int(0));
         }
-        // Native performs the switch inline, so the AssignRemoval and global
-        // `ClearAll` callbacks it runs (C4Game.cpp:4190-4208) still observe
-        // the requesting script's own re-entry guard — S2Tower's
-        // `g_sect_is_loading` is the shipped example, and every section-
-        // switching pack carries one, because without it native recurses
-        // through `C4Game::LoadScenarioSection` until the process dies.
-        // Here the switch is a player command that runs after the requesting
-        // frame returned and cleared that guard, so those same callbacks ask
-        // for another switch and each one asks again. Refuse the re-entrant
-        // request: for guarded content this reproduces the native outcome,
-        // where the call is never reached at all.
-        if context.world.scenario_section_switch_in_flight() {
-            tracing::warn!(
-                section = name.as_str(),
-                flags,
-                "LoadScenarioSection from a scenario-section callback ignored"
-            );
-            return Ok(Value::Int(0));
-        }
-        let preserve_ids = context
+        let preserve_ids: Vec<ObjectId> = context
             .all_world_object_ids()
             .into_iter()
             .filter(|id| {
@@ -6026,10 +6204,25 @@ pub(crate) fn load_scenario_section(args: &[Value]) -> Result<Value, RuntimeErro
         context.record_player_command(PlayerCommand::LoadScenarioSection {
             name: name.clone(),
             flags,
-            preserve_ids,
+            preserve_ids: preserve_ids.clone(),
         });
         context.preview_scenario_section_load(&name);
-        Ok(Value::Int(1))
+        if synchronous_script_boundary_active() {
+            Err(RuntimeError::host_continuation(
+                ScenarioSectionSwitchRequest {
+                    name,
+                    flags,
+                    preserve_ids,
+                },
+                // The callback only records the request.  The embedding
+                // engine supplies the result of the actual switch when it
+                // resumes this frame; keeping this placeholder neutral avoids
+                // turning a deferred request into a fabricated success.
+                Value::Nil,
+            ))
+        } else {
+            Ok(Value::Int(1))
+        }
     })
 }
 

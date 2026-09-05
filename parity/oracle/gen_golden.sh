@@ -1314,6 +1314,69 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_assign_removal.inc"
 
+# 3p2. Keep the section-switch host and object lifecycle ordering as
+# mechanical source extracts. The bounded fixture below deliberately does
+# not lift all of LoadScenarioSection (its group/landscape/VM dependencies are
+# a separate live-oracle concern): it uses the exact script hosts, NewObject /
+# CreateObject path, StatusDeactivate, active-list deletion, and the object
+# teardown block that decides which objects survive a switch.
+awk '
+  /^static C4ValueInt FnLoadScenarioSection\(C4AulContext \*ctx, C4String \*pstrSection, C4ValueInt dwFlags\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Script.cpp" > "$gen/script_fn_load_scenario_section.inc"
+
+awk '
+  /^static bool FnSetObjectStatus\(C4AulContext \*ctx, C4ValueInt iNewStatus, C4Object \*pObj, bool fClearPointers\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Script.cpp" > "$gen/script_fn_set_object_status.inc"
+
+awk '
+  /^C4Object \*C4Game::NewObject\(C4Def \*pDef, C4Object \*pCreator,$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/game_new_object.inc"
+
+awk '
+  /^C4Object \*C4Game::CreateObject\(C4ID id, C4Object \*pCreator, int32_t iOwner,$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/game_create_object.inc"
+
+awk '
+  /^void C4Game::DeleteObjects\(bool fDeleteInactive\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/game_delete_objects.inc"
+
+awk '
+  /^void C4ObjectList::DeleteObjects\(\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4ObjectList.cpp" > "$gen/object_list_delete_objects.inc"
+
+awk '
+  /^bool C4Object::StatusDeactivate\(bool fClearPointers\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_status_deactivate.inc"
+
+awk '
+  /^bool C4Game::LoadScenarioSection\(/ { in_loader = 1 }
+  in_loader && /^[[:space:]]*\/\/ remove all objects \(except inactive\)$/ { p = 1 }
+  p { print }
+  p && /^[[:space:]]*DeleteObjects\(false\);$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/game_scenario_section_teardown.inc"
+
 awk '
   /^void C4Effect::Execute\(C4Object \*pObj\)$/ { p = 1 }
   p { print }

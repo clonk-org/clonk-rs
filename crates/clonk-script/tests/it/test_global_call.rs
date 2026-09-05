@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use clonk_script::{clear_active_object_references, Engine, RuntimeError, Value};
+use clonk_script::{
+    clear_active_object_references, Engine, RuntimeError, ScriptCallOutcome, Value,
+};
 
 fn reference_sweep_engine(clear_result: Value) -> Engine {
     let mut engine = Engine::new();
@@ -234,6 +236,43 @@ func Probe() { return global->~DefinitelyMissing(Mark()); }
         Value::Nil
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn global_eval_continuation_resumes_in_engine_scope() {
+    // AB_CALLGLOBAL clears Obj/Def before FnEval selects Game.Script, while
+    // DirectExec retains its suffix across a yielding host call
+    // (C4AulExec.cpp:1216-1297,1658-1707; C4Script.cpp:4501-4513).
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation((), Value::Nil))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+global func GlobalAnswer() { return 73; }
+func Probe() { return global->eval("Pause() + GlobalAnswer()"); }
+"#,
+        )
+        .expect("global eval continuation script loads");
+
+    let suspension = match engine
+        .call_with_continuation("Probe", &[])
+        .expect("global eval should suspend at Pause")
+    {
+        ScriptCallOutcome::Suspended(suspension) => suspension,
+        ScriptCallOutcome::Complete(value) => {
+            panic!("global eval completed before Pause: {value:?}")
+        }
+    };
+    let result = match engine
+        .resume_script_continuation_with_value(suspension, Value::Int(0))
+        .expect("global eval suffix should resume")
+    {
+        ScriptCallOutcome::Complete(value) => value,
+        ScriptCallOutcome::Suspended(_) => panic!("global eval suspended twice"),
+    };
+    assert_eq!(result, Value::Int(73));
 }
 
 #[test]
@@ -594,4 +633,97 @@ func Probe() {
         engine.call("Probe", &[]).expect("tree-walk eager and runs"),
         Value::Bool(false)
     );
+}
+
+#[test]
+fn resumed_global_call_reenters_its_native_context() {
+    // AB_CALLGLOBAL's cleared Obj/Def belongs to the entire callee frame,
+    // including native calls after a synchronous host boundary
+    // (C4AulExec.cpp:1216-1297).
+    let mut engine = Engine::new();
+    let active = Arc::new(AtomicUsize::new(0));
+    let hook_active = Arc::clone(&active);
+    engine.register_global_call_context_hook(Arc::new(move |enter| {
+        if enter {
+            hook_active.fetch_add(1, Ordering::SeqCst);
+        } else {
+            hook_active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }));
+    let observed = Arc::clone(&active);
+    engine.register_host_function("Scope", move |_| {
+        Ok(Value::Bool(observed.load(Ordering::SeqCst) > 0))
+    });
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation((), Value::Nil))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+global func Paused() { Pause(); return Scope(); }
+func Probe() { return global->Paused(); }
+"#,
+        )
+        .expect("global context probe loads");
+    let ScriptCallOutcome::Suspended(suspension) = engine
+        .call_with_continuation("Probe", &[])
+        .expect("global child suspends")
+    else {
+        panic!("expected suspension")
+    };
+    assert_eq!(
+        active.load(Ordering::SeqCst),
+        0,
+        "parked frames release host scope"
+    );
+    let ScriptCallOutcome::Complete(value) = engine
+        .resume_script_continuation_with_value(suspension, Value::Nil)
+        .expect("global child resumes")
+    else {
+        panic!("unexpected second suspension")
+    };
+    assert_eq!(value, Value::Bool(true));
+    assert_eq!(
+        active.load(Ordering::SeqCst),
+        0,
+        "completed frames release host scope"
+    );
+}
+
+#[test]
+fn nested_ast_child_can_suspend_twice_without_losing_its_parent() {
+    // C4Aul retains both caller and callee frames through each synchronous
+    // native call (C4AulExec.cpp:821-846,1318-1342).
+    let mut engine = Engine::new();
+    engine.register_host_function("Pause", |_| {
+        Err(RuntimeError::host_continuation((), Value::Nil))
+    });
+    engine
+        .load_script(
+            r#"#strict 3
+func Inner() { for (var i = 0; i < 2; i++) Pause(); return 3; }
+func Middle() { return eval("Inner() + 1"); }
+func Probe() { return Middle() + 1; }
+"#,
+        )
+        .expect("nested continuation script loads");
+    let ScriptCallOutcome::Suspended(first) = engine
+        .call_with_continuation("Probe", &[])
+        .expect("first boundary")
+    else {
+        panic!("expected first suspension")
+    };
+    let ScriptCallOutcome::Suspended(second) = engine
+        .resume_script_continuation_with_value(first, Value::Nil)
+        .expect("second boundary")
+    else {
+        panic!("expected second suspension")
+    };
+    let ScriptCallOutcome::Complete(value) = engine
+        .resume_script_continuation_with_value(second, Value::Nil)
+        .expect("both parents resume")
+    else {
+        panic!("unexpected third suspension")
+    };
+    assert_eq!(value, Value::Int(5));
 }

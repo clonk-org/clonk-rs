@@ -12,6 +12,151 @@ fn effect_callback_needs_owned_snapshot(effects: &[EffectState], event: &EffectE
             .any(|effect| effect.number == event.effect.number)
 }
 
+pub(crate) type EffectRunOutput = (
+    Vec<EffectCommand>,
+    Vec<ParticleCommand>,
+    PhysicsDelta,
+    Vec<AudioCommand>,
+    Vec<MessageCommand>,
+    Vec<PlayerCommand>,
+    Vec<ObjectOrderCommand>,
+    Vec<NextMissionCommand>,
+    Vec<LandscapeOperation>,
+    Vec<TransferZoneCommand>,
+    Vec<SpawnConfig>,
+    Vec<compat::NestedObjectOutcome>,
+    Option<compat::EffectObjectListPreview>,
+    Vec<HostSolidMaskOperation>,
+    Option<compat::HostRasterPreview>,
+    bool,
+    bool,
+    Option<bool>,
+    bool,
+    u64,
+    bool,
+    Option<bool>,
+    Option<i32>,
+    AudioRegistry,
+    LcgRng,
+);
+
+pub(crate) struct EffectEventContinuation {
+    pub(crate) event: EffectEvent,
+    pub(crate) resume: EffectScriptResume,
+    pub(crate) queue: VecDeque<EffectEvent>,
+    pub(crate) state_snapshot: ObjectState,
+    pub(crate) accumulated_physics: PhysicsDelta,
+    pub(crate) pending_spawns: Vec<SpawnConfig>,
+    pub(crate) global_commands: Vec<EffectCommand>,
+    pub(crate) pending_particles: Vec<ParticleCommand>,
+    pub(crate) pending_audio: Vec<AudioCommand>,
+    pub(crate) pending_messages: Vec<MessageCommand>,
+    pub(crate) pending_player_commands: Vec<PlayerCommand>,
+    pub(crate) pending_object_order_commands: Vec<ObjectOrderCommand>,
+    pub(crate) pending_next_mission_commands: Vec<NextMissionCommand>,
+    pub(crate) pending_landscape_ops: Vec<LandscapeOperation>,
+    pub(crate) pending_transfer_zones: Vec<TransferZoneCommand>,
+    pub(crate) pending_other_objects: Vec<compat::NestedObjectOutcome>,
+    pub(crate) pending_object_lists: Option<compat::EffectObjectListPreview>,
+    pub(crate) pending_solid_mask_operations: Vec<HostSolidMaskOperation>,
+    pub(crate) solid_mask_changed: bool,
+    pub(crate) action_callbacks_dispatched: bool,
+    pub(crate) change_def_reinsert: Option<bool>,
+    pub(crate) host_container_change: bool,
+    pub(crate) game_over_requested: bool,
+    pub(crate) script_go_requested: Option<bool>,
+    pub(crate) script_counter_requested: Option<i32>,
+    pub(crate) checked_started: HashSet<i32>,
+    pub(crate) denied_started: HashSet<i32>,
+    pub(crate) annulled_started: HashMap<i32, (i32, bool)>,
+    pub(crate) temp_wrapped_started: HashSet<i32>,
+    pub(crate) temp_wrapped_stopped: HashSet<i32>,
+}
+
+pub(crate) enum EffectEventRunResult {
+    Complete(EffectRunOutput),
+    Suspended {
+        output: EffectRunOutput,
+        continuation: EffectEventContinuation,
+    },
+}
+
+/// Owned lifetime for a suspended script frame while an engine callback
+/// performs synchronous work. The stack reservation and weak registry entry
+/// survive arbitrary nested callbacks, while the strong suspension remains
+/// owned by this guard until `finish` hands it back to its continuation.
+pub(crate) struct SuspendedScriptBoundary {
+    handle: Option<Rc<RefCell<ScriptSuspension>>>,
+    registrations: Rc<RefCell<Vec<SuspendedScriptRegistration>>>,
+    stack_context: Option<clonk_script::ScriptValueStackContext>,
+}
+
+impl SuspendedScriptBoundary {
+    pub(crate) fn finish(mut self) -> Result<ScriptSuspension, EngineError> {
+        let handle = self.handle.as_ref().ok_or_else(|| {
+            EngineError::invalid_script_output(
+                "Engine",
+                "SynchronousScriptBoundary",
+                "suspended script boundary was finished twice".to_owned(),
+            )
+        })?;
+        // Remove the registration while the strong handle is still owned by
+        // this guard. This is the normal RAII exit: the LocalCells clone must
+        // stop participating in removal sweeps as soon as the callback is
+        // handed back to the VM, rather than waiting for the next boundary.
+        let own = Rc::downgrade(handle);
+        let mut registrations = self.registrations.try_borrow_mut().map_err(|_| {
+            EngineError::invalid_script_output(
+                "Engine",
+                "SynchronousScriptBoundary",
+                "suspended script registry was borrowed while closing a boundary".to_owned(),
+            )
+        })?;
+        registrations.retain(|registration| !Weak::ptr_eq(&registration.suspension, &own));
+        drop(registrations);
+
+        // Drop the independent VM reservation before handing the frame back
+        // to the continuation driver. AssignRemoval may run while it is
+        // attached, but resume must see a fresh caller stack charge.
+        self.stack_context.take();
+        let handle = self.handle.take().ok_or_else(|| {
+            EngineError::invalid_script_output(
+                "Engine",
+                "SynchronousScriptBoundary",
+                "suspended script boundary was finished twice".to_owned(),
+            )
+        })?;
+        Rc::try_unwrap(handle)
+            .map(|cell| cell.into_inner())
+            .map_err(|_| {
+                EngineError::invalid_script_output(
+                    "Engine",
+                    "SynchronousScriptBoundary",
+                    "suspended script frame acquired an unexpected owner".to_owned(),
+                )
+            })
+    }
+}
+
+impl Drop for SuspendedScriptBoundary {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.as_ref() else {
+            return;
+        };
+        let own = Rc::downgrade(handle);
+        // Drop is also the panic/error cleanup path. A concurrent registry
+        // borrow is an internal invariant violation, but it must not turn a
+        // script panic into a second panic; the stale weak entry is harmless
+        // and will be pruned by the next boundary.
+        if let Ok(mut registrations) = self.registrations.try_borrow_mut() {
+            registrations.retain(|registration| {
+                !Weak::ptr_eq(&registration.suspension, &own)
+                    && registration.suspension.upgrade().is_some()
+            });
+        }
+    }
+}
+
 impl Engine {
     pub fn snapshot(&self) -> SimulationSnapshot {
         // Section spans for clonk-org/clonk-rs#294. Observation only: every
@@ -1676,18 +1821,170 @@ impl Engine {
         definition_id: &DefinitionId,
         events: Vec<EffectEvent>,
     ) -> Result<(), EngineError> {
+        self.dispatch_object_effect_events_inner(idx, definition_id, events, false)
+            .map(|_| ())
+    }
+
+    /// Runs effect callbacks while retaining nested outcomes whose target has
+    /// not materialized yet. Pending-object construction uses this variant:
+    /// C++ links a CreateObject result before the caller resumes, whereas the
+    /// Rust spawn queue may still hold that object as a SpawnConfig.
+    pub(crate) fn dispatch_object_effect_events_retaining_missing(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        events: Vec<EffectEvent>,
+    ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
+        self.dispatch_object_effect_events_inner(idx, definition_id, events, true)
+    }
+
+    fn dispatch_object_effect_events_inner(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        events: Vec<EffectEvent>,
+        retain_missing_nested: bool,
+    ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
         let object_id = self.objects[idx].id;
+        let object_instance_token = self
+            .object_instance_token(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
         let previous_container = self.objects[idx].state.container;
-        let global_view = self.global_effects.clone();
-        let rng_state = self.rng.clone();
-        let world = self.host_world_context_for_object(idx);
+        let mut detached = Some(self.objects[idx].clone());
+        let mut pending_events = Some(events);
+        let mut pending_continuation = None;
+        loop {
+            let live_index = self.find_object_index(object_id).filter(|index| {
+                self.object_instance_token(object_id) == Some(object_instance_token)
+            });
+            let Some(mut object) = live_index
+                .and_then(|index| self.objects.get(index).cloned())
+                .or_else(|| detached.clone())
+            else {
+                return Err(EngineError::UnknownObject(object_id));
+            };
+            let world = live_index
+                .map(|index| self.host_world_context_for_object(index))
+                .unwrap_or_else(|| self.host_world_context());
+            let definition = self
+                .definitions
+                .get(definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            let result = Self::run_effect_events_for_object_with_continuation(
+                definition,
+                &self.definitions,
+                self.game_over_triggered,
+                self.rng.clone(),
+                object_id,
+                &mut object,
+                pending_events.take().unwrap_or_default(),
+                self.global_effects.clone(),
+                &mut self.environment,
+                self.physics,
+                self.frame,
+                world,
+                self.audio_registry.clone(),
+                pending_continuation.take(),
+            )?;
+            match result {
+                EffectEventRunResult::Complete(output) => {
+                    if let Some(index) = self.find_object_index(object_id).filter(|_| {
+                        self.object_instance_token(object_id) == Some(object_instance_token)
+                    }) {
+                        self.objects[index] = object;
+                    }
+                    return self.fold_effect_run_output(
+                        idx,
+                        object_id,
+                        object_instance_token,
+                        previous_container,
+                        output,
+                        None,
+                        retain_missing_nested,
+                    );
+                }
+                EffectEventRunResult::Suspended {
+                    output,
+                    mut continuation,
+                } => {
+                    if let Some(index) = self.find_object_index(object_id).filter(|_| {
+                        self.object_instance_token(object_id) == Some(object_instance_token)
+                    }) {
+                        self.objects[index] = object;
+                        detached = self.objects.get(index).cloned();
+                    } else {
+                        detached = Some(object);
+                    }
+                    let request = continuation
+                        .resume
+                        .suspension
+                        .request::<compat::ScenarioSectionSwitchRequest>()
+                        .cloned()
+                        .ok_or_else(|| {
+                            EngineError::invalid_script_output(
+                                definition_id.clone(),
+                                "EffectCallback",
+                                "script yielded an unsupported host continuation".to_owned(),
+                            )
+                        })?;
+                    self.capture_effect_script_context_identity(&mut continuation.resume);
+                    let (suspension, (retained_prefix, switched)) = self
+                        .with_suspended_script_boundary(
+                            continuation.resume.suspension,
+                            Some(continuation.resume.cells.clone()),
+                            |engine| {
+                                let retained_prefix = engine.fold_effect_run_output(
+                                    idx,
+                                    object_id,
+                                    object_instance_token,
+                                    previous_container,
+                                    output,
+                                    Some(&request),
+                                    retain_missing_nested,
+                                )?;
+                                let switched = engine.load_scenario_section(
+                                    &request.name,
+                                    request.flags,
+                                    request.preserve_ids,
+                                )?;
+                                Ok((retained_prefix, switched))
+                            },
+                        )?;
+                    continuation.resume.suspension = suspension;
+                    continuation.pending_other_objects.extend(retained_prefix);
+                    if self.object_instance_token(object_id) == Some(object_instance_token) {
+                        if let Some(index) = self.find_object_index(object_id) {
+                            continuation.state_snapshot =
+                                self.objects[index].script_state_snapshot();
+                        }
+                    }
+                    continuation.resume.value = Value::Int(i32::from(switched));
+                    continuation.resume.receiver_available =
+                        self.object_instance_token(object_id) == Some(object_instance_token);
+                    self.refresh_effect_script_context_identity(&mut continuation.resume);
+                    pending_continuation = Some(continuation);
+                }
+            }
+        }
+    }
+
+    fn fold_effect_run_output(
+        &mut self,
+        index: usize,
+        object_id: ObjectId,
+        object_instance_token: u64,
+        previous_container: Option<ObjectId>,
+        output: EffectRunOutput,
+        section_request: Option<&compat::ScenarioSectionSwitchRequest>,
+        retain_missing_nested: bool,
+    ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
         let (
             global_cmds,
             emitted_particles,
             physics_delta,
             audio_events,
             event_messages,
-            player_commands,
+            mut player_commands,
             object_order_commands,
             next_mission_commands,
             landscape_ops,
@@ -1707,38 +2004,24 @@ impl Engine {
             effect_script_counter,
             audio_state,
             new_rng,
-        ) = {
-            let definition = self
-                .definitions
-                .get(definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-            let definitions_ref = &self.definitions;
-            let object = &mut self.objects[idx];
-            Self::run_effect_events_for_object(
-                definition,
-                definitions_ref,
-                self.game_over_triggered,
-                rng_state,
-                object_id,
-                object,
-                events,
-                global_view,
-                &mut self.environment,
-                self.physics,
-                self.frame,
-                world.clone(),
-                self.audio_registry.clone(),
-            )?
-        };
+        ) = output;
+        if let Some(request) = section_request {
+            consume_section_switch_command(&mut player_commands, request);
+        }
         let outermost = self.stage_host_solid_mask_operations(
             effect_solid_mask_operations,
             effect_host_raster_preview,
         );
+        let mut retained_nested = Vec::new();
         let fold_result = (|| -> Result<(), EngineError> {
             self.rng = new_rng;
             self.audio_registry = audio_state;
             if effect_solid_mask_changed {
-                self.update_solid_mask(idx);
+                if let Some(live_index) = self.find_object_index(object_id).filter(|_| {
+                    self.object_instance_token(object_id) == Some(object_instance_token)
+                }) {
+                    self.update_solid_mask(live_index);
+                }
             }
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
@@ -1748,7 +2031,13 @@ impl Engine {
                 self.apply_transfer_zone_commands(effect_transfer_zones)?;
             }
             if !effect_other_objects.is_empty() {
-                self.apply_nested_object_outcomes(effect_other_objects)?;
+                if retain_missing_nested {
+                    retained_nested.extend(
+                        self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?,
+                    );
+                } else {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
+                }
             }
             if let Some(preview) = effect_object_lists {
                 self.install_effect_object_lists(preview);
@@ -1787,40 +2076,85 @@ impl Engine {
                 self.apply_global_effect_commands(&global_cmds);
             }
             self.apply_particle_commands(emitted_particles);
-            // `apply_player_commands` above may have run `LoadScenarioSection`,
-            // which rebuilds the object list (C4Game.cpp:4194-4208). The
-            // captured `idx` is then some other object's slot, or none — and an
-            // object that departed with its section has no container change
-            // left to reconcile.
-            let Some(idx) = self.find_object_index(object_id) else {
-                return Ok(());
-            };
-            let new_container = self.objects[idx].state.container;
-            if previous_container != new_container {
-                if effect_host_container_change {
-                    self.apply_host_container_link_change(
-                        object_id,
-                        previous_container,
-                        new_container,
-                    )?;
-                } else {
-                    self.apply_container_change(
-                        object_id,
-                        previous_container,
-                        new_container,
-                        false,
-                    )?;
+            if let Some(live_index) = self
+                .find_object_index(object_id)
+                .filter(|_| self.object_instance_token(object_id) == Some(object_instance_token))
+            {
+                let new_container = self.objects[live_index].state.container;
+                if previous_container != new_container {
+                    if effect_host_container_change {
+                        self.apply_host_container_link_change(
+                            object_id,
+                            previous_container,
+                            new_container,
+                        )?;
+                    } else {
+                        self.apply_container_change(
+                            object_id,
+                            previous_container,
+                            new_container,
+                            false,
+                        )?;
+                    }
+                }
+                if effect_change_def_reinsert.unwrap_or(false) {
+                    self.reinsert_change_def_contents_link(object_id)?;
                 }
             }
-            if effect_change_def_reinsert.unwrap_or(false) {
-                self.reinsert_change_def_contents_link(object_id)?;
-            }
+            let _ = index;
             Ok(())
         })();
-        self.finish_host_solid_mask_operations(outermost, fold_result)
+        self.finish_host_solid_mask_operations(outermost, fold_result)?;
+        Ok(retained_nested)
     }
 
+    /// Legacy one-shot adapter retained for effect consumers that are not
+    /// driving a synchronous section boundary. The frame loop uses the
+    /// continuation-aware sibling above; yielding here is surfaced instead of
+    /// dropping the VM frame.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_effect_events_for_object(
+        definition: &Definition,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        game_over_triggered: bool,
+        rng: LcgRng,
+        object_id: ObjectId,
+        object: &mut Object,
+        events: Vec<EffectEvent>,
+        global_view: Vec<EffectState>,
+        environment: &mut EnvironmentSettings,
+        physics: PhysicsSettings,
+        frame: u64,
+        world: HostWorldContext,
+        audio: AudioRegistry,
+    ) -> Result<EffectRunOutput, EngineError> {
+        match Self::run_effect_events_for_object_with_continuation(
+            definition,
+            definitions,
+            game_over_triggered,
+            rng,
+            object_id,
+            object,
+            events,
+            global_view,
+            environment,
+            physics,
+            frame,
+            world,
+            audio,
+            None,
+        )? {
+            EffectEventRunResult::Complete(output) => Ok(output),
+            EffectEventRunResult::Suspended { .. } => Err(EngineError::invalid_script_output(
+                definition.id.clone(),
+                "EffectCallback",
+                "effect callback yielded outside its continuation driver".to_owned(),
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_effect_events_for_object_with_continuation(
         definition: &Definition,
         definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
         game_over_triggered: bool,
@@ -1834,39 +2168,11 @@ impl Engine {
         frame: u64,
         world: HostWorldContext,
         audio: AudioRegistry,
-    ) -> Result<
-        (
-            Vec<EffectCommand>,
-            Vec<ParticleCommand>,
-            PhysicsDelta,
-            Vec<AudioCommand>,
-            Vec<MessageCommand>,
-            Vec<PlayerCommand>,
-            Vec<ObjectOrderCommand>,
-            Vec<NextMissionCommand>,
-            Vec<LandscapeOperation>,
-            Vec<TransferZoneCommand>,
-            Vec<SpawnConfig>,
-            Vec<compat::NestedObjectOutcome>,
-            Option<compat::EffectObjectListPreview>,
-            Vec<HostSolidMaskOperation>,
-            Option<compat::HostRasterPreview>,
-            bool,
-            bool,
-            Option<bool>,
-            bool,
-            u64,
-            bool,
-            Option<bool>,
-            Option<i32>,
-            AudioRegistry,
-            LcgRng,
-        ),
-        EngineError,
-    > {
-        if events.is_empty() {
+        continuation: Option<EffectEventContinuation>,
+    ) -> Result<EffectEventRunResult, EngineError> {
+        if events.is_empty() && continuation.is_none() {
             let next_object_id = world.next_object_id();
-            return Ok((
+            return Ok(EffectEventRunResult::Complete((
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
@@ -1892,7 +2198,7 @@ impl Engine {
                 None,
                 audio,
                 rng,
-            ));
+            )));
         }
 
         // Spawns from one callback (CreateContents in an FxStart, the
@@ -1942,187 +2248,45 @@ impl Engine {
         // run after a removal (max existing + 1, C4Effect.cpp:76-78).
         let mut temp_wrapped_started: HashSet<i32> = HashSet::new();
         let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
+        let mut resumed_event = None;
+        if let Some(saved) = continuation {
+            resumed_event = Some((saved.event, saved.resume));
+            queue = saved.queue;
+            state_snapshot = saved.state_snapshot;
+            accumulated_physics = saved.accumulated_physics;
+            pending_spawns = saved.pending_spawns;
+            global_commands = saved.global_commands;
+            pending_particles = saved.pending_particles;
+            pending_audio = saved.pending_audio;
+            pending_messages = saved.pending_messages;
+            pending_player_commands = saved.pending_player_commands;
+            pending_object_order_commands = saved.pending_object_order_commands;
+            pending_next_mission_commands = saved.pending_next_mission_commands;
+            pending_landscape_ops = saved.pending_landscape_ops;
+            pending_transfer_zones = saved.pending_transfer_zones;
+            pending_other_objects = saved.pending_other_objects;
+            pending_object_lists = saved.pending_object_lists;
+            pending_solid_mask_operations = saved.pending_solid_mask_operations;
+            solid_mask_changed = saved.solid_mask_changed;
+            action_callbacks_dispatched = saved.action_callbacks_dispatched;
+            change_def_reinsert = saved.change_def_reinsert;
+            host_container_change = saved.host_container_change;
+            game_over_requested = saved.game_over_requested;
+            script_go_requested = saved.script_go_requested;
+            script_counter_requested = saved.script_counter_requested;
+            checked_started = saved.checked_started;
+            denied_started = saved.denied_started;
+            annulled_started = saved.annulled_started;
+            temp_wrapped_started = saved.temp_wrapped_started;
+            temp_wrapped_stopped = saved.temp_wrapped_stopped;
+        }
 
-        while let Some(mut event) = queue.pop_front() {
-            // A command generated by an earlier callback may have killed a
-            // queued callback target. Timer execution normally arrives one
-            // live node at a time, but this guard also protects callers that
-            // supply an explicit event batch.
-            if matches!(event.kind, EffectEventKind::Timer)
-                && !object
-                    .state
-                    .effects
-                    .iter()
-                    .any(|effect| effect.number == event.effect.number && effect.priority != 0)
-            {
-                continue;
-            }
-            // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
-            // validates, ask all effects with iPriority >= the new priority
-            // via their Fx<Name>Effect callback — except for priority-1
-            // effects, which are out of the priority call chain (:170).
-            if matches!(event.kind, EffectEventKind::Started) {
-                // Fx*Start already ran synchronously inside FnAddEffect
-                // (priority-1 effects, C4Effect.cpp:96-152) — do not
-                // dispatch it again.
-                if event.effect.start_dispatched {
-                    continue;
-                }
-                if denied_started.remove(&event.effect.number) {
-                    continue;
-                }
-                if event.effect.priority != 1 && !checked_started.contains(&event.effect.number) {
-                    checked_started.insert(event.effect.number);
-                    // C4Effect::Check (C4Effect.cpp:278-282): every OTHER
-                    // effect with iPriority >= the new priority is asked —
-                    // the walk starts at the new effect's pNext, so only
-                    // the effect itself is excluded, never same-name peers.
-                    let checkers: Vec<EffectState> = state_snapshot
-                        .effects
-                        .iter()
-                        .filter(|existing| {
-                            existing.number != event.effect.number
-                                && existing.priority != 0
-                                && existing.priority >= event.effect.priority
-                        })
-                        .cloned()
-                        .collect();
-                    if !checkers.is_empty() {
-                        let pending = event.effect.clone();
-                        let constructor_values = event.constructor_values.clone();
-                        queue.push_front(event);
-                        for checker in checkers.into_iter().rev() {
-                            queue.push_front(EffectEvent::check(
-                                checker,
-                                pending.clone(),
-                                constructor_values.clone(),
-                            ));
-                        }
-                        continue;
-                    }
-                }
-                if let Some((acceptor_number, do_temp_calls)) =
-                    annulled_started.remove(&event.effect.number)
-                {
-                    // Add-to-other-effect (C4Effect.cpp:295-313): the new
-                    // effect stays dead — no Start, no Stop — and the
-                    // acceptor's Fx*Add merges its parameters.
-                    object.remove_effect_by_number(event.effect.number);
-                    state_snapshot.effects = object.state.effects.clone();
-                    if let Some(acceptor) = object
-                        .state
-                        .effects
-                        .iter()
-                        .find(|existing| existing.number == acceptor_number)
-                        .cloned()
-                    {
-                        // AnnulCalls (C4Fx_Effect_AnnulCalls,
-                        // C4Effects.h:38): the Add runs inside a temp
-                        // remove/readd bracket of the effects above the
-                        // ACCEPTOR (C4Effect.cpp:297-304).
-                        let uppers = if do_temp_calls {
-                            upper_effects_of(&object.state.effects, &acceptor)
-                        } else {
-                            Vec::new()
-                        };
-                        let mut sequence: Vec<EffectEvent> = uppers
-                            .iter()
-                            .rev()
-                            .cloned()
-                            .map(EffectEvent::temp_removed)
-                            .collect();
-                        sequence.push(EffectEvent::add_to(
-                            acceptor,
-                            event.effect.clone(),
-                            event.constructor_values.clone(),
-                        ));
-                        sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
-                        for queued in sequence.into_iter().rev() {
-                            queue.push_front(queued);
-                        }
-                    }
-                    continue;
-                }
-                // C4Effect ctor (C4Effect.cpp:118-133): a validating
-                // Fx*Start is bracketed by temp-deactivating all upper
-                // effects (high to low) and reactivating them afterwards
-                // (low to high) — only when the new effect HAS an Fx*Start
-                // and is not priority 1 (`fRemoveUpper && pNext &&
-                // pFnStart`, C4Effect.cpp:123). The bracket runs even when
-                // the Start then denies (C4Effect.cpp:128-133).
-                if event.effect.priority != 1
-                    && !temp_wrapped_started.contains(&event.effect.number)
-                {
-                    clonk_script::lookup_profile::record_key_allocation(
-                        clonk_script::lookup_profile::LookupFamily::EffectCallback,
-                    );
-                    let callback_name = format!("Fx{}Start", event.effect.name);
-                    let has_start = event.effect.name == C4FX_FIRE
-                        || resolve_effect_script_callback(&event.effect, &callback_name, &world)
-                            .is_some();
-                    if has_start {
-                        let uppers = upper_effects_of(&object.state.effects, &event.effect);
-                        if !uppers.is_empty() {
-                            temp_wrapped_started.insert(event.effect.number);
-                            let mut sequence: Vec<EffectEvent> = uppers
-                                .iter()
-                                .rev()
-                                .cloned()
-                                .map(EffectEvent::temp_removed)
-                                .collect();
-                            sequence.push(event);
-                            sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
-                            for queued in sequence.into_iter().rev() {
-                                queue.push_front(queued);
-                            }
-                            continue;
-                        }
-                    }
-                }
-                // The constructor has survived Check/annul negotiation and
-                // is about to execute its one Start call. Mark the live node
-                // before the callback so EffectVar updates cloned from its
-                // host snapshot retain the completed-constructor state.
-                event.effect.start_dispatched = true;
-                if let Some(effect) = object
-                    .state
-                    .effects
-                    .iter_mut()
-                    .find(|effect| effect.number == event.effect.number)
-                {
-                    effect.start_dispatched = true;
-                }
-                state_snapshot.effects = object.state.effects.clone();
-            }
-            // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
-            // bracketed by temp-deactivating all upper effects
-            // (C4Effect.cpp:370-374) and reactivating them after the Stop
-            // (C4Effect.cpp:404). Clear/destroy removals go through
-            // ClearAll, which does NO temp calls (C4Effect.cpp:407-425);
-            // priority-1 victims skip the bracket (C4Effect.cpp:477).
-            if matches!(
-                event.kind,
-                EffectEventKind::Stopped(EffectStopReason::Removed)
-            ) && event.effect.priority != 1
-                && !temp_wrapped_stopped.contains(&event.effect.number)
-            {
-                let uppers = upper_effects_of(&object.state.effects, &event.effect);
-                if !uppers.is_empty() {
-                    temp_wrapped_stopped.insert(event.effect.number);
-                    let mut sequence: Vec<EffectEvent> = uppers
-                        .iter()
-                        .rev()
-                        .cloned()
-                        .map(EffectEvent::temp_removed)
-                        .collect();
-                    sequence.push(event);
-                    sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
-                    for queued in sequence.into_iter().rev() {
-                        queue.push_front(queued);
-                    }
-                    continue;
-                }
-            }
+        while let Some((mut event, callback_resume)) = resumed_event
+            .take()
+            .map(|(event, resume)| (event, Some(resume)))
+            .or_else(|| queue.pop_front().map(|event| (event, None)))
+        {
+            let resumed_callback = callback_resume.is_some();
             let clear_all_stop = matches!(
                 event.kind,
                 EffectEventKind::Stopped(
@@ -2135,85 +2299,269 @@ impl Engine {
                 event.kind,
                 EffectEventKind::Stopped(EffectStopReason::Death)
             );
-            if clear_all_stop {
-                // ClearAll calls SetDead immediately before Fx*Stop, but
-                // keeps the node linked so GetEffect(number, include-dead)
-                // and the unique-number allocator still see it
-                // (C4Effect.cpp:407-424,55-81).
-                let effect = object
-                    .state
-                    .effects
-                    .iter_mut()
-                    .find(|effect| effect.number == event.effect.number);
-                match effect {
-                    Some(effect) if effect.priority != 0 => {
-                        // A higher Stop may have renamed this lower node while
-                        // ClearAll's recursive frame was suspended. C++
-                        // dispatches through its then-live callback pointers.
-                        event.effect = effect.clone();
-                        effect.priority = 0;
-                        state_snapshot.effects = object.state.effects.clone();
-                    }
-                    Some(_) => {
-                        // A higher Stop killed this still-linked node before
-                        // its recursive frame resumed (IsDead => return).
-                        continue;
-                    }
-                    None if death_stop => {
-                        // AssignDeath keeps every native node linked. If the
-                        // node disappeared, the carrier was mutated past the
-                        // frame C++ would still be able to call.
-                        continue;
-                    }
-                    None => {
-                        // Legacy deferred Clear/Destroyed commands may have
-                        // drained the Rust vector before dispatch. The owned
-                        // snapshot fallback below recreates C++'s linked dead
-                        // victim for that callback.
-                    }
+            if !resumed_callback {
+                // A command generated by an earlier callback may have killed a
+                // queued callback target. Timer execution normally arrives one
+                // live node at a time, but this guard also protects callers that
+                // supply an explicit event batch.
+                if matches!(event.kind, EffectEventKind::Timer)
+                    && !object
+                        .state
+                        .effects
+                        .iter()
+                        .any(|effect| effect.number == event.effect.number && effect.priority != 0)
+                {
+                    continue;
                 }
-            }
-
-            // TempRemoveUpperEffects flips each live upper node BEFORE its
-            // Stop callback; TempReadd walks the then-live suffix and flips
-            // only still-inactive nodes before Start. Resolving by number at
-            // dispatch time prevents a stale queued readd from resurrecting
-            // an effect killed inside its temp Stop.
-            match event.kind {
-                EffectEventKind::TempRemoved => {
-                    let Some(effect) = object
+                // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
+                // validates, ask all effects with iPriority >= the new priority
+                // via their Fx<Name>Effect callback — except for priority-1
+                // effects, which are out of the priority call chain (:170).
+                if matches!(event.kind, EffectEventKind::Started) {
+                    // Fx*Start already ran synchronously inside FnAddEffect
+                    // (priority-1 effects, C4Effect.cpp:96-152) — do not
+                    // dispatch it again.
+                    if event.effect.start_dispatched {
+                        continue;
+                    }
+                    if denied_started.remove(&event.effect.number) {
+                        continue;
+                    }
+                    if event.effect.priority != 1 && !checked_started.contains(&event.effect.number)
+                    {
+                        checked_started.insert(event.effect.number);
+                        // C4Effect::Check (C4Effect.cpp:278-282): every OTHER
+                        // effect with iPriority >= the new priority is asked —
+                        // the walk starts at the new effect's pNext, so only
+                        // the effect itself is excluded, never same-name peers.
+                        let checkers: Vec<EffectState> = state_snapshot
+                            .effects
+                            .iter()
+                            .filter(|existing| {
+                                existing.number != event.effect.number
+                                    && existing.priority != 0
+                                    && existing.priority >= event.effect.priority
+                            })
+                            .cloned()
+                            .collect();
+                        if !checkers.is_empty() {
+                            let pending = event.effect.clone();
+                            let constructor_values = event.constructor_values.clone();
+                            queue.push_front(event);
+                            for checker in checkers.into_iter().rev() {
+                                queue.push_front(EffectEvent::check(
+                                    checker,
+                                    pending.clone(),
+                                    constructor_values.clone(),
+                                ));
+                            }
+                            continue;
+                        }
+                    }
+                    if let Some((acceptor_number, do_temp_calls)) =
+                        annulled_started.remove(&event.effect.number)
+                    {
+                        // Add-to-other-effect (C4Effect.cpp:295-313): the new
+                        // effect stays dead — no Start, no Stop — and the
+                        // acceptor's Fx*Add merges its parameters.
+                        object.remove_effect_by_number(event.effect.number);
+                        state_snapshot.effects = object.state.effects.clone();
+                        if let Some(acceptor) = object
+                            .state
+                            .effects
+                            .iter()
+                            .find(|existing| existing.number == acceptor_number)
+                            .cloned()
+                        {
+                            // AnnulCalls (C4Fx_Effect_AnnulCalls,
+                            // C4Effects.h:38): the Add runs inside a temp
+                            // remove/readd bracket of the effects above the
+                            // ACCEPTOR (C4Effect.cpp:297-304).
+                            let uppers = if do_temp_calls {
+                                upper_effects_of(&object.state.effects, &acceptor)
+                            } else {
+                                Vec::new()
+                            };
+                            let mut sequence: Vec<EffectEvent> = uppers
+                                .iter()
+                                .rev()
+                                .cloned()
+                                .map(EffectEvent::temp_removed)
+                                .collect();
+                            sequence.push(EffectEvent::add_to(
+                                acceptor,
+                                event.effect.clone(),
+                                event.constructor_values.clone(),
+                            ));
+                            sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                            for queued in sequence.into_iter().rev() {
+                                queue.push_front(queued);
+                            }
+                        }
+                        continue;
+                    }
+                    // C4Effect ctor (C4Effect.cpp:118-133): a validating
+                    // Fx*Start is bracketed by temp-deactivating all upper
+                    // effects (high to low) and reactivating them afterwards
+                    // (low to high) — only when the new effect HAS an Fx*Start
+                    // and is not priority 1 (`fRemoveUpper && pNext &&
+                    // pFnStart`, C4Effect.cpp:123). The bracket runs even when
+                    // the Start then denies (C4Effect.cpp:128-133).
+                    if event.effect.priority != 1
+                        && !temp_wrapped_started.contains(&event.effect.number)
+                    {
+                        clonk_script::lookup_profile::record_key_allocation(
+                            clonk_script::lookup_profile::LookupFamily::EffectCallback,
+                        );
+                        let callback_name = format!("Fx{}Start", event.effect.name);
+                        let has_start = event.effect.name == C4FX_FIRE
+                            || resolve_effect_script_callback(
+                                &event.effect,
+                                &callback_name,
+                                &world,
+                            )
+                            .is_some();
+                        if has_start {
+                            let uppers = upper_effects_of(&object.state.effects, &event.effect);
+                            if !uppers.is_empty() {
+                                temp_wrapped_started.insert(event.effect.number);
+                                let mut sequence: Vec<EffectEvent> = uppers
+                                    .iter()
+                                    .rev()
+                                    .cloned()
+                                    .map(EffectEvent::temp_removed)
+                                    .collect();
+                                sequence.push(event);
+                                sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                                for queued in sequence.into_iter().rev() {
+                                    queue.push_front(queued);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    // The constructor has survived Check/annul negotiation and
+                    // is about to execute its one Start call. Mark the live node
+                    // before the callback so EffectVar updates cloned from its
+                    // host snapshot retain the completed-constructor state.
+                    event.effect.start_dispatched = true;
+                    if let Some(effect) = object
                         .state
                         .effects
                         .iter_mut()
                         .find(|effect| effect.number == event.effect.number)
-                    else {
-                        continue;
-                    };
-                    // This recursive TempRemoveUpperEffects frame was entered
-                    // while the node was active. A higher Stop callback may
-                    // kill it before the frame resumes, but C++ still applies
-                    // FlipActive (zero remains zero) and dispatches FxStop
-                    // (C4Effect.cpp:480-490).
-                    effect.priority = -effect.priority;
-                    event.effect = effect.clone();
+                    {
+                        effect.start_dispatched = true;
+                    }
                     state_snapshot.effects = object.state.effects.clone();
-                    if event.effect.priority == 1 {
+                }
+                // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
+                // bracketed by temp-deactivating all upper effects
+                // (C4Effect.cpp:370-374) and reactivating them after the Stop
+                // (C4Effect.cpp:404). Clear/destroy removals go through
+                // ClearAll, which does NO temp calls (C4Effect.cpp:407-425);
+                // priority-1 victims skip the bracket (C4Effect.cpp:477).
+                if matches!(
+                    event.kind,
+                    EffectEventKind::Stopped(EffectStopReason::Removed)
+                ) && event.effect.priority != 1
+                    && !temp_wrapped_stopped.contains(&event.effect.number)
+                {
+                    let uppers = upper_effects_of(&object.state.effects, &event.effect);
+                    if !uppers.is_empty() {
+                        temp_wrapped_stopped.insert(event.effect.number);
+                        let mut sequence: Vec<EffectEvent> = uppers
+                            .iter()
+                            .rev()
+                            .cloned()
+                            .map(EffectEvent::temp_removed)
+                            .collect();
+                        sequence.push(event);
+                        sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                        for queued in sequence.into_iter().rev() {
+                            queue.push_front(queued);
+                        }
                         continue;
                     }
                 }
-                EffectEventKind::TempReadded => {
-                    let Some(effect) =
-                        object.state.effects.iter_mut().find(|effect| {
-                            effect.number == event.effect.number && effect.priority < 0
-                        })
-                    else {
-                        continue;
-                    };
-                    effect.priority = -effect.priority;
-                    event.effect = effect.clone();
-                    state_snapshot.effects = object.state.effects.clone();
+                if clear_all_stop {
+                    // ClearAll calls SetDead immediately before Fx*Stop, but
+                    // keeps the node linked so GetEffect(number, include-dead)
+                    // and the unique-number allocator still see it
+                    // (C4Effect.cpp:407-424,55-81).
+                    let effect = object
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|effect| effect.number == event.effect.number);
+                    match effect {
+                        Some(effect) if effect.priority != 0 => {
+                            // A higher Stop may have renamed this lower node while
+                            // ClearAll's recursive frame was suspended. C++
+                            // dispatches through its then-live callback pointers.
+                            event.effect = effect.clone();
+                            effect.priority = 0;
+                            state_snapshot.effects = object.state.effects.clone();
+                        }
+                        Some(_) => {
+                            // A higher Stop killed this still-linked node before
+                            // its recursive frame resumed (IsDead => return).
+                            continue;
+                        }
+                        None if death_stop => {
+                            // AssignDeath keeps every native node linked. If the
+                            // node disappeared, the carrier was mutated past the
+                            // frame C++ would still be able to call.
+                            continue;
+                        }
+                        None => {
+                            // Legacy deferred Clear/Destroyed commands may have
+                            // drained the Rust vector before dispatch. The owned
+                            // snapshot fallback below recreates C++'s linked dead
+                            // victim for that callback.
+                        }
+                    }
                 }
-                _ => {}
+
+                // TempRemoveUpperEffects flips each live upper node BEFORE its
+                // Stop callback; TempReadd walks the then-live suffix and flips
+                // only still-inactive nodes before Start. Resolving by number at
+                // dispatch time prevents a stale queued readd from resurrecting
+                // an effect killed inside its temp Stop.
+                match event.kind {
+                    EffectEventKind::TempRemoved => {
+                        let Some(effect) = object
+                            .state
+                            .effects
+                            .iter_mut()
+                            .find(|effect| effect.number == event.effect.number)
+                        else {
+                            continue;
+                        };
+                        // This recursive TempRemoveUpperEffects frame was entered
+                        // while the node was active. A higher Stop callback may
+                        // kill it before the frame resumes, but C++ still applies
+                        // FlipActive (zero remains zero) and dispatches FxStop
+                        // (C4Effect.cpp:480-490).
+                        effect.priority = -effect.priority;
+                        event.effect = effect.clone();
+                        state_snapshot.effects = object.state.effects.clone();
+                        if event.effect.priority == 1 {
+                            continue;
+                        }
+                    }
+                    EffectEventKind::TempReadded => {
+                        let Some(effect) = object.state.effects.iter_mut().find(|effect| {
+                            effect.number == event.effect.number && effect.priority < 0
+                        }) else {
+                            continue;
+                        };
+                        effect.priority = -effect.priority;
+                        event.effect = effect.clone();
+                        state_snapshot.effects = object.state.effects.clone();
+                    }
+                    _ => {}
+                }
             }
             let owned_snapshot_for_call =
                 effect_callback_needs_owned_snapshot(&state_snapshot.effects, &event).then(|| {
@@ -2280,12 +2628,21 @@ impl Engine {
             // keeps mutations made before the error).
             let rng_backup = rng.clone();
             let audio_backup = current_audio.clone();
-            let call_result = match event.kind {
+            let callback_carrier = callback_resume
+                .as_ref()
+                .is_none_or(|resume| resume.receiver_available)
+                .then_some((snapshot_for_call, object_id));
+            let call_result = match &event.kind {
                 EffectEventKind::Started => dispatch_definition
-                    .call_effect_start(
-                        Some((snapshot_for_call, object_id)),
+                    .call_effect_event_with_continuation(
+                        callback_carrier,
                         &event.effect,
-                        &event.constructor_values,
+                        "Start",
+                        "FxStart",
+                        // C4Effect.cpp:128 passes iTemp=0 before constructor values.
+                        std::iter::once(Value::Int(0))
+                            .chain(event.constructor_values.iter().cloned())
+                            .collect(),
                         rng,
                         &global_view,
                         current_physics,
@@ -2294,48 +2651,58 @@ impl Engine {
                         world.clone(),
                         game_over_triggered,
                         current_audio,
+                        callback_resume,
                     )
-                    .map(|(outcome, audio_state, new_rng, start_result)| {
-                        // C4Fx_Start_Deny (-1, C4Effects.h:43): the effect
-                        // is marked dead before validating
-                        // (C4Effect.cpp:128-131) and deleted without a
-                        // Stop callback.
-                        start_denied = start_result
-                            .as_ref()
-                            .is_some_and(|value| compat::value_as_i32(value) == -1);
-                        (outcome, audio_state, new_rng)
+                    .inspect(|result| {
+                        if let EffectCallbackResult::Complete { value, .. } = &result {
+                            // C4Fx_Start_Deny (-1, C4Effects.h:43): the
+                            // effect is marked dead before validating and is
+                            // deleted without a Stop callback
+                            // (C4Effect.cpp:128-131).
+                            start_denied = value
+                                .as_ref()
+                                .is_some_and(|value| compat::value_as_i32(value) == -1);
+                        }
                     }),
                 EffectEventKind::Timer => dispatch_definition
-                    .call_effect_timer(
-                        Some((snapshot_for_call, object_id)),
+                    .call_effect_event_with_continuation(
+                        callback_carrier,
                         &event.effect,
-                        frame,
+                        "Timer",
+                        "FxTimer",
+                        vec![Value::Int(event.effect.timer)],
                         rng,
                         &global_view,
                         current_physics,
                         current_environment,
+                        frame,
                         world.clone(),
                         game_over_triggered,
                         current_audio,
+                        callback_resume,
                     )
-                    .map(|(outcome, audio_state, new_rng, timer_result)| {
-                        // C4Effect::Execute (C4Effect.cpp:342-360): FxTimer
-                        // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
-                        // kills the effect; an elapsed interval with NO
-                        // timer function kills too ("no timer function:
-                        // mark dead after time elapsed" — the else arm at
-                        // :358-360; the intro's Divinity markers die on
-                        // their first exec in C++ as well).
-                        timer_kill = timer_result
-                            .as_ref()
-                            .is_none_or(|value| compat::value_as_i32(value) == -1);
-                        (outcome, audio_state, new_rng)
+                    .inspect(|result| {
+                        if let EffectCallbackResult::Complete { value, .. } = &result {
+                            // C4Effect::Execute (C4Effect.cpp:342-360): a
+                            // missing timer callback or -1 kills the effect.
+                            timer_kill = value
+                                .as_ref()
+                                .is_none_or(|value| compat::value_as_i32(value) == -1);
+                        }
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition
-                    .call_effect_stop(
-                        Some((snapshot_for_call, object_id)),
+                    .call_effect_event_with_continuation(
+                        callback_carrier,
                         &event.effect,
-                        reason,
+                        "Stop",
+                        "FxStop",
+                        effect_stop_reason_value(*reason).map_or_else(Vec::new, |value| {
+                            let mut extras = vec![value];
+                            if matches!(*reason, EffectStopReason::Temp) {
+                                extras.push(Value::Bool(true));
+                            }
+                            extras
+                        }),
                         rng,
                         &global_view,
                         current_physics,
@@ -2344,103 +2711,111 @@ impl Engine {
                         world.clone(),
                         game_over_triggered,
                         current_audio,
+                        callback_resume,
                     )
-                    .map(|(outcome, audio_state, new_rng, stop_result)| {
-                        // AssignDeath uses ClearAll(RemoveDeath), whose Stop
-                        // callbacks may deny removal and revive the object
-                        // (C4Object.cpp:1162-1170; C4Effect.cpp:407-424).
-                        // Object-clear/destroy removals still cannot veto the
-                        // object going away.
-                        stop_denied = matches!(
-                            reason,
-                            EffectStopReason::Removed
-                                | EffectStopReason::Cleared
-                                | EffectStopReason::Death
-                                | EffectStopReason::Destroyed
-                        ) && stop_result
-                            .as_ref()
-                            .is_some_and(|value| compat::value_as_i32(value) == -1);
-                        (outcome, audio_state, new_rng)
-                    }),
-                EffectEventKind::Check { ref pending } => dispatch_definition
-                    .call_effect_effect(
-                        Some((snapshot_for_call, object_id)),
-                        &event.effect,
-                        pending,
-                        &event.constructor_values,
-                        rng,
-                        &global_view,
-                        current_physics,
-                        current_environment,
-                        frame,
-                        world.clone(),
-                        game_over_triggered,
-                        current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, check_result)| {
-                        match check_result.as_ref().map(compat::value_as_i32) {
-                            // C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks
-                            // the new effect entirely.
-                            Some(-1) => {
-                                denied_started.insert(pending.number);
-                                annulled_started.remove(&pending.number);
-                                object.remove_effect_by_number(pending.number);
-                                state_snapshot.effects = object.state.effects.clone();
-                                // The deny returns immediately from the
-                                // checker walk (C4Effect.cpp:283-285) —
-                                // checkers later in the chain are never
-                                // asked.
-                                queue.retain(|queued| match &queued.kind {
-                                    EffectEventKind::Check {
-                                        pending: queued_pending,
-                                    } => queued_pending.number != pending.number,
-                                    _ => true,
-                                });
-                            }
-                            // C4Fx_Effect_Annul/AnnulCalls (-2/-3,
-                            // C4Effects.h:37-38): this checker accepts the
-                            // new effect; the walk continues and the LAST
-                            // acceptor wins (C4Effect.cpp:287-291).
-                            Some(-2) => {
-                                annulled_started
-                                    .insert(pending.number, (event.effect.number, false));
-                            }
-                            Some(-3) => {
-                                annulled_started
-                                    .insert(pending.number, (event.effect.number, true));
-                            }
-                            _ => {}
+                    .inspect(|result| {
+                        if let EffectCallbackResult::Complete { value, .. } = &result {
+                            // AssignDeath may revive an effect when Stop
+                            // returns -1; ordinary clear/destroy still wins
+                            // (C4Object.cpp:1162-1170; C4Effect.cpp:407-424).
+                            stop_denied = matches!(
+                                *reason,
+                                EffectStopReason::Removed
+                                    | EffectStopReason::Cleared
+                                    | EffectStopReason::Death
+                                    | EffectStopReason::Destroyed
+                            ) && value
+                                .as_ref()
+                                .is_some_and(|value| compat::value_as_i32(value) == -1);
                         }
-                        (outcome, audio_state, new_rng)
                     }),
-                EffectEventKind::AddTo { ref pending } => dispatch_definition
-                    .call_effect_add(
-                        Some((snapshot_for_call, object_id)),
-                        &event.effect,
-                        pending,
-                        &event.constructor_values,
-                        rng,
-                        &global_view,
-                        current_physics,
-                        current_environment,
-                        frame,
-                        world.clone(),
-                        game_over_triggered,
-                        current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, add_result)| {
-                        // C4Fx_Start_Deny from Fx*Add kills the ACCEPTOR
-                        // (C4Effect.cpp:306-309).
-                        add_denied = add_result
-                            .as_ref()
-                            .is_some_and(|value| compat::value_as_i32(value) == -1);
-                        (outcome, audio_state, new_rng)
-                    }),
+                EffectEventKind::Check { pending } => {
+                    let mut extras = vec![Value::String(pending.name.clone().into())];
+                    extras.extend(event.constructor_values.iter().cloned());
+                    dispatch_definition
+                        .call_effect_event_with_continuation(
+                            callback_carrier,
+                            &event.effect,
+                            "Effect",
+                            "FxEffect",
+                            extras,
+                            rng,
+                            &global_view,
+                            current_physics,
+                            current_environment,
+                            frame,
+                            world.clone(),
+                            game_over_triggered,
+                            current_audio,
+                            callback_resume,
+                        )
+                        .inspect(|result| {
+                            if let EffectCallbackResult::Complete { value, .. } = &result {
+                                match value.as_ref().map(compat::value_as_i32) {
+                                    Some(-1) => {
+                                        denied_started.insert(pending.number);
+                                        annulled_started.remove(&pending.number);
+                                        object.remove_effect_by_number(pending.number);
+                                        state_snapshot.effects = object.state.effects.clone();
+                                        queue.retain(|queued| match &queued.kind {
+                                            EffectEventKind::Check {
+                                                pending: queued_pending,
+                                            } => queued_pending.number != pending.number,
+                                            _ => true,
+                                        });
+                                    }
+                                    Some(-2) => {
+                                        annulled_started
+                                            .insert(pending.number, (event.effect.number, false));
+                                    }
+                                    Some(-3) => {
+                                        annulled_started
+                                            .insert(pending.number, (event.effect.number, true));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        })
+                }
+                EffectEventKind::AddTo { pending } => {
+                    let mut extras = vec![
+                        Value::String(pending.name.clone().into()),
+                        Value::Int(pending.interval),
+                    ];
+                    extras.extend(event.constructor_values.iter().cloned());
+                    extras.push(Value::Nil);
+                    dispatch_definition
+                        .call_effect_event_with_continuation(
+                            callback_carrier,
+                            &event.effect,
+                            "Add",
+                            "FxAdd",
+                            extras,
+                            rng,
+                            &global_view,
+                            current_physics,
+                            current_environment,
+                            frame,
+                            world.clone(),
+                            game_over_triggered,
+                            current_audio,
+                            callback_resume,
+                        )
+                        .inspect(|result| {
+                            if let EffectCallbackResult::Complete { value, .. } = &result {
+                                add_denied = value
+                                    .as_ref()
+                                    .is_some_and(|value| compat::value_as_i32(value) == -1);
+                            }
+                        })
+                }
                 EffectEventKind::TempRemoved => dispatch_definition
-                    .call_effect_stop(
-                        Some((snapshot_for_call, object_id)),
+                    .call_effect_event_with_continuation(
+                        callback_carrier,
                         &event.effect,
-                        EffectStopReason::Temp,
+                        "Stop",
+                        "FxStop",
+                        vec![Value::Int(1), Value::Bool(true)],
                         rng,
                         &global_view,
                         current_physics,
@@ -2449,16 +2824,15 @@ impl Engine {
                         world.clone(),
                         game_over_triggered,
                         current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
-                        // The temp stop's result is ignored
-                        // (C4Effect.cpp:489 does not check it).
-                        (outcome, audio_state, new_rng)
-                    }),
+                        callback_resume,
+                    ),
                 EffectEventKind::TempReadded => dispatch_definition
-                    .call_effect_temp_readd(
-                        Some((snapshot_for_call, object_id)),
+                    .call_effect_event_with_continuation(
+                        callback_carrier,
                         &event.effect,
+                        "Start",
+                        "FxStart",
+                        vec![Value::Int(1)],
                         rng,
                         &global_view,
                         current_physics,
@@ -2467,15 +2841,22 @@ impl Engine {
                         world.clone(),
                         game_over_triggered,
                         current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
-                        // The temp readd's result is ignored
-                        // (C4Effect.cpp:505 does not check it).
-                        (outcome, audio_state, new_rng)
-                    }),
+                        callback_resume,
+                    ),
             };
-            let (outcome, audio_state, new_rng) = match call_result {
-                Ok(value) => value,
+            let (outcome, audio_state, new_rng, suspended_resume) = match call_result {
+                Ok(EffectCallbackResult::Complete {
+                    value: _,
+                    outcome,
+                    audio,
+                    rng,
+                }) => (outcome, audio, rng, None),
+                Ok(EffectCallbackResult::Suspended {
+                    resume,
+                    outcome,
+                    audio,
+                    rng,
+                }) => (outcome, audio, rng, Some(resume)),
                 Err(EngineError::Script {
                     definition,
                     function,
@@ -2826,6 +3207,80 @@ impl Engine {
                 game_over_requested = true;
             }
 
+            // A host continuation returns after the callback's prefix has
+            // already produced all of these side channels. Hand that prefix
+            // to the engine now and retain only the still-pending event queue
+            // and fold state. The fresh runner after the switch receives new
+            // physics/environment/audio/global views from Engine; no lazy
+            // HostWorldContext is retained here.
+            if let Some(resume) = suspended_resume {
+                *environment = current_environment;
+                let host_raster_preview = (!pending_solid_mask_operations.is_empty())
+                    .then(|| world.host_raster_preview());
+                let output = (
+                    std::mem::take(&mut global_commands),
+                    std::mem::take(&mut pending_particles),
+                    std::mem::take(&mut accumulated_physics),
+                    std::mem::take(&mut pending_audio),
+                    std::mem::take(&mut pending_messages),
+                    std::mem::take(&mut pending_player_commands),
+                    std::mem::take(&mut pending_object_order_commands),
+                    std::mem::take(&mut pending_next_mission_commands),
+                    std::mem::take(&mut pending_landscape_ops),
+                    std::mem::take(&mut pending_transfer_zones),
+                    std::mem::take(&mut pending_spawns),
+                    std::mem::take(&mut pending_other_objects),
+                    pending_object_lists.take(),
+                    std::mem::take(&mut pending_solid_mask_operations),
+                    host_raster_preview,
+                    solid_mask_changed,
+                    action_callbacks_dispatched,
+                    change_def_reinsert,
+                    host_container_change,
+                    world.next_object_id(),
+                    game_over_requested,
+                    script_go_requested,
+                    script_counter_requested,
+                    current_audio.clone(),
+                    rng.clone(),
+                );
+                return Ok(EffectEventRunResult::Suspended {
+                    output,
+                    continuation: EffectEventContinuation {
+                        event,
+                        resume,
+                        queue,
+                        state_snapshot: object.script_state_snapshot(),
+                        accumulated_physics: PhysicsDelta::default(),
+                        pending_spawns: Vec::new(),
+                        global_commands: Vec::new(),
+                        pending_particles: Vec::new(),
+                        pending_audio: Vec::new(),
+                        pending_messages: Vec::new(),
+                        pending_player_commands: Vec::new(),
+                        pending_object_order_commands: Vec::new(),
+                        pending_next_mission_commands: Vec::new(),
+                        pending_landscape_ops: Vec::new(),
+                        pending_transfer_zones: Vec::new(),
+                        pending_other_objects: Vec::new(),
+                        pending_object_lists: None,
+                        pending_solid_mask_operations: Vec::new(),
+                        solid_mask_changed: false,
+                        action_callbacks_dispatched: false,
+                        change_def_reinsert: None,
+                        host_container_change: false,
+                        game_over_requested: false,
+                        script_go_requested: None,
+                        script_counter_requested: None,
+                        checked_started,
+                        denied_started,
+                        annulled_started,
+                        temp_wrapped_started,
+                        temp_wrapped_stopped,
+                    },
+                });
+            }
+
             if timer_kill
                 && !object.destroyed
                 && !matches!(object.state.status, ObjectStatus::Deleted)
@@ -2853,7 +3308,7 @@ impl Engine {
         let next_object_id = world.next_object_id();
         let host_raster_preview =
             (!pending_solid_mask_operations.is_empty()).then(|| world.host_raster_preview());
-        Ok((
+        Ok(EffectEventRunResult::Complete((
             global_commands,
             pending_particles,
             accumulated_physics,
@@ -2879,7 +3334,7 @@ impl Engine {
             script_counter_requested,
             current_audio,
             rng,
-        ))
+        )))
     }
 
     pub(crate) fn apply_physics_delta(&mut self, delta: PhysicsDelta) {
@@ -3212,9 +3667,196 @@ impl Engine {
         // marker is restored rather than cleared so nothing here depends on
         // the switch being the outermost one.
         let outer = std::mem::replace(&mut self.scenario_section_state.switch_in_flight, true);
-        let switched = self.perform_scenario_section_switch(name, flags, preserve_ids);
+        // A callback is allowed to panic after the host has entered this
+        // boundary. Restore the marker before propagating that panic so a
+        // later callback cannot observe a stale in-flight section switch.
+        let switched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.perform_scenario_section_switch(name, flags, preserve_ids)
+        }));
         self.scenario_section_state.switch_in_flight = outer;
-        switched
+        match switched {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Begin an engine-owned synchronous boundary while retaining the
+    /// suspended VM frame in an owned registry. The returned guard owns the
+    /// stack reservation and weak registration; it carries no Engine borrow,
+    /// so callers can run arbitrary nested callbacks and actual AssignRemoval
+    /// before finishing and resuming the frame.
+    pub(crate) fn begin_suspended_script_boundary(
+        &mut self,
+        suspension: ScriptSuspension,
+        cells: Option<clonk_script::LocalCells>,
+    ) -> Result<SuspendedScriptBoundary, EngineError> {
+        let handle = Rc::new(RefCell::new(suspension));
+        // The VM reservation is independent of the suspension borrow. Hold
+        // it across the synchronous engine work so nested callbacks account
+        // for the suspended caller's retained operands, then drop it before
+        // the continuation is resumed.
+        let stack_context = {
+            let suspension_ref = handle.try_borrow().map_err(|_| {
+                EngineError::invalid_script_output(
+                    "Engine",
+                    "SynchronousScriptBoundary",
+                    "suspended script frame was borrowed while attaching its value stack"
+                        .to_owned(),
+                )
+            })?;
+            suspension_ref
+                .attach_value_stack_context()
+                .map_err(|error| {
+                    EngineError::invalid_script_output(
+                        "Engine",
+                        "SynchronousScriptBoundary",
+                        format!("could not attach suspended value stack: {error}"),
+                    )
+                })?
+        };
+        // Attach first. If the frame cannot reserve its captured value stack,
+        // no registry entry is published and the caller gets a clean error
+        // without leaving a strong LocalCells clone behind.
+        let registrations = Rc::clone(&self.suspended_script_registrations);
+        {
+            let mut registrations = registrations.try_borrow_mut().map_err(|_| {
+                EngineError::invalid_script_output(
+                    "Engine",
+                    "SynchronousScriptBoundary",
+                    "suspended script registry was borrowed while opening a boundary".to_owned(),
+                )
+            })?;
+            registrations.retain(|registration| registration.suspension.upgrade().is_some());
+            registrations.push(SuspendedScriptRegistration {
+                suspension: Rc::downgrade(&handle),
+                cells,
+            });
+        }
+
+        Ok(SuspendedScriptBoundary {
+            handle: Some(handle),
+            registrations,
+            stack_context: Some(stack_context),
+        })
+    }
+
+    /// Run one engine-owned synchronous operation while retaining the
+    /// suspended VM frame in an owned registry. The registry entry is weak;
+    /// the continuation driver remains the sole owner of the frame, while
+    /// `AssignRemoval` can still clear it at the exact native removal tail.
+    ///
+    /// The operation receives the live engine only for its duration. No
+    /// engine reference, host-context pointer, or TLS frame escapes into the
+    /// suspended continuation. Panic recovery drops the weak registration
+    /// before the panic is resumed, so a later callback cannot observe stale
+    /// boundary state.
+    pub(crate) fn with_suspended_script_boundary<R>(
+        &mut self,
+        suspension: ScriptSuspension,
+        cells: Option<clonk_script::LocalCells>,
+        operation: impl FnOnce(&mut Self) -> Result<R, EngineError>,
+    ) -> Result<(ScriptSuspension, R), EngineError> {
+        let boundary = self.begin_suspended_script_boundary(suspension, cells)?;
+
+        let operation_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(self)));
+        let suspension = match boundary.finish() {
+            Ok(suspension) => suspension,
+            Err(error) => match operation_result {
+                Ok(Err(previous)) => return Err(previous),
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(Ok(_)) => return Err(error),
+            },
+        };
+
+        match operation_result {
+            Ok(result) => result.map(|result| (suspension, result)),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Clear suspended VM references at the real `AssignRemoval` boundary.
+    /// This is intentionally driven by the removal tail rather than by a
+    /// predicted section membership list: a Destruction callback may
+    /// deactivate a future object and thereby preserve its allocation, while
+    /// a save/freeze failure may abort a section switch before teardown.
+    pub(crate) fn clear_suspended_script_references_for_removal(
+        &mut self,
+        target: ObjectId,
+    ) -> Result<(), EngineError> {
+        let mut borrow_error = false;
+        let mut registrations = self
+            .suspended_script_registrations
+            .try_borrow_mut()
+            .map_err(|_| {
+                EngineError::invalid_script_output(
+                    "Engine",
+                    "AssignRemoval",
+                    format!(
+                        "suspended script registry was borrowed while removing object {}",
+                        target.as_u64()
+                    ),
+                )
+            })?;
+        registrations.retain(|registration| {
+            let Some(suspension) = registration.suspension.upgrade() else {
+                return false;
+            };
+            if let Ok(mut suspension) = suspension.try_borrow_mut() {
+                suspension.clear_object_references(target.as_u64());
+                if let Some(cells) = registration.cells.as_ref() {
+                    cells.clear_object_references(target.as_u64());
+                }
+            } else {
+                borrow_error = true;
+                tracing::error!(
+                    object = %target,
+                    "suspended script frame was borrowed during AssignRemoval reference sweep"
+                );
+            }
+            true
+        });
+        if borrow_error {
+            return Err(EngineError::invalid_script_output(
+                "Engine",
+                "AssignRemoval",
+                format!(
+                    "suspended script frame was borrowed while removing object {}",
+                    target.as_u64()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Save the allocation identity behind a suspended effect callback's
+    /// `cthr->Obj` before the section switch removes active objects. Object
+    /// numbers are stable only until removal; the token is what distinguishes
+    /// the old command target from a destination object reusing its number.
+    pub(crate) fn capture_effect_script_context_identity(&self, resume: &mut EffectScriptResume) {
+        if resume.context_available {
+            resume.context_instance_token = resume
+                .context_object
+                .and_then(|object_id| self.object_instance_token(object_id));
+        }
+    }
+
+    /// Revalidate the suspended effect callback's command-target context after
+    /// `LoadScenarioSection`. A missing or replaced target is represented by a
+    /// null context; it must never be looked up again by the recycled number.
+    pub(crate) fn refresh_effect_script_context_identity(&self, resume: &mut EffectScriptResume) {
+        let available = resume.context_available
+            && resume
+                .context_object
+                .zip(resume.context_instance_token)
+                .is_some_and(|(object_id, token)| {
+                    self.object_instance_token(object_id) == Some(token)
+                });
+        resume.context_available = available;
+        if !available {
+            resume.context_object = None;
+            resume.context_instance_token = None;
+        }
     }
 
     /// `C4Game::LoadScenarioSection` proper (C4Game.cpp:4084-4237).
@@ -3315,6 +3957,21 @@ impl Engine {
         // pointer that native Denumerate just cleared. The refreshed number
         // caches survive Denumerate and remain available to Objects.txt.
         let mut state = self.capture_state();
+        // Inactive objects cross a section switch as the same native
+        // allocation. Preserve their transient identity token while the
+        // structured state is round-tripped below; active objects are removed
+        // and must receive fresh tokens when the destination is materialized.
+        let preserved_instance_tokens = self
+            .objects
+            .iter()
+            .filter(|object| {
+                preserved.contains(&object.id) && object.state.status == ObjectStatus::Inactive
+            })
+            .filter_map(|object| {
+                self.object_instance_token(object.id)
+                    .map(|token| (object.id, token))
+            })
+            .collect::<HashMap<_, _>>();
         let saved_landscape_systems =
             (changing_section && flags & 1 != 0).then(|| scenario::ScenarioLandscapeSystems {
                 pxs: self.pxs_system.to_c4b().map(|bytes| {
@@ -3755,6 +4412,29 @@ impl Engine {
 
         self.base_extinguish_enabled = target.base_extinguish_enabled;
         self.restore_state_with_local_sound_reset(&state, false)?;
+        if !preserved_instance_tokens.is_empty() {
+            let retained = self
+                .objects
+                .iter_mut()
+                .filter_map(|object| {
+                    preserved_instance_tokens
+                        .get(&object.id)
+                        .copied()
+                        .filter(|_| object.state.status == ObjectStatus::Inactive)
+                        .map(|token| {
+                            object.instance_token = token;
+                            (object.id, token)
+                        })
+                })
+                .collect::<Vec<_>>();
+            let mut tokens = self.object_instance_tokens.borrow_mut();
+            let mut next = self.next_object_instance_token.get();
+            for (id, token) in retained {
+                tokens.insert(id, token);
+                next = next.max(token.wrapping_add(1));
+            }
+            self.next_object_instance_token.set(next);
+        }
         match target_landscape_systems.pxs {
             Some(mut pxs) => {
                 // C4PXSSystem::Load clears chunks but deliberately leaves the

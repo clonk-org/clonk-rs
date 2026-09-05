@@ -187,6 +187,19 @@ pub type EvalDirectExecHook = std::rc::Rc<
     ) -> Option<Result<Value, RuntimeError>>,
 >;
 
+/// Continuation-capable twin of [`EvalDirectExecHook`].  The old hook remains
+/// value-returning for the recursive evaluator; this channel is used only by
+/// an AST continuation so a nested `eval` can preserve its parent's suffix.
+pub type EvalDirectExecContinuationHook = std::rc::Rc<
+    dyn Fn(
+        &str,
+        &crate::vm::LocalCells,
+        Value,
+        Option<u8>,
+        usize,
+    ) -> Option<Result<crate::vm::ScriptCallOutcome, RuntimeError>>,
+>;
+
 /// The engine-global named-variable table (`static` declarations;
 /// C4AulScriptEngine::GlobalNamed): one shared table across every script
 /// host. Values live in cells so lvalues (x = .., x++, ...) write through.
@@ -1177,6 +1190,9 @@ pub struct Engine {
     global_call_context_hook: Option<GlobalCallContextHook>,
     /// Embedding-engine receiver selection and DirectExec for FnEval.
     eval_direct_exec_hook: Option<EvalDirectExecHook>,
+    /// Continuation-capable receiver selection and DirectExec for nested
+    /// `eval` inside an already suspended AST frame.
+    eval_direct_exec_continuation_hook: Option<EvalDirectExecContinuationHook>,
     /// The shared `static` table; `None` keeps the legacy per-host
     /// fallback (fixtures without an engine).
     globals_named: Option<GlobalVariables>,
@@ -1322,6 +1338,7 @@ impl Engine {
             direct_call_function_probe: None,
             global_call_context_hook: None,
             eval_direct_exec_hook: None,
+            eval_direct_exec_continuation_hook: None,
             globals_named: None,
             globals_numbered: Some(new_global_slots()),
             globals_consts: None,
@@ -2213,6 +2230,13 @@ impl Engine {
         self.eval_direct_exec_hook = Some(hook);
     }
 
+    pub fn register_eval_direct_exec_continuation_hook(
+        &mut self,
+        hook: EvalDirectExecContinuationHook,
+    ) {
+        self.eval_direct_exec_continuation_hook = Some(hook);
+    }
+
     /// The VM every call path on this host runs. Each entry point below
     /// attaches the same function tables, host seams and global tables, so
     /// assembling it once keeps a newly registered channel from reaching
@@ -2241,6 +2265,7 @@ impl Engine {
         .with_direct_call_function_probe(self.direct_call_function_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_eval_direct_exec_hook(self.eval_direct_exec_hook.as_ref())
+        .with_eval_direct_exec_continuation_hook(self.eval_direct_exec_continuation_hook.as_ref())
         .with_global_variables(self.globals_named.as_ref())
         .with_global_slots(self.globals_numbered.as_ref())
         .with_global_constants(self.globals_consts.as_ref())
@@ -2252,6 +2277,100 @@ impl Engine {
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, ScriptError> {
         let vm = self.vm();
         vm.call(name, args).map_err(ScriptError::from)
+    }
+
+    /// Call a function through the synchronous host boundary. A host native
+    /// may return [`RuntimeError::host_continuation`] to yield its request;
+    /// the caller commits that request and resumes the returned continuation
+    /// through [`Self::resume_script_continuation`].
+    pub fn call_with_continuation(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm();
+        vm.call_with_continuation(name, args)
+            .map_err(ScriptError::from)
+    }
+
+    /// Reference-argument counterpart to [`Self::call_with_continuation`].
+    /// The returned cells remain owned by the caller, so writes made before a
+    /// host suspension and after its resumption can be observed across the
+    /// boundary just like C4Aul's live `C4Value` argument slots.
+    pub fn call_with_ref_args_with_continuation(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<(crate::vm::ScriptCallOutcome, Vec<crate::vm::ValueCell>), ScriptError> {
+        let vm = self.vm();
+        let cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args = cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
+            .collect();
+        let outcome = vm
+            .call_args_with_continuation(name, call_args)
+            .map_err(ScriptError::from)?;
+        Ok((outcome, cells))
+    }
+
+    /// Resume a script call after its host-side continuation request has been
+    /// committed. The VM is rebuilt from this engine's current host tables,
+    /// while the continuation owns every suspended frame and operand.
+    pub fn resume_script_continuation(
+        &self,
+        suspension: crate::vm::ScriptSuspension,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm();
+        suspension.resume(&vm).map_err(ScriptError::from)
+    }
+
+    /// Resume a suspended call with the value produced by the host operation
+    /// that was requested.  The value embedded by the native callback is a
+    /// fallback for standalone users; an embedding engine that performs the
+    /// operation must pass its actual success/failure result here.
+    pub fn resume_script_continuation_with_value(
+        &self,
+        suspension: crate::vm::ScriptSuspension,
+        value: Value,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm();
+        suspension
+            .resume_with_value(&vm, value)
+            .map_err(ScriptError::from)
+    }
+
+    /// Resume a suspended call with both the host operation result and the
+    /// receiver selected by the embedding engine. A removed object resumes
+    /// with `Value::Nil`, even when its numeric ID has been reused.
+    pub fn resume_script_continuation_with_value_and_this(
+        &self,
+        suspension: crate::vm::ScriptSuspension,
+        value: Value,
+        this: Value,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm();
+        suspension
+            .resume_with_value_and_this(&vm, value, this)
+            .map_err(ScriptError::from)
+    }
+
+    /// Resume a suspended scripted C4Effect callback with the value produced
+    /// by its host operation. The callback entry's legacy pre-STRICT3
+    /// parameter-conversion policy is restored on every resume slice, just
+    /// as it is for the initial callback entry.
+    #[doc(hidden)]
+    pub fn resume_effect_callback_continuation_with_value_and_this(
+        &self,
+        suspension: crate::vm::ScriptSuspension,
+        value: Value,
+        this: Value,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm().with_effect_callback_parameter_conversion();
+        suspension
+            .resume_with_value_and_this(&vm, value, this)
+            .map_err(ScriptError::from)
     }
 
     /// Calls a function passing every argument as a REFERENCE cell — the
@@ -2479,6 +2598,53 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
+    /// Continuation-aware counterpart to
+    /// [`Self::call_resolved_with_cells_and_this`]. The supplied local cells
+    /// remain live for the suspended frame and for any host calls after it is
+    /// resumed.
+    #[doc(hidden)]
+    pub fn call_resolved_with_cells_and_this_with_continuation(
+        &self,
+        resolution: &ScriptFunctionResolution,
+        engine_global: bool,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm().with_this(this);
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        vm.call_resolved_with_cells_with_continuation(resolution, args, cells)
+            .map_err(ScriptError::from)
+    }
+
+    /// Effect-callback counterpart to
+    /// [`Self::call_resolved_with_cells_and_this_with_continuation`]. The
+    /// selected callback receives C++'s pre-STRICT3 conversion-warning policy
+    /// while its suspended frame remains owned by the returned outcome.
+    #[doc(hidden)]
+    pub fn call_resolved_with_cells_and_this_with_continuation_for_effect_callback(
+        &self,
+        resolution: &ScriptFunctionResolution,
+        engine_global: bool,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm().with_this(this);
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        let vm = vm.with_effect_callback_parameter_conversion();
+        vm.call_resolved_with_cells_with_continuation(resolution, args, cells)
+            .map_err(ScriptError::from)
+    }
+
     /// Scripted-C4Effect counterpart to
     /// [`Engine::call_pinned_with_cells_and_this`]. The selected callback
     /// alone receives C++'s pre-STRICT3 conversion-warning compatibility.
@@ -2556,6 +2722,40 @@ impl Engine {
     ) -> Result<Value, ScriptError> {
         let vm = self.vm().with_this(this);
         vm.call_with_cells(name, args, cells)
+            .map_err(ScriptError::from)
+    }
+
+    /// Continuation-aware counterpart to [`Self::call_with_cells_and_this`].
+    #[doc(hidden)]
+    pub fn call_with_cells_and_this_with_continuation(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm().with_this(this);
+        vm.call_with_cells_with_continuation(name, args, cells)
+            .map_err(ScriptError::from)
+    }
+
+    /// Effect-callback counterpart to
+    /// [`Self::call_with_cells_and_this_with_continuation`]. The selected
+    /// callback receives C++'s pre-STRICT3 conversion-warning policy; nested
+    /// calls still use the VM's ordinary conversion policy.
+    #[doc(hidden)]
+    pub fn call_with_cells_and_this_with_continuation_for_effect_callback(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self
+            .vm()
+            .with_this(this)
+            .with_effect_callback_parameter_conversion();
+        vm.call_with_cells_with_continuation(name, args, cells)
             .map_err(ScriptError::from)
     }
 
@@ -2872,6 +3072,56 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
+    /// Continuation-capable shared-cell DirectExec. A suspended result owns
+    /// the remaining expression suffix; the supplied cells remain live for
+    /// nested callbacks and for every later resume slice.
+    #[doc(hidden)]
+    pub fn direct_exec_with_cells_and_this_at_strict_in_context_diagnostics_with_continuation(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        strict_level: Option<u8>,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<crate::vm::ScriptCallOutcome, ScriptError> {
+        let vm = self.vm().with_this(this);
+        vm.direct_exec_with_cells_in_context_with_continuation(
+            source,
+            cells,
+            strict_level,
+            context,
+            diagnostics,
+        )
+        .map_err(ScriptError::from)
+    }
+
+    /// Continuation-capable map adapter. The returned cells are the backing
+    /// storage for `local_vars`; callers must keep them with a Suspended
+    /// outcome and snapshot them after the final Complete outcome.
+    #[doc(hidden)]
+    pub fn direct_exec_with_locals_and_this_at_strict_in_context_diagnostics_with_continuation(
+        &self,
+        source: &str,
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+        strict_level: Option<u8>,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<(crate::vm::ScriptCallOutcome, crate::vm::LocalCells), ScriptError> {
+        let cells = crate::vm::LocalCells::from_local_vars(local_vars);
+        let outcome = self
+            .direct_exec_with_cells_and_this_at_strict_in_context_diagnostics_with_continuation(
+                source,
+                &cells,
+                this,
+                strict_level,
+                context,
+                diagnostics,
+            )?;
+        Ok((outcome, cells))
+    }
+
     /// Exact receiver-side entry for FnEval. The embedding engine first
     /// selects the active object's definition script, active definition, or
     /// Game.Script, then this method creates DirectExec's temporary child
@@ -2887,6 +3137,23 @@ impl Engine {
     ) -> Result<Value, RuntimeError> {
         let vm = self.vm().with_this(this);
         vm.eval_direct_exec_with_cells(source, cells, strict_level, depth)
+    }
+
+    /// Continuation-capable counterpart to
+    /// [`Self::eval_direct_exec_with_cells_and_this_at_strict`]. The VM keeps
+    /// FnEval's diagnostic frame and depth semantics while the returned
+    /// suspension owns the temporary expression frame.
+    #[doc(hidden)]
+    pub fn eval_direct_exec_with_cells_and_this_at_strict_with_continuation(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        strict_level: Option<u8>,
+        depth: usize,
+    ) -> Result<crate::vm::ScriptCallOutcome, RuntimeError> {
+        let vm = self.vm().with_this(this);
+        vm.eval_direct_exec_with_cells_with_continuation(source, cells, strict_level, depth)
     }
 
     /// The destination host script's own parsed strict level. Included and

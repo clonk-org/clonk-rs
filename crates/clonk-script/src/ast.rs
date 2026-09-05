@@ -288,10 +288,25 @@ impl Function {
     }
 
     pub(crate) fn resolved_snapshot(&self) -> std::sync::Arc<Self> {
-        std::sync::Arc::clone(
-            self.resolved_snapshot
-                .get_or_init(|| std::sync::Arc::new(self.clone())),
-        )
+        let snapshot = self
+            .resolved_snapshot
+            .get_or_init(|| std::sync::Arc::new(self.clone()));
+        // Link-time mutation normally resets this cache.  A few embedders
+        // retain the public Function and replace its parsed body in place,
+        // though, so do not let the permanent queue snapshot hide that
+        // replacement.  The common unchanged path keeps the one Arc; only a
+        // detected source mutation mints a fresh owned target.
+        if snapshot.params == self.params
+            && snapshot.body == self.body
+            && snapshot.access == self.access
+            && snapshot.returns_reference == self.returns_reference
+            && snapshot.strict_level == self.strict_level
+            && snapshot.global_local_reference == self.global_local_reference
+        {
+            std::sync::Arc::clone(snapshot)
+        } else {
+            std::sync::Arc::new(self.clone())
+        }
     }
 
     fn reset_resolved_snapshot_chain(&mut self) {

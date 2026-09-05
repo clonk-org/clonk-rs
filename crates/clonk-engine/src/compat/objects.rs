@@ -1429,7 +1429,7 @@ fn retire_object_info_and_clear_references(
     context: &mut EffectHostContext,
     target: ObjectId,
     last_position: Option<Vector2>,
-) {
+) -> Result<(), RuntimeError> {
     let link = context
         .object_scope(target)
         .and_then(ObjectScopeContext::info_link);
@@ -1444,7 +1444,7 @@ fn retire_object_info_and_clear_references(
     if let Some(scope) = context.object_scope_mut(target) {
         scope.clear_info_for_removal();
     }
-    context.clear_non_player_script_object_references(target, last_position);
+    context.clear_non_player_script_object_references(target, last_position)
 }
 
 pub(crate) fn assign_removal_live(
@@ -1538,7 +1538,7 @@ pub(crate) fn assign_removal_live(
         let _ = assign_removal_live(child, false)?;
     }
 
-    with_host_context_mut((), |context| {
+    with_host_context_mut(Ok(()), |context| {
         let removed_from = context
             .object_scope(target)
             .and_then(ObjectScopeContext::container);
@@ -1554,8 +1554,8 @@ pub(crate) fn assign_removal_live(
             // SetOCF on the surviving parent (C4Object.cpp:297-305).
             refresh_container_collection_ocf(context, container);
         }
-        retire_object_info_and_clear_references(context, target, exit_position);
-    });
+        retire_object_info_and_clear_references(context, target, exit_position)
+    })?;
     clear_player_object_pointers_host(target);
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -5172,138 +5172,320 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     };
 
-    // C4Game::NewObject makes the raw Con=0 object script-visible, then
-    // invokes Construction with the creator (C4Game.cpp:1102-1121).
-    let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
-    if let Some(Err(error)) = call_world_object_own_function(target, "Construction", &[creator_arg])
-    {
-        tracing::error!(
-            id = target.as_u64(),
-            callback = "Construction",
-            %error,
-            "creation callback failed; continuing like C++ fail-safe Call"
-        );
-        log_runtime_call_frames("", error.call_frames());
-    }
-    let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
-    if removed {
-        return Ok(Value::Nil);
-    }
+    // NewObject's native suffix is retained by the VM when any lifecycle
+    // callback yields. The pending spawn has already been registered once
+    // above; every later phase works against that same allocation token.
+    let target_instance_token =
+        with_host_context(None, |context| context.object_instance_token(target)).ok_or_else(
+            || {
+                RuntimeError::new(format!(
+                    "CreateObject target {} has no allocation token",
+                    target.as_u64()
+                ))
+            },
+        )?;
+    CreateObjectContinuation::new(
+        target,
+        target_instance_token,
+        creator,
+        creator_controller,
+        shape,
+        stretch_growth,
+        line,
+        ocf_base,
+        crew_member,
+        category,
+        alive,
+    )
+    .start()
+}
 
-    // Construction ran against the raw Con=0 object, before NewObject's
-    // initial DoCon. Commit its final action state into the pending spawn at
-    // that boundary instead of leaving the ActionUpdate to replay after the
-    // spawn has materialized at its post-growth integer position. SetAction
-    // synchronizes fix_x/fix_y immediately in C++; replaying it later changed
-    // WMPF's raw y=516 fixed coordinate to the intermediate growth y=512.
-    with_host_context_mut((), |context| {
-        context.commit_creation_action(target);
-    });
+#[derive(Clone, Copy, Debug)]
+enum CreateObjectPhase {
+    Construction,
+    Completion,
+    Initialize,
+}
 
-    // Initial DoCon(FullCon,true) runs only after Construction. Its straight
-    // growth keeps the old bottom fixed in integer coordinates and leaves
-    // fix_y at the supplied raw center (C4Object.cpp:1428-1515).
-    let crossed_full_con = with_host_context_mut(false, |context| {
-        if !context.ensure_object_scope(target) {
-            return false;
+/// Owned native suffix for the script CreateObject wrapper. The pending
+/// SpawnConfig is registered before this state is created and is never
+/// registered again while a child callback is suspended.
+struct CreateObjectContinuation {
+    target: ObjectId,
+    /// This token is allocation metadata, never a script-visible object
+    /// reference. It remains after a removal sweep so a same-number
+    /// destination object cannot receive the old suffix.
+    target_instance_token: u64,
+    target_available: bool,
+    pending_spawn_registered: bool,
+    creator: Option<ObjectId>,
+    creator_controller: Option<i32>,
+    shape: Option<DefinitionRect>,
+    stretch_growth: bool,
+    line: i32,
+    ocf_base: u32,
+    crew_member: bool,
+    category: i32,
+    alive: bool,
+    phase: CreateObjectPhase,
+}
+
+impl CreateObjectContinuation {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        target: ObjectId,
+        target_instance_token: u64,
+        creator: Option<ObjectId>,
+        creator_controller: Option<i32>,
+        shape: Option<DefinitionRect>,
+        stretch_growth: bool,
+        line: i32,
+        ocf_base: u32,
+        crew_member: bool,
+        category: i32,
+        alive: bool,
+    ) -> Self {
+        Self {
+            target,
+            target_instance_token,
+            target_available: true,
+            pending_spawn_registered: true,
+            creator,
+            creator_controller,
+            shape,
+            stretch_growth,
+            line,
+            ocf_base,
+            crew_member,
+            category,
+            alive,
+            phase: CreateObjectPhase::Construction,
         }
-        let was_full = context
-            .object_scope(target)
-            .is_some_and(|scope| scope.construction() >= FULL_CON);
-        let Some(final_construction) = context.adjust_object_construction(target, FULL_CON) else {
-            return false;
-        };
-        // `UpdateFace(true)` updates the solid mask straight after the shape
-        // refresh and BEFORE the keep-bottom move (C4Object.cpp:1487). The
-        // move's own update then finds a mask present and removes it, and
-        // that Remove is what probes the landscape for instability
-        // (C4Object.cpp:1490-1497; C4SolidMask.cpp:256). Without this first
-        // put there is nothing to remove, so a script-created object seeds no
-        // mass movers -- the engine placement path was given the same pair in
-        // clonk-org/clonk-rs#1165.
-        context.update_live_solid_mask(target, false);
-        let (pre_growth_position, adjusted_position) = {
-            let Some(scope) = context.object_scope_mut(target) else {
+    }
+
+    fn start(mut self) -> Result<Value, RuntimeError> {
+        if !self.pending_spawn_registered {
+            return Err(RuntimeError::new(
+                "CreateObject continuation lost its pending spawn",
+            ));
+        }
+        let creator = self.creator.take();
+        let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
+        self.phase = CreateObjectPhase::Construction;
+        let outcome = Box::new(self).run_callback("Construction", &[creator_arg])?;
+        materialize_native_outcome(outcome)
+    }
+
+    fn run_callback(
+        self: Box<Self>,
+        callback: &'static str,
+        args: &[Value],
+    ) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+        call_world_object_own_function_with_native_continuation(self.target, callback, args, self)
+    }
+
+    fn target_is_current(&self) -> bool {
+        self.target_available
+            && with_host_context(false, |context| {
+                context.object_instance_token(self.target) == Some(self.target_instance_token)
+                    && !context.nested_object_destroyed(self.target)
+            })
+    }
+
+    fn finish_callback(
+        mut self: Box<Self>,
+        callback_result: Result<Value, RuntimeError>,
+    ) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+        if let Err(error) = callback_result {
+            let callback = match self.phase {
+                CreateObjectPhase::Construction => "Construction",
+                CreateObjectPhase::Completion => "Completion",
+                CreateObjectPhase::Initialize => "Initialize",
+            };
+            tracing::error!(
+                id = self.target.as_u64(),
+                callback,
+                %error,
+                "creation callback failed; continuing like C++ fail-safe Call"
+            );
+            log_runtime_call_frames("", error.call_frames());
+        }
+
+        if !self.target_is_current() {
+            return Ok(clonk_script::NativeCallOutcome::Complete(Value::Nil));
+        }
+
+        match self.phase {
+            CreateObjectPhase::Construction => {
+                // Construction ran against raw Con=0. Its action writes are
+                // committed exactly once before the initial DoCon phase.
+                with_host_context_mut((), |context| {
+                    context.commit_creation_action(self.target);
+                });
+                self.run_initial_docon()
+            }
+            CreateObjectPhase::Completion => {
+                self.phase = CreateObjectPhase::Initialize;
+                Box::new(self).run_callback("Initialize", &[])
+            }
+            CreateObjectPhase::Initialize => self.finish_native(),
+        }
+    }
+
+    fn run_initial_docon(
+        mut self: Box<Self>,
+    ) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+        // C4Object::DoCon(FullCon,true) updates the shape/mask before the
+        // keep-bottom movement. This is the same phase body as the
+        // synchronous path, but it is entered only after Construction has
+        // completed and never re-registers the pending spawn.
+        let crossed_full_con = with_host_context_mut(false, |context| {
+            if !context.ensure_object_scope(self.target) {
+                return false;
+            }
+            let was_full = context
+                .object_scope(self.target)
+                .is_some_and(|scope| scope.construction() >= FULL_CON);
+            let Some(final_construction) =
+                context.adjust_object_construction(self.target, FULL_CON)
+            else {
                 return false;
             };
-            let pre_growth_position = scope.effective_position();
-            let adjusted_position = Vector2::new(
-                pre_growth_position.x,
-                crate::docon_initial_center_y(
-                    shape,
-                    stretch_growth,
-                    line,
-                    final_construction,
-                    pre_growth_position.y,
-                ),
-            );
-            scope.pending_update.construction = None;
-            scope.current_position = adjusted_position;
-            scope.pending_update.position = None;
-            scope.cached_ocf = Some(ocf::compute(
-                ocf_base,
-                crew_member,
-                alive,
-                ObjectStatus::Normal,
-                false,
-                final_construction,
-                category,
-            ));
-            (pre_growth_position, adjusted_position)
-        };
-        if let Some(spawn) = context
-            .pending_spawns
-            .iter_mut()
-            .find(|spawn| spawn.id == Some(target))
-        {
-            spawn.position = adjusted_position;
-            spawn.construction = FULL_CON;
-            spawn.fixed_position = (adjusted_position != pre_growth_position).then_some(
-                FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
-            );
-        }
-        context.update_live_solid_mask(target, false);
-        !was_full && final_construction >= FULL_CON
-    });
-
-    if crossed_full_con {
-        for callback in ["Completion", "Initialize"] {
-            if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
-                tracing::error!(
-                    id = target.as_u64(),
-                    callback,
-                    %error,
-                    "creation callback failed; continuing like C++ fail-safe Call"
+            context.update_live_solid_mask(self.target, false);
+            let (pre_growth_position, adjusted_position) = {
+                let Some(scope) = context.object_scope_mut(self.target) else {
+                    return false;
+                };
+                let pre_growth_position = scope.effective_position();
+                let adjusted_position = Vector2::new(
+                    pre_growth_position.x,
+                    crate::docon_initial_center_y(
+                        self.shape,
+                        self.stretch_growth,
+                        self.line,
+                        final_construction,
+                        pre_growth_position.y,
+                    ),
                 );
-                log_runtime_call_frames("", error.call_frames());
+                scope.pending_update.construction = None;
+                scope.current_position = adjusted_position;
+                scope.pending_update.position = None;
+                scope.cached_ocf = Some(ocf::compute(
+                    self.ocf_base,
+                    self.crew_member,
+                    self.alive,
+                    ObjectStatus::Normal,
+                    false,
+                    final_construction,
+                    self.category,
+                ));
+                (pre_growth_position, adjusted_position)
+            };
+            if let Some(spawn) = context
+                .pending_spawns
+                .iter_mut()
+                .find(|spawn| spawn.id == Some(self.target))
+            {
+                spawn.position = adjusted_position;
+                spawn.construction = FULL_CON;
+                spawn.fixed_position = (adjusted_position != pre_growth_position).then_some(
+                    FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
+                );
             }
+            context.update_live_solid_mask(self.target, false);
+            !was_full && final_construction >= FULL_CON
+        });
+
+        if crossed_full_con {
+            self.phase = CreateObjectPhase::Completion;
+            Box::new(self).run_callback("Completion", &[])
+        } else {
+            self.finish_native()
         }
     }
 
-    let removed = with_host_context_mut(true, |context| {
-        if context.nested_object_destroyed(target) {
-            return true;
-        }
-        // FnCreateObject applies the creating controller only after
-        // Game.CreateObject (and therefore every lifecycle callback) returns
-        // (C4Script.cpp:1886-1902).
-        if let Some(controller) = creator_controller {
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope.set_controller(controller);
-            }
-            if let Some(preview) = context.pending_objects.get_mut(&target) {
-                if let Some(state) = preview.state.as_mut() {
-                    Rc::make_mut(state).controller = controller;
+    fn finish_native(&self) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+        let mut removed = true;
+        if self.target_is_current() {
+            removed = with_host_context_mut(true, |context| {
+                if context.object_instance_token(self.target) != Some(self.target_instance_token)
+                    || context.nested_object_destroyed(self.target)
+                {
+                    return true;
                 }
-            }
+                // FnCreateObject applies Controller only after every
+                // lifecycle callback returns (C4Script.cpp:1886-1902).
+                if let Some(controller) = self.creator_controller {
+                    if let Some(scope) = context.object_scope_mut(self.target) {
+                        scope.set_controller(controller);
+                    }
+                    if let Some(preview) = context.pending_objects.get_mut(&self.target) {
+                        if let Some(state) = preview.state.as_mut() {
+                            Rc::make_mut(state).controller = controller;
+                        }
+                    }
+                }
+                false
+            });
         }
-        false
-    });
-    Ok(if removed {
-        Value::Nil
-    } else {
-        object_reference_value(target)
-    })
+        Ok(clonk_script::NativeCallOutcome::Complete(if removed {
+            Value::Nil
+        } else {
+            object_reference_value(self.target)
+        }))
+    }
+}
+
+impl clonk_script::NativeContinuation for CreateObjectContinuation {
+    fn resume(
+        self: Box<Self>,
+        child_result: Result<Value, RuntimeError>,
+    ) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+        self.finish_callback(child_result)
+    }
+
+    fn resume_child(
+        &mut self,
+        _child: clonk_script::ScriptSuspension,
+        _value: Value,
+    ) -> Result<clonk_script::ScriptCallOutcome, RuntimeError> {
+        Err(RuntimeError::new(
+            "CreateObject native suffix does not own a child frame",
+        ))
+    }
+
+    fn clear_object_references(&mut self, object_id: u64) {
+        if self.target.as_u64() == object_id {
+            // The allocation token deliberately survives this sweep; only
+            // the ability to bind the child back to its old object is cleared.
+            self.target_available = false;
+        }
+        if self
+            .creator
+            .is_some_and(|creator| creator.as_u64() == object_id)
+        {
+            self.creator = None;
+        }
+    }
+
+    fn value_stack_slots(&self) -> usize {
+        0
+    }
+}
+
+fn materialize_native_outcome(
+    outcome: clonk_script::NativeCallOutcome,
+) -> Result<Value, RuntimeError> {
+    match outcome {
+        clonk_script::NativeCallOutcome::Complete(value) => Ok(value),
+        clonk_script::NativeCallOutcome::Suspended {
+            child,
+            continuation,
+        } => clonk_script::lift_native_continuation(
+            clonk_script::ScriptCallOutcome::Suspended(child),
+            continuation,
+        ),
+    }
 }
 
 pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -9341,7 +9523,7 @@ pub(crate) fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
             // number stays consumed, exactly like C++ where the object
             // existed and died (the GoldRush TRPR Recruitment temp,
             // Trapper.c4d/Script.c:19-25).
-            let removed = with_host_context_mut(false, |context| {
+            let removed = with_host_context_mut(Ok(false), |context| {
                 let last_position = context
                     .object_scope(target)
                     .map(|scope| scope.current_position)
@@ -9353,10 +9535,10 @@ pub(crate) fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 mark_object_status_deleted(context, target);
                 let removed = context.cancel_pending_spawn(target);
                 if removed {
-                    retire_object_info_and_clear_references(context, target, last_position);
+                    retire_object_info_and_clear_references(context, target, last_position)?;
                 }
-                removed
-            });
+                Ok(removed)
+            })?;
             if removed {
                 clear_player_object_pointers_host(target);
                 with_host_context_mut((), |context| {

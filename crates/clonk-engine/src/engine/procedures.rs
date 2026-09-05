@@ -1615,7 +1615,7 @@ impl Engine {
 
     fn action_with_optional_target_and_calls(
         &mut self,
-        idx: usize,
+        mut idx: usize,
         definition_id: &DefinitionId,
         name: &str,
         target: Option<ObjectId>,
@@ -1709,7 +1709,7 @@ impl Engine {
         }
 
         if !library.is_idle_state(&current_action) {
-            self.invoke_action_callback(
+            let receiver_is_live = self.invoke_action_callback(
                 idx,
                 ActionCallbackKind::Start,
                 &current_action.name,
@@ -1719,6 +1719,13 @@ impl Engine {
                 None,
                 None,
             )?;
+            if !receiver_is_live {
+                return Ok(false);
+            }
+            let Some(live_idx) = self.find_object_index(object_id) else {
+                return Ok(false);
+            };
+            idx = live_idx;
         }
 
         // A StartCall that removes the object or changes its definition stops
@@ -1730,7 +1737,7 @@ impl Engine {
                 && !matches!(object.state.status, ObjectStatus::Deleted)
         });
         if callback_target_survived && !force && !library.is_idle_state(&previous) {
-            self.invoke_action_callback(
+            let receiver_is_live = self.invoke_action_callback(
                 idx,
                 ActionCallbackKind::Abort,
                 &previous.name,
@@ -1740,6 +1747,9 @@ impl Engine {
                 Some(previous.phase),
                 None,
             )?;
+            if !receiver_is_live {
+                return Ok(false);
+            }
         }
 
         Ok(true)
