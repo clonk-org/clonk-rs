@@ -9166,6 +9166,21 @@ mod tests {
         front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => Some(front_id)};
         front_assert_eq! {graphics.object_at_point_excluding(&snapshot, 1, point, front_id) => Some(back_id), "FindVisObject skips only the exact excluded object"};
 
+        // The renderer appends omitted IDs in canonical object order, and an
+        // empty sidecar uses that order directly. Both forms must keep the
+        // same frontmost target as a complete sidecar.
+        snapshot.render_order = vec![back_id];
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, point) => Some(front_id),
+            "a partial render order appends omitted objects in canonical order"
+        };
+        snapshot.render_order.clear();
+        front_assert_eq! {
+            graphics.object_at_point(&snapshot, 1, point) => Some(front_id),
+            "an empty render order falls back to canonical object order"
+        };
+        snapshot.render_order = vec![back_id, front_id];
+
         snapshot.objects[1].visibility = clonk_engine::VIS_NONE;
         front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => Some(back_id), "FindVisObject must skip a VIS_None front object"};
         snapshot.objects[1].visibility = clonk_engine::VIS_ALL;
@@ -9195,6 +9210,112 @@ mod tests {
             ..PlayerState::default()
         }];
         front_assert_eq! {graphics.object_at_point(&snapshot, 1, point) => None, "a valid player without a cursor must fall through to select-next"};
+    }
+
+    #[test]
+    fn mouse_target_lookup_index_work_scales_linearly_and_reuses_capacity() {
+        // A complete render order used to resolve every ID by rescanning the
+        // master object list. Count the actual object traversals and map
+        // resolutions so the index work stays proportional to the snapshot
+        // size as the order grows.
+        let mut graphics = test_graphics((320, 180, 150), "Mouse Pick Index");
+        let lookup_metrics = |graphics: &mut GraphicsSystem, object_count: usize| {
+            let mut snapshot = make_snapshot();
+            let template = snapshot.objects.pop().expect("snapshot object template");
+            snapshot.objects = (0..object_count)
+                .map(|index| {
+                    let mut object = template.clone();
+                    object.id = ObjectId::new(index as u64 + 1);
+                    object.status = ObjectStatus::Deleted;
+                    object
+                })
+                .collect();
+            snapshot.render_order = snapshot.objects.iter().map(|object| object.id).collect();
+
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::ownerless(Vector2::new(100, 100), 1.0)],
+            );
+
+            reset_mouse_target_object_index_scans();
+            let result = graphics
+                .mouse_target_lookup(
+                    &snapshot,
+                    OWNER_NONE,
+                    MouseTargetLookupQuery {
+                        screen: GuiPoint::new(10.0, 10.0),
+                        world: Vector2::ZERO,
+                        width: 0,
+                        height: 0,
+                        requested_ocf: u32::MAX,
+                        excluded: None,
+                        owner: None,
+                        find_next: None,
+                        adjust_ocf: false,
+                    },
+                )
+                .expect("ownerless viewport exists");
+            front_assert_eq! {result.object => None};
+            (
+                mouse_target_object_index_scans(),
+                mouse_target_object_index_resolutions(),
+                graphics.mouse_target_object_index_capacities(),
+            )
+        };
+
+        let (small_scans, small_resolutions, _) = lookup_metrics(&mut graphics, 64);
+        let (large_scans, large_resolutions, large_capacity) = lookup_metrics(&mut graphics, 128);
+        let (_, _, small_capacity_after_shrink) = lookup_metrics(&mut graphics, 64);
+        front_assert_eq! {small_scans => 128};
+        front_assert_eq! {large_scans => 256};
+        front_assert_eq! {small_resolutions => 64};
+        front_assert_eq! {large_resolutions => 128};
+        front_assert_eq! {large_scans => small_scans * 2};
+        front_assert_eq! {large_resolutions => small_resolutions * 2};
+        front_assert_eq! {
+            small_capacity_after_shrink => large_capacity,
+            "shrinking the snapshot retains the index buffers' high-water capacities"
+        };
+        front_assert!(large_capacity.0 >= 128);
+        front_assert!(large_capacity.1 >= 128);
+        front_assert!(large_capacity.2 >= 128);
+    }
+
+    #[test]
+    fn mouse_target_lookup_keeps_first_object_for_duplicate_ids() {
+        let mut snapshot = make_snapshot();
+        let id = snapshot.objects[0].id;
+        snapshot.objects[0].status = ObjectStatus::Deleted;
+        let mut duplicate = snapshot.objects[0].clone();
+        duplicate.status = ObjectStatus::Normal;
+        duplicate.ocf = 1;
+        snapshot.objects.push(duplicate);
+        snapshot.render_order = vec![id];
+
+        let mut graphics = test_graphics((320, 180, 150), "Duplicate Mouse Pick");
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::ownerless(Vector2::new(100, 100), 1.0)],
+        );
+
+        let result = graphics
+            .mouse_target_lookup(
+                &snapshot,
+                OWNER_NONE,
+                MouseTargetLookupQuery {
+                    screen: GuiPoint::new(10.0, 10.0),
+                    world: Vector2::ZERO,
+                    width: 0,
+                    height: 0,
+                    requested_ocf: u32::MAX,
+                    excluded: None,
+                    owner: None,
+                    find_next: None,
+                    adjust_ocf: false,
+                },
+            )
+            .expect("ownerless viewport exists");
+        front_assert_eq! {result.object => None};
     }
 
     #[test]

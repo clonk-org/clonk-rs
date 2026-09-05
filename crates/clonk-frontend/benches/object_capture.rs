@@ -1,9 +1,10 @@
 use clonk_engine::{
     ActionState, DefinitionActionFacet, DefinitionActionGraphics, DefinitionRect, Direction,
-    DrawTransform, ObjectId, ObjectSnapshot, Vector2,
+    DrawTransform, ObjectId, ObjectSnapshot, SimulationSnapshot, Vector2,
 };
 use clonk_frontend::{
-    ColorByOwnerMask, CursorAtlas, DefinitionSprite, GraphicsSystem, HudGraphics, ImageData,
+    ColorByOwnerMask, CursorAtlas, DefinitionSprite, GraphicsSystem, GuiPoint, HudGraphics,
+    ImageData, ViewportInput,
 };
 use clonk_graphics::{BitmapFont, GammaRamp, GpuCommand};
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const OBJECTS: usize = 1_000;
 const PHASES: usize = 20;
@@ -28,6 +29,8 @@ const OWNER_SHEET_HEIGHT: u32 = 420;
 const OBJECT_INSTANCE_BYTES: usize = 88;
 const OWNER_UNFOGGED_INSTANCE_BUDGET: usize = 176 * 1024;
 const OWNER_FOGGED_INSTANCES: usize = 2_400;
+const MOUSE_LOOKUP_SAMPLES: usize = 1_000;
+const MOUSE_LOOKUP_COUNTS: [usize; 2] = [128, 256];
 
 static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
 static ALLOCATION_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -568,12 +571,84 @@ fn bench_object_capture(c: &mut Criterion) {
     group.finish();
 }
 
+fn mouse_target_objects(count: usize) -> Vec<ObjectSnapshot> {
+    let mut template = object_template("ST5B");
+    // Keep candidates active and OCF-matching; their positions stay away from
+    // the probe so every lookup takes the production empty-space path.
+    template.ocf = 1;
+    (0..count)
+        .map(|index| {
+            let mut object = template.clone();
+            object.id = ObjectId::new(index as u64 + 1);
+            object.position = Vector2::new(8 + index as i32, 8);
+            object
+        })
+        .collect()
+}
+
+fn mouse_target_fixture(count: usize) -> (GraphicsSystem, SimulationSnapshot, GuiPoint) {
+    let objects = mouse_target_objects(count);
+    let render_order = objects.iter().map(|object| object.id).collect();
+    let snapshot = SimulationSnapshot {
+        objects,
+        render_order,
+        ..SimulationSnapshot::default()
+    };
+    let mut graphics = graphics();
+    graphics.render_frame_without_atlas(
+        &snapshot,
+        &[ViewportInput::ownerless(
+            Vector2::new((EXTENT[0] / 2) as i32, (EXTENT[1] / 2) as i32),
+            1.0,
+        )],
+    );
+    let point = GuiPoint::new((EXTENT[0] - 1) as f32, (EXTENT[1] - 1) as f32);
+    (graphics, snapshot, point)
+}
+
+fn bench_mouse_target_lookup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mouse_target_lookup");
+    for count in MOUSE_LOOKUP_COUNTS {
+        let (graphics, snapshot, point) = mouse_target_fixture(count);
+        let (cold_result, cold_allocations) = measure_allocations(|| {
+            graphics.object_at_point(&snapshot, clonk_engine::OWNER_NONE, point)
+        });
+        assert_eq!(
+            cold_result, None,
+            "the probe point must be empty so the production walk examines every object"
+        );
+
+        let (warm_elapsed, warm_allocations) = measure_allocations(|| {
+            let started = Instant::now();
+            for _ in 0..MOUSE_LOOKUP_SAMPLES {
+                black_box(graphics.object_at_point(&snapshot, clonk_engine::OWNER_NONE, point));
+            }
+            started.elapsed()
+        });
+        assert_eq!(warm_allocations.calls, 0);
+        assert_eq!(warm_allocations.bytes, 0);
+        println!(
+            "mouse target lookup raw stats: objects={count}, samples={MOUSE_LOOKUP_SAMPLES}, \
+             cold_allocations={cold_allocations:?}, warm_elapsed_ns={}, warm_allocations={warm_allocations:?}",
+            warm_elapsed.as_nanos(),
+        );
+
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_function(format!("empty_space_{count}"), |b| {
+            b.iter(|| {
+                black_box(graphics.object_at_point(&snapshot, clonk_engine::OWNER_NONE, point))
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(Duration::from_secs(2))
         .measurement_time(Duration::from_secs(5))
         .sample_size(20);
-    targets = bench_object_capture
+    targets = bench_object_capture, bench_mouse_target_lookup
 }
 criterion_main!(benches);
