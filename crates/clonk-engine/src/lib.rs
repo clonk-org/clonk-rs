@@ -14210,5 +14210,9 @@ mod issue_62_scheduled_global_effect_callbacks;
 #[path = "lib_tests/duplicate_object_id_identity_regression.rs"]
 mod duplicate_object_id_identity_regression;
 
+#[cfg(test)]
+#[path = "lib_tests/scenario_section_callback_outcome_regression.rs"]
+mod scenario_section_callback_outcome_regression;
+
 pub use definition::*;
 pub use object::*;
