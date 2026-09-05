@@ -17452,6 +17452,53 @@ mod tests {
     }
 
     #[test]
+    fn multiple_viewports_keep_particle_layers_bounded_to_live_emitters() {
+        const FRAMES: u64 = 32;
+        let mut snapshot = make_snapshot();
+        let focus = snapshot.objects[0].clone();
+        let viewports = [
+            ViewportInput::from_focus(&focus),
+            ViewportInput::ownerless(Vector2::new(80, 60), 1.0),
+        ];
+        let mut graphics =
+            test_graphics_with_sprites((64, 40, 120), "bounded particle layers", empty_sprites());
+
+        reset_particle_layer_scans();
+        for raw_id in 1..=FRAMES {
+            let emitter = ObjectId::new(raw_id);
+            snapshot.particles = vec![
+                particle_fixture("Smoke", FloatVector2::new(8.0, 8.0), ParticleLayer::Global),
+                particle_fixture(
+                    "Smoke",
+                    FloatVector2::new(8.0, 8.0),
+                    ParticleLayer::ObjectFront(emitter),
+                ),
+                particle_fixture(
+                    "Smoke",
+                    FloatVector2::new(8.0, 8.0),
+                    ParticleLayer::ObjectBack(emitter),
+                ),
+            ];
+            graphics.render_frame_without_atlas(&snapshot, &viewports);
+            front_assert_eq! {
+                graphics.particle_layer_index_layer_count() => 3,
+                "two viewport passes retain only the current global/front/back layers"
+            };
+        }
+
+        snapshot.particles.clear();
+        graphics.render_frame_without_atlas(&snapshot, &viewports);
+        front_assert_eq! {
+            graphics.particle_layer_index_layer_count() => 0,
+            "an empty viewport frame releases every emitter layer"
+        };
+        front_assert_eq! {
+            particle_layer_scans() => FRAMES as usize * viewports.len() * 3,
+            "each viewport groups the live particle slice once"
+        };
+    }
+
+    #[test]
     fn normal_object_visibility_is_evaluated_only_in_the_normal_pass() {
         const OBJECTS: usize = 1_000;
 

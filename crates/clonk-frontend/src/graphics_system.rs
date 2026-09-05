@@ -369,6 +369,16 @@ impl ParticleLayerIndex {
     fn rebuild(&mut self, particles: &[ParticleSnapshot]) {
         #[cfg(test)]
         PARTICLE_LAYER_SCANS.with(|scans| scans.set(scans.get() + particles.len()));
+        #[cfg(test)]
+        PARTICLE_LAYER_REBUILD_WORK.with(|work| {
+            work.set(
+                work.get()
+                    .saturating_add(self.layers.len() + particles.len()),
+            )
+        });
+        // Clear the live vectors so their backing storage can be reused, then
+        // remove empty entries after grouping. This drops obsolete emitter
+        // vectors while keeping steady-state layer allocations bounded.
         self.layers.values_mut().for_each(Vec::clear);
         // Snapshot order is creation order whereas C++ prepends new particles,
         // so reverse traversal is native newest-first order. Recording it here
@@ -379,6 +389,16 @@ impl ParticleLayerIndex {
                 .or_default()
                 .push(offset as u32);
         }
+        self.layers.retain(|_, offsets| !offsets.is_empty());
+        for offsets in self.layers.values_mut() {
+            let shrink_limit = offsets.len().saturating_mul(4).saturating_add(16);
+            if offsets.capacity() > shrink_limit {
+                offsets.shrink_to(offsets.len());
+            }
+        }
+        // Historical emitter churn can leave the table with excess buckets;
+        // shrink them to the live key count without moving the Vec buffers.
+        self.layers.shrink_to(self.layers.len());
         self.source = Some((particles.as_ptr() as usize, particles.len()));
     }
 
@@ -392,6 +412,142 @@ impl ParticleLayerIndex {
                 .get(&ParticleLayerKey::of(layer))
                 .map_or(&[][..], Vec::as_slice)
         })
+    }
+}
+
+#[cfg(test)]
+mod particle_layer_index_tests {
+    use super::*;
+
+    fn particle(layer: ParticleLayer) -> ParticleSnapshot {
+        ParticleSnapshot {
+            definition_id: "test".to_string(),
+            position: FloatVector2::new(0.0, 0.0),
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 1,
+            parameter_a: 0.0,
+            parameter_b: 0,
+            layer,
+            pxs_fixed: None,
+            pxs_slot: None,
+        }
+    }
+
+    #[test]
+    fn rebuild_drops_layers_and_capacity_for_dead_emitters() {
+        // C4ParticleList::Remove releases particles from object front/back
+        // lists when their owner is gone (C4Particles.cpp:291-310), and the
+        // viewport only draws the lists that exist for the current frame
+        // (C4Viewport.cpp:1056-1078).
+        let owner = ObjectId::new(1);
+        let particles = vec![
+            particle(ParticleLayer::Global),
+            particle(ParticleLayer::ObjectFront(owner)),
+            particle(ParticleLayer::ObjectBack(owner)),
+        ];
+        let mut index = ParticleLayerIndex::default();
+
+        index.rebuild(&particles);
+        assert_eq!(index.layers.len(), 3);
+        assert_eq!(
+            index
+                .layers
+                .get(&ParticleLayerKey::of(&ParticleLayer::Global))
+                .map(Vec::as_slice),
+            Some([0].as_slice())
+        );
+        assert_eq!(
+            index
+                .layers
+                .get(&ParticleLayerKey::of(&ParticleLayer::ObjectFront(owner)))
+                .map(Vec::as_slice),
+            Some([1].as_slice())
+        );
+        assert_eq!(
+            index
+                .layers
+                .get(&ParticleLayerKey::of(&ParticleLayer::ObjectBack(owner)))
+                .map(Vec::as_slice),
+            Some([2].as_slice())
+        );
+
+        for raw_id in 2..=64 {
+            let churned = [particle(ParticleLayer::ObjectFront(ObjectId::new(raw_id)))];
+            index.rebuild(&churned);
+            assert_eq!(index.layers.len(), 1);
+            assert_eq!(index.layers.values().map(Vec::len).sum::<usize>(), 1);
+        }
+
+        let empty = [];
+        index.rebuild(&empty);
+        assert!(index.layers.is_empty());
+        assert_eq!(index.layers.capacity(), 0);
+        assert_eq!(index.layers.values().map(Vec::capacity).sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn rebuild_work_matches_a_fresh_index_after_emitter_churn() {
+        const MEASURED_REBUILDS: usize = 1_000;
+        let live = vec![
+            particle(ParticleLayer::Global),
+            particle(ParticleLayer::ObjectFront(ObjectId::new(100))),
+            particle(ParticleLayer::ObjectBack(ObjectId::new(100))),
+        ];
+        let mut churned = ParticleLayerIndex::default();
+        for raw_id in 1..=64 {
+            let emitter = ObjectId::new(raw_id);
+            churned.rebuild(&[
+                particle(ParticleLayer::Global),
+                particle(ParticleLayer::ObjectFront(emitter)),
+                particle(ParticleLayer::ObjectBack(emitter)),
+            ]);
+        }
+
+        reset_particle_layer_rebuild_work();
+        let churned_start = std::time::Instant::now();
+        for _ in 0..MEASURED_REBUILDS {
+            churned.rebuild(&live);
+        }
+        let churned_elapsed = churned_start.elapsed();
+        let churned_work = particle_layer_rebuild_work();
+
+        let mut fresh = ParticleLayerIndex::default();
+        fresh.rebuild(&live);
+        reset_particle_layer_rebuild_work();
+        let fresh_start = std::time::Instant::now();
+        for _ in 0..MEASURED_REBUILDS {
+            fresh.rebuild(&live);
+        }
+        let fresh_elapsed = fresh_start.elapsed();
+        let fresh_work = particle_layer_rebuild_work();
+
+        println!(
+            "post-churn rebuild: {} estimated work units vs {} fresh; {:.3} us vs {:.3} us per rebuild",
+            churned_work,
+            fresh_work,
+            churned_elapsed.as_secs_f64() * 1e6 / MEASURED_REBUILDS as f64,
+            fresh_elapsed.as_secs_f64() * 1e6 / MEASURED_REBUILDS as f64,
+        );
+        assert_eq!(churned_work, fresh_work);
+    }
+
+    #[test]
+    fn rebuild_trims_a_burst_capacity_for_a_live_layer() {
+        let mut index = ParticleLayerIndex::default();
+        let burst = (0..=1023)
+            .map(|_| particle(ParticleLayer::Global))
+            .collect::<Vec<_>>();
+        index.rebuild(&burst);
+        assert!(index
+            .layers
+            .get(&ParticleLayerKey::Global)
+            .is_some_and(|offsets| offsets.capacity() >= burst.len()));
+
+        index.rebuild(&[particle(ParticleLayer::Global)]);
+        assert!(index
+            .layers
+            .get(&ParticleLayerKey::Global)
+            .is_some_and(|offsets| offsets.capacity() <= 20));
     }
 }
 
@@ -583,6 +739,9 @@ std::thread_local! {
     /// Particle entries examined to decide layer membership, whether by the
     /// linear scan or by the grouping pass that replaces it.
     static PARTICLE_LAYER_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Estimated rebuild work: existing entries visited plus live particles grouped;
+    /// bucket scans and allocator timing are measured separately.
+    static PARTICLE_LAYER_REBUILD_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Calls into C4Object::IsVisible from the presentation object walk.
     static OBJECT_VISIBILITY_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Canonically ordered objects examined while preparing viewport phase partitions.
@@ -603,6 +762,16 @@ pub(crate) fn reset_particle_layer_scans() {
 #[cfg(test)]
 pub(crate) fn particle_layer_scans() -> usize {
     PARTICLE_LAYER_SCANS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_particle_layer_rebuild_work() {
+    PARTICLE_LAYER_REBUILD_WORK.with(|work| work.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn particle_layer_rebuild_work() -> usize {
+    PARTICLE_LAYER_REBUILD_WORK.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -1601,6 +1770,11 @@ impl GraphicsSystem {
             .iter()
             .filter(|surface| surface.has_pixel_plane())
             .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn particle_layer_index_layer_count(&self) -> usize {
+        self.particle_layer_index.layers.len()
     }
 
     pub fn begin_gpu_scene_capture(&mut self) {
