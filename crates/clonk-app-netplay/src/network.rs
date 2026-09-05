@@ -430,21 +430,29 @@ impl Default for RuntimeNetworkConnectionsSnapshot {
     }
 }
 
+#[derive(Debug)]
+struct PendingRuntimeConnectionInspection {
+    completion: Receiver<std::result::Result<Vec<RuntimeNetworkConnection>, String>>,
+    generation: u64,
+}
+
 #[derive(Debug, Default)]
 struct RuntimeConnectionTelemetryState {
     latest: Vec<RuntimeNetworkConnection>,
-    pending: Option<Receiver<std::result::Result<Vec<RuntimeNetworkConnection>, String>>>,
+    pending: Option<PendingRuntimeConnectionInspection>,
     last_requested_at: Option<Instant>,
     last_completed_at: Option<Instant>,
     unavailable: bool,
+    generation: u64,
 }
 
 impl RuntimeConnectionTelemetryState {
     fn poll(&mut self, command_tx: &tokio_mpsc::Sender<NetworkCommand>) {
         let now = Instant::now();
-        if let Some(completion) = self.pending.take() {
-            match completion.try_recv() {
-                Ok(Ok(connections)) => {
+        if let Some(pending) = self.pending.take() {
+            let request_generation = pending.generation;
+            match pending.completion.try_recv() {
+                Ok(Ok(connections)) if request_generation == self.generation => {
                     self.latest = connections;
                     // Start the refresh interval when the sample arrives.
                     // A slow inspection must not cause the next presentation
@@ -453,12 +461,17 @@ impl RuntimeConnectionTelemetryState {
                     self.last_completed_at = Some(now);
                     self.unavailable = false;
                 }
+                Ok(Ok(_)) => {
+                    // A topology event arrived while this request was in
+                    // flight. Keep the single-flight bound, but discard the
+                    // result and issue one replacement request immediately.
+                    self.last_requested_at = None;
+                    self.unavailable = false;
+                }
                 Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
                     self.unavailable = true;
                 }
-                Err(TryRecvError::Empty) => {
-                    self.pending = Some(completion);
-                }
+                Err(TryRecvError::Empty) => self.pending = Some(pending),
             }
         }
 
@@ -473,7 +486,10 @@ impl RuntimeConnectionTelemetryState {
         let (completion, inspected) = mpsc::channel();
         match command_tx.try_send(NetworkCommand::InspectRuntimeConnections { completion }) {
             Ok(()) => {
-                self.pending = Some(inspected);
+                self.pending = Some(PendingRuntimeConnectionInspection {
+                    completion: inspected,
+                    generation: self.generation,
+                });
                 self.unavailable = false;
             }
             Err(tokio_mpsc::error::TrySendError::Full(_)) => {
@@ -509,14 +525,37 @@ impl RuntimeConnectionTelemetryState {
 
     fn invalidate(&mut self) {
         self.latest.clear();
-        self.pending = None;
+        // The worker-side inspection is detached, so dropping this receiver
+        // would leave that request alive while the next session starts a
+        // second one. Keep the single-flight slot occupied across the
+        // boundary; its generation makes the eventual result disposable.
         self.last_requested_at = None;
         self.last_completed_at = None;
         self.unavailable = false;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn mark_dirty(&mut self) {
+        self.mark_dirty_matching(|_| true);
+    }
+
+    fn mark_peer_dirty(&mut self, client_id: ClientId) {
+        self.mark_dirty_matching(|connection| connection.client_id == client_id);
+    }
+
+    fn mark_connection_dirty(&mut self, connection_id: u32) {
+        self.mark_dirty_matching(|connection| connection.connection_id == connection_id);
+    }
+
+    fn mark_dirty_matching(
+        &mut self,
+        mut should_remove: impl FnMut(&RuntimeNetworkConnection) -> bool,
+    ) {
+        self.latest.retain(|connection| !should_remove(connection));
         self.last_requested_at = None;
+        self.last_completed_at = None;
+        self.unavailable = false;
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
@@ -3834,6 +3873,18 @@ impl NetworkManager {
         self.runtime_connection_telemetry.lock().mark_dirty();
     }
 
+    fn mark_runtime_connection_telemetry_peer_dirty(&self, client_id: ClientId) {
+        self.runtime_connection_telemetry
+            .lock()
+            .mark_peer_dirty(client_id);
+    }
+
+    fn mark_runtime_connection_telemetry_connection_dirty(&self, connection_id: u32) {
+        self.runtime_connection_telemetry
+            .lock()
+            .mark_connection_dirty(connection_id);
+    }
+
     fn observe_runtime_connection_event(&self, event: &NetworkEvent) {
         match event {
             NetworkEvent::JoinData(_)
@@ -3843,11 +3894,27 @@ impl NetworkManager {
             | NetworkEvent::RoundRestarted => {
                 self.invalidate_runtime_connection_telemetry();
             }
-            NetworkEvent::PeerConnected { .. }
-            | NetworkEvent::PeerDisconnected { .. }
-            | NetworkEvent::PeerConnectionFailed { .. }
-            | NetworkEvent::RecoverableRouteDiagnostic { .. }
-            | NetworkEvent::TransportDiagnostic { .. } => {
+            NetworkEvent::PeerConnected { client_id, .. }
+            | NetworkEvent::PeerDisconnected { client_id, .. }
+            | NetworkEvent::PeerConnectionFailed { client_id } => {
+                self.mark_runtime_connection_telemetry_peer_dirty(*client_id);
+            }
+            NetworkEvent::RecoverableRouteDiagnostic {
+                client_id: Some(client_id),
+                ..
+            }
+            | NetworkEvent::TransportDiagnostic {
+                client_id: Some(client_id),
+                ..
+            } => {
+                self.mark_runtime_connection_telemetry_peer_dirty(*client_id);
+            }
+            NetworkEvent::RecoverableRouteDiagnostic {
+                client_id: None, ..
+            }
+            | NetworkEvent::TransportDiagnostic {
+                client_id: None, ..
+            } => {
                 self.mark_runtime_connection_telemetry_dirty();
             }
             _ => {}
@@ -4018,10 +4085,14 @@ impl NetworkManager {
                 completion,
             })
             .map_err(|_| anyhow!("network worker is not accepting connection disconnects"))?;
-        disconnected
+        let result = disconnected
             .recv()
             .map_err(|_| anyhow!("network worker ended before disconnecting the connection"))?
-            .map_err(|message| anyhow!(message))
+            .map_err(|message| anyhow!(message));
+        if result.is_ok() {
+            self.mark_runtime_connection_telemetry_connection_dirty(connection_id);
+        }
+        result
     }
 
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
@@ -16428,26 +16499,32 @@ Message=Server says Andr\xe9\r\n\
         let reset = manager.runtime_connections_snapshot();
         assert_eq!(reset.status, RuntimeNetworkTelemetryStatus::Pending);
         assert!(reset.connections.is_empty());
+        assert!(
+            commands.command_rx.try_recv().is_err(),
+            "session invalidation must not start a second inspection while the old one is pending"
+        );
+        late_completion
+            .send(Ok(vec![RuntimeNetworkConnection {
+                connection_id: 2,
+                client_id: 7,
+                usage: "late-old-session".to_string(),
+                protocol: NetworkProtocol::Udp,
+                peer_address: None,
+                packet_loss: 0,
+                ping_ms: 777,
+                lag_ms: 777,
+            }]))
+            .test_value();
+        let _ = manager.runtime_connections_snapshot();
         let fresh_completion = match commands.command_rx.try_recv() {
             Ok(NetworkCommand::InspectRuntimeConnections { completion }) => completion,
             Ok(command) => panic!("unexpected command: {command:?}"),
             Err(error) => panic!("missing fresh inspection: {error:?}"),
         };
-        assert!(
-            late_completion
-                .send(Ok(vec![RuntimeNetworkConnection {
-                    connection_id: 2,
-                    client_id: 7,
-                    usage: "late-old-session".to_string(),
-                    protocol: NetworkProtocol::Udp,
-                    peer_address: None,
-                    packet_loss: 0,
-                    ping_ms: 777,
-                    lag_ms: 777,
-                }]))
-                .is_err(),
-            "a completion from the previous round cannot repopulate telemetry"
-        );
+        assert!(manager
+            .runtime_connections_snapshot()
+            .connections
+            .is_empty());
         let new_route = RuntimeNetworkConnection {
             connection_id: 3,
             client_id: 7,
@@ -16490,6 +16567,45 @@ Message=Server says Andr\xe9\r\n\
         let snapshot = state.snapshot(now);
         assert_eq!(snapshot.status, RuntimeNetworkTelemetryStatus::Stale);
         assert_eq!(snapshot.connections, vec![route]);
+    }
+
+    #[test]
+    fn runtime_connection_snapshot_does_not_show_disconnected_peer_while_refreshing() {
+        let (mut manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        let _ = manager.runtime_connections_snapshot();
+        let completion = match commands.command_rx.try_recv() {
+            Ok(NetworkCommand::InspectRuntimeConnections { completion }) => completion,
+            Ok(command) => panic!("unexpected command: {command:?}"),
+            Err(error) => panic!("missing inspection: {error:?}"),
+        };
+        completion
+            .send(Ok(vec![RuntimeNetworkConnection {
+                connection_id: 1,
+                client_id: 7,
+                usage: "Msg".to_string(),
+                protocol: NetworkProtocol::Udp,
+                peer_address: None,
+                packet_loss: 0,
+                ping_ms: 12,
+                lag_ms: 12,
+            }]))
+            .test_value();
+        assert_eq!(manager.runtime_connections_snapshot().connections.len(), 1);
+
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: 7,
+                reason: None,
+            })
+            .test_value();
+        manager.poll_events();
+
+        let refreshing = manager.runtime_connections_snapshot();
+        assert_eq!(refreshing.status, RuntimeNetworkTelemetryStatus::Pending);
+        assert!(
+            refreshing.connections.is_empty(),
+            "a disconnected peer must disappear before the replacement inspection completes"
+        );
     }
 
     #[test]
