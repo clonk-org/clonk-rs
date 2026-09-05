@@ -3066,21 +3066,33 @@ impl Engine {
     /// `C4GameObjects::Clear(false)` differ only in what they run *before*
     /// this (C4Game.cpp:4194-4201; C4GameObjects.cpp:313-331).
     fn delete_non_inactive_objects_for_scenario_section(&mut self) {
+        // Native deletes the *list*, so identity here is the link, not the
+        // enumeration number. A restored payload may carry two objects sharing
+        // one number (`object_ids_are_unique`); deciding membership from a set
+        // of departing ids would delete the retained inactive twin along with
+        // the departing object. Keep each object on its own status instead,
+        // then prune the id-keyed lists against what actually survived.
         let removed = self
             .objects
             .iter()
             .filter(|object| object.state.status != ObjectStatus::Inactive)
             .map(|object| object.id)
+            .collect::<Vec<_>>();
+        self.objects
+            .retain(|object| object.state.status == ObjectStatus::Inactive);
+        let surviving = self
+            .objects
+            .iter()
+            .map(|object| object.id)
             .collect::<HashSet<_>>();
-        self.objects.retain(|object| !removed.contains(&object.id));
         self.execution
             .exec_list
-            .retain(|object| !removed.contains(object));
+            .retain(|object| surviving.contains(object));
         self.execution
             .inactive
-            .retain(|object| !removed.contains(object));
+            .retain(|object| surviving.contains(object));
         if let Some(sectors) = self.sectors.as_mut() {
-            for object in &removed {
+            for object in removed.iter().filter(|id| !surviving.contains(id)) {
                 sectors.remove(*object);
             }
         }
