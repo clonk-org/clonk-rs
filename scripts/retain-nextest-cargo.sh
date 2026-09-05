@@ -20,6 +20,9 @@ find_real_cargo() {
     return 1
 }
 
+# Cargo can sanitize the CI-only LC_* variables before launching a nested
+# command while still rewriting CARGO to this wrapper. Resolve past the
+# wrapper in that environment instead of making presentation tooling fail.
 real_cargo=${LC_REAL_CARGO:-${CARGO:-}}
 resolved_cargo=
 if [[ -n "$real_cargo" ]]; then
