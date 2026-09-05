@@ -14109,7 +14109,7 @@ fn runtime_client_list_prevents_tick5_from_reviving_edge_scroll() {
     main_assert!(app.live_input.ingame_viewport_mouse.is_some(), "native VpX/VpY remains retained for Tick5 reevaluation");
 
     for _ in 0..2 {
-        main_assert!(!app.refresh_ingame_edge_scroll_tick5().expect("client-list Tick5 reevaluation"));
+        main_assert!(app.refresh_ingame_edge_scroll_tick5().expect("client-list Tick5 reevaluation").is_none());
     }
     main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => stopped);
     main_assert!(app.live_input.ingame_pointer.is_none());

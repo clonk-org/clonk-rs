@@ -17,8 +17,107 @@
 // that regime on macOS; measured -29% mean and -35% p99 tick time on MeltMe.
 // The win is allocator-relative, so platforms whose default allocator already
 // handles small-object churn well (glibc's tcache) may see much less.
+#[cfg(not(all(test, feature = "presentation-profile")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(test, feature = "presentation-profile"))]
+static PROFILE_ALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// The opt-in app-path probe keeps the shipped mimalloc allocator and wraps
+/// only its own test binary so each measured input/tick can report requested
+/// allocation calls and bytes. Ordinary tests retain the unwrapped allocator.
+#[cfg(all(test, feature = "presentation-profile"))]
+struct ProfileAllocator(mimalloc::MiMalloc);
+
+#[cfg(all(test, feature = "presentation-profile"))]
+#[global_allocator]
+static GLOBAL: ProfileAllocator = ProfileAllocator(mimalloc::MiMalloc);
+
+#[cfg(all(test, feature = "presentation-profile"))]
+unsafe impl std::alloc::GlobalAlloc for ProfileAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
+            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+            PROFILE_ALLOCATION_BYTES.fetch_add(
+                u64::try_from(layout.size()).unwrap_or(u64::MAX),
+                AtomicOrdering::Relaxed,
+            );
+        }
+        // SAFETY: the wrapped allocator receives the caller's original
+        // allocation contract unchanged.
+        unsafe { self.0.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
+            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+            PROFILE_ALLOCATION_BYTES.fetch_add(
+                u64::try_from(layout.size()).unwrap_or(u64::MAX),
+                AtomicOrdering::Relaxed,
+            );
+        }
+        // SAFETY: the wrapped allocator receives the caller's original
+        // allocation contract unchanged.
+        unsafe { self.0.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the pointer and layout came from this wrapped allocator.
+        unsafe { self.0.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(
+        &self,
+        pointer: *mut u8,
+        layout: std::alloc::Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        if PROFILE_COUNT_ALLOCATIONS.load(AtomicOrdering::Relaxed) {
+            PROFILE_ALLOCATION_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+            PROFILE_ALLOCATION_BYTES.fetch_add(
+                u64::try_from(new_size).unwrap_or(u64::MAX),
+                AtomicOrdering::Relaxed,
+            );
+        }
+        // SAFETY: the pointer, old layout and new size are the caller's
+        // original reallocation contract.
+        unsafe { self.0.realloc(pointer, layout, new_size) }
+    }
+}
+
+#[cfg(all(test, feature = "presentation-profile"))]
+static EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(test, feature = "presentation-profile"))]
+fn reset_edge_scroll_profile_counters() {
+    EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT.store(0, AtomicOrdering::Relaxed);
+    PROFILE_ALLOCATION_CALLS.store(0, AtomicOrdering::Relaxed);
+    PROFILE_ALLOCATION_BYTES.store(0, AtomicOrdering::Relaxed);
+}
+
+#[cfg(all(test, feature = "presentation-profile"))]
+fn edge_scroll_profile_projection_count() -> u64 {
+    EDGE_SCROLL_SNAPSHOT_PROJECTION_COUNT.load(AtomicOrdering::Relaxed)
+}
+
+#[cfg(all(test, feature = "presentation-profile"))]
+fn measure_app_profile_allocations<T>(operation: impl FnOnce() -> T) -> (T, u64, u64) {
+    PROFILE_ALLOCATION_CALLS.store(0, AtomicOrdering::Relaxed);
+    PROFILE_ALLOCATION_BYTES.store(0, AtomicOrdering::Relaxed);
+    PROFILE_COUNT_ALLOCATIONS.store(true, AtomicOrdering::SeqCst);
+    let result = operation();
+    PROFILE_COUNT_ALLOCATIONS.store(false, AtomicOrdering::SeqCst);
+    (
+        result,
+        PROFILE_ALLOCATION_CALLS.load(AtomicOrdering::Relaxed),
+        PROFILE_ALLOCATION_BYTES.load(AtomicOrdering::Relaxed),
+    )
+}
 
 mod accessibility;
 mod advanced_config;
@@ -5752,33 +5851,38 @@ impl GameApp {
             || self.object_menu.is_some()
     }
 
-    /// Retake the full engine projection after a player camera move while
-    /// retaining presentation requests already attached to the app snapshot.
-    /// Engine snapshots deliberately leave these one-frame queues empty, but
-    /// the app still owns requests emitted by the tick that just completed.
-    fn refresh_snapshot_after_player_view_scroll(&mut self) {
-        let scoreboard_presentations =
-            std::mem::take(&mut self.snapshot.hud.scoreboard_presentations);
-        let menu_requests = std::mem::take(&mut self.snapshot.menu_requests);
-        let audio = std::mem::take(&mut self.snapshot.audio);
-        self.snapshot = self.engine.snapshot();
-        self.snapshot.hud.scoreboard_presentations = scoreboard_presentations;
-        self.snapshot.menu_requests = menu_requests;
-        self.snapshot.audio = audio;
+    /// Refresh the camera fields after a player edge scroll without rebuilding
+    /// the simulation snapshot. `ScrollView` changes only the live player's
+    /// view mode, target, center and process-local viewports; app-owned
+    /// presentation requests and the rest of the previous tick snapshot stay
+    /// intact.
+    fn refresh_snapshot_after_player_view_scroll(&mut self, owner: i32) {
+        let Some(player) = self.engine.player(owner) else {
+            return;
+        };
+        let Some(snapshot_player) = self
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+        else {
+            return;
+        };
+        player.copy_view_state_to(snapshot_player);
     }
 
     /// Apply one C4MouseControl::UpdateScrolling step. Pointer movement calls
     /// this immediately; the successful simulation path calls it once more
     /// after every engine tick while the retained border state remains live.
-    /// The return value reports an engine mutation that needs a fresh app
-    /// snapshot; observer cameras are presentation-owned and return false.
-    fn apply_ingame_edge_scroll(&mut self) -> Result<bool, EngineError> {
+    /// The return value identifies the player whose camera was mutated;
+    /// observer cameras are presentation-owned and return `None`.
+    fn apply_ingame_edge_scroll(&mut self) -> Result<Option<i32>, EngineError> {
         if self.live_input.ingame_edge_scroll.is_none() {
-            return Ok(false);
+            return Ok(None);
         }
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
             self.live_input.ingame_edge_scroll = None;
-            return Ok(false);
+            return Ok(None);
         };
         self.live_input.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
@@ -5788,10 +5892,10 @@ impl GameApp {
     /// move was interior or suppressed by a viewport region. Reevaluate the
     /// retained VpX/VpY so disappearing regions and resized layouts take
     /// effect without a new platform motion event.
-    fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<bool, EngineError> {
+    fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<Option<i32>, EngineError> {
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
             self.live_input.ingame_edge_scroll = None;
-            return Ok(false);
+            return Ok(None);
         };
         self.live_input.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
@@ -5909,7 +6013,7 @@ impl GameApp {
         &mut self,
         scroll: ActiveViewportEdgeScroll,
         viewport: ActiveViewportProjection,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Option<i32>, EngineError> {
         if scroll.observer {
             for delta in scroll.edge.steps() {
                 if !self
@@ -5920,7 +6024,7 @@ impl GameApp {
                     break;
                 }
             }
-            return Ok(false);
+            return Ok(None);
         }
 
         for delta in scroll.edge.steps() {
@@ -5935,7 +6039,7 @@ impl GameApp {
                 true,
             )?;
         }
-        Ok(true)
+        Ok(Some(scroll.owner))
     }
 
     fn cancel_ingame_selection_for_region(&mut self, cancel_left: bool, cancel_right: bool) {

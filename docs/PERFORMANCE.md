@@ -135,11 +135,38 @@ edge, a stationary pointer that keeps scrolling on successive ticks, and an
 edge event that lands in the same frame as the tick refresh. Record full
 projection counts as well as p50, p95, and p99 projection and combined-frame
 times; retain allocation and byte counts when the profiler exposes them. The
-expected count baseline is zero extra projections for an interior move, one
-for an edge event, one per successful stationary-pointer tick, and at most two
-when the event and tick paths both run in one frame. Use 20 warm-up frames and
-600 measured frames with a fixed seed, content revision, release profile, and
-machine fingerprint.
+pre-fix count baseline is zero extra projections for an interior move, one for
+an edge event, one per successful stationary-pointer tick, and at most two
+when the event and tick paths both run in one frame. The focused refresh should
+reduce each edge case to zero extra full projections while keeping the camera
+fields current. Use 20 warm-up frames and 600 measured frames with a fixed
+seed, content revision, release profile, and machine fingerprint.
+
+The checked-in app-path probe is opt-in and ignored by the ordinary test
+suite. Run it with output capture disabled so the raw metadata and per-case
+samples can be retained:
+
+```sh
+cargo nextest run --release --offline --locked -p clonk-app \
+  --features presentation-profile --run-ignored all --no-capture \
+  -E 'test(/edge_scroll_snapshot_profile$/)'
+```
+
+The probe wraps the app test binary's existing mimalloc allocator only while a
+measured operation is running, and reports requested allocation calls and
+bytes alongside elapsed and projection p50/p95/p99 values. Its alternate
+horizontal edge points keep the camera away from map bounds; the workload is
+the real `GameApp` input and update path, without changing production
+scheduling. The probe runs each case with `busy_objects=0` (the original
+sandbox crew) and `busy_objects=256` (256 static synthetic `PRFB` objects);
+each metadata, state, and case line carries the workload count. Treat the
+output as a current measurement tied to its printed source/content/toolchain/
+machine fingerprints, and make any threshold decision from that run rather
+than from the older headless scenario table. Each case also reports paired
+projection-share percentiles: the projection and elapsed duration are divided
+within each sample before the p50/p95/p99 calculation. For the tick cases this
+is the measured update or event-plus-update operation; the pointer-only cases
+are event latency measurements.
 
 ### Arso-Morf 1,000-Stippel simulation profile
 

@@ -8217,8 +8217,8 @@ impl GameApp {
                     }
                 })
             };
-            if self.apply_ingame_edge_scroll()? {
-                self.refresh_snapshot_after_player_view_scroll();
+            if let Some(owner) = self.apply_ingame_edge_scroll()? {
+                self.refresh_snapshot_after_player_view_scroll(owner);
             }
             self.advance_ingame_mouse_caption(
                 pointer,

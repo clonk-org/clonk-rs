@@ -1710,6 +1710,26 @@ impl Player {
         }
     }
 
+    /// Copy the process-local camera fields that `C4Player::ScrollView`
+    /// changes into an existing presentation state. The app uses this after
+    /// an edge scroll so it does not have to rebuild the whole simulation
+    /// snapshot; synchronized player fields and app-owned presentation queues
+    /// remain in the existing snapshot.
+    pub fn copy_view_state_to(&self, state: &mut PlayerState) {
+        debug_assert_eq!(state.id, self.id);
+        state.view_mode = self.view_mode;
+        state.view_cursor = self.view_cursor;
+        state.view_target = self.view_target;
+        state.view_center = self.view_center;
+        // A full engine projection synthesizes a fallback viewport for a
+        // player whose live process-local list is empty. Keep that fallback
+        // instead of replacing it with an empty list here.
+        if !self.viewports.is_empty() {
+            state.viewports.clone_from(&self.viewports);
+        }
+        state.view_offset = self.view_offset;
+    }
+
     /// Declare or revoke hostility toward another player
     /// (C4Player::Hostility set, fed into C4PlayerList::Hostile).
     pub fn set_hostile_towards(&mut self, opponent: i32, hostile: bool) {
