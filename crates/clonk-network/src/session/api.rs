@@ -1384,13 +1384,27 @@ impl HostHandle {
         initialized.await.map_err(|_| HostError::HostLoopGone)
     }
 
+    /// Builds a detached route-inspection request for worker-side callers.
+    /// The ordinary [`Self::runtime_connections`] API remains async and
+    /// awaits the same response.
+    pub fn runtime_connections_request(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<RuntimeNetworkConnection>, HostError>>
+           + Send
+           + 'static {
+        let command_tx = self.command_tx.clone();
+        async move {
+            let (completion, inspected) = oneshot::channel();
+            command_tx
+                .send(HostCommand::InspectRuntimeConnections { completion })
+                .await
+                .map_err(|_| HostError::HostLoopGone)?;
+            inspected.await.map_err(|_| HostError::HostLoopGone)
+        }
+    }
+
     pub async fn runtime_connections(&self) -> Result<Vec<RuntimeNetworkConnection>, HostError> {
-        let (completion, inspected) = oneshot::channel();
-        self.command_tx
-            .send(HostCommand::InspectRuntimeConnections { completion })
-            .await
-            .map_err(|_| HostError::HostLoopGone)?;
-        inspected.await.map_err(|_| HostError::HostLoopGone)
+        self.runtime_connections_request().await
     }
 
     pub async fn lobby_client_telemetry(
@@ -1985,13 +1999,27 @@ impl ClientHandle {
         inspected.await.map_err(|_| ClientError::ClientLoopGone)
     }
 
+    /// Builds a detached route-inspection request for worker-side callers.
+    /// The ordinary [`Self::runtime_connections`] API remains async and
+    /// awaits the same response.
+    pub fn runtime_connections_request(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<RuntimeNetworkConnection>, ClientError>>
+           + Send
+           + 'static {
+        let command_tx = self.command_tx.clone();
+        async move {
+            let (completion, inspected) = oneshot::channel();
+            command_tx
+                .send(ClientCommand::InspectRuntimeConnections { completion })
+                .await
+                .map_err(|_| ClientError::ClientLoopGone)?;
+            inspected.await.map_err(|_| ClientError::ClientLoopGone)
+        }
+    }
+
     pub async fn runtime_connections(&self) -> Result<Vec<RuntimeNetworkConnection>, ClientError> {
-        let (completion, inspected) = oneshot::channel();
-        self.command_tx
-            .send(ClientCommand::InspectRuntimeConnections { completion })
-            .await
-            .map_err(|_| ClientError::ClientLoopGone)?;
-        inspected.await.map_err(|_| ClientError::ClientLoopGone)
+        self.runtime_connections_request().await
     }
 
     pub async fn lobby_client_telemetry(

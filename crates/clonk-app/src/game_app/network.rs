@@ -1494,18 +1494,29 @@ impl GameApp {
             _ => "Async",
         };
 
-        let (addresses, connections, client_states) = self.network.as_ref().map_or_else(
-            || (Vec::new(), Vec::new(), Vec::new()),
-            |network| {
-                let addresses = network.local_addresses();
-                let connections = network.runtime_connections().unwrap_or_default();
-                let states = u32::try_from(control_tick)
-                    .ok()
-                    .and_then(|tick| network.runtime_client_states(tick).ok())
-                    .unwrap_or_default();
-                (addresses, connections, states)
-            },
-        );
+        let (addresses, connections, connection_status, client_states) =
+            self.network.as_ref().map_or_else(
+                || {
+                    (
+                        Vec::new(),
+                        Vec::new(),
+                        network::RuntimeNetworkTelemetryStatus::Unavailable,
+                        Vec::new(),
+                    )
+                },
+                |network| {
+                    let addresses = network.local_addresses();
+                    let states = u32::try_from(control_tick)
+                        .ok()
+                        .and_then(|tick| network.runtime_client_states(tick).ok())
+                        .unwrap_or_default();
+                    // Start the route inspection after the established client
+                    // state read. The route future is asynchronous, so its
+                    // completion cannot hold this status presentation path.
+                    let snapshot = network.runtime_connections_snapshot();
+                    (addresses, snapshot.connections, snapshot.status, states)
+                },
+            );
         let protocol_name = |protocol: clonk_network::NetworkProtocol| match protocol {
             clonk_network::NetworkProtocol::Tcp => "TCP".to_string(),
             clonk_network::NetworkProtocol::Udp => "UDP".to_string(),
@@ -1521,6 +1532,9 @@ impl GameApp {
                 if ack { " ack" } else { "" },
             ),
         ];
+        if connection_status != network::RuntimeNetworkTelemetryStatus::Fresh {
+            lines.push(format!("Network routes {}", connection_status.label()));
+        }
         let tcp = addresses
             .iter()
             .find(|address| address.protocol == clonk_network::NetworkProtocol::Tcp);
@@ -1697,16 +1711,6 @@ impl GameApp {
             .as_ref()
             .map(NetworkManager::local_addresses)
             .unwrap_or_default();
-        let runtime_connections = self
-            .network
-            .as_ref()
-            .map(NetworkManager::runtime_connections)
-            .transpose()
-            .unwrap_or_else(|error| {
-                tracing::debug!(%error, "runtime connection details are not available");
-                None
-            })
-            .unwrap_or_default();
         let runtime_client_states = u32::try_from(status.tick)
             .ok()
             .and_then(|tick| {
@@ -1720,6 +1724,12 @@ impl GameApp {
                 None
             })
             .unwrap_or_default();
+        let runtime_connection_snapshot = self
+            .network
+            .as_ref()
+            .map(NetworkManager::runtime_connections_snapshot)
+            .unwrap_or_default();
+        let runtime_connections = runtime_connection_snapshot.connections;
         let can_moderate = matches!(self.network_mode, Some(NetworkMode::Host(_)));
         let (_, retained_player_infos) = self.control_player_infos.retained_rows_snapshot();
         let active_player_names = retained_player_infos

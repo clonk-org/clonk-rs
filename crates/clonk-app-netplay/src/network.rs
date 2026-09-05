@@ -393,6 +393,132 @@ impl Default for NetworkStartupCancellation {
 
 const HOST_CLIENT_ID: ClientId = 0;
 const NETWORK_TELEMETRY_CAPACITY: usize = 256;
+const RUNTIME_CONNECTION_TELEMETRY_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const RUNTIME_CONNECTION_TELEMETRY_STALE_AFTER: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeNetworkTelemetryStatus {
+    Unavailable,
+    Pending,
+    Fresh,
+    Stale,
+}
+
+impl RuntimeNetworkTelemetryStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Pending => "pending",
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeNetworkConnectionsSnapshot {
+    pub connections: Vec<RuntimeNetworkConnection>,
+    pub status: RuntimeNetworkTelemetryStatus,
+}
+
+impl Default for RuntimeNetworkConnectionsSnapshot {
+    fn default() -> Self {
+        Self {
+            connections: Vec::new(),
+            status: RuntimeNetworkTelemetryStatus::Unavailable,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RuntimeConnectionTelemetryState {
+    latest: Vec<RuntimeNetworkConnection>,
+    pending: Option<Receiver<std::result::Result<Vec<RuntimeNetworkConnection>, String>>>,
+    last_requested_at: Option<Instant>,
+    last_completed_at: Option<Instant>,
+    unavailable: bool,
+}
+
+impl RuntimeConnectionTelemetryState {
+    fn poll(&mut self, command_tx: &tokio_mpsc::Sender<NetworkCommand>) {
+        let now = Instant::now();
+        if let Some(completion) = self.pending.take() {
+            match completion.try_recv() {
+                Ok(Ok(connections)) => {
+                    self.latest = connections;
+                    // Start the refresh interval when the sample arrives.
+                    // A slow inspection must not cause the next presentation
+                    // read to enqueue another request immediately.
+                    self.last_requested_at = Some(now);
+                    self.last_completed_at = Some(now);
+                    self.unavailable = false;
+                }
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                    self.unavailable = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending = Some(completion);
+                }
+            }
+        }
+
+        let due = self.pending.is_none()
+            && self
+                .last_requested_at
+                .is_none_or(|last| now >= last + RUNTIME_CONNECTION_TELEMETRY_REFRESH_INTERVAL);
+        if !due {
+            return;
+        }
+
+        let (completion, inspected) = mpsc::channel();
+        match command_tx.try_send(NetworkCommand::InspectRuntimeConnections { completion }) {
+            Ok(()) => {
+                self.pending = Some(inspected);
+                self.unavailable = false;
+            }
+            Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                self.unavailable = true;
+            }
+            Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                self.unavailable = true;
+            }
+        }
+        self.last_requested_at = Some(now);
+    }
+
+    fn snapshot(&self, now: Instant) -> RuntimeNetworkConnectionsSnapshot {
+        let status = if self.unavailable {
+            RuntimeNetworkTelemetryStatus::Unavailable
+        } else if self
+            .last_completed_at
+            .is_some_and(|completed| now >= completed + RUNTIME_CONNECTION_TELEMETRY_STALE_AFTER)
+        {
+            RuntimeNetworkTelemetryStatus::Stale
+        } else if self.pending.is_some() {
+            RuntimeNetworkTelemetryStatus::Pending
+        } else if self.last_completed_at.is_some() {
+            RuntimeNetworkTelemetryStatus::Fresh
+        } else {
+            RuntimeNetworkTelemetryStatus::Unavailable
+        };
+        RuntimeNetworkConnectionsSnapshot {
+            connections: self.latest.clone(),
+            status,
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.latest.clear();
+        self.pending = None;
+        self.last_requested_at = None;
+        self.last_completed_at = None;
+        self.unavailable = false;
+    }
+
+    fn mark_dirty(&mut self) {
+        self.last_requested_at = None;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NetworkRole {
@@ -1513,6 +1639,7 @@ pub struct NetworkManager {
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
     role: NetworkRole,
     client_status: ClientStatusState,
+    runtime_connection_telemetry: Mutex<RuntimeConnectionTelemetryState>,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
     league_start_failure: Option<String>,
     league_runtime_available: AtomicBool,
@@ -1828,6 +1955,16 @@ type SubmittedPlayerInputs = (
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl TestNetworkCommands {
+    pub fn receive_runtime_connection_inspection(
+        &mut self,
+    ) -> Sender<std::result::Result<Vec<RuntimeNetworkConnection>, String>> {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::InspectRuntimeConnections { completion }) => completion,
+            Some(command) => panic!("unexpected runtime connection command: {command:?}"),
+            None => panic!("network command channel ended before runtime connection inspection"),
+        }
+    }
+
     pub fn receive_league_player_auth(&mut self) -> TestLeaguePlayerAuthCommand {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::LeagueAuthenticatePlayer {
@@ -2739,13 +2876,22 @@ impl TestNetworkCommands {
     }
 
     pub fn receive_join_allowed(&mut self) -> (bool, Sender<std::result::Result<(), String>>) {
-        match self.command_rx.blocking_recv() {
-            Some(NetworkCommand::SetJoinAllowed {
-                allowed,
-                completion,
-            }) => (allowed, completion),
-            Some(command) => panic!("expected join-admission command, got {command:?}"),
-            None => panic!("network command channel ended before join-admission command"),
+        loop {
+            match self.command_rx.blocking_recv() {
+                Some(NetworkCommand::InspectRuntimeConnections { completion }) => {
+                    // Presentation may publish a best-effort route inspection
+                    // before the join-admission operation reaches this stub.
+                    // Complete that independent request, then keep waiting so
+                    // the test still asserts the actual admission command.
+                    let _ = completion.send(Ok(Vec::new()));
+                }
+                Some(NetworkCommand::SetJoinAllowed {
+                    allowed,
+                    completion,
+                }) => return (allowed, completion),
+                Some(command) => panic!("expected join-admission command, got {command:?}"),
+                None => panic!("network command channel ended before join-admission command"),
+            }
         }
     }
 
@@ -3629,6 +3775,7 @@ impl NetworkManager {
             netpuncher_state,
             role,
             client_status: ClientStatusState::default(),
+            runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
             league_start_response: ready.league_start_response,
             league_start_failure: ready.league_start_failure,
             league_runtime_available,
@@ -3668,6 +3815,43 @@ impl NetworkManager {
             .recv()
             .map_err(|_| anyhow!("network worker ended before returning live connections"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    /// Returns the latest completed route inspection without waiting for the
+    /// network worker. Presentation and once-per-second accounting use this
+    /// path so a slow socket query cannot hold the game thread.
+    pub fn runtime_connections_snapshot(&self) -> RuntimeNetworkConnectionsSnapshot {
+        let mut telemetry = self.runtime_connection_telemetry.lock();
+        telemetry.poll(&self.command_tx);
+        telemetry.snapshot(Instant::now())
+    }
+
+    fn invalidate_runtime_connection_telemetry(&self) {
+        self.runtime_connection_telemetry.lock().invalidate();
+    }
+
+    fn mark_runtime_connection_telemetry_dirty(&self) {
+        self.runtime_connection_telemetry.lock().mark_dirty();
+    }
+
+    fn observe_runtime_connection_event(&self, event: &NetworkEvent) {
+        match event {
+            NetworkEvent::JoinData(_)
+            | NetworkEvent::HostRestarting { .. }
+            | NetworkEvent::HostRestartLobby
+            | NetworkEvent::FatalError(_)
+            | NetworkEvent::RoundRestarted => {
+                self.invalidate_runtime_connection_telemetry();
+            }
+            NetworkEvent::PeerConnected { .. }
+            | NetworkEvent::PeerDisconnected { .. }
+            | NetworkEvent::PeerConnectionFailed { .. }
+            | NetworkEvent::RecoverableRouteDiagnostic { .. }
+            | NetworkEvent::TransportDiagnostic { .. } => {
+                self.mark_runtime_connection_telemetry_dirty();
+            }
+            _ => {}
+        }
     }
 
     /// Returns the most recently completed C++-cadence input/output samples,
@@ -4321,6 +4505,7 @@ impl NetworkManager {
                 "only the network host may restart a round in the lobby"
             ));
         }
+        self.invalidate_runtime_connection_telemetry();
         let restarted_resource_cores = retained_host_round_player_resource_cores(&config);
         let (completion, restarted) = mpsc::channel();
         self.command_tx
@@ -4377,6 +4562,7 @@ impl NetworkManager {
                 "only a network client may acknowledge a retained round restart"
             ));
         }
+        self.invalidate_runtime_connection_telemetry();
         let (completion, acknowledged) = mpsc::channel();
         self.command_tx
             .blocking_send(NetworkCommand::AcknowledgeRoundRestart { completion })
@@ -5357,8 +5543,12 @@ impl NetworkManager {
             .collect::<Vec<_>>();
         loop {
             match self.event_rx.try_recv() {
-                Ok(NetworkEvent::RoundRestarted) => continue,
+                Ok(NetworkEvent::RoundRestarted) => {
+                    self.invalidate_runtime_connection_telemetry();
+                    continue;
+                }
                 Ok(event) => {
+                    self.observe_runtime_connection_event(&event);
                     if self.role == NetworkRole::Client {
                         match &event {
                             NetworkEvent::JoinData(join_data) => {
@@ -5392,7 +5582,10 @@ impl NetworkManager {
         }
         loop {
             match self.telemetry_rx.try_recv() {
-                Ok(event) => events.push(event),
+                Ok(event) => {
+                    self.observe_runtime_connection_event(&event);
+                    events.push(event);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
@@ -5482,6 +5675,7 @@ impl NetworkManager {
                 netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
                 role: NetworkRole::Host,
                 client_status: ClientStatusState::default(),
+                runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
                 league_start_response: None,
                 league_start_failure: None,
                 league_runtime_available: AtomicBool::new(false),
@@ -5521,6 +5715,7 @@ impl NetworkManager {
                 netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
                 role: NetworkRole::Client,
                 client_status: ClientStatusState::default(),
+                runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
                 league_start_response: None,
                 league_start_failure: None,
                 league_runtime_available: AtomicBool::new(false),
@@ -5598,6 +5793,7 @@ impl NetworkManager {
                     NetworkRole::Client
                 },
                 client_status: ClientStatusState::default(),
+                runtime_connection_telemetry: Mutex::new(RuntimeConnectionTelemetryState::default()),
                 league_start_response: None,
                 league_start_failure: None,
                 league_runtime_available: AtomicBool::new(false),
@@ -6763,18 +6959,13 @@ async fn run_host_worker_with_voice_enabled(
                 Some(command) = command_rx.recv() => {
                     match command {
                     NetworkCommand::InspectRuntimeConnections { completion } => {
-                        let result = await_host_operation_while_forwarding_events(
-                            host.runtime_connections(),
-                            &mut host_events,
-                            local_owner,
-                            &event_tx,
-                            &telemetry_tx,
-                            &mut player_info_echo_provenance,
-                            &netpuncher_state,
-                        )
-                        .await?
-                        .map_err(|error| error.to_string());
-                        let _ = completion.send(result);
+                        let inspection = host.runtime_connections_request();
+                        tokio::spawn(async move {
+                            let result = inspection
+                                .await
+                                .map_err(|error| error.to_string());
+                            let _ = completion.send(result);
+                        });
                     }
                     NetworkCommand::InspectLobbyClientTelemetry {
                         client_ids,
@@ -8512,25 +8703,13 @@ async fn run_client_worker_with_voice_enabled(
                 }
                 match command {
                     NetworkCommand::InspectRuntimeConnections { completion } => {
-                        let result = await_client_operation_while_forwarding_events(
-                            client.runtime_connections(),
-                            &mut client_events,
-                            &mut client_status,
-                            &mut client_activation,
-                            &mut frame_builder,
-                            &mut rebase_pending_on_activation,
-                            &mut reset_client_performance_pending,
-                            &current_frame_source,
-                            &mut client_events_open,
-                            local_owner,
-                            client_id,
-                            &event_tx,
-                            &telemetry_tx,
-                            &netpuncher_state,
-                        )
-                        .await?
-                        .map_err(|error| error.to_string());
-                        let _ = completion.send(result);
+                        let inspection = client.runtime_connections_request();
+                        tokio::spawn(async move {
+                            let result = inspection
+                                .await
+                                .map_err(|error| error.to_string());
+                            let _ = completion.send(result);
+                        });
                     }
                     NetworkCommand::InspectLobbyClientTelemetry {
                         client_ids: lobby_client_ids,
@@ -16120,6 +16299,197 @@ Message=Server says Andr\xe9\r\n\
             .expect_err("stub cannot retire a live route")
             .to_string()
             .contains("without a network worker"));
+    }
+
+    #[test]
+    fn runtime_connection_snapshot_reports_worker_shutdown_without_waiting() {
+        let (manager, _events) = NetworkManager::test_stub();
+
+        let snapshot = manager.runtime_connections_snapshot();
+
+        assert_eq!(snapshot.status, RuntimeNetworkTelemetryStatus::Unavailable);
+        assert!(snapshot.connections.is_empty());
+    }
+
+    #[test]
+    fn runtime_connection_snapshot_is_nonblocking_and_coalesces_requests() {
+        // C4Network2::DrawStatus is presentation-only (src/C4Network2.cpp:
+        // 1148-1219); a delayed route inspection must not hold the game loop.
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let first = manager.runtime_connections_snapshot();
+        assert_eq!(
+            first.status,
+            RuntimeNetworkTelemetryStatus::Pending,
+            "the first read publishes an asynchronous inspection"
+        );
+        assert!(first.connections.is_empty());
+
+        let completion = match commands.command_rx.try_recv() {
+            Ok(NetworkCommand::InspectRuntimeConnections { completion }) => completion,
+            Ok(command) => panic!("unexpected command: {command:?}"),
+            Err(error) => panic!("missing coalesced inspection: {error:?}"),
+        };
+        let route = RuntimeNetworkConnection {
+            connection_id: 1,
+            client_id: 7,
+            usage: "Msg".to_string(),
+            protocol: NetworkProtocol::Udp,
+            peer_address: None,
+            packet_loss: 0,
+            ping_ms: 12,
+            lag_ms: 12,
+        };
+        let (release_tx, release_rx) = mpsc::channel();
+        let (responder_started_tx, responder_started_rx) = mpsc::channel();
+        let responder = thread::spawn(move || {
+            responder_started_tx.send(()).test_value();
+            release_rx.recv().test_value();
+            completion.send(Ok(vec![route])).test_value();
+        });
+
+        responder_started_rx.recv().test_value();
+        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (manager_tx, manager_rx) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let snapshot = manager.runtime_connections_snapshot();
+            snapshot_tx.send(snapshot).test_value();
+            manager_tx.send(manager).test_value();
+        });
+        let pending = snapshot_rx
+            .recv_timeout(Duration::from_secs(1))
+            .test_value();
+        assert_eq!(
+            pending.status,
+            RuntimeNetworkTelemetryStatus::Pending,
+            "a presentation read returns while the worker completion is held"
+        );
+        assert!(pending.connections.is_empty());
+        let manager = manager_rx.recv().test_value();
+        caller.join().test_value();
+        assert!(commands.command_rx.try_recv().is_err());
+
+        release_tx.send(()).test_value();
+        responder.join().test_value();
+
+        let completed = manager.runtime_connections_snapshot();
+        assert_eq!(completed.status, RuntimeNetworkTelemetryStatus::Fresh);
+        assert_eq!(completed.connections.len(), 1);
+        assert_eq!(completed.connections[0].ping_ms, 12);
+        assert!(commands.command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn runtime_connection_snapshot_discards_previous_round_data() {
+        // C4Network2 replaces the live JoinData/session boundary for a host
+        // round restart; an inspection completion from the old session must
+        // not cross that boundary (src/C4Network2.cpp:1574-1623).
+        let (mut manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        let _ = manager.runtime_connections_snapshot();
+        let initial_completion = match commands.command_rx.try_recv() {
+            Ok(NetworkCommand::InspectRuntimeConnections { completion }) => completion,
+            Ok(command) => panic!("unexpected command: {command:?}"),
+            Err(error) => panic!("missing inspection: {error:?}"),
+        };
+        let old_route = RuntimeNetworkConnection {
+            connection_id: 1,
+            client_id: 7,
+            usage: "old-session".to_string(),
+            protocol: NetworkProtocol::Udp,
+            peer_address: None,
+            packet_loss: 0,
+            ping_ms: 99,
+            lag_ms: 99,
+        };
+        initial_completion
+            .send(Ok(vec![old_route.clone()]))
+            .test_value();
+        let initial = manager.runtime_connections_snapshot();
+        assert_eq!(initial.status, RuntimeNetworkTelemetryStatus::Fresh);
+        assert_eq!(initial.connections, vec![old_route]);
+
+        event_tx
+            .send(NetworkEvent::PeerConnected {
+                client_id: 7,
+                name: "new session".to_string(),
+                kind: ParticipantKind::Player,
+            })
+            .test_value();
+        manager.poll_events();
+        let _ = manager.runtime_connections_snapshot();
+        let late_completion = match commands.command_rx.try_recv() {
+            Ok(NetworkCommand::InspectRuntimeConnections { completion }) => completion,
+            Ok(command) => panic!("unexpected command: {command:?}"),
+            Err(error) => panic!("missing replacement inspection: {error:?}"),
+        };
+
+        event_tx.send(NetworkEvent::HostRestartLobby).test_value();
+        assert_eq!(manager.poll_events(), vec![NetworkEvent::HostRestartLobby]);
+
+        let reset = manager.runtime_connections_snapshot();
+        assert_eq!(reset.status, RuntimeNetworkTelemetryStatus::Pending);
+        assert!(reset.connections.is_empty());
+        let fresh_completion = match commands.command_rx.try_recv() {
+            Ok(NetworkCommand::InspectRuntimeConnections { completion }) => completion,
+            Ok(command) => panic!("unexpected command: {command:?}"),
+            Err(error) => panic!("missing fresh inspection: {error:?}"),
+        };
+        assert!(
+            late_completion
+                .send(Ok(vec![RuntimeNetworkConnection {
+                    connection_id: 2,
+                    client_id: 7,
+                    usage: "late-old-session".to_string(),
+                    protocol: NetworkProtocol::Udp,
+                    peer_address: None,
+                    packet_loss: 0,
+                    ping_ms: 777,
+                    lag_ms: 777,
+                }]))
+                .is_err(),
+            "a completion from the previous round cannot repopulate telemetry"
+        );
+        let new_route = RuntimeNetworkConnection {
+            connection_id: 3,
+            client_id: 7,
+            usage: "new-session".to_string(),
+            protocol: NetworkProtocol::Udp,
+            peer_address: None,
+            packet_loss: 0,
+            ping_ms: 21,
+            lag_ms: 21,
+        };
+        fresh_completion
+            .send(Ok(vec![new_route.clone()]))
+            .test_value();
+        let fresh = manager.runtime_connections_snapshot();
+        assert_eq!(fresh.status, RuntimeNetworkTelemetryStatus::Fresh);
+        assert_eq!(fresh.connections, vec![new_route]);
+    }
+
+    #[test]
+    fn runtime_connection_snapshot_reports_stale_completed_data() {
+        let now = Instant::now();
+        let route = RuntimeNetworkConnection {
+            connection_id: 1,
+            client_id: 7,
+            usage: "old-sample".to_string(),
+            protocol: NetworkProtocol::Udp,
+            peer_address: None,
+            packet_loss: 0,
+            ping_ms: 90,
+            lag_ms: 90,
+        };
+        let state = RuntimeConnectionTelemetryState {
+            latest: vec![route.clone()],
+            last_completed_at: Some(
+                now - RUNTIME_CONNECTION_TELEMETRY_STALE_AFTER - Duration::from_secs(1),
+            ),
+            ..RuntimeConnectionTelemetryState::default()
+        };
+
+        let snapshot = state.snapshot(now);
+        assert_eq!(snapshot.status, RuntimeNetworkTelemetryStatus::Stale);
+        assert_eq!(snapshot.connections, vec![route]);
     }
 
     #[test]

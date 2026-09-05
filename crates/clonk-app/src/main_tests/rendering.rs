@@ -988,6 +988,87 @@ fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from()
 }
 
 #[test]
+fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
+    // C4Network2::DrawStatus and C4Network2Stats::Execute both consume route
+    // data from presentation paths (src/C4Network2.cpp:1148-1219;
+    // src/C4Network2Stats.cpp:336-343). A worker completion held behind this
+    // barrier must leave both callers able to return and must not be reused
+    // after it is released.
+    let mut app = new_running_sandbox_app();
+    let (_events, commands) = install_running_network_stub(&mut app, 0, 40, 4);
+    app.network_stats = Some(clonk_network::NetworkStats::new());
+    app.network_stats
+        .as_mut()
+        .test_value()
+        .register_client(7, "Client");
+    app.display_flags.show_stats = true;
+
+    let (completion_tx, completion_rx) = mpsc::channel();
+    let command_reader = thread::spawn(move || {
+        let mut commands = commands;
+        completion_tx
+            .send(commands.receive_runtime_connection_inspection())
+            .test_value();
+    });
+
+    app.update_diagnostics_overlay();
+    let completion = completion_rx
+        .recv_timeout(Duration::from_secs(1))
+        .test_value();
+    command_reader.join().test_value();
+
+    let (release_tx, release_rx) = mpsc::channel();
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let responder = thread::spawn(move || {
+        worker_started_tx.send(()).test_value();
+        release_rx.recv().test_value();
+        completion
+            .send(Ok(vec![clonk_app_netplay::network::RuntimeNetworkConnection {
+                connection_id: 1,
+                client_id: 7,
+                usage: "Msg".to_string(),
+                protocol: clonk_network::NetworkProtocol::Udp,
+                peer_address: None,
+                packet_loss: 0,
+                ping_ms: 21,
+                lag_ms: 19,
+            }]))
+            .test_value();
+    });
+    worker_started_rx.recv().test_value();
+
+    // Both real presentation callers run while the worker is held. If either
+    // path used the old blocking request, this test would wait on release.
+    app.update_diagnostics_overlay();
+    app.record_network_stats_second();
+    let pending = app
+        .graphics
+        .diagnostics_overlay_text()
+        .test_value()
+        .to_string();
+    main_assert!(pending.contains("Network routes pending"), "{pending}");
+    main_assert!(!pending.contains("Ping"), "no route is complete yet: {pending}");
+
+    release_tx.send(()).test_value();
+    responder.join().test_value();
+    app.record_network_stats_second();
+    app.update_diagnostics_overlay();
+    let fresh = app
+        .graphics
+        .diagnostics_overlay_text()
+        .test_value()
+        .to_string();
+    main_assert!(fresh.contains("Ping 21 ms, loss 0"), "{fresh}");
+    let ping_graph = app
+        .network_stats
+        .as_ref()
+        .test_value()
+        .client_ping_graph(7)
+        .test_value();
+    main_assert_eq!(ping_graph.raw_value(ping_graph.end_time() - 1) => 19.0);
+}
+
+#[test]
 fn stats_toggle_is_default_unbound_and_a_custom_chord_flips_the_overlay() {
     // Registered the way C++ registers its own diagnostics actions —
     // `ChartToggle` is KEY_Default in the "no default keys assigned" block

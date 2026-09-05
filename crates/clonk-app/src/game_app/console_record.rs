@@ -623,7 +623,8 @@ impl GameApp {
         if let Some(connections) = self
             .network
             .as_ref()
-            .and_then(|network| network.runtime_connections().ok())
+            .map(NetworkManager::runtime_connections_snapshot)
+            .map(|snapshot| snapshot.connections)
         {
             for connection in connections {
                 if matches!(connection.usage.as_str(), "Msg" | "Data/Msg") {
