@@ -3098,6 +3098,44 @@ impl GraphicsSystem {
         Some(Self::pointer_for_viewport(viewport, point))
     }
 
+    /// The same mapping as [`Self::viewport_output_point_for_index`], addressed
+    /// by a projection rather than by a position in `active_viewports`.
+    ///
+    /// A detached viewport is never in that list — a detached draw swaps it out
+    /// and restores it — but `C4GraphicsSystem::MouseMoveToViewport` bounds the
+    /// point into whichever viewport owns the mouse and hands the result to
+    /// `C4MouseControl::Move` regardless of how that viewport is presented
+    /// (`C4GraphicsSystem.cpp:476-485`).
+    pub fn viewport_output_point_for_projection(
+        projection: &ActiveViewportProjection,
+        point: GuiPoint,
+    ) -> Option<ViewportPointer> {
+        let rect = projection.rect;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+        let right = rect
+            .x
+            .saturating_add(i32::try_from(rect.width.saturating_sub(1)).unwrap_or(i32::MAX));
+        let bottom = rect
+            .y
+            .saturating_add(i32::try_from(rect.height.saturating_sub(1)).unwrap_or(i32::MAX));
+        let point = GuiPoint::new(
+            point.x.clamp(rect.x as f32, right as f32),
+            point.y.clamp(rect.y as f32, bottom as f32),
+        );
+        let zoom = projection.zoom.max(MIN_VIEWPORT_ZOOM);
+        let world_x =
+            (point.x - projection.content_rect.x as f32) / zoom + projection.content_origin_x;
+        let world_y =
+            (point.y - projection.content_rect.y as f32) / zoom + projection.content_origin_y;
+        Some(ViewportPointer {
+            owner: projection.owner,
+            world: FloatVector2::new(world_x, world_y),
+            screen: point,
+        })
+    }
+
     fn pointer_for_viewport(viewport: &ActiveViewport, point: GuiPoint) -> ViewportPointer {
         let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
         let base_x = viewport.content_rect.x as f32;

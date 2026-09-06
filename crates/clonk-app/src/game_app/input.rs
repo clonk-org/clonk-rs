@@ -8072,8 +8072,10 @@ impl GameApp {
                         ) as f32,
                     )
                 };
-            self.graphics
-                .viewport_output_point_for_index(viewport.index, point)
+            // Address the viewport by the projection already resolved above:
+            // its list position is meaningless for a detached window, which
+            // `active_viewports` never retains.
+            clonk_frontend::GraphicsSystem::viewport_output_point_for_projection(&viewport, point)
         });
         if let (Some(pointer), Some(viewport)) = (pointer, viewport) {
             self.live_input.ingame_mouse_init_centered = true;
