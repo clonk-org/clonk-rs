@@ -5130,6 +5130,65 @@ fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
     );
 }
 
+/// `C4MouseControl` must be able to name a detached window's viewport.
+///
+/// `C4MouseControl::Move` re-resolves its viewport on every move through
+/// `Game.GraphicsSystem.GetViewport(Player)`, which returns the *first* entry
+/// of the one `Viewports` list matching that player (`C4MouseControl.cpp:212`;
+/// `C4GraphicsSystem.cpp:410-420`). In console mode every viewport is a window,
+/// so that first entry is a detached one.
+///
+/// Rust resolved it from `active_viewport_projections()` instead, and
+/// `render_detached_viewport_with_gamma` swaps `active_viewports` out for the
+/// duration of a detached draw and restores it afterwards, so a detached
+/// viewport is never in that list and could never own the mouse.
+#[test]
+fn a_detached_viewport_can_be_the_mouse_control_viewport() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let identity = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+    let viewport = app
+        .active_ingame_mouse_viewport()
+        .expect("the detached viewport follows the mouse-owning player");
+    runtime_assert_eq!(
+        viewport.identity => Some(identity),
+        "the exact physical viewport C4MouseControl owns is the detached one",
+    );
+}
+
+/// Play-mode motion in the mouse-control viewport reaches the gameplay mouse.
+///
+/// `C4ViewportWindow` sends `MouseMove(..., cvp)` on the Play arm — the one
+/// gated by `Game.MouseControl.IsViewport(cvp) && EditCursor.GetMode() ==
+/// C4CNS_ModePlay` (`C4Viewport.cpp:150-194`) — and everything else falls to
+/// the edit cursor. The port sent every pointer event to the editor helpers,
+/// which return immediately in Play mode, so a detached window's gameplay
+/// pointer was inert.
+#[test]
+fn detached_play_mode_motion_drives_the_gameplay_mouse() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let identity = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+    app.live_input.ingame_viewport_mouse = None;
+
+    app.console_viewport_motion(identity, (48, 36), 1.0, false, false);
+
+    let retained = app
+        .live_input
+        .ingame_viewport_mouse
+        .as_ref()
+        .expect("Play-mode motion reaches C4MouseControl::Move");
+    runtime_assert_eq!(
+        retained.owner => app.players.local_owner,
+        "it moves the mouse of the player whose viewport this is",
+    );
+}
+
 #[test]
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();

@@ -2737,6 +2737,45 @@ impl GameApp {
     /// rubber band is armed the band's live corner follows the pointer
     /// (`X2 = X; Y2 = Y`); otherwise the hovered target is re-picked, which is
     /// what a later shift-click resumes from.
+    /// Where one detached viewport window's pointer input goes.
+    ///
+    /// The native gate is a conjunction — `Game.MouseControl.IsViewport(cvp) &&
+    /// Console.EditCursor.GetMode() == C4CNS_ModePlay` (`C4Viewport.cpp:151`) —
+    /// and everything else falls to the edit cursor (`:174-193`). `IsViewport`
+    /// is an identity comparison against the single viewport the control is
+    /// assigned to (`C4MouseControl.cpp:165-167`), so however many windows are
+    /// open, at most one takes the mouse-control arm.
+    pub(crate) fn console_viewport_route(
+        &self,
+        identity: u64,
+    ) -> clonk_engine::developer_viewport::ViewportEventRoute {
+        use clonk_engine::developer_cursor::CursorMode;
+
+        let mode = match self.developer_console_edit_mode {
+            ConsoleEditMode::Play => CursorMode::Play,
+            ConsoleEditMode::Edit => CursorMode::Edit,
+            ConsoleEditMode::Draw => CursorMode::Draw,
+        };
+        let owns_mouse_control = self
+            .active_ingame_mouse_viewport()
+            .and_then(|viewport| viewport.identity)
+            == Some(identity);
+        clonk_engine::developer_viewport::route_viewport_event(mode, owns_mouse_control)
+    }
+
+    /// `C4GraphicsSystem::MouseMove`'s scale quantization, applied to a
+    /// detached window's own coordinates (`C4GraphicsSystem.cpp:447-449`).
+    /// `MouseMoveToViewport` then bounds them into the viewport that owns the
+    /// mouse, which for a window of its own means no further offset (`:476-485`).
+    fn console_viewport_gameplay_point(local: (i32, i32), scale: f32) -> GuiPoint {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        GuiPoint::new(local.0 as f32 / scale, local.1 as f32 / scale)
+    }
+
     pub(crate) fn console_viewport_motion(
         &mut self,
         identity: u64,
@@ -2747,6 +2786,15 @@ impl GameApp {
     ) {
         use clonk_engine::developer_cursor::edit_target;
 
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            let point = Self::console_viewport_gameplay_point(local, scale);
+            if let Err(error) = self.update_ingame_pointer(point) {
+                tracing::error!(%error, "detached viewport gameplay motion failed");
+            }
+            return;
+        }
         if self.developer_console_edit_mode == ConsoleEditMode::Draw {
             self.console_draw_motion(identity, local, scale);
             return;
