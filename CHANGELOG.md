@@ -4,6 +4,16 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-09-06
+
+### Features
+
+- Restore the pinned group and platform-path FFI bridges (#1525)
+- Restore the pinned clonk-core config FFI bridge (#1523)
+- Complete detached viewport pointer routing with double click and wheel (#1522)
+- Route detached play-mode buttons through the gameplay mouse (#1521)
+- Make a detached viewport able to own the gameplay mouse (#1520)
+
 ## [0.22.0] - 2026-09-06
 
 ### Bug fixes
