@@ -2703,7 +2703,21 @@ impl GameApp {
                 tracing::error!(%error, "detached viewport gameplay press failed");
                 return None;
             }
-            if let Err(error) = self.handle_ingame_mouse_button(ElementState::Pressed) {
+            // X11 synthesizes the double-click rather than being told about it,
+            // from a 400ms stamp that is function-`static` and therefore shared
+            // across every viewport window (`C4Viewport.cpp:704-716`). winit is
+            // in the same position — it reports no click count — so this reuses
+            // the app-wide stamp deliberately: two windows clicked in
+            // alternation *do* produce a double-click natively, and per-window
+            // state would be the obvious wrong answer.
+            let double =
+                classic_press_is_double_click(&mut self.live_input.last_left_press, Instant::now());
+            let outcome = if double {
+                self.on_ingame_mouse_double()
+            } else {
+                self.handle_ingame_mouse_button(ElementState::Pressed)
+            };
+            if let Err(error) = outcome {
                 tracing::error!(%error, "detached viewport gameplay press failed");
             }
             return None;

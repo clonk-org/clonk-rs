@@ -5302,6 +5302,39 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
     );
 }
 
+/// The double-click stamp is shared across viewport windows, not per window.
+///
+/// X11 synthesizes the double-click instead of being told about it, from a
+/// `400ms` stamp held in a function-`static` (`C4Viewport.cpp:704-716`). It is
+/// therefore one stamp for every viewport window, and two windows clicked in
+/// alternation genuinely do produce a double-click. Per-window state is the
+/// obvious implementation and is the wrong one; winit reports no click count,
+/// so the port is in exactly X11's position.
+#[test]
+fn the_detached_double_click_stamp_is_shared_across_windows() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let owning = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(owning, 320, 200).is_some());
+
+    app.live_input.last_left_press = None;
+    app.console_viewport_motion(owning, (48, 36), 1.0, false, false);
+    app.console_viewport_press(owning, (48, 36), 1.0, false, false);
+    assert!(
+        app.live_input.last_left_press.is_some(),
+        "the first press stamps the shared clock"
+    );
+
+    // A second press inside the interval consumes the stamp as a double,
+    // exactly as `if (timeGetTime() - last_left_click < 400)` does.
+    app.console_viewport_press(owning, (48, 36), 1.0, false, false);
+    assert!(
+        app.live_input.last_left_press.is_none(),
+        "the second press is a LeftDouble and resets the stamp to 0"
+    );
+}
+
 #[test]
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();
