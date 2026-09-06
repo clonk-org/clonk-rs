@@ -7933,14 +7933,28 @@ impl GameApp {
 
     pub(crate) fn active_ingame_mouse_viewport(&self) -> Option<ActiveViewportProjection> {
         let projections = self.graphics.active_viewport_projections();
-        match self.local_controls.mouse_owner() {
-            Some(owner) => projections
-                .into_iter()
-                .find(|viewport| viewport.owner == owner),
-            None => projections
-                .into_iter()
-                .find(|viewport| viewport.is_no_owner_viewport),
+        let matches = |viewport: &ActiveViewportProjection| match self.local_controls.mouse_owner()
+        {
+            Some(owner) => viewport.owner == owner,
+            None => viewport.is_no_owner_viewport,
+        };
+        if let Some(viewport) = projections.into_iter().find(matches) {
+            return Some(viewport);
         }
+        // `C4MouseControl::Move` re-resolves through
+        // `Game.GraphicsSystem.GetViewport(Player)`, which walks the one
+        // `Viewports` list and does not care whether an entry is tiled into the
+        // fullscreen surface or owns a window of its own
+        // (C4MouseControl.cpp:212; C4GraphicsSystem.cpp:410-420). In console
+        // mode every viewport is a window, so the match is a detached one and
+        // `active_viewport_projections` — which a detached draw restores after
+        // itself — cannot see it. `physical_viewports` is this port's
+        // `Viewports`, in the same order.
+        self.physical_viewports
+            .iter()
+            .map(|viewport| viewport.physical_identity)
+            .find_map(|identity| self.console_viewport_projections.get(&identity).copied())
+            .filter(matches)
     }
 
     pub(crate) fn ingame_mouse_controls_owner(&self, owner: i32) -> bool {
