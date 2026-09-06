@@ -397,7 +397,7 @@ pub(crate) fn handle_console_viewport_event(
             {
                 return;
             }
-            app.console_viewport_release();
+            app.console_viewport_release(identity);
         }
         Event::WindowEvent {
             event:

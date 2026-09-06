@@ -5307,7 +5307,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
 
     // Drag the band back so it spans the object, then release.
     app.console_viewport_motion(identity, (local.0 - 40, local.1 - 40), 1.0, false, false);
-    let framed = app.console_viewport_release().test_value();
+    let framed = app.console_viewport_release(identity).test_value();
     runtime_assert!(
         framed.objects.contains(&id),
         "an object inside the band is framed: {:?}",
@@ -7321,7 +7321,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     };
     assert_eq!((dragging.x, dragging.y), world(dragged));
 
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     assert!(!app.developer_tools.holding(), "the release clears Hold");
     runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
@@ -7345,7 +7345,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
         commands.take_submitted_decided_controls().is_empty(),
         "a line draws nothing while it is dragged"
     );
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     let decided = commands.take_submitted_decided_controls();
     let [(_, clonk_engine::ControlPacket::EmDrawTool(line), false)] = decided.as_slice() else {
         panic!("expected one line control, got {decided:?}");
@@ -7428,7 +7428,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     };
     assert_eq!((fill.x, fill.y), world(moved));
 
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     app.edit_cursor_tick_frame = None;
     app.console_edit_cursor_tick();
     runtime_assert!(
@@ -7471,7 +7471,7 @@ fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
     assert!(app.developer_tools.holding());
     let _ = commands.take_submitted_decided_controls();
     app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     runtime_assert!(
         !app.developer_tools.holding(),
         "the release clears Hold even though the Draw finish did not run"

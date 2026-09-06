@@ -2845,7 +2845,9 @@ impl GameApp {
     /// (`C4EditCursor.cpp:287-341`).
     pub(crate) fn console_viewport_release(
         &mut self,
+        identity: u64,
     ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
+        let _ = identity;
         use clonk_engine::developer_cursor::{
             edit_release, frame_selection, EditRelease, FrameCandidate,
         };
