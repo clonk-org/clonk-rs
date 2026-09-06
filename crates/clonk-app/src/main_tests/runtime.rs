@@ -5281,16 +5281,24 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
         !app.console_viewport_middle_release(owning, (48, 36), 1.0),
         "the mouse-control viewport has no middle button on the Win32 spelling"
     );
-    // The wheel is deliberately untouched: it is this port's stand-in for the
-    // scroll bars the window does not have, and both of its lock states are
-    // already pinned to `ScrollBarsByViewPosition` (`C4Viewport.cpp:272`).
+    // The wheel splits by the lock, which is what reconciles the two halves of
+    // this issue: a *locked* viewport has no bars for the port's stand-in to
+    // stand in for, so its wheel is free to be native's `C4MC_Button_Wheel`
+    // (`C4Viewport.cpp:150-194`); an *unlocked* one keeps scrolling. The
+    // refusal that `ScrollBarsByViewPosition` pins (`:272`) is about the view
+    // not moving, so it still reports no scroll either way.
     assert!(
         app.console_viewport_player_lock(owning),
         "a fresh viewport starts locked (C4Viewport::Default)"
     );
+    app.live_input.ingame_mouse_init_centered = false;
     assert!(
         !app.scroll_console_viewport(owning, 3, 0),
-        "the locked refusal stands whichever arm the pointer takes"
+        "a locked viewport still reports no scroll of its own view"
+    );
+    assert!(
+        app.live_input.ingame_mouse_init_centered,
+        "but the wheel reached the gameplay mouse"
     );
 
     // Edit mode falls to the editor arm for the very same window, and the
