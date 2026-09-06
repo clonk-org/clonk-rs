@@ -5189,6 +5189,119 @@ fn detached_play_mode_motion_drives_the_gameplay_mouse() {
     );
 }
 
+/// A Play-arm press and release are gameplay clicks, not edit-cursor gestures.
+///
+/// Win32 sends `MouseMove(LeftDown/LeftUp, …, cvp)` on the same conjunction
+/// that gates motion, and only the editor arm runs `EditCursor.LeftButtonDown`
+/// (`C4Viewport.cpp:150-194`). The port ran the edit cursor unconditionally, so
+/// a Play-mode press in a detached window took an `edit_cursor_hold` that
+/// nothing in Play mode ever releases.
+#[test]
+fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let identity = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+    app.console_viewport_motion(identity, (48, 36), 1.0, false, false);
+    runtime_assert_eq!(
+        app.console_viewport_press(identity, (48, 36), 1.0, false, false) => None,
+        "a Play-mode press edits no selection",
+    );
+    assert!(
+        !app.edit_cursor_hold,
+        "and it must not take the edit cursor's hold"
+    );
+    assert!(
+        app.mouse_state.is_some(),
+        "it is an ordinary gameplay LeftDown instead"
+    );
+
+    runtime_assert_eq!(
+        app.console_viewport_release(identity) => None,
+        "its release is not an edit-cursor release either",
+    );
+    assert!(
+        app.mouse_state.is_none(),
+        "the gameplay LeftUp completes the click"
+    );
+}
+
+/// The right button follows the same arm, and opens no editor context menu.
+///
+/// Win32 sends `RightDown`/`RightUp` through `MouseMove` on the Play arm and
+/// runs `EditCursor.RightButtonDown/Up` — the arm that builds the context menu
+/// — only on the editor one (`C4Viewport.cpp:150-194`).
+#[test]
+fn detached_play_mode_right_button_is_a_gameplay_click() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let identity = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+    app.console_viewport_motion(identity, (48, 36), 1.0, false, false);
+    runtime_assert_eq!(
+        app.console_viewport_right_press(identity, (48, 36), 1.0, false) => None,
+        "a Play-mode right press edits no selection",
+    );
+    assert!(
+        app.ingame_right_mouse_state.is_some(),
+        "it is an ordinary gameplay RightDown instead"
+    );
+
+    app.open_console_viewport_context_menu(identity, (48, 36));
+    assert!(
+        !app.console_viewport_context_menu_open(),
+        "the Play arm never reaches DoContextMenu"
+    );
+    assert!(
+        app.ingame_right_mouse_state.is_none(),
+        "the gameplay RightUp completes the click"
+    );
+}
+
+/// The recorded middle-button divergence, and the wheel's two arms.
+///
+/// Win32 handles `WM_MBUTTONUP` in the *editor* arm as the picker and sends
+/// nothing for middle on the Play arm (`C4Viewport.cpp:150-194`); X11 is the
+/// exact inverse (`:656-760`). This port follows Win32, so the mouse-control
+/// viewport has no middle button — while a Play-mode viewport that does *not*
+/// own the mouse keeps the editor picker, which is the arm it falls to.
+#[test]
+fn detached_middle_and_wheel_follow_their_native_arms() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let owning = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(owning, 320, 200).is_some());
+
+    assert!(
+        !app.console_viewport_middle_release(owning, (48, 36), 1.0),
+        "the mouse-control viewport has no middle button on the Win32 spelling"
+    );
+    // The wheel is deliberately untouched: it is this port's stand-in for the
+    // scroll bars the window does not have, and both of its lock states are
+    // already pinned to `ScrollBarsByViewPosition` (`C4Viewport.cpp:272`).
+    assert!(
+        app.console_viewport_player_lock(owning),
+        "a fresh viewport starts locked (C4Viewport::Default)"
+    );
+    assert!(
+        !app.scroll_console_viewport(owning, 3, 0),
+        "the locked refusal stands whichever arm the pointer takes"
+    );
+
+    // Edit mode falls to the editor arm for the very same window, and the
+    // picker and scroll bars come back with it.
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    assert!(
+        app.console_viewport_middle_release(owning, (48, 36), 1.0),
+        "the editor arm still invokes the picker"
+    );
+}
+
 #[test]
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();
@@ -5307,7 +5420,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
 
     // Drag the band back so it spans the object, then release.
     app.console_viewport_motion(identity, (local.0 - 40, local.1 - 40), 1.0, false, false);
-    let framed = app.console_viewport_release().test_value();
+    let framed = app.console_viewport_release(identity).test_value();
     runtime_assert!(
         framed.objects.contains(&id),
         "an object inside the band is framed: {:?}",
@@ -7321,7 +7434,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     };
     assert_eq!((dragging.x, dragging.y), world(dragged));
 
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     assert!(!app.developer_tools.holding(), "the release clears Hold");
     runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
@@ -7345,7 +7458,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
         commands.take_submitted_decided_controls().is_empty(),
         "a line draws nothing while it is dragged"
     );
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     let decided = commands.take_submitted_decided_controls();
     let [(_, clonk_engine::ControlPacket::EmDrawTool(line), false)] = decided.as_slice() else {
         panic!("expected one line control, got {decided:?}");
@@ -7428,7 +7541,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     };
     assert_eq!((fill.x, fill.y), world(moved));
 
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     app.edit_cursor_tick_frame = None;
     app.console_edit_cursor_tick();
     runtime_assert!(
@@ -7471,7 +7584,7 @@ fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
     assert!(app.developer_tools.holding());
     let _ = commands.take_submitted_decided_controls();
     app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    app.console_viewport_release();
+    app.console_viewport_release(identity);
     runtime_assert!(
         !app.developer_tools.holding(),
         "the release clears Hold even though the Draw finish did not run"

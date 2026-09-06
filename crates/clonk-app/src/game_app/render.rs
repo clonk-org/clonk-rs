@@ -2692,6 +2692,22 @@ impl GameApp {
 
         // Play routes to ordinary mouse control; Edit and Draw are the two
         // editor arms (`developer_viewport::route_viewport_event`).
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            // Win32 sends the pointer through `MouseMove` before the button so
+            // `C4MouseControl` already holds this position; the port's gameplay
+            // press reads the same retained pointer (C4Viewport.cpp:153-160).
+            let point = Self::console_viewport_gameplay_point(local, scale);
+            if let Err(error) = self.update_ingame_pointer(point) {
+                tracing::error!(%error, "detached viewport gameplay press failed");
+                return None;
+            }
+            if let Err(error) = self.handle_ingame_mouse_button(ElementState::Pressed) {
+                tracing::error!(%error, "detached viewport gameplay press failed");
+            }
+            return None;
+        }
         if self.developer_console_edit_mode == ConsoleEditMode::Draw {
             self.console_draw_press(identity, local, scale);
             return None;
@@ -2845,10 +2861,23 @@ impl GameApp {
     /// (`C4EditCursor.cpp:287-341`).
     pub(crate) fn console_viewport_release(
         &mut self,
+        identity: u64,
     ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
         use clonk_engine::developer_cursor::{
             edit_release, frame_selection, EditRelease, FrameCandidate,
         };
+
+        // The release follows its press: on the Play arm this window's button
+        // is an ordinary `MouseMove(LeftUp, …, cvp)` and never reaches the edit
+        // cursor (`C4Viewport.cpp:153-160`).
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            if let Err(error) = self.handle_ingame_mouse_button(ElementState::Released) {
+                tracing::error!(%error, "detached viewport gameplay release failed");
+            }
+            return None;
+        }
         use clonk_engine::developer_selection::SelectionWriter;
 
         let band = self.edit_cursor_drag_frame.take();
@@ -2924,6 +2953,19 @@ impl GameApp {
         use clonk_engine::developer_cursor::{right_press, SelectionEdit};
         use clonk_engine::developer_selection::SelectionWriter;
 
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            let point = Self::console_viewport_gameplay_point(local, scale);
+            if let Err(error) = self.update_ingame_pointer(point) {
+                tracing::error!(%error, "detached viewport gameplay right press failed");
+                return None;
+            }
+            if let Err(error) = self.handle_ingame_right_mouse_button(ElementState::Pressed) {
+                tracing::error!(%error, "detached viewport gameplay right press failed");
+            }
+            return None;
+        }
         let (x, y) = self.console_viewport_world(identity, local, scale)?;
         let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
         // `fCursorIsOnSelection` — `pLnk->Obj->At(X, Y)` over the selection
@@ -3061,6 +3103,18 @@ impl GameApp {
     pub(crate) fn open_console_viewport_context_menu(&mut self, identity: u64, local: (i32, i32)) {
         use clonk_engine::developer_cursor::context_menu;
         use clonk_frontend::developer_context_menu::ViewportContextMenu;
+
+        // `RightButtonUp` and its `DoContextMenu` live on the editor arm only;
+        // the Play arm sends an ordinary `MouseMove(RightUp, …, cvp)`
+        // (`C4Viewport.cpp:150-194`).
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            if let Err(error) = self.handle_ingame_right_mouse_button(ElementState::Released) {
+                tracing::error!(%error, "detached viewport gameplay right release failed");
+            }
+            return;
+        }
 
         // `Target = nullptr` — the hover is dropped before the menu opens.
         self.developer_selection.set_hover(None);
@@ -4665,6 +4719,13 @@ impl GameApp {
         )
         .is_none()
         {
+            // The Play arm's `C4MC_Button_Wheel` is deliberately *not* routed
+            // here. This function is the port's stand-in for scroll bars the
+            // window does not have, and its locked refusal is pinned to
+            // `ScrollBarsByViewPosition` (`C4Viewport.cpp:272`); making the
+            // wheel a gameplay message in either lock state would contradict
+            // one of those two contracts. Which one gives is a divergence
+            // decision, tracked on clonk-org/clonk-rs#1186.
             return false;
         }
         if (dx, dy) == (0, 0) {
@@ -4871,6 +4932,22 @@ impl GameApp {
         local: (i32, i32),
         scale: f32,
     ) -> bool {
+        // **Recorded divergence.** The two native ports disagree about which
+        // arm owns the middle button and no single C++ file has both. Win32
+        // handles `WM_MBUTTONUP` in the *editor* arm as `MiddleButtonUp()`, the
+        // picker, and sends nothing for middle on the Play arm
+        // (`C4Viewport.cpp:150-194`). X11 is the exact inverse: `Button2`
+        // press/release send `C4MC_Button_MiddleDown`/`MiddleUp` on the *Play*
+        // arm and its editor arm has no middle handling at all (`:656-760`).
+        //
+        // This port follows Win32, because the picker is the behaviour the
+        // editor already ships and depends on. So a viewport that owns mouse
+        // control in Play mode has no middle button, exactly as on Win32.
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            return false;
+        }
         if self.edit_cursor_hold || self.developer_tools.holding() {
             return false;
         }
