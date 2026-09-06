@@ -2703,7 +2703,21 @@ impl GameApp {
                 tracing::error!(%error, "detached viewport gameplay press failed");
                 return None;
             }
-            if let Err(error) = self.handle_ingame_mouse_button(ElementState::Pressed) {
+            // X11 synthesizes the double-click rather than being told about it,
+            // from a 400ms stamp that is function-`static` and therefore shared
+            // across every viewport window (`C4Viewport.cpp:704-716`). winit is
+            // in the same position — it reports no click count — so this reuses
+            // the app-wide stamp deliberately: two windows clicked in
+            // alternation *do* produce a double-click natively, and per-window
+            // state would be the obvious wrong answer.
+            let double =
+                classic_press_is_double_click(&mut self.live_input.last_left_press, Instant::now());
+            let outcome = if double {
+                self.on_ingame_mouse_double()
+            } else {
+                self.handle_ingame_mouse_button(ElementState::Pressed)
+            };
+            if let Err(error) = outcome {
                 tracing::error!(%error, "detached viewport gameplay press failed");
             }
             return None;
@@ -4719,13 +4733,24 @@ impl GameApp {
         )
         .is_none()
         {
-            // The Play arm's `C4MC_Button_Wheel` is deliberately *not* routed
-            // here. This function is the port's stand-in for scroll bars the
-            // window does not have, and its locked refusal is pinned to
-            // `ScrollBarsByViewPosition` (`C4Viewport.cpp:272`); making the
-            // wheel a gameplay message in either lock state would contradict
-            // one of those two contracts. Which one gives is a divergence
-            // decision, tracked on clonk-org/clonk-rs#1186.
+            // `ScrollBarsByViewPosition` is false here, so this window has no
+            // bars for the port's wheel-as-scrollbar stand-in to stand in for
+            // (`C4Viewport.cpp:272`). That frees the wheel to be what native
+            // always makes it on the Play arm — `C4MC_Button_Wheel` to the
+            // viewport that owns mouse control (`:150-194`). An *unlocked*
+            // viewport falls through and keeps scrolling instead.
+            //
+            // The `false` is still correct and is not a refusal to act: it
+            // reports that this window's own view did not move, which is what
+            // the caller uses to decide whether to redraw it.
+            if self.console_viewport_route(identity)
+                == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+            {
+                let delta = MouseScrollDelta::LineDelta(-dx as f32, -dy as f32);
+                if let Err(error) = self.handle_mouse_wheel(delta, 1.0) {
+                    tracing::error!(%error, "detached viewport gameplay wheel failed");
+                }
+            }
             return false;
         }
         if (dx, dy) == (0, 0) {

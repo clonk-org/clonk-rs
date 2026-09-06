@@ -5281,16 +5281,24 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
         !app.console_viewport_middle_release(owning, (48, 36), 1.0),
         "the mouse-control viewport has no middle button on the Win32 spelling"
     );
-    // The wheel is deliberately untouched: it is this port's stand-in for the
-    // scroll bars the window does not have, and both of its lock states are
-    // already pinned to `ScrollBarsByViewPosition` (`C4Viewport.cpp:272`).
+    // The wheel splits by the lock, which is what reconciles the two halves of
+    // this issue: a *locked* viewport has no bars for the port's stand-in to
+    // stand in for, so its wheel is free to be native's `C4MC_Button_Wheel`
+    // (`C4Viewport.cpp:150-194`); an *unlocked* one keeps scrolling. The
+    // refusal that `ScrollBarsByViewPosition` pins (`:272`) is about the view
+    // not moving, so it still reports no scroll either way.
     assert!(
         app.console_viewport_player_lock(owning),
         "a fresh viewport starts locked (C4Viewport::Default)"
     );
+    app.live_input.ingame_mouse_init_centered = false;
     assert!(
         !app.scroll_console_viewport(owning, 3, 0),
-        "the locked refusal stands whichever arm the pointer takes"
+        "a locked viewport still reports no scroll of its own view"
+    );
+    assert!(
+        app.live_input.ingame_mouse_init_centered,
+        "but the wheel reached the gameplay mouse"
     );
 
     // Edit mode falls to the editor arm for the very same window, and the
@@ -5299,6 +5307,39 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
     assert!(
         app.console_viewport_middle_release(owning, (48, 36), 1.0),
         "the editor arm still invokes the picker"
+    );
+}
+
+/// The double-click stamp is shared across viewport windows, not per window.
+///
+/// X11 synthesizes the double-click instead of being told about it, from a
+/// `400ms` stamp held in a function-`static` (`C4Viewport.cpp:704-716`). It is
+/// therefore one stamp for every viewport window, and two windows clicked in
+/// alternation genuinely do produce a double-click. Per-window state is the
+/// obvious implementation and is the wrong one; winit reports no click count,
+/// so the port is in exactly X11's position.
+#[test]
+fn the_detached_double_click_stamp_is_shared_across_windows() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let owning = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(owning, 320, 200).is_some());
+
+    app.live_input.last_left_press = None;
+    app.console_viewport_motion(owning, (48, 36), 1.0, false, false);
+    app.console_viewport_press(owning, (48, 36), 1.0, false, false);
+    assert!(
+        app.live_input.last_left_press.is_some(),
+        "the first press stamps the shared clock"
+    );
+
+    // A second press inside the interval consumes the stamp as a double,
+    // exactly as `if (timeGetTime() - last_left_click < 400)` does.
+    app.console_viewport_press(owning, (48, 36), 1.0, false, false);
+    assert!(
+        app.live_input.last_left_press.is_none(),
+        "the second press is a LeftDouble and resets the stamp to 0"
     );
 }
 
