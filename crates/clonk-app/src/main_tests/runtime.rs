@@ -5189,6 +5189,45 @@ fn detached_play_mode_motion_drives_the_gameplay_mouse() {
     );
 }
 
+/// A Play-arm press and release are gameplay clicks, not edit-cursor gestures.
+///
+/// Win32 sends `MouseMove(LeftDown/LeftUp, …, cvp)` on the same conjunction
+/// that gates motion, and only the editor arm runs `EditCursor.LeftButtonDown`
+/// (`C4Viewport.cpp:150-194`). The port ran the edit cursor unconditionally, so
+/// a Play-mode press in a detached window took an `edit_cursor_hold` that
+/// nothing in Play mode ever releases.
+#[test]
+fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let identity = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+    app.console_viewport_motion(identity, (48, 36), 1.0, false, false);
+    runtime_assert_eq!(
+        app.console_viewport_press(identity, (48, 36), 1.0, false, false) => None,
+        "a Play-mode press edits no selection",
+    );
+    assert!(
+        !app.edit_cursor_hold,
+        "and it must not take the edit cursor's hold"
+    );
+    assert!(
+        app.mouse_state.is_some(),
+        "it is an ordinary gameplay LeftDown instead"
+    );
+
+    runtime_assert_eq!(
+        app.console_viewport_release(identity) => None,
+        "its release is not an edit-cursor release either",
+    );
+    assert!(
+        app.mouse_state.is_none(),
+        "the gameplay LeftUp completes the click"
+    );
+}
+
 #[test]
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();

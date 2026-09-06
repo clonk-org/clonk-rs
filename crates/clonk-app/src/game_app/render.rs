@@ -2692,6 +2692,22 @@ impl GameApp {
 
         // Play routes to ordinary mouse control; Edit and Draw are the two
         // editor arms (`developer_viewport::route_viewport_event`).
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            // Win32 sends the pointer through `MouseMove` before the button so
+            // `C4MouseControl` already holds this position; the port's gameplay
+            // press reads the same retained pointer (C4Viewport.cpp:153-160).
+            let point = Self::console_viewport_gameplay_point(local, scale);
+            if let Err(error) = self.update_ingame_pointer(point) {
+                tracing::error!(%error, "detached viewport gameplay press failed");
+                return None;
+            }
+            if let Err(error) = self.handle_ingame_mouse_button(ElementState::Pressed) {
+                tracing::error!(%error, "detached viewport gameplay press failed");
+            }
+            return None;
+        }
         if self.developer_console_edit_mode == ConsoleEditMode::Draw {
             self.console_draw_press(identity, local, scale);
             return None;
@@ -2847,10 +2863,21 @@ impl GameApp {
         &mut self,
         identity: u64,
     ) -> Option<clonk_engine::developer_selection::SelectionSnapshot> {
-        let _ = identity;
         use clonk_engine::developer_cursor::{
             edit_release, frame_selection, EditRelease, FrameCandidate,
         };
+
+        // The release follows its press: on the Play arm this window's button
+        // is an ordinary `MouseMove(LeftUp, …, cvp)` and never reaches the edit
+        // cursor (`C4Viewport.cpp:153-160`).
+        if self.console_viewport_route(identity)
+            == clonk_engine::developer_viewport::ViewportEventRoute::MouseControl
+        {
+            if let Err(error) = self.handle_ingame_mouse_button(ElementState::Released) {
+                tracing::error!(%error, "detached viewport gameplay release failed");
+            }
+            return None;
+        }
         use clonk_engine::developer_selection::SelectionWriter;
 
         let band = self.edit_cursor_drag_frame.take();
