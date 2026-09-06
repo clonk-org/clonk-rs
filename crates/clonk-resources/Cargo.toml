@@ -11,6 +11,10 @@ publish.workspace = true
 
 [features]
 default = []
+# The C ABI the pinned oracle's USE_RUST_GROUP bridge links against
+# (clonk-org/clonk-rs#1265). Off by default so ordinary builds pay nothing
+# for a differential-testing surface.
+ffi = []
 
 [dependencies]
 walkdir = "2"

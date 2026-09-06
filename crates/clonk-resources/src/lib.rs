@@ -1,6 +1,12 @@
 pub mod bitmap;
 pub mod definition;
 mod diagnostic;
+/// The C ABI the pinned oracle's `USE_RUST_GROUP` bridge links against
+/// (clonk-org/clonk-rs#1265). Off by default: it is a differential-testing
+/// surface, and the crate types it needs are emitted by `cargo xtask ffi`
+/// rather than declared in the manifest.
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod font;
 pub mod graphics;
 pub mod group;
