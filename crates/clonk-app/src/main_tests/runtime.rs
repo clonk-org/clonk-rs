@@ -5228,6 +5228,80 @@ fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
     );
 }
 
+/// The right button follows the same arm, and opens no editor context menu.
+///
+/// Win32 sends `RightDown`/`RightUp` through `MouseMove` on the Play arm and
+/// runs `EditCursor.RightButtonDown/Up` — the arm that builds the context menu
+/// — only on the editor one (`C4Viewport.cpp:150-194`).
+#[test]
+fn detached_play_mode_right_button_is_a_gameplay_click() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let identity = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(identity, 320, 200).is_some());
+
+    app.console_viewport_motion(identity, (48, 36), 1.0, false, false);
+    runtime_assert_eq!(
+        app.console_viewport_right_press(identity, (48, 36), 1.0, false) => None,
+        "a Play-mode right press edits no selection",
+    );
+    assert!(
+        app.ingame_right_mouse_state.is_some(),
+        "it is an ordinary gameplay RightDown instead"
+    );
+
+    app.open_console_viewport_context_menu(identity, (48, 36));
+    assert!(
+        !app.console_viewport_context_menu_open(),
+        "the Play arm never reaches DoContextMenu"
+    );
+    assert!(
+        app.ingame_right_mouse_state.is_none(),
+        "the gameplay RightUp completes the click"
+    );
+}
+
+/// The recorded middle-button divergence, and the wheel's two arms.
+///
+/// Win32 handles `WM_MBUTTONUP` in the *editor* arm as the picker and sends
+/// nothing for middle on the Play arm (`C4Viewport.cpp:150-194`); X11 is the
+/// exact inverse (`:656-760`). This port follows Win32, so the mouse-control
+/// viewport has no middle button — while a Play-mode viewport that does *not*
+/// own the mouse keeps the editor picker, which is the arm it falls to.
+#[test]
+fn detached_middle_and_wheel_follow_their_native_arms() {
+    let mut app = new_lightweight_running_sandbox_app();
+    app.console_mode = true;
+    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    let owning = open_local_test_console_viewport(&mut app);
+    assert!(app.render_console_viewport(owning, 320, 200).is_some());
+
+    assert!(
+        !app.console_viewport_middle_release(owning, (48, 36), 1.0),
+        "the mouse-control viewport has no middle button on the Win32 spelling"
+    );
+    // The wheel is deliberately untouched: it is this port's stand-in for the
+    // scroll bars the window does not have, and both of its lock states are
+    // already pinned to `ScrollBarsByViewPosition` (`C4Viewport.cpp:272`).
+    assert!(
+        app.console_viewport_player_lock(owning),
+        "a fresh viewport starts locked (C4Viewport::Default)"
+    );
+    assert!(
+        !app.scroll_console_viewport(owning, 3, 0),
+        "the locked refusal stands whichever arm the pointer takes"
+    );
+
+    // Edit mode falls to the editor arm for the very same window, and the
+    // picker and scroll bars come back with it.
+    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    assert!(
+        app.console_viewport_middle_release(owning, (48, 36), 1.0),
+        "the editor arm still invokes the picker"
+    );
+}
+
 #[test]
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();

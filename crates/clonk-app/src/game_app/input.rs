@@ -9922,7 +9922,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_ingame_right_mouse_button(
+    pub(crate) fn handle_ingame_right_mouse_button(
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
