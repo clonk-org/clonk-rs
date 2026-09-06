@@ -19,9 +19,9 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 /// The crates carrying an `ffi` module. The pinned tree also shipped
-/// `clonk-resources`, `clonk-gui`, `clonk-platform`, `clonk-graphics`,
-/// `clonk-audio` and `clonk-script` surfaces for the bridges this repository
-/// has not restored yet.
+/// `clonk-gui`, `clonk-platform`, `clonk-graphics`, `clonk-audio` and
+/// `clonk-script` surfaces for the bridges this repository has not restored
+/// yet.
 const FFI_CRATES: &[FfiCrate] = &[
     FfiCrate {
         name: "clonk-engine",
@@ -30,6 +30,11 @@ const FFI_CRATES: &[FfiCrate] = &[
     // `USE_RUST_CONFIG` (clonk-org/clonk-rs#1264).
     FfiCrate {
         name: "clonk-core",
+        feature: Some("ffi"),
+    },
+    // `USE_RUST_GROUP` (clonk-org/clonk-rs#1265).
+    FfiCrate {
+        name: "clonk-resources",
         feature: Some("ffi"),
     },
 ];
@@ -263,54 +268,65 @@ mod tests {
             .collect()
     }
 
-    /// The config bridge's surface, checked the same way.
+    /// The other bridges' surfaces, checked the same way.
     ///
-    /// `lc_string_free` does not share the `lc_config_` prefix, so both sides
-    /// match on the whole `lc_` name rather than one stem.
+    /// One table rather than a test each: every restored bridge owes the same
+    /// obligation, and a new row is the whole cost of adding one. `lc_string_free`
+    /// does not share the `lc_config_` prefix and `lc_group_string_free` is its
+    /// own symbol, so both sides match on the entire `lc_` name rather than a
+    /// per-bridge stem.
     #[test]
-    fn every_symbol_the_config_header_declares_is_exported_by_clonk_core() {
+    fn every_symbol_a_bridge_header_declares_is_exported_by_its_crate() {
+        const BRIDGES: &[(&str, &str)] = &[
+            // `USE_RUST_CONFIG` (clonk-org/clonk-rs#1264).
+            ("lc_config_ffi.h", "crates/clonk-core/src/ffi.rs"),
+            // `USE_RUST_GROUP` (clonk-org/clonk-rs#1265).
+            ("lc_group_ffi.h", "crates/clonk-resources/src/ffi.rs"),
+        ];
+
         let workspace = crate::parity::workspace_dir().expect("workspace root");
-        let header = std::fs::read_to_string(workspace.join("parity/bridge/lc_config_ffi.h"))
-            .expect("vendored config bridge header");
-        let implementation =
-            std::fs::read_to_string(workspace.join("crates/clonk-core/src/ffi.rs"))
-                .expect("clonk-core FFI module");
+        for (header_name, module_path) in BRIDGES {
+            let header = std::fs::read_to_string(workspace.join("parity/bridge").join(header_name))
+                .unwrap_or_else(|_| panic!("vendored bridge header {header_name}"));
+            let implementation = std::fs::read_to_string(workspace.join(module_path))
+                .unwrap_or_else(|_| panic!("FFI module {module_path}"));
 
-        let declared = bridge_symbols(&header, |line| {
-            let line = line.trim();
-            if line.starts_with("//") || line.starts_with('*') {
-                return None;
-            }
-            line.split_once("lc_")
-                .map(|(_, rest)| rest)
-                .and_then(|rest| rest.split_once('('))
-                .map(|(name, _)| name)
-                .filter(|name| !name.contains(' '))
-        });
-        let exported = bridge_symbols(&implementation, |line| {
-            line.trim()
-                .strip_prefix("pub extern \"C\" fn lc_")
-                .or_else(|| line.trim().strip_prefix("pub unsafe extern \"C\" fn lc_"))
-                .and_then(|rest| rest.split_once('('))
-                .map(|(name, _)| name)
-        });
+            let declared = bridge_symbols(&header, |line| {
+                let line = line.trim();
+                if line.starts_with("//") || line.starts_with('*') {
+                    return None;
+                }
+                line.split_once("lc_")
+                    .map(|(_, rest)| rest)
+                    .and_then(|rest| rest.split_once('('))
+                    .map(|(name, _)| name)
+                    .filter(|name| !name.contains(' '))
+            });
+            let exported = bridge_symbols(&implementation, |line| {
+                line.trim()
+                    .strip_prefix("pub extern \"C\" fn lc_")
+                    .or_else(|| line.trim().strip_prefix("pub unsafe extern \"C\" fn lc_"))
+                    .and_then(|rest| rest.split_once('('))
+                    .map(|(name, _)| name)
+            });
 
-        assert!(
-            !declared.is_empty() && !exported.is_empty(),
-            "both sides must parse: {} declared, {} exported",
-            declared.len(),
-            exported.len()
-        );
-        let missing: Vec<_> = declared.difference(&exported).collect();
-        assert!(
-            missing.is_empty(),
-            "declared by lc_config_ffi.h but not exported by clonk-core: {missing:?}"
-        );
-        let extra: Vec<_> = exported.difference(&declared).collect();
-        assert!(
-            extra.is_empty(),
-            "exported by clonk-core but absent from lc_config_ffi.h: {extra:?}"
-        );
+            assert!(
+                !declared.is_empty() && !exported.is_empty(),
+                "both sides of {header_name} must parse: {} declared, {} exported",
+                declared.len(),
+                exported.len()
+            );
+            let missing: Vec<_> = declared.difference(&exported).collect();
+            assert!(
+                missing.is_empty(),
+                "declared by {header_name} but not exported by {module_path}: {missing:?}"
+            );
+            let extra: Vec<_> = exported.difference(&declared).collect();
+            assert!(
+                extra.is_empty(),
+                "exported by {module_path} but absent from {header_name}: {extra:?}"
+            );
+        }
     }
 
     fn bridge_symbols<'a>(
