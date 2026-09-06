@@ -18,14 +18,21 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-/// The crates carrying an `ffi` module. Only `clonk-engine` has one today; the
-/// pinned tree also shipped `clonk-core`, `clonk-resources`, `clonk-gui`,
-/// `clonk-platform`, `clonk-graphics`, `clonk-audio` and `clonk-script`
-/// surfaces for the bridges this repository has not restored.
-const FFI_CRATES: &[FfiCrate] = &[FfiCrate {
-    name: "clonk-engine",
-    feature: Some("ffi"),
-}];
+/// The crates carrying an `ffi` module. The pinned tree also shipped
+/// `clonk-resources`, `clonk-gui`, `clonk-platform`, `clonk-graphics`,
+/// `clonk-audio` and `clonk-script` surfaces for the bridges this repository
+/// has not restored yet.
+const FFI_CRATES: &[FfiCrate] = &[
+    FfiCrate {
+        name: "clonk-engine",
+        feature: Some("ffi"),
+    },
+    // `USE_RUST_CONFIG` (clonk-org/clonk-rs#1264).
+    FfiCrate {
+        name: "clonk-core",
+        feature: Some("ffi"),
+    },
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FfiCrate {
@@ -253,6 +260,67 @@ mod tests {
             .lines()
             .filter_map(extract)
             .map(|name| format!("lc_engine_{name}"))
+            .collect()
+    }
+
+    /// The config bridge's surface, checked the same way.
+    ///
+    /// `lc_string_free` does not share the `lc_config_` prefix, so both sides
+    /// match on the whole `lc_` name rather than one stem.
+    #[test]
+    fn every_symbol_the_config_header_declares_is_exported_by_clonk_core() {
+        let workspace = crate::parity::workspace_dir().expect("workspace root");
+        let header = std::fs::read_to_string(workspace.join("parity/bridge/lc_config_ffi.h"))
+            .expect("vendored config bridge header");
+        let implementation =
+            std::fs::read_to_string(workspace.join("crates/clonk-core/src/ffi.rs"))
+                .expect("clonk-core FFI module");
+
+        let declared = bridge_symbols(&header, |line| {
+            let line = line.trim();
+            if line.starts_with("//") || line.starts_with('*') {
+                return None;
+            }
+            line.split_once("lc_")
+                .map(|(_, rest)| rest)
+                .and_then(|rest| rest.split_once('('))
+                .map(|(name, _)| name)
+                .filter(|name| !name.contains(' '))
+        });
+        let exported = bridge_symbols(&implementation, |line| {
+            line.trim()
+                .strip_prefix("pub extern \"C\" fn lc_")
+                .or_else(|| line.trim().strip_prefix("pub unsafe extern \"C\" fn lc_"))
+                .and_then(|rest| rest.split_once('('))
+                .map(|(name, _)| name)
+        });
+
+        assert!(
+            !declared.is_empty() && !exported.is_empty(),
+            "both sides must parse: {} declared, {} exported",
+            declared.len(),
+            exported.len()
+        );
+        let missing: Vec<_> = declared.difference(&exported).collect();
+        assert!(
+            missing.is_empty(),
+            "declared by lc_config_ffi.h but not exported by clonk-core: {missing:?}"
+        );
+        let extra: Vec<_> = exported.difference(&declared).collect();
+        assert!(
+            extra.is_empty(),
+            "exported by clonk-core but absent from lc_config_ffi.h: {extra:?}"
+        );
+    }
+
+    fn bridge_symbols<'a>(
+        source: &'a str,
+        extract: impl Fn(&'a str) -> Option<&'a str>,
+    ) -> std::collections::BTreeSet<String> {
+        source
+            .lines()
+            .filter_map(extract)
+            .map(|name| format!("lc_{name}"))
             .collect()
     }
 
