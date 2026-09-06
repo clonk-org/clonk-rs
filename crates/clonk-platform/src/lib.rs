@@ -3,6 +3,12 @@ mod console;
 #[cfg(unix)]
 pub mod crash;
 pub mod crash_win32;
+/// The C ABI the pinned oracle's `USE_RUST_PLATFORM_PATHS` bridge links
+/// against (clonk-org/clonk-rs#1267). Off by default: it is a
+/// differential-testing surface, and the crate types it needs are emitted by
+/// `cargo xtask ffi` rather than declared in the manifest.
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod file_classes;
 pub mod file_monitor;
 mod paths;
