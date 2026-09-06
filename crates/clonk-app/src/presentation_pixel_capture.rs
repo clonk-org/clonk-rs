@@ -4192,127 +4192,266 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn presentation_capture_live_cases_share_one_boot_fixture() -> Result<()> {
+    /// One case of the live capture batch: its subcase name, the measured cost
+    /// that decides which fixture runs it, and the case itself. The weights are
+    /// milliseconds of wall clock from one uninstrumented run of the whole
+    /// batch. Only their ranking matters, so a coverage build or a different
+    /// machine does not invalidate them, and a rough weight on a new case costs
+    /// balance rather than correctness.
+    type LiveCaptureCase = (&'static str, u32, CaptureSubcase);
+
+    const LIVE_CAPTURE_CASES: [LiveCaptureCase; 26] = [
+        (
+            "capture_boot_preserves_the_canonical_config_bytes",
+            80,
+            capture_boot_preserves_the_canonical_config_bytes,
+        ),
+        (
+            "live_startup_main_capture_emits_png_and_semantic_layout",
+            380,
+            live_startup_main_capture_emits_png_and_semantic_layout,
+        ),
+        (
+            "capture_reroutes_ambient_pointer_input_to_the_canonical_position",
+            430,
+            capture_reroutes_ambient_pointer_input_to_the_canonical_position,
+        ),
+        (
+            "live_startup_dialog_captures_emit_png_and_semantic_layout",
+            1150,
+            live_startup_dialog_captures_emit_png_and_semantic_layout,
+        ),
+        (
+            "player_selection_rejects_noncanonical_install_root_rows",
+            70,
+            player_selection_rejects_noncanonical_install_root_rows,
+        ),
+        (
+            "gameplay_checkpoint_runs_the_real_tutorial_to_frame_180",
+            4120,
+            gameplay_checkpoint_runs_the_real_tutorial_to_frame_180,
+        ),
+        (
+            "gameplay_layout_capture_contains_the_live_tutorial_message",
+            4150,
+            gameplay_layout_capture_contains_the_live_tutorial_message,
+        ),
+        (
+            "hud_checkpoint_ages_message_board_during_native_intermediate_renders",
+            3710,
+            hud_checkpoint_ages_message_board_during_native_intermediate_renders,
+        ),
+        (
+            "hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence",
+            3690,
+            hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence,
+        ),
+        (
+            "hud_layout_capture_retains_the_text_commands_from_its_presented_frame",
+            3770,
+            hud_layout_capture_retains_the_text_commands_from_its_presented_frame,
+        ),
+        (
+            "ingame_menu_layout_capture_contains_every_visible_menu_cell",
+            3770,
+            ingame_menu_layout_capture_contains_every_visible_menu_cell,
+        ),
+        (
+            "object_menu_layout_capture_contains_menu_and_game_message_topology",
+            18110,
+            object_menu_layout_capture_contains_menu_and_game_message_topology,
+        ),
+        (
+            "evaluation_layout_capture_contains_the_live_dialog_topology",
+            3820,
+            evaluation_layout_capture_contains_the_live_dialog_topology,
+        ),
+        (
+            "gameplay_checkpoint_renders_through_the_production_cpu_surface",
+            4160,
+            gameplay_checkpoint_renders_through_the_production_cpu_surface,
+        ),
+        (
+            "pixel_capture_png_omits_the_native_framebuffer_alpha_channel",
+            480,
+            pixel_capture_png_omits_the_native_framebuffer_alpha_channel,
+        ),
+        (
+            "network_lobby_capture_paints_the_tab_background_after_its_frame",
+            3990,
+            network_lobby_capture_paints_the_tab_background_after_its_frame,
+        ),
+        (
+            "loader_capture_encodes_the_final_ordinal_two_render_frame",
+            490,
+            loader_capture_encodes_the_final_ordinal_two_render_frame,
+        ),
+        (
+            "object_menu_checkpoint_uses_the_real_auto_context_menu_route",
+            17270,
+            object_menu_checkpoint_uses_the_real_auto_context_menu_route,
+        ),
+        (
+            "object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence",
+            14520,
+            object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence,
+        ),
+        (
+            "discovery_runs_the_same_real_gameplay_checkpoint_without_files",
+            4380,
+            discovery_runs_the_same_real_gameplay_checkpoint_without_files,
+        ),
+        (
+            "layout_png_contains_the_second_render_native_presentation",
+            380,
+            layout_png_contains_the_second_render_native_presentation,
+        ),
+        (
+            "layout_capture_png_omits_the_native_framebuffer_alpha_channel",
+            380,
+            layout_capture_png_omits_the_native_framebuffer_alpha_channel,
+        ),
+        (
+            "startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam",
+            330,
+            startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam,
+        ),
+        (
+            "runtime_capture_discards_rust_only_startup_random_draws",
+            70,
+            runtime_capture_discards_rust_only_startup_random_draws,
+        ),
+        (
+            "classic_capture_uses_the_native_sound_options_tab",
+            80,
+            classic_capture_uses_the_native_sound_options_tab,
+        ),
+        (
+            "one_row_scenario_selection_auto_hides_its_native_scrollbar",
+            1060,
+            one_row_scenario_selection_auto_hides_its_native_scrollbar,
+        ),
+    ];
+
+    /// nextest runs every `#[test]` in its own process, so the number of groups
+    /// is this shard's parallel width over the capture work. One fixture for
+    /// all 26 cases put 1.6s of boot in front of 95s of strictly serial
+    /// cases, which made this one test the shard's whole wall clock. Four
+    /// fixtures match the CI runner's core count and cut that to ~26s: the
+    /// three object-menu cases are 53% of the work and have to land in three
+    /// different groups, and past four groups the heaviest single case is the
+    /// floor, so more fixtures would buy boots rather than time.
+    const LIVE_CAPTURE_GROUPS: usize = 4;
+
+    /// Longest-processing-time-first, the standard greedy makespan schedule:
+    /// place the dearest remaining case on the lightest group. Deriving the
+    /// split from the weights rather than hand-writing it is what keeps the
+    /// groups balanced as cases are added, and every process derives the same
+    /// one because the order is total.
+    fn live_capture_groups() -> [Vec<&'static LiveCaptureCase>; LIVE_CAPTURE_GROUPS] {
+        let mut ordered: Vec<&'static LiveCaptureCase> = LIVE_CAPTURE_CASES.iter().collect();
+        ordered.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+
+        let mut groups = std::array::from_fn(|_| Vec::new());
+        let mut loads = [0u64; LIVE_CAPTURE_GROUPS];
+        for case in ordered {
+            let lightest = (0..LIVE_CAPTURE_GROUPS)
+                .min_by_key(|group| (loads[*group], *group))
+                .unwrap_or(0);
+            groups[lightest].push(case);
+            loads[lightest] += u64::from(case.1);
+        }
+        groups
+    }
+
+    /// Runs one group's cases against a single booted application. Each case
+    /// is bracketed by `return_to_menu`, so a group starts from the same state
+    /// the fused batch gave its cases and the split changes only who runs them.
+    fn run_live_capture_group(group: usize) -> Result<()> {
+        let groups = live_capture_groups();
+        let cases = groups.get(group).map(Vec::as_slice).unwrap_or_default();
+
         let mut fixture = SharedCaptureFixture::new()?;
         let mut failures = Vec::new();
-
-        let cases: &[(&'static str, CaptureSubcase)] = &[
-            (
-                "capture_boot_preserves_the_canonical_config_bytes",
-                capture_boot_preserves_the_canonical_config_bytes,
-            ),
-            (
-                "live_startup_main_capture_emits_png_and_semantic_layout",
-                live_startup_main_capture_emits_png_and_semantic_layout,
-            ),
-            (
-                "capture_reroutes_ambient_pointer_input_to_the_canonical_position",
-                capture_reroutes_ambient_pointer_input_to_the_canonical_position,
-            ),
-            (
-                "live_startup_dialog_captures_emit_png_and_semantic_layout",
-                live_startup_dialog_captures_emit_png_and_semantic_layout,
-            ),
-            (
-                "player_selection_rejects_noncanonical_install_root_rows",
-                player_selection_rejects_noncanonical_install_root_rows,
-            ),
-            (
-                "gameplay_checkpoint_runs_the_real_tutorial_to_frame_180",
-                gameplay_checkpoint_runs_the_real_tutorial_to_frame_180,
-            ),
-            (
-                "gameplay_layout_capture_contains_the_live_tutorial_message",
-                gameplay_layout_capture_contains_the_live_tutorial_message,
-            ),
-            (
-                "hud_checkpoint_ages_message_board_during_native_intermediate_renders",
-                hud_checkpoint_ages_message_board_during_native_intermediate_renders,
-            ),
-            (
-                "hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence",
-                hud_checkpoint_advances_the_game_clock_from_the_fixed_tick_cadence,
-            ),
-            (
-                "hud_layout_capture_retains_the_text_commands_from_its_presented_frame",
-                hud_layout_capture_retains_the_text_commands_from_its_presented_frame,
-            ),
-            (
-                "ingame_menu_layout_capture_contains_every_visible_menu_cell",
-                ingame_menu_layout_capture_contains_every_visible_menu_cell,
-            ),
-            (
-                "object_menu_layout_capture_contains_menu_and_game_message_topology",
-                object_menu_layout_capture_contains_menu_and_game_message_topology,
-            ),
-            (
-                "evaluation_layout_capture_contains_the_live_dialog_topology",
-                evaluation_layout_capture_contains_the_live_dialog_topology,
-            ),
-            (
-                "gameplay_checkpoint_renders_through_the_production_cpu_surface",
-                gameplay_checkpoint_renders_through_the_production_cpu_surface,
-            ),
-            (
-                "pixel_capture_png_omits_the_native_framebuffer_alpha_channel",
-                pixel_capture_png_omits_the_native_framebuffer_alpha_channel,
-            ),
-            (
-                "network_lobby_capture_paints_the_tab_background_after_its_frame",
-                network_lobby_capture_paints_the_tab_background_after_its_frame,
-            ),
-            (
-                "loader_capture_encodes_the_final_ordinal_two_render_frame",
-                loader_capture_encodes_the_final_ordinal_two_render_frame,
-            ),
-            (
-                "object_menu_checkpoint_uses_the_real_auto_context_menu_route",
-                object_menu_checkpoint_uses_the_real_auto_context_menu_route,
-            ),
-            (
-                "object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence",
-                object_menu_checkpoint_ages_global_sounds_at_the_native_tick_cadence,
-            ),
-            (
-                "discovery_runs_the_same_real_gameplay_checkpoint_without_files",
-                discovery_runs_the_same_real_gameplay_checkpoint_without_files,
-            ),
-            (
-                "layout_png_contains_the_second_render_native_presentation",
-                layout_png_contains_the_second_render_native_presentation,
-            ),
-            (
-                "layout_capture_png_omits_the_native_framebuffer_alpha_channel",
-                layout_capture_png_omits_the_native_framebuffer_alpha_channel,
-            ),
-            (
-                "startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam",
-                startup_checkpoint_reseeds_both_random_streams_at_the_execute_seam,
-            ),
-            (
-                "runtime_capture_discards_rust_only_startup_random_draws",
-                runtime_capture_discards_rust_only_startup_random_draws,
-            ),
-            (
-                "classic_capture_uses_the_native_sound_options_tab",
-                classic_capture_uses_the_native_sound_options_tab,
-            ),
-            (
-                "one_row_scenario_selection_auto_hides_its_native_scrollbar",
-                one_row_scenario_selection_auto_hides_its_native_scrollbar,
-            ),
-        ];
-        for &(name, case) in cases {
+        for &&(name, _, case) in cases {
             run_shared_capture_case(&mut fixture, name, case, &mut failures);
         }
 
-        assert!(
+        anyhow::ensure!(
             failures.is_empty(),
             "presentation capture subcase(s) failed: {}",
             failures.join(", ")
         );
         Ok(())
+    }
+
+    #[test]
+    fn presentation_capture_group_1_of_4_shares_one_boot_fixture() -> Result<()> {
+        run_live_capture_group(0)
+    }
+
+    #[test]
+    fn presentation_capture_group_2_of_4_shares_one_boot_fixture() -> Result<()> {
+        run_live_capture_group(1)
+    }
+
+    #[test]
+    fn presentation_capture_group_3_of_4_shares_one_boot_fixture() -> Result<()> {
+        run_live_capture_group(2)
+    }
+
+    #[test]
+    fn presentation_capture_group_4_of_4_shares_one_boot_fixture() -> Result<()> {
+        run_live_capture_group(3)
+    }
+
+    #[test]
+    fn every_live_capture_case_runs_in_exactly_one_group() {
+        assert_eq!(
+            LIVE_CAPTURE_GROUPS, 4,
+            "add or remove a `presentation_capture_group_N_of_4` test to match"
+        );
+
+        let groups = live_capture_groups();
+        assert!(
+            groups.iter().all(|group| !group.is_empty()),
+            "an empty group boots a fixture it never uses"
+        );
+
+        let mut scheduled: Vec<&str> = groups.iter().flatten().map(|(name, _, _)| *name).collect();
+        scheduled.sort_unstable();
+        let mut declared: Vec<&str> = LIVE_CAPTURE_CASES
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect();
+        declared.sort_unstable();
+
+        assert_eq!(scheduled, declared);
+        declared.dedup();
+        assert_eq!(
+            declared.len(),
+            LIVE_CAPTURE_CASES.len(),
+            "duplicate subcase name"
+        );
+    }
+
+    #[test]
+    fn live_capture_groups_stay_balanced_enough_to_beat_one_serial_fixture() {
+        let loads: Vec<u64> = live_capture_groups()
+            .iter()
+            .map(|group| group.iter().map(|(_, weight, _)| u64::from(*weight)).sum())
+            .collect();
+        let total: u64 = loads.iter().sum();
+        let heaviest = loads.iter().copied().max().unwrap_or(0);
+
+        // The split earns its extra boots only while no single group carries
+        // the batch. This is deliberately loose -- it passes a genuinely
+        // expensive new case and fails the regression that matters, a table
+        // whose weights have drifted far enough to serialize the shard again.
+        assert!(
+            heaviest * 2 <= total,
+            "group weights {loads:?} put over half of {total}ms on one fixture"
+        );
     }
 
     #[test]
