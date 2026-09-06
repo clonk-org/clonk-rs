@@ -37,6 +37,11 @@ const FFI_CRATES: &[FfiCrate] = &[
         name: "clonk-resources",
         feature: Some("ffi"),
     },
+    // `USE_RUST_PLATFORM_PATHS` (clonk-org/clonk-rs#1267).
+    FfiCrate {
+        name: "clonk-platform",
+        feature: Some("ffi"),
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,6 +287,8 @@ mod tests {
             ("lc_config_ffi.h", "crates/clonk-core/src/ffi.rs"),
             // `USE_RUST_GROUP` (clonk-org/clonk-rs#1265).
             ("lc_group_ffi.h", "crates/clonk-resources/src/ffi.rs"),
+            // `USE_RUST_PLATFORM_PATHS` (clonk-org/clonk-rs#1267).
+            ("lc_platform_ffi.h", "crates/clonk-platform/src/ffi.rs"),
         ];
 
         let workspace = crate::parity::workspace_dir().expect("workspace root");

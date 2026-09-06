@@ -749,7 +749,10 @@ fn env_string(key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+// `pub(crate)` so the FFI bridge's tests can share `EnvGuard` and, with it,
+// the process-wide env lock. Two test modules mutating `LC_INSTALL_ROOT`
+// without one lock race, and the loser reads the other's roots.
+pub(crate) mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::fs;
