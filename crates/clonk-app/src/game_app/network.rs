@@ -6806,6 +6806,16 @@ impl GameApp {
             return Ok(false);
         };
         let bind_addr = old_settings.bind_addr;
+        // The finished round's packed directories are served again while
+        // unchanged, as C4Network2ResList::AddByFile returns the resource
+        // already in the list (src/C4Network2Res.cpp:1443-1449); deflating
+        // them a second time is what every client waited on
+        // (clonk-org/clonk-rs#1472).
+        let reusable_standalones = old_settings
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.reusable_standalones().to_vec())
+            .unwrap_or_default();
         let definition_load = self
             .active_definition_load
             .clone()
@@ -6848,7 +6858,9 @@ impl GameApp {
             );
             return Ok(false);
         };
-        let preparation = preparation.with_staged_scenario(staged_scenario);
+        let preparation = preparation
+            .with_staged_scenario(staged_scenario)
+            .with_reusable_standalones(reusable_standalones);
         let global_system_scripts = self.global_scripts_for_session();
         let mut prepared =
             match preparation.prepare_with_global_system_scripts(&global_system_scripts) {

@@ -1787,6 +1787,7 @@ fn prepare_harpoonrace_host_with_seed(
                 network_udp_port: 0,
             },
             league: Some(&league),
+            reusable_standalones: &[],
         },
     )
     .test_value();

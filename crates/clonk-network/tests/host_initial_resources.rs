@@ -65,6 +65,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
         dynamic_wire_name: crate::c4(b"Network/DynScenario.c4s"),
         parameters,
         dynamic_tick: 7,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -230,6 +231,7 @@ fn cpp_host_publication_reuses_network_core_for_repeated_game_resource_file() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -276,6 +278,7 @@ fn packed_cross_type_source_reuses_the_definition_core() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -320,6 +323,7 @@ fn packed_physical_directory_rewrites_the_reuse_key() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -372,6 +376,7 @@ fn post_pack_over_limit_directory_retains_logical_key_and_temporary_file() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -415,6 +420,7 @@ fn same_source_path_with_a_distinct_wire_name_publishes_a_distinct_core() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -482,6 +488,7 @@ fn absolute_opened_source_and_relative_alias_publish_distinct_cores_with_same_wi
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -534,6 +541,7 @@ fn player_lookup_reuses_an_earlier_cross_type_resource_core() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -592,6 +600,7 @@ fn exact_player_name_reuses_an_earlier_alias_opened_core() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -642,6 +651,7 @@ fn virtual_group_materialization_sanitizes_the_opened_basename() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -685,6 +695,7 @@ fn virtual_group_materialization_flattens_native_backslashes_before_basename_sel
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -721,6 +732,7 @@ fn league_initial_publication_hashes_scenario_and_all_game_resources_only() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters,
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -783,6 +795,7 @@ fn failed_player_publication_consumes_its_reserved_resource_id() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -844,6 +857,7 @@ fn failed_virtual_player_materialization_is_skipped_with_an_id_hole() {
         dynamic_wire_name: crate::c4(b"Network/Dynamic.c4s"),
         parameters: base_parameters(),
         dynamic_tick: 0,
+        reusable_standalones: Vec::new(),
     })
     .unwrap();
 
@@ -1058,6 +1072,7 @@ fn dynamic_metadata_that_disagrees_with_the_packed_bytes_is_refused() {
             dynamic_wire_name: crate::c4(b"Network/DynScenario.c4s"),
             parameters: base_parameters(),
             dynamic_tick: 7,
+            reusable_standalones: Vec::new(),
         })
         .expect_err("a dynamic advertising the wrong metadata must not publish");
 

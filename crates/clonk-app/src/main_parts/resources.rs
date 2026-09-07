@@ -4461,6 +4461,7 @@ pub(crate) fn build_network_host_preparation(
         },
         league,
         staged_scenario: None,
+        reusable_standalones: Vec::new(),
     })
 }
 
