@@ -8078,6 +8078,9 @@ fn scenario_search_fuzzy_title_score(title_words: &[String], terms: &[&str]) -> 
         };
         title_words
             .iter()
+            // The distance is at least the length gap, so a word the
+            // threshold already rules out never needs the matrix.
+            .filter(|candidate| candidate.chars().count().abs_diff(length) <= threshold)
             .map(|candidate| damerau_levenshtein(term, candidate))
             .min()
             .filter(|distance| *distance <= threshold)
