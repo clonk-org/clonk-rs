@@ -233,6 +233,15 @@ impl ReadyCheckContinuation {
         }
     }
 
+    /// Records a toast a backend showed outside [`Self::show`]: WinRT's
+    /// `show_and_watch` creates the toast itself. Without this the app's hide
+    /// would find nothing to hide when the dialog wins.
+    pub(crate) fn note_shown(&self, id: NotificationId) {
+        if let Ok(mut shown) = self.shown.lock() {
+            *shown = Some(id);
+        }
+    }
+
     /// Whether this continuation has already been resolved.
     pub(crate) fn resolved(&self) -> bool {
         self.claimed.load(Ordering::Acquire)

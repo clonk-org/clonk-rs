@@ -5,6 +5,100 @@
 //! the translation between one platform's notification API and that core lives
 //! here, so the race the core owns is never re-implemented per platform.
 
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+use crate::desktop_notification::DesktopNotification;
+use crate::ready_check_notification::{
+    NotificationActions, NotificationSink, ReadyCheckContinuation,
+};
+
+/// A backend that shows an actionable toast and routes its buttons into the
+/// continuation that owns the prompt.
+///
+/// `NotificationSink` is the half the app keeps: `ReadyCheckDialog::OnClosed`
+/// hides the toast from whichever side resolved the prompt
+/// (`src/C4Network2.cpp:176-178`), the in-window dialog on the app thread
+/// included, so the object the watcher shows through must be the object the
+/// app hides through.
+pub(crate) trait ActionableSink: NotificationSink + Send + Sync {
+    /// Shows the toast and watches it until it is gone.
+    ///
+    /// The freedesktop backend blocks reading the bus until the toast no
+    /// longer exists; the WinRT backend returns once its handlers are attached
+    /// and the platform delivers the answer later. Either way the caller runs
+    /// it on its own thread, so a resolved prompt never waits on a daemon.
+    fn show_and_watch(
+        &self,
+        actions: &NotificationActions,
+        continuation: &ReadyCheckContinuation,
+    ) -> anyhow::Result<()>;
+}
+
+/// The platform's actionable sink for one prompt, or `None` where no
+/// notification service exists: macOS and the non-desktop targets.
+///
+/// A backend that fails to initialise is reported and treated the same, so
+/// the caller leaves `SilentSink` in place and the in-window dialog stays the
+/// answer path (clonk-org/clonk-rs#1308).
+pub(crate) fn platform_sink(notification: &DesktopNotification) -> Option<Arc<dyn ActionableSink>> {
+    #[cfg(target_os = "linux")]
+    {
+        match freedesktop::FreedesktopSink::new(notification.clone()) {
+            Ok(sink) => Some(Arc::new(sink)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "ready-check toast backend is unavailable; the in-window dialog answers"
+                );
+                None
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        match winrt::WinRtSink::for_notification(notification.clone()) {
+            Ok(sink) => Some(Arc::new(sink)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "ready-check toast backend is unavailable; the in-window dialog answers"
+                );
+                None
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = notification;
+        None
+    }
+}
+
+/// Runs `show_and_watch` on its own thread.
+///
+/// The thread holds a clone of the continuation, whose claim is shared, so an
+/// answer from the toast and an answer from the dialog race safely; and it
+/// holds the same sink the app keeps, so whichever side wins hides the toast
+/// the other showed. A failure to start the thread is the caller's to log:
+/// the prompt is still answerable in the window.
+pub(crate) fn watch_on_thread(
+    sink: Arc<dyn ActionableSink>,
+    actions: NotificationActions,
+    continuation: ReadyCheckContinuation,
+) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("ready-check-toast".to_owned())
+        .spawn(move || {
+            if let Err(error) = sink.show_and_watch(&actions, &continuation) {
+                tracing::warn!(
+                    %error,
+                    "ready-check toast listener failed; the in-window dialog answers"
+                );
+            }
+        })
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) mod freedesktop {
     use std::collections::HashMap;
@@ -111,6 +205,16 @@ pub(crate) mod freedesktop {
         }
     }
 
+    impl super::ActionableSink for FreedesktopSink {
+        fn show_and_watch(
+            &self,
+            actions: &NotificationActions,
+            continuation: &ReadyCheckContinuation,
+        ) -> Result<()> {
+            FreedesktopSink::show_and_watch(self, actions, continuation)
+        }
+    }
+
     impl NotificationSink for FreedesktopSink {
         fn show(&self, actions: &NotificationActions) -> Result<NotificationId> {
             let expiration =
@@ -157,6 +261,10 @@ pub(crate) mod winrt {
         },
     };
 
+    use crate::desktop_notification::{
+        backend::{create_toast_notifier, toast_content, toast_expiration},
+        DesktopNotification,
+    };
     use crate::ready_check_notification::{
         dispatch_signal, NotificationActions, NotificationId, NotificationSignal, NotificationSink,
         ReadyCheckContinuation, DEFAULT_ACTION_KEY, NO_ACTION_KEY, YES_ACTION_KEY,
@@ -206,6 +314,8 @@ pub(crate) mod winrt {
     /// to make safe.
     pub(crate) struct WinRtSink {
         notifier: ToastNotifier,
+        /// Title, body and expiration of the toast this sink shows.
+        notification: Option<DesktopNotification>,
         shown: std::sync::Mutex<Option<ToastNotification>>,
     }
 
@@ -213,8 +323,19 @@ pub(crate) mod winrt {
         pub(crate) fn new(notifier: ToastNotifier) -> Self {
             Self {
                 notifier,
+                notification: None,
                 shown: std::sync::Mutex::new(None),
             }
+        }
+
+        /// A sink for one prompt, on the application's toast notifier. The
+        /// plain notifier initialised the WinRT apartment at startup; a
+        /// process where that failed fails here too, which the caller treats
+        /// as "no backend".
+        pub(crate) fn for_notification(notification: DesktopNotification) -> Result<Self> {
+            let mut sink = Self::new(create_toast_notifier()?);
+            sink.notification = Some(notification);
+            Ok(sink)
         }
 
         /// Shows the toast and routes its callbacks into `continuation`.
@@ -230,6 +351,11 @@ pub(crate) mod winrt {
             attach_actions(content, actions)?;
             let toast = ToastNotification::CreateToastNotification(content)
                 .context("failed to create the actionable WinRT toast")?;
+            if let Some(notification) = self.notification.as_ref() {
+                toast
+                    .SetExpirationTime(&toast_expiration(notification.expiration)?)
+                    .context("failed to set the actionable WinRT toast expiration")?;
+            }
 
             let activated = continuation.clone();
             toast
@@ -277,6 +403,25 @@ pub(crate) mod winrt {
             // uses it to hide the toast it showed, and this sink holds exactly
             // one, so a constant is enough to satisfy the shared seam.
             Ok(NotificationId(0))
+        }
+    }
+
+    impl super::ActionableSink for WinRtSink {
+        fn show_and_watch(
+            &self,
+            actions: &NotificationActions,
+            continuation: &ReadyCheckContinuation,
+        ) -> Result<()> {
+            let notification = self
+                .notification
+                .as_ref()
+                .ok_or_else(|| anyhow!("the WinRT ready-check sink has no notification to show"))?;
+            let content = toast_content(notification)?;
+            let id = WinRtSink::show_and_watch(self, &content, actions, continuation)?;
+            // The continuation only hides what it knows it showed, and this
+            // path never went through `NotificationSink::show`.
+            continuation.note_shown(id);
+            Ok(())
         }
     }
 
@@ -364,5 +509,105 @@ pub(crate) mod winrt {
             )
             .context("failed to set a WinRT toast activation type")?;
         Ok(action)
+    }
+}
+
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
+))]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::ready_check_notification::{
+        NotificationAction, NotificationActions, NotificationActivation, NotificationId,
+        NotificationSink, ReadyCheckContinuation, ReadyCheckOutcome,
+    };
+
+    /// A backend whose toast presses Yes from the watcher's own thread, the
+    /// way a freedesktop listener or a WinRT handler would.
+    #[derive(Default)]
+    struct AnsweringSink {
+        hidden: Mutex<Vec<NotificationId>>,
+    }
+
+    impl NotificationSink for AnsweringSink {
+        fn show(&self, _actions: &NotificationActions) -> anyhow::Result<NotificationId> {
+            Ok(NotificationId(7))
+        }
+
+        fn hide(&self, id: NotificationId) -> anyhow::Result<()> {
+            self.hidden.lock().expect("answering sink").push(id);
+            Ok(())
+        }
+    }
+
+    impl ActionableSink for AnsweringSink {
+        fn show_and_watch(
+            &self,
+            actions: &NotificationActions,
+            continuation: &ReadyCheckContinuation,
+        ) -> anyhow::Result<()> {
+            continuation.show(self, actions);
+            continuation.activate(
+                NotificationActivation::Chosen(NotificationAction::Yes),
+                self,
+            );
+            Ok(())
+        }
+    }
+
+    fn actions() -> NotificationActions {
+        NotificationActions {
+            yes: "Yes".to_owned(),
+            no: "No".to_owned(),
+        }
+    }
+
+    /// clonk-org/clonk-rs#1308: the lobby used to call `continuation.show`
+    /// on a silent sink and never spawned the listener, so a real toast's
+    /// buttons resolved nothing. The watcher thread owns both halves: it
+    /// shows through the backend and routes the answer into the shared
+    /// claim, hiding the toast it showed.
+    #[test]
+    fn a_watcher_thread_shows_the_toast_and_resolves_the_continuation() {
+        let sink: Arc<dyn ActionableSink> = Arc::new(AnsweringSink::default());
+        let continuation = ReadyCheckContinuation::new();
+        let watcher = watch_on_thread(Arc::clone(&sink), actions(), continuation.clone())
+            .expect("the watcher thread spawns");
+        watcher.join().expect("the watcher finishes");
+        assert_eq!(
+            continuation.outcome(),
+            Some(ReadyCheckOutcome::Answered(true))
+        );
+        assert!(
+            continuation.shown_id().is_none(),
+            "the answer hides the toast the watcher showed"
+        );
+    }
+
+    /// The app hides through its own handle when the in-window dialog wins,
+    /// so the sink the watcher shows through must be the same object the app
+    /// keeps: an `Arc<dyn ActionableSink>` upcasts to the app's sink type.
+    #[test]
+    fn the_actionable_sink_is_the_app_sink() {
+        let sink: Arc<dyn ActionableSink> = Arc::new(AnsweringSink::default());
+        let app_sink: Arc<dyn NotificationSink + Send + Sync> = sink.clone();
+        let continuation = ReadyCheckContinuation::new();
+        continuation.show(app_sink.as_ref(), &actions());
+        assert!(continuation.answer(false, app_sink.as_ref()));
+        assert!(continuation.shown_id().is_none());
+    }
+
+    #[cfg(not(any(target_os = "linux", windows)))]
+    #[test]
+    fn this_platform_offers_no_actionable_sink() {
+        let notification = crate::desktop_notification::DesktopNotification::new(
+            "Are you ready?",
+            "body",
+            std::time::Duration::from_secs(10),
+        );
+        assert!(platform_sink(&notification).is_none());
     }
 }

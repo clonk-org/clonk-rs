@@ -106,7 +106,7 @@ impl DesktopNotifier {
 }
 
 #[cfg(target_os = "linux")]
-mod backend {
+pub(crate) mod backend {
     use std::collections::HashMap;
 
     use anyhow::{Context, Result};
@@ -182,7 +182,7 @@ mod backend {
 }
 
 #[cfg(windows)]
-mod backend {
+pub(crate) mod backend {
     use std::mem::size_of;
     use std::slice;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -247,26 +247,11 @@ mod backend {
         }
 
         pub(super) fn show(&self, notification: &DesktopNotification) -> Result<ShownToast> {
-            let content =
-                ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02)
-                    .context("failed to create WinRT toast content")?;
-            set_text_node(&content, 0, &notification.title)?;
-            set_text_node(&content, 1, &notification.body)?;
+            let content = toast_content(notification)?;
             let toast = ToastNotification::CreateToastNotification(&content)
                 .context("failed to create WinRT toast")?;
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default();
-            let expiration = now.saturating_add(notification.expiration);
-            let ticks = i128::from(expiration.as_secs()) * 10_000_000
-                + i128::from(expiration.subsec_nanos() / 100)
-                + 116_444_736_000_000_000_i128;
-            let boxed = PropertyValue::CreateDateTime(DateTime {
-                UniversalTime: i64::try_from(ticks).unwrap_or(i64::MAX),
-            })?
-            .cast::<IReference<DateTime>>()?;
             toast
-                .SetExpirationTime(&boxed)
+                .SetExpirationTime(&toast_expiration(notification.expiration)?)
                 .context("failed to set WinRT toast expiration")?;
             self.notifier
                 .as_ref()
@@ -303,7 +288,35 @@ mod backend {
     /// Separate from `initialize` so its failure can be caught there and the
     /// WinRT apartment uninitialized before returning: the identity calls are
     /// advisory and only warn, but the notifier itself is fallible.
-    fn create_toast_notifier() -> Result<ToastNotifier> {
+    /// The `ToastText02` template carrying `notification`'s title and body:
+    /// the content of the plain toast, and the base the actionable ready-check
+    /// toast adds its buttons to.
+    pub(crate) fn toast_content(notification: &DesktopNotification) -> Result<XmlDocument> {
+        let content = ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02)
+            .context("failed to create WinRT toast content")?;
+        set_text_node(&content, 0, &notification.title)?;
+        set_text_node(&content, 1, &notification.body)?;
+        Ok(content)
+    }
+
+    /// `expiration` from now as the boxed `DateTime` `SetExpirationTime` takes.
+    pub(crate) fn toast_expiration(
+        expiration: std::time::Duration,
+    ) -> Result<IReference<DateTime>> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let expiration = now.saturating_add(expiration);
+        let ticks = i128::from(expiration.as_secs()) * 10_000_000
+            + i128::from(expiration.subsec_nanos() / 100)
+            + 116_444_736_000_000_000_i128;
+        Ok(PropertyValue::CreateDateTime(DateTime {
+            UniversalTime: i64::try_from(ticks).unwrap_or(i64::MAX),
+        })?
+        .cast::<IReference<DateTime>>()?)
+    }
+
+    pub(crate) fn create_toast_notifier() -> Result<ToastNotifier> {
         if let Err(error) =
             unsafe { SetCurrentProcessExplicitAppUserModelID(w!("LegacyClonkTeam.LegacyClonk")) }
         {
