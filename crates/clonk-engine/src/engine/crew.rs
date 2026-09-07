@@ -565,7 +565,7 @@ impl Engine {
                 .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
                 .script_state_snapshot(),
         );
-        let action_library = object_definition.action_library().clone();
+        let action_library = object_definition.shared_action_library_handle();
         let mut resume: Option<DefinitionScriptResume> = None;
         loop {
             let receiver_available = resume
@@ -605,7 +605,7 @@ impl Engine {
                 .cloned()
                 .unwrap_or_else(|| object_definition.clone());
             let live_callback_definition = callback_definition.clone();
-            let live_action_library = live_object_definition.action_library().clone();
+            let live_action_library = live_object_definition.shared_action_library_handle();
             let world = if receiver_available
                 && self
                     .objects
@@ -800,8 +800,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
-            .action_library()
-            .clone();
+            .shared_action_library_handle();
         let mut resume = None;
         loop {
             let receiver_available = resume
@@ -1122,7 +1121,7 @@ impl Engine {
             let Some(action_library) = self
                 .definitions
                 .get(&definition_id)
-                .map(|definition| definition.action_library().clone())
+                .map(|definition| definition.shared_action_library_handle())
             else {
                 break;
             };
@@ -1219,8 +1218,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
-            .action_library()
-            .clone();
+            .shared_action_library_handle();
         let args = [compat::object_reference_value(crew_id)];
         self.call_movement_object_function(
             container_index,

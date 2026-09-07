@@ -1383,7 +1383,7 @@ impl Engine {
             (
                 name,
                 definition.description().unwrap_or_default().to_string(),
-                definition.action_library().clone(),
+                definition.shared_action_library_handle(),
             )
         };
         self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {

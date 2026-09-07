@@ -1034,14 +1034,14 @@ fn contact_callbacks_reuse_the_definition_action_library() {
     let object = spawn_fixture!(engine, "CALL");
     let index = engine.test_object_index(object);
 
-    CONTACT_ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(0));
+    ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(0));
     PARTICLE_DEF_NAME_REBUILDS.with(|count| count.set(0));
     SET_VERTEX_DEFINITION_METADATA_DEEP_CLONES.with(|count| count.set(0));
     crate::TestValueExt::test_value(
         engine.dispatch_contact_callbacks(index, MovementContactDispatch::Direct(CNAT_BOTTOM)),
     );
     assert_eq!(
-        CONTACT_ACTION_LIBRARY_DEEP_CLONES.with(Cell::get),
+        ACTION_LIBRARY_DEEP_CLONES.with(Cell::get),
         0,
         "contact dispatch shares immutable definition metadata"
     );

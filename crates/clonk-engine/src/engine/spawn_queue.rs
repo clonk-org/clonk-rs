@@ -259,7 +259,7 @@ impl Engine {
                 .get(&definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
             (
-                definition_ref.action_library().clone(),
+                definition_ref.shared_action_library_handle(),
                 definition_ref.category(),
                 definition_ref.default_action_state(),
                 definition_ref.shape_vertices().to_vec(),
@@ -1072,11 +1072,11 @@ impl Engine {
                         self.materials.len(),
                         owner_color,
                     );
-                    definition.action_library().clone()
+                    definition.shared_action_library_handle()
                 } else {
                     self.definitions
                         .get(&object.definition_id)
-                        .map(|definition| definition.action_library().clone())
+                        .map(|definition| definition.shared_action_library_handle())
                         .unwrap_or_else(|| action_library.clone())
                 };
                 if change_def.is_some() {
@@ -1482,11 +1482,11 @@ impl Engine {
                         self.materials.len(),
                         owner_color,
                     );
-                    definition.action_library().clone()
+                    definition.shared_action_library_handle()
                 } else {
                     self.definitions
                         .get(&object.definition_id)
-                        .map(|definition| definition.action_library().clone())
+                        .map(|definition| definition.shared_action_library_handle())
                         .unwrap_or_else(|| action_library.clone())
                 };
                 if change_def.is_some() {

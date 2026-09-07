@@ -29,7 +29,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = definition.action_library().clone();
+        let action_library = definition.shared_action_library_handle();
         let world =
             self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.command_buy_value(
@@ -95,7 +95,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = definition.action_library().clone();
+        let action_library = definition.shared_action_library_handle();
         let world =
             self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.command_buy_item(
@@ -160,7 +160,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = definition.action_library().clone();
+        let action_library = definition.shared_action_library_handle();
         let world =
             self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.command_sell_item(
@@ -231,7 +231,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = definition.action_library().clone();
+        let action_library = definition.shared_action_library_handle();
         let world =
             self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.incinerate_object(
@@ -1905,7 +1905,7 @@ impl Engine {
                     let action_library = self
                         .definitions
                         .get(&host_definition_id)
-                        .map(|definition| definition.action_library().clone())
+                        .map(|definition| definition.shared_action_library_handle())
                         .unwrap_or_default();
                     let state_snapshot = self.objects[current_idx].script_state_snapshot();
                     let rng_state = self.rng.clone();
@@ -2845,7 +2845,7 @@ impl Engine {
         let Some((library, incomplete_activity)) =
             self.definitions.get(&definition_id).map(|definition| {
                 (
-                    definition.action_library().clone(),
+                    definition.shared_action_library_handle(),
                     definition.incomplete_activity(),
                 )
             })
@@ -2935,7 +2935,7 @@ impl Engine {
         let definition_id = self.objects[idx].definition_id.clone();
         let library = self.definitions.get(&definition_id).map(|definition| {
             (
-                definition.action_library().clone(),
+                definition.shared_action_library_handle(),
                 definition.incomplete_activity(),
             )
         });

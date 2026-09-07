@@ -42,7 +42,7 @@ impl Engine {
                             crew_member_value: definition.crew_member_value(),
                             silent_commands: definition.silent_commands(),
                             vehicle_control: definition.vehicle_control(),
-                            action_library: definition.action_library().clone().into(),
+                            action_library: definition.shared_action_library_handle(),
                             control_transfer_callback: definition.control_transfer_callback(),
                             action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),

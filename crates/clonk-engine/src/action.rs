@@ -621,8 +621,32 @@ impl ActionProcedure {
     }
 }
 
+/// Zero-sized witness that a whole [`ActionLibrary`] was deep-copied. The
+/// ActMap is load-time data shared through [`SharedActionLibrary`] handles;
+/// deriving `Clone` clones this field with the rest so tests can pin that
+/// no per-frame path copies the maps.
+#[derive(Debug, Default)]
+pub(crate) struct ActionLibraryCloneProbe;
+
+impl Clone for ActionLibraryCloneProbe {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        crate::ACTION_LIBRARY_DEEP_CLONES.with(|count| count.set(count.get() + 1));
+        Self
+    }
+}
+
+impl PartialEq for ActionLibraryCloneProbe {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ActionLibraryCloneProbe {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionLibrary {
+    clone_probe: ActionLibraryCloneProbe,
     default: String,
     /// Deliberately still on `RandomState` even though `spec_for_entry` probes
     /// it on the hot path: `chop_action`
@@ -694,6 +718,7 @@ impl ActionLibrary {
         }
 
         Self {
+            clone_probe: ActionLibraryCloneProbe,
             default,
             specs,
             declared,

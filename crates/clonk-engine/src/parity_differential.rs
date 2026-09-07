@@ -10556,8 +10556,7 @@ global func ReadEffectCallStrict3ReferenceValue() { return(callback_value); }
             .definitions
             .get(&definition_id)
             .expect("movement fixture definition")
-            .action_library()
-            .clone();
+            .shared_action_library_handle();
         engine
             .exec_object_movement(index, &action_library, &definition_id, &[])
             .expect("movement fixture step");
@@ -11640,8 +11639,7 @@ protected func ContactBottom()
             .definitions
             .get(&definition_id)
             .expect("movement handoff definition remains")
-            .action_library()
-            .clone();
+            .shared_action_library_handle();
         let (_, trace) = engine
             .parity_exec_object_movement(object_index, &action_library, &definition_id, &[])
             .expect("movement handoff full DoMovement succeeds");
