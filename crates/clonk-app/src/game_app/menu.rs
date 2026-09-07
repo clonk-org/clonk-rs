@@ -4957,7 +4957,7 @@ impl GameApp {
         // precisely because the default is to drop it.
         self.pending_host_rejoin = None;
         // C4Game::Clear starts the fade before tearing down game state.
-        self.fade_out_game_music();
+        self.sound.fade_out_game_music();
         if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             audio.stop_lobby_elevator();

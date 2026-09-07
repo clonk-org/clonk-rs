@@ -3103,7 +3103,7 @@ impl GameApp {
         if let Some(material_groups) = material_groups {
             self.network_material_resource_groups = Some(material_groups);
         }
-        self.fade_out_game_music();
+        self.sound.fade_out_game_music();
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
         let title = legacy_presentation_text(join_data.parameters.title.as_bytes());
         let scenario = FrontendScenario {
@@ -6249,7 +6249,7 @@ impl GameApp {
             if !classic_start {
                 self.play_ui_sound("Click");
             }
-            self.fade_out_game_music();
+            self.sound.fade_out_game_music();
             self.status_text.clear();
             let (sender, receiver) = mpsc::channel();
             if use_lobby_preload {

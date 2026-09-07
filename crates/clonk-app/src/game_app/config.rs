@@ -995,10 +995,10 @@ impl GameApp {
                     SoundSheetAction::TestSound(sound) => self.play_options_test_sound(sound),
                     SoundSheetAction::CheckboxChanged { id, checked } => match id {
                         SoundCheckboxId::FrontendMusic => {
-                            self.set_frontend_music_option(checked)?;
+                            self.sound.set_frontend_music_option(checked)?;
                         }
                         SoundCheckboxId::FrontendSoundEffects => {
-                            self.set_frontend_sound_option(checked)?;
+                            self.sound.set_frontend_sound_option(checked)?;
                         }
                         SoundCheckboxId::GameMusic => {
                             self.set_startup_game_music_option(checked)?;
