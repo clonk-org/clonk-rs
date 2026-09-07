@@ -27,7 +27,7 @@ fn resource_rank_extension_errors_remain_deferred_through_engine_definition() {
         engine
             .definitions
             .get("DRNK")
-            .and_then(Definition::rank_names),
+            .and_then(|definition| definition.rank_names()),
     );
     assert_eq!(names.get(0).as_deref(), Some("Recruit"));
     assert!(

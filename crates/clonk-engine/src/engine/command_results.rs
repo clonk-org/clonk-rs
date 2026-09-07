@@ -1369,7 +1369,7 @@ impl Engine {
         let silent_commands = self
             .definitions
             .get(&self.objects[actor_index].definition_id)
-            .is_some_and(Definition::silent_commands);
+            .is_some_and(|definition| definition.silent_commands());
         if silent_commands {
             return Ok(());
         }

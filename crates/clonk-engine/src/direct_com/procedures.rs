@@ -743,7 +743,7 @@ impl Engine {
             let collection_limit = self
                 .definitions
                 .get(&self.objects[clonk_index].definition_id)
-                .map_or(0, crate::Definition::collection_limit);
+                .map_or(0, |definition| definition.collection_limit());
             let contents_count = self.objects[clonk_index]
                 .state
                 .contents

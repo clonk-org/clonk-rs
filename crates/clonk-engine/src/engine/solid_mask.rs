@@ -429,7 +429,7 @@ impl Engine {
         mover: &mut Object,
         before: &mut [Object],
         after: &mut [Object],
-        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
         materials: &MaterialSet,
         mass_movers: &mut MassMoverSet,
         landscape: &mut Landscape,
@@ -2578,7 +2578,7 @@ impl Engine {
         let collection_limit = self
             .definitions
             .get(&self.objects[target_index].definition_id)
-            .map_or(0, Definition::collection_limit);
+            .map_or(0, |definition| definition.collection_limit());
         let contents_count = self.objects[target_index]
             .state
             .contents
@@ -2827,7 +2827,7 @@ impl Engine {
             let collection_limit = self
                 .definitions
                 .get(&self.objects[index].definition_id)
-                .map_or(0, Definition::collection_limit);
+                .map_or(0, |definition| definition.collection_limit());
             crate::collection_limit_reached(collection_limit, contents_count)
         });
         if collection_limit_reached {

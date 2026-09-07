@@ -216,8 +216,26 @@ pub struct DefinitionComponent {
     pub count: i32,
 }
 
+/// Zero-sized witness that a whole [`Definition`] was deep-copied.
+///
+/// A definition is a load-time artefact: its script tree, DefCore tables and
+/// graphics are immutable while the round runs, so simulation code shares
+/// handles instead of copying. Deriving `Clone` clones this field with the
+/// rest, which lets tests pin that no per-frame path copies a definition.
+#[derive(Debug, Default)]
+pub(crate) struct DefinitionCloneProbe;
+
+impl Clone for DefinitionCloneProbe {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        crate::DEFINITION_DEEP_CLONES.with(|count| count.set(count.get() + 1));
+        Self
+    }
+}
+
 #[derive(Clone)]
 pub struct Definition {
+    clone_probe: DefinitionCloneProbe,
     pub(crate) id: DefinitionId,
     pub(crate) name: String,
     /// DefCore `Version` / C4Def::rC4XVer (src/C4Def.h:190).
@@ -596,6 +614,7 @@ impl Definition {
         // Rc-based GlobalNamed table).
         #[allow(clippy::arc_with_non_send_sync)]
         Ok(Self {
+            clone_probe: DefinitionCloneProbe,
             source_path: None,
             resource_backed: false,
             movement_profile_override: false,

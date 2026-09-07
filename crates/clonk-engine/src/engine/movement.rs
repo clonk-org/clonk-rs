@@ -1046,7 +1046,7 @@ impl Engine {
         let no_horizontal_move = self
             .definitions
             .get(&self.objects[idx].definition_id)
-            .map(Definition::no_horizontal_move)
+            .map(|definition| definition.no_horizontal_move())
             .unwrap_or(0);
         if no_horizontal_move != 0 {
             let object = &mut self.objects[idx];
@@ -1176,7 +1176,7 @@ impl Engine {
             if let Some(action_library) = self
                 .definitions
                 .get(&definition_id)
-                .map(Definition::shared_action_library_handle)
+                .map(|definition| definition.shared_action_library_handle())
             {
                 self.apply_no_attach_action(idx, &definition_id, &action_library)?;
             }

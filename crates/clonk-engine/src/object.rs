@@ -3262,7 +3262,7 @@ impl Object {
         materials: &MaterialSet,
         mut landscape: Option<&mut Landscape>,
         action_library: &ActionLibrary,
-        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
         players: &HashMap<i32, Player>,
     ) -> CommandQueueOutcome {
         #[cfg(test)]
@@ -3312,7 +3312,7 @@ impl Object {
             }
             let current_action_library = definitions
                 .get(&self.definition_id)
-                .map(Definition::action_library)
+                .map(|definition| definition.action_library())
                 .unwrap_or(action_library);
             let delta_outcome = self.apply_delta(&delta, current_action_library);
             let callbacks_dispatched = delta

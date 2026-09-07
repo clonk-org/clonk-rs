@@ -95,7 +95,7 @@ impl Engine {
                     if let Some(action_library) = self
                         .definitions
                         .get(&callback_definition_id)
-                        .map(Definition::shared_action_library_handle)
+                        .map(|definition| definition.shared_action_library_handle())
                     {
                         let _ = tolerate_script_error(self.call_movement_object_function(
                             target_idx,
@@ -123,7 +123,7 @@ impl Engine {
             let lift_top = self
                 .definitions
                 .get(&definition_id)
-                .map(Definition::lift_top)
+                .map(|definition| definition.lift_top())
                 .unwrap_or(0);
             let should_call = lift_top != 0
                 && object.state.command_direction == CommandDirection::Up
@@ -137,7 +137,7 @@ impl Engine {
                 if let Some(action_library) = self
                     .definitions
                     .get(&definition_id)
-                    .map(Definition::shared_action_library_handle)
+                    .map(|definition| definition.shared_action_library_handle())
                 {
                     let _ = tolerate_script_error(self.call_movement_object_function(
                         lifter_idx,
@@ -174,7 +174,7 @@ impl Engine {
         let Some(action_library) = self
             .definitions
             .get(definition_id)
-            .map(Definition::action_library)
+            .map(|definition| definition.action_library())
         else {
             return;
         };
@@ -673,7 +673,7 @@ impl Engine {
         let target_mass = self
             .definitions
             .get(&self.objects[target_idx].definition_id)
-            .map(Definition::mass)
+            .map(|definition| definition.mass())
             .unwrap_or(100);
         let target_mass = if target_mass == 0 { 1 } else { target_mass };
         let delta = (i64::from(level) * i64::from(build_speed) * 150) / i64::from(target_mass);
@@ -2697,7 +2697,7 @@ impl Engine {
         let target_allows_incomplete_activity = self
             .definitions
             .get(&self.objects[target_idx].definition_id)
-            .is_some_and(Definition::incomplete_activity);
+            .is_some_and(|definition| definition.incomplete_activity());
         if target_is_incomplete && !target_allows_incomplete_activity {
             let _ = tolerate_script_error(self.action_with_calls(idx, definition_id, "Idle"))?;
             return Ok(false);
@@ -3459,7 +3459,7 @@ impl Engine {
         let no_horizontal_move = self
             .definitions
             .get(&self.objects[target_idx].definition_id)
-            .map(Definition::no_horizontal_move)
+            .map(|definition| definition.no_horizontal_move())
             .unwrap_or(0);
         if self.frame.is_multiple_of(35) && txdir.is_nonzero() && no_horizontal_move == 0 {
             let target_id = self.objects[target_idx].id;

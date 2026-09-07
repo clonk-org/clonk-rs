@@ -423,7 +423,7 @@ impl Engine {
         let smoke_rate = self
             .definitions
             .get(&object.definition_id)
-            .map_or(0, Definition::smoke_rate);
+            .map_or(0, |definition| definition.smoke_rate());
         // `if (smoke_rate)` — SmokeRate=0 opts out, and guards the divide.
         if smoke_rate == 0 {
             return;
@@ -502,9 +502,9 @@ impl Engine {
             fire_mode,
             def_width: def_shape.width,
             def_height: def_shape.height,
-            fire_top: definition.map_or(0, Definition::fire_top),
+            fire_top: definition.map_or(0, |definition| definition.fire_top()),
             con: object.state.construction,
-            growth_type: definition.is_some_and(Definition::stretch_growth),
+            growth_type: definition.is_some_and(|definition| definition.stretch_growth()),
             x: object.state.position.x,
             y: object.state.position.y,
             shape_x: shape.x,
@@ -595,7 +595,7 @@ impl Engine {
             return Ok(());
         };
         let definition = self.definitions.get(&self.objects[idx].definition_id);
-        let oversize = definition.is_some_and(Definition::oversize);
+        let oversize = definition.is_some_and(|definition| definition.oversize());
         let definition_components = definition
             .map(|definition| {
                 definition
@@ -650,7 +650,7 @@ impl Engine {
             let incomplete_activity = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
-                .is_some_and(Definition::incomplete_activity);
+                .is_some_and(|definition| definition.incomplete_activity());
             if !incomplete_activity {
                 while let Some(parent_index) = self.find_object_index(object_id) {
                     let Some(child) = self.objects[parent_index]
@@ -725,7 +725,7 @@ impl Engine {
             let definition_height = self
                 .definitions
                 .get(&self.objects[index].definition_id)
-                .and_then(Definition::shape_rect)
+                .and_then(|definition| definition.shape_rect())
                 .map_or(0, |shape| shape.height);
             let current_position = self.objects[index].state.position;
             let current_shape = self.objects[index].current_shape_rect();
@@ -1245,7 +1245,7 @@ impl Engine {
                 && self
                     .definitions
                     .get(&object.definition_id)
-                    .is_some_and(Definition::base_auto_sell)
+                    .is_some_and(|definition| definition.base_auto_sell())
         })
     }
 
@@ -1627,7 +1627,7 @@ impl Engine {
                 let rank_base = self
                     .definitions
                     .get(&definition_id)
-                    .and_then(Definition::rank_base)
+                    .and_then(|definition| definition.rank_base())
                     .unwrap_or(1_000);
                 fair_crew_physical(info_definition, self.fair_crew_strength, rank_base)
             }
@@ -2685,7 +2685,7 @@ impl Engine {
         let action_library = self
             .definitions
             .get(&definition_id)
-            .map(Definition::shared_action_library_handle)
+            .map(|definition| definition.shared_action_library_handle())
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         Ok((definition_id, action_library))
     }
