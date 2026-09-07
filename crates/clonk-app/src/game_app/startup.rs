@@ -524,7 +524,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || !matches!(
                 self.startup.view,
                 StartupView::MainMenu
@@ -764,8 +764,8 @@ impl GameApp {
             && self.dialogs.messages.is_empty()
             && self.context_menus.open.is_none()
             && self.definition_selector.is_none()
-            && self.game_option_input_dialog.is_none()
-            && self.league_signup_dialog.is_none()
+            && self.dialogs.game_option_input.is_none()
+            && self.dialogs.league_signup.is_none()
     }
 
     pub(crate) fn startup_options_dialog_is_active(&self) -> bool {
@@ -954,7 +954,7 @@ impl GameApp {
         actions: Vec<MainMenuAction>,
         play_activation_sound: bool,
     ) -> Result<(), EngineError> {
-        if self.game_over_dialog.is_some() {
+        if self.dialogs.game_over.is_some() {
             return Ok(());
         }
         for action in actions {
@@ -2994,9 +2994,9 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::PlayerSelection
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.startup.player_properties_dialog.is_some()
-            || self.game_option_input_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
             || self.definition_selector.is_some()
             || self.context_menus.open.is_some()
         {
@@ -3099,7 +3099,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::MainMenu
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
         {
             return Ok(false);
         }
@@ -4746,7 +4746,7 @@ impl GameApp {
         .with_max_text(75)
         .with_input_text(&initial_text);
         self.startup_tooltip.pointer_left();
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::StartupCrew(
                 PendingCrewInputAction::SetDeathMessage { index },
             ),
@@ -5129,14 +5129,14 @@ impl GameApp {
         self.chat.running = None;
         self.dialogs.client_list = None;
         self.dialogs.stack.clear();
-        self.running_active_dialog = None;
+        self.dialogs.running_active = None;
         self.dialogs.client_list_consumed_keys.clear();
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         self.message_input_history.clear();
         self.close_context_menu_silently();
         self.abort_startup_crew_rename();
         self.startup.player_properties_dialog = None;
-        self.game_option_input_dialog = None;
+        self.dialogs.game_option_input = None;
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
@@ -5529,8 +5529,8 @@ impl GameApp {
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             || self.definition_selector.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.league_signup_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
+            || self.dialogs.league_signup.is_some()
             || self.startup.options_advanced_dialog.is_some()
             || self.chat.external_dialog_visible
             || self.dialogs.client_list.is_some()
@@ -5599,8 +5599,8 @@ impl GameApp {
                     && self.dialogs.client_list.is_none()
                     && self.context_menus.open.is_none()
                     && self.definition_selector.is_none()
-                    && self.game_option_input_dialog.is_none()
-                    && self.league_signup_dialog.is_none()
+                    && self.dialogs.game_option_input.is_none()
+                    && self.dialogs.league_signup.is_none()
                     && self.dialogs.messages.is_empty()
                     && self.startup.player_properties_dialog.is_none()
                     && !self.chat.external_dialog_visible
@@ -5727,7 +5727,7 @@ impl GameApp {
     }
 
     pub(crate) fn preflight_startup_presentation(&self) -> Result<()> {
-        if self.game_over_dialog.is_some() {
+        if self.dialogs.game_over.is_some() {
             return Err(anyhow::Error::new(report_classic_parity_boundary(
                 ClassicParityBoundary::StartupGameOver {
                     view: self.startup.view,

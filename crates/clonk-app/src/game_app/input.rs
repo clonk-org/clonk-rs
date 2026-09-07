@@ -57,10 +57,10 @@ impl GameApp {
         }
         self.console_mode
             || self.mode == AppMode::Menu
-            || (self.game_option_input_dialog.is_some()
+            || (self.dialogs.game_option_input.is_some()
                 && (self.running_chat_controller().is_none()
                     || self.running_chat_keyboard_active()))
-            || self.league_signup_dialog.is_some()
+            || self.dialogs.league_signup.is_some()
             || (self.chat.external_dialog_visible
                 && (self.mode != AppMode::Running
                     || self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)))
@@ -87,14 +87,15 @@ impl GameApp {
         if !self.dialogs.messages.is_empty() && !self.running_chat_active() {
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             if self.context_menus.open.is_none() {
                 let mut encoded = [0_u8; 4];
                 let text = character.encode_utf8(&mut encoded);
                 let layout = self.league_signup_layout();
                 let fonts = self.assets.clonk_fonts.clone();
                 let actions = self
-                    .league_signup_dialog
+                    .dialogs
+                    .league_signup
                     .as_mut()
                     .map(|dialog| match (layout.as_ref(), fonts.as_deref()) {
                         (Some(layout), Some(fonts)) => dialog
@@ -156,7 +157,7 @@ impl GameApp {
             self.process_startup_player_properties_actions(actions);
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some()
+        if self.dialogs.game_option_input.is_some()
             && self.context_menus.open.is_none()
             && (self.running_chat_controller().is_none() || self.running_chat_keyboard_active())
         {
@@ -169,7 +170,8 @@ impl GameApp {
             let mut encoded = [0_u8; 4];
             let input = character.encode_utf8(&mut encoded);
             let actions = self
-                .game_option_input_dialog
+                .dialogs
+                .game_option_input
                 .as_mut()
                 .map(|dialog| {
                     dialog
@@ -420,7 +422,7 @@ impl GameApp {
         } else if !self.dialogs.messages.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             return Ok(());
         }
         let runtime_client_info_only = self
@@ -554,7 +556,7 @@ impl GameApp {
                 }
             }
         }
-        if self.game_option_input_dialog.is_some()
+        if self.dialogs.game_option_input.is_some()
             && self.game_option_input_owns_running_pointer_event()
             && top_default_target.is_none()
         {
@@ -591,7 +593,7 @@ impl GameApp {
                                 let surface = self.rendering.graphics.surface();
                                 (surface.width(), surface.height())
                             };
-                            if let Some(dialog) = self.game_over_dialog.as_mut() {
+                            if let Some(dialog) = self.dialogs.game_over.as_mut() {
                                 dialog.handle_pointer_move(point.x, point.y, width, height);
                                 dialog.handle_wheel(native_delta, width, height);
                             }
@@ -1014,7 +1016,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.league_signup_dialog.is_none() {
+        if self.dialogs.league_signup.is_none() {
             return Ok(false);
         }
         if self.context_menus.open.is_some() {
@@ -1036,7 +1038,8 @@ impl GameApp {
         let actions = match state {
             ElementState::Pressed if hotkey_modifiers => context_menu_hotkey(key)
                 .and_then(|character| {
-                    self.league_signup_dialog
+                    self.dialogs
+                        .league_signup
                         .as_mut()
                         .map(|dialog| dialog.controller.handle_hotkey(character))
                 })
@@ -1071,7 +1074,7 @@ impl GameApp {
                             .as_ref()
                             .zip(fonts.as_deref())
                             .and_then(|(layout, fonts)| {
-                                self.league_signup_dialog.as_mut().map(|dialog| {
+                                self.dialogs.league_signup.as_mut().map(|dialog| {
                                     dialog.controller.handle_clipboard_shortcut(
                                         shortcut,
                                         clipboard.as_deref(),
@@ -1089,7 +1092,7 @@ impl GameApp {
                 layout
                     .as_ref()
                     .and_then(|layout| {
-                        self.league_signup_dialog.as_ref().map(|dialog| {
+                        self.dialogs.league_signup.as_ref().map(|dialog| {
                             dialog
                                 .controller
                                 .request_context_menu_from_key(clipboard_text_available(), layout)
@@ -1108,7 +1111,8 @@ impl GameApp {
                     _ => None,
                 };
                 if let Some(edit_key) = edit_key {
-                    self.league_signup_dialog
+                    self.dialogs
+                        .league_signup
                         .as_mut()
                         .map(|dialog| match (layout.as_ref(), fonts.as_deref()) {
                             (Some(layout), Some(fonts)) => {
@@ -1123,7 +1127,8 @@ impl GameApp {
                         })
                         .unwrap_or_default()
                 } else if let Some(gui_key) = league_signup_dialog_key_code(key, c4_modifiers) {
-                    self.league_signup_dialog
+                    self.dialogs
+                        .league_signup
                         .as_mut()
                         .map(|dialog| dialog.controller.handle_key_down(gui_key, modifiers.shift))
                         .unwrap_or_default()
@@ -1133,7 +1138,8 @@ impl GameApp {
             }
             ElementState::Released => league_signup_dialog_key_code(key, c4_modifiers)
                 .and_then(|gui_key| {
-                    self.league_signup_dialog
+                    self.dialogs
+                        .league_signup
                         .as_mut()
                         .map(|dialog| dialog.controller.handle_key_up(gui_key))
                 })
@@ -1300,7 +1306,7 @@ impl GameApp {
 
     pub(crate) fn network_chart_elevated_owns_input(&self) -> bool {
         self.dialogs.chart_elevated
-            && self.message_dialog_active_index.is_none()
+            && self.dialogs.message_active_index.is_none()
             && !self.running_chat_active()
     }
 
@@ -1623,7 +1629,7 @@ impl GameApp {
     }
 
     fn local_player_key_binding_owner_in_scope(&self, key: VirtualKeyCode) -> Option<i32> {
-        if self.game_over_dialog.is_some()
+        if self.dialogs.game_over.is_some()
             || (self.runtime_gui_has_keyboard_focus() && !self.dialogs.chart_elevated)
             || self.runtime_top_default_dialog_is_exclusive()
         {
@@ -1733,7 +1739,7 @@ impl GameApp {
             return true;
         }
         matches!(
-            self.running_active_dialog,
+            self.dialogs.running_active,
             Some(RunningDialogStackEntry::Message(_))
         ) && self.running_shared_gui_has_keyboard_focus()
     }
@@ -1750,7 +1756,8 @@ impl GameApp {
             dialog.pointer_left();
         }
         let game_over_sounds = self
-            .game_over_dialog
+            .dialogs
+            .game_over
             .as_mut()
             .map(|dialog| {
                 dialog.pointer_left();
@@ -1831,7 +1838,7 @@ impl GameApp {
         for entry in stack.into_iter().rev() {
             match entry {
                 RunningDialogStackEntry::Scoreboard => {
-                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    let captured = global_drag_open && self.dialogs.running_active == Some(entry);
                     if captured || self.scoreboard_pointer_target(point)?.is_some() {
                         return Ok(Some(entry));
                     }
@@ -1840,7 +1847,7 @@ impl GameApp {
                     let Some(index) = self.running_message_index(stack_id) else {
                         continue;
                     };
-                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    let captured = global_drag_open && self.dialogs.running_active == Some(entry);
                     let hit = self
                         .message_dialog_layout_at(index)
                         .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout));
@@ -1849,13 +1856,13 @@ impl GameApp {
                     }
                 }
                 RunningDialogStackEntry::RuntimeClientList => {
-                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    let captured = global_drag_open && self.dialogs.running_active == Some(entry);
                     if captured || self.runtime_client_list_contains_point(point) {
                         return Ok(Some(entry));
                     }
                 }
                 RunningDialogStackEntry::Chat => {
-                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    let captured = global_drag_open && self.dialogs.running_active == Some(entry);
                     let hit = self
                         .game_option_input_layout()
                         .is_some_and(|layout| Self::point_in_input_dialog_bounds(point, &layout));
@@ -1871,7 +1878,7 @@ impl GameApp {
     fn running_shared_pointer_capture_open(&self) -> bool {
         self.dialogs.scoreboard_close_pointer_capture
             || self.dialogs.scoreboard_runtime.title_drag.is_some()
-            || self.message_dialog_pointer_capture_index.is_some()
+            || self.dialogs.message_pointer_capture_index.is_some()
             || self
                 .dialogs
                 .client_list
@@ -1942,7 +1949,7 @@ impl GameApp {
                 };
                 self.scoreboard_pointer_occluded();
                 if self.live_input.primary_left_down {
-                    self.message_dialog_active_index = Some(index);
+                    self.dialogs.message_active_index = Some(index);
                     self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
                 }
                 for other in 0..self.dialogs.messages.len() {
@@ -2001,7 +2008,7 @@ impl GameApp {
                 };
                 if state == ElementState::Pressed {
                     self.scoreboard_pointer_left();
-                    self.message_dialog_active_index = Some(index);
+                    self.dialogs.message_active_index = Some(index);
                     self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
                 } else if self.dialogs.scoreboard_close_pointer_capture
                     || self.dialogs.scoreboard_runtime.title_drag.is_some()
@@ -2091,7 +2098,7 @@ impl GameApp {
         if self.running_chat_active() && !modifiers.contains(ModifiersState::ALT) {
             return true;
         }
-        if self.game_option_input_dialog.is_some()
+        if self.dialogs.game_option_input.is_some()
             && modifiers.is_empty()
             && map_key_code(key).is_some()
         {
@@ -2200,7 +2207,7 @@ impl GameApp {
         if self.context_menus.open.is_none()
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             && self.dialogs.messages.is_empty()
-            && self.game_option_input_dialog.is_none()
+            && self.dialogs.game_option_input.is_none()
         {
             return Ok(false);
         }
@@ -2241,7 +2248,7 @@ impl GameApp {
             }
         };
         if !c4_modifiers.is_empty() && !custom_binding {
-            if self.game_over_dialog.is_some()
+            if self.dialogs.game_over.is_some()
                 || self.context_menus.open.is_some()
                 || (self.dialogs.client_list.is_some() && c4_modifiers == ModifiersState::SHIFT)
             {
@@ -2251,7 +2258,7 @@ impl GameApp {
         }
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
-        if (self.game_over_dialog.is_some() || self.dialogs.client_list.is_some())
+        if (self.dialogs.game_over.is_some() || self.dialogs.client_list.is_some())
             && self.context_menus.open.is_some()
         {
             // Context rejects Tab and suppresses the game-over DlgKeyCB. The
@@ -2303,7 +2310,8 @@ impl GameApp {
         self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
             || self.game_over_dialog_contains_point(point)
             || self
-                .game_over_dialog
+                .dialogs
+                .game_over
                 .as_ref()
                 .is_some_and(GameOverState::has_pointer_capture)
     }
@@ -2316,17 +2324,17 @@ impl GameApp {
                 .as_ref()
                 .is_some_and(|dialog| !dialog.is_info_only())
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
-            && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
-            && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+            && self.dialogs.running_active == Some(RunningDialogStackEntry::RuntimeClientList)
+            && (self.dialogs.game_over.is_none() || self.dialogs.client_list_above_game_over)
             && self.context_menus.open.is_none()
     }
 
     pub(crate) fn game_over_dialog_is_mouse_active(&self) -> bool {
         self.mode == AppMode::Running
-            && self.game_over_dialog.is_some()
+            && self.dialogs.game_over.is_some()
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
             && self.dialogs.messages.is_empty()
-            && self.game_option_input_dialog.is_none()
+            && self.dialogs.game_option_input.is_none()
             && self.definition_selector.is_none()
             && self
                 .network_start_wait
@@ -2364,9 +2372,9 @@ impl GameApp {
             .as_ref()
             .is_some_and(|dialog| dialog.is_info_only());
         if self.mode == AppMode::Running {
-            let active = self.running_active_dialog
+            let active = self.dialogs.running_active
                 == Some(RunningDialogStackEntry::RuntimeClientList)
-                && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+                && (self.dialogs.game_over.is_none() || self.dialogs.client_list_above_game_over)
                 && self.context_menus.open.is_none();
             if !active {
                 return Ok(false);
@@ -2868,7 +2876,7 @@ impl GameApp {
             return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
         }
         if pause_binding {
-            if state == ElementState::Released || self.game_over_dialog.is_some() {
+            if state == ElementState::Released || self.dialogs.game_over.is_some() {
                 return Ok(RuntimeGlobalKeyOutcome::Handled);
             }
             self.toggle_runtime_pause();
@@ -2932,7 +2940,8 @@ impl GameApp {
                 .then(|| startup_dialog_hotkey(key))
                 .flatten()
                 .and_then(|hotkey| {
-                    self.game_over_dialog
+                    self.dialogs
+                        .game_over
                         .as_ref()
                         .and_then(|dialog| dialog.hotkey_action(hotkey))
                 })
@@ -2942,7 +2951,7 @@ impl GameApp {
             && unmodified_arrow
             && matches!(key, VirtualKeyCode::ArrowUp | VirtualKeyCode::ArrowDown)
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
-            && self.game_over_dialog.as_ref().is_some_and(|dialog| {
+            && self.dialogs.game_over.as_ref().is_some_and(|dialog| {
                 matches!(dialog.focused(), Some(GameOverFocus::PlayerList(_)))
             });
         let active_vote_hotkey = dialog_callbacks_active
@@ -3008,7 +3017,7 @@ impl GameApp {
                 )
             });
         let ownerless_fullscreen = self.viewports.primary_physical_viewport_is_no_owner();
-        let fullscreen_menu_binding = self.game_over_dialog.is_none()
+        let fullscreen_menu_binding = self.dialogs.game_over.is_none()
             && self.running_chat_controller().is_none()
             && if self.ingame_menu_belongs_to(OWNER_NONE)
                 || (ownerless_fullscreen && self.ingame_menus.players.is_some())
@@ -3248,7 +3257,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if !matches!(self.mode, AppMode::Running)
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.running_chat_controller().is_some()
         {
             return Ok(false);
@@ -3349,7 +3358,7 @@ impl GameApp {
     ) -> Option<RuntimeCustomGamepadAction> {
         if !matches!(self.mode, AppMode::Running)
             || self.running_chat_active()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.chat.external_dialog_visible
         {
             return None;
@@ -3685,7 +3694,7 @@ impl GameApp {
                 }
             }
             RuntimeCustomGamepadAction::Abort => {
-                if self.game_over_dialog.is_none() {
+                if self.dialogs.game_over.is_none() {
                     let dialog_owner = if self.viewports.primary_physical_viewport_is_no_owner() {
                         OWNER_NONE
                     } else {
@@ -3938,7 +3947,7 @@ impl GameApp {
             return Ok(());
         }
         if state == ElementState::Released
-            && self.game_option_input_dialog.is_none()
+            && self.dialogs.game_option_input.is_none()
             && self.game_option_input_consumed_keys.remove(&key)
         {
             // A context/button action may close the top input dialog on
@@ -3997,7 +4006,7 @@ impl GameApp {
         if self.handle_message_dialog_key(key, state)? {
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() && self.context_menus.open.is_some() {
+        if self.dialogs.league_signup.is_some() && self.context_menus.open.is_some() {
             let modifiers = self.live_input.modifiers
                 & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if modifiers.is_empty() {
@@ -4379,7 +4388,8 @@ impl GameApp {
             {
                 if state == ElementState::Pressed {
                     let action = startup_dialog_hotkey(key).and_then(|hotkey| {
-                        self.game_over_dialog
+                        self.dialogs
+                            .game_over
                             .as_ref()
                             .and_then(|dialog| dialog.hotkey_action(hotkey))
                     });
@@ -4399,7 +4409,7 @@ impl GameApp {
                 (VirtualKeyCode::Tab, modifiers, ElementState::Pressed)
                     if modifiers.is_empty() || modifiers == ModifiersState::SHIFT =>
                 {
-                    if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    if let Some(dialog) = self.dialogs.game_over.as_mut() {
                         dialog.advance_focus(modifiers == ModifiersState::SHIFT);
                     }
                 }
@@ -4410,7 +4420,7 @@ impl GameApp {
                 }
                 (VirtualKeyCode::Enter, modifiers, event_state)
                     if modifiers.is_empty()
-                        && self.game_over_dialog.as_ref().is_some_and(|dialog| {
+                        && self.dialogs.game_over.as_ref().is_some_and(|dialog| {
                             !matches!(
                                 dialog.focused(),
                                 Some(GameOverFocus::Close | GameOverFocus::Button(_))
@@ -4425,11 +4435,12 @@ impl GameApp {
                 (VirtualKeyCode::Enter, modifiers, ElementState::Pressed)
                     if modifiers.is_empty() =>
                 {
-                    let captured = self.game_over_dialog.as_mut().is_some_and(|dialog| {
+                    let captured = self.dialogs.game_over.as_mut().is_some_and(|dialog| {
                         dialog.handle_activation_down(GameOverActivationKey::Confirm)
                     });
                     let sounds = self
-                        .game_over_dialog
+                        .dialogs
+                        .game_over
                         .as_mut()
                         .map(GameOverState::take_sound_events)
                         .unwrap_or_default();
@@ -4441,11 +4452,12 @@ impl GameApp {
                 (VirtualKeyCode::Enter, modifiers, ElementState::Released)
                     if modifiers.is_empty() =>
                 {
-                    let action = self.game_over_dialog.as_mut().and_then(|dialog| {
+                    let action = self.dialogs.game_over.as_mut().and_then(|dialog| {
                         dialog.handle_activation_up(GameOverActivationKey::Confirm)
                     });
                     let sounds = self
-                        .game_over_dialog
+                        .dialogs
+                        .game_over
                         .as_mut()
                         .map(GameOverState::take_sound_events)
                         .unwrap_or_default();
@@ -4457,11 +4469,12 @@ impl GameApp {
                 (VirtualKeyCode::Space, modifiers, ElementState::Pressed)
                     if modifiers.is_empty() =>
                 {
-                    if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    if let Some(dialog) = self.dialogs.game_over.as_mut() {
                         dialog.handle_activation_down(GameOverActivationKey::Space);
                     }
                     let sounds = self
-                        .game_over_dialog
+                        .dialogs
+                        .game_over
                         .as_mut()
                         .map(GameOverState::take_sound_events)
                         .unwrap_or_default();
@@ -4470,11 +4483,12 @@ impl GameApp {
                 (VirtualKeyCode::Space, modifiers, ElementState::Released)
                     if modifiers.is_empty() =>
                 {
-                    let action = self.game_over_dialog.as_mut().and_then(|dialog| {
+                    let action = self.dialogs.game_over.as_mut().and_then(|dialog| {
                         dialog.handle_activation_up(GameOverActivationKey::Space)
                     });
                     let sounds = self
-                        .game_over_dialog
+                        .dialogs
+                        .game_over
                         .as_mut()
                         .map(GameOverState::take_sound_events)
                         .unwrap_or_default();
@@ -4486,7 +4500,8 @@ impl GameApp {
                 (VirtualKeyCode::Escape, modifiers, ElementState::Pressed)
                     if modifiers.is_empty()
                         && self
-                            .game_over_dialog
+                            .dialogs
+                            .game_over
                             .as_ref()
                             .is_some_and(GameOverState::allows_escape_close) =>
                 {
@@ -4539,7 +4554,7 @@ impl GameApp {
 
         match self.mode {
             AppMode::Menu => {
-                if self.game_over_dialog.is_some() {
+                if self.dialogs.game_over.is_some() {
                     if state == ElementState::Pressed
                         && matches!(
                             key,
@@ -5354,7 +5369,7 @@ impl GameApp {
         }
         let modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
-        let Some(dialog) = self.game_over_dialog.as_ref() else {
+        let Some(dialog) = self.dialogs.game_over.as_ref() else {
             return false;
         };
         if modifiers == ModifiersState::ALT
@@ -5553,7 +5568,7 @@ impl GameApp {
                 ClusterOwner::ContextPending
             } else if self.message_dialog_owns_gamepad_input() {
                 ClusterOwner::Message
-            } else if self.league_signup_dialog.is_some() {
+            } else if self.dialogs.league_signup.is_some() {
                 ClusterOwner::LeagueSignup
             } else if self.runtime_client_list_keyboard_active()
                 && self
@@ -5570,7 +5585,7 @@ impl GameApp {
                 ClusterOwner::Suppressed
             } else if self.definition_selector.is_some() {
                 ClusterOwner::Definition
-            } else if self.game_option_input_dialog.is_some() {
+            } else if self.dialogs.game_option_input.is_some() {
                 ClusterOwner::Input
             } else if self.startup.player_properties_dialog.is_some() {
                 if eligible_gamepad_gui {
@@ -5698,9 +5713,9 @@ impl GameApp {
                                         .is_some_and(|dialog| dialog.is_info_only())
                                 {
                                     ClusterOwner::RuntimeClientInfo
-                                } else if self.game_option_input_dialog.is_some() {
+                                } else if self.dialogs.game_option_input.is_some() {
                                     ClusterOwner::Input
-                                } else if self.league_signup_dialog.is_some() {
+                                } else if self.dialogs.league_signup.is_some() {
                                     ClusterOwner::LeagueSignup
                                 } else if self.startup.player_properties_dialog.is_some() {
                                     if eligible_gamepad_gui {
@@ -6035,8 +6050,8 @@ impl GameApp {
                 if let Some(dialog) = self.dialogs.messages.get_mut(active_index) {
                     dialog.state.cancel_interaction();
                 }
-                if self.message_dialog_pointer_capture_index == Some(active_index) {
-                    self.message_dialog_pointer_capture_index = None;
+                if self.dialogs.message_pointer_capture_index == Some(active_index) {
+                    self.dialogs.message_pointer_capture_index = None;
                 }
                 None
             }
@@ -6065,7 +6080,8 @@ impl GameApp {
         event: GamepadEvent,
     ) -> Result<(), EngineError> {
         let actions = self
-            .league_signup_dialog
+            .dialogs
+            .league_signup
             .as_mut()
             .map(|dialog| match event {
                 GamepadEvent::Direction {
@@ -6131,11 +6147,12 @@ impl GameApp {
                 state: ElementState::Pressed,
                 ..
             } => {
-                let captured = self.game_over_dialog.as_mut().is_some_and(|dialog| {
+                let captured = self.dialogs.game_over.as_mut().is_some_and(|dialog| {
                     dialog.handle_activation_down(GameOverActivationKey::Confirm)
                 });
                 let sounds = self
-                    .game_over_dialog
+                    .dialogs
+                    .game_over
                     .as_mut()
                     .map(GameOverState::take_sound_events)
                     .unwrap_or_default();
@@ -6150,12 +6167,13 @@ impl GameApp {
                 state: ElementState::Released,
                 ..
             } => {
-                let action = self
-                    .game_over_dialog
-                    .as_mut()
-                    .and_then(|dialog| dialog.handle_activation_up(GameOverActivationKey::Confirm));
+                let action =
+                    self.dialogs.game_over.as_mut().and_then(|dialog| {
+                        dialog.handle_activation_up(GameOverActivationKey::Confirm)
+                    });
                 let sounds = self
-                    .game_over_dialog
+                    .dialogs
+                    .game_over
                     .as_mut()
                     .map(GameOverState::take_sound_events)
                     .unwrap_or_default();
@@ -6171,7 +6189,8 @@ impl GameApp {
                 ..
             } => {
                 if self
-                    .game_over_dialog
+                    .dialogs
+                    .game_over
                     .as_ref()
                     .is_some_and(GameOverState::allows_escape_close)
                 {
@@ -6184,7 +6203,7 @@ impl GameApp {
                 state: ElementState::Pressed,
                 ..
             } => {
-                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                if let Some(dialog) = self.dialogs.game_over.as_mut() {
                     dialog.advance_focus(true);
                 }
                 Ok(())
@@ -6194,13 +6213,13 @@ impl GameApp {
                 state: ElementState::Pressed,
                 ..
             } => {
-                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                if let Some(dialog) = self.dialogs.game_over.as_mut() {
                     dialog.advance_focus(false);
                 }
                 Ok(())
             }
             GamepadEvent::Clear { .. } => {
-                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                if let Some(dialog) = self.dialogs.game_over.as_mut() {
                     dialog.cancel_interaction();
                 }
                 Ok(())
@@ -7165,7 +7184,7 @@ impl GameApp {
     }
 
     fn handle_league_signup_pointer_move(&mut self, point: GuiPoint) -> Result<bool, EngineError> {
-        if self.league_signup_dialog.is_none() {
+        if self.dialogs.league_signup.is_none() {
             return Ok(false);
         }
         self.league_signup_pointer_position = Some(point);
@@ -7175,7 +7194,7 @@ impl GameApp {
             .as_ref()
             .and_then(|layout| {
                 fonts.as_deref().and_then(|fonts| {
-                    self.league_signup_dialog.as_mut().map(|dialog| {
+                    self.dialogs.league_signup.as_mut().map(|dialog| {
                         dialog
                             .controller
                             .handle_pointer_move(point, layout, &fonts.text)
@@ -7189,7 +7208,8 @@ impl GameApp {
 
     fn league_signup_pointer_left(&mut self, clear_position: bool) {
         let sounds = self
-            .league_signup_dialog
+            .dialogs
+            .league_signup
             .as_mut()
             .map(|dialog| {
                 dialog.controller.pointer_left();
@@ -7213,7 +7233,7 @@ impl GameApp {
         state: ElementState,
         left_double_click: bool,
     ) -> Result<bool, EngineError> {
-        if self.league_signup_dialog.is_none() {
+        if self.dialogs.league_signup.is_none() {
             return Ok(false);
         }
         let Some(point) = self
@@ -7228,7 +7248,8 @@ impl GameApp {
         };
         let fonts = self.assets.clonk_fonts.clone();
         let actions = self
-            .league_signup_dialog
+            .dialogs
+            .league_signup
             .as_mut()
             .map(|dialog| match state {
                 ElementState::Pressed => fonts.as_deref().map_or_else(Vec::new, |fonts| {
@@ -7334,7 +7355,8 @@ impl GameApp {
         }
         if self.context_menus.open.is_some()
             && self
-                .game_option_input_dialog
+                .dialogs
+                .game_option_input
                 .as_ref()
                 .is_some_and(|dialog| dialog.controller.has_positional_pointer_drag())
         {
@@ -7345,7 +7367,7 @@ impl GameApp {
                 .as_ref()
                 .zip(fonts.as_deref())
                 .and_then(|(layout, fonts)| {
-                    self.game_option_input_dialog.as_mut().map(|dialog| {
+                    self.dialogs.game_option_input.as_mut().map(|dialog| {
                         dialog
                             .controller
                             .handle_pointer_move(point, layout, &fonts.text)
@@ -7413,7 +7435,7 @@ impl GameApp {
                     .as_ref()
                     .zip(fonts.as_deref())
                     .and_then(|(layout, fonts)| {
-                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                        self.dialogs.game_option_input.as_mut().map(|dialog| {
                             dialog
                                 .controller
                                 .handle_pointer_move(point, layout, &fonts.text)
@@ -7444,7 +7466,7 @@ impl GameApp {
                     });
                     if target_is_hit {
                         self.set_running_chat_active(false);
-                        self.message_dialog_active_index = message_target;
+                        self.dialogs.message_active_index = message_target;
                     }
                 }
                 for index in 0..self.dialogs.messages.len() {
@@ -7491,7 +7513,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if self.league_signup_dialog.is_some() && self.context_menus.open.is_some() {
+        if self.dialogs.league_signup.is_some() && self.context_menus.open.is_some() {
             self.league_signup_pointer_position = Some(point);
             if !context_routed_before_running_dialogs
                 && self.handle_context_menu_pointer_move(point)?
@@ -7591,7 +7613,7 @@ impl GameApp {
             return Ok(());
         }
         if !context_routed_before_running_dialogs && self.handle_context_menu_pointer_move(point)? {
-            if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
                 dialog.controller.pointer_left();
                 let sounds = dialog.controller.take_sound_events();
                 self.play_input_dialog_sound_events(sounds);
@@ -7599,7 +7621,7 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some()
+        if self.dialogs.game_option_input.is_some()
             && self.game_option_input_owns_running_pointer_event()
         {
             self.game_option_input_pointer_position = Some(point);
@@ -7609,7 +7631,7 @@ impl GameApp {
                 .as_ref()
                 .zip(fonts.as_deref())
                 .and_then(|(layout, fonts)| {
-                    self.game_option_input_dialog.as_mut().map(|dialog| {
+                    self.dialogs.game_option_input.as_mut().map(|dialog| {
                         dialog
                             .controller
                             .handle_pointer_move(point, layout, &fonts.text)
@@ -7644,7 +7666,7 @@ impl GameApp {
         }
         match self.mode {
             AppMode::Menu => {
-                if self.game_over_dialog.is_some() {
+                if self.dialogs.game_over.is_some() {
                     self.pointer_left_unchecked();
                     return Ok(());
                 }
@@ -7854,8 +7876,8 @@ impl GameApp {
             || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menus.open.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
+            || self.dialogs.game_over.is_some()
             || self.dialogs.scoreboard_close_pointer_capture
         {
             return false;
@@ -7886,8 +7908,8 @@ impl GameApp {
             && self.startup.player_properties_dialog.is_none()
             && self.definition_selector.is_none()
             && self.context_menus.open.is_none()
-            && self.game_option_input_dialog.is_none()
-            && self.game_over_dialog.is_none()
+            && self.dialogs.game_option_input.is_none()
+            && self.dialogs.game_over.is_none()
             && !self.dialogs.scoreboard_close_pointer_capture
             && !self.ingame_edge_cursor_active()
     }
@@ -7913,7 +7935,7 @@ impl GameApp {
                 self.network_start_wait
                     .as_ref()
                     .is_some_and(|wait| wait.visible)
-                    || self.league_signup_dialog.is_some()
+                    || self.dialogs.league_signup.is_some()
                     || !self.dialogs.messages.is_empty()
             }
             AppMode::Running => self.live_input.gui_mouse_owned,
@@ -8019,8 +8041,8 @@ impl GameApp {
             || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menus.open.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
+            || self.dialogs.game_over.is_some()
             || self.dialogs.chart_pointer_capture
         {
             return Ok(false);
@@ -9317,11 +9339,12 @@ impl GameApp {
                     if self.game_over_pointer_route_hit(point) {
                         let surface = self.rendering.graphics.surface();
                         let (width, height) = (surface.width(), surface.height());
-                        if let Some(dialog) = self.game_over_dialog.as_mut() {
+                        if let Some(dialog) = self.dialogs.game_over.as_mut() {
                             dialog.handle_pointer_move(point.x, point.y, width, height);
                         }
                         let sounds = self
-                            .game_over_dialog
+                            .dialogs
+                            .game_over
                             .as_mut()
                             .map(GameOverState::take_sound_events)
                             .unwrap_or_default();
@@ -9413,7 +9436,7 @@ impl GameApp {
         } else if !self.dialogs.messages.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             if self
                 .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Right)?
             {
@@ -9428,7 +9451,7 @@ impl GameApp {
                 let actions = point
                     .zip(layout.as_ref())
                     .and_then(|(point, layout)| {
-                        self.league_signup_dialog.as_mut().map(|dialog| {
+                        self.dialogs.league_signup.as_mut().map(|dialog| {
                             dialog.controller.request_context_menu_at(
                                 point,
                                 clipboard_text_available(),
@@ -9497,14 +9520,14 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some()
+        if self.dialogs.game_option_input.is_some()
             && self.game_option_input_owns_running_pointer_event()
         {
             if button_state == ElementState::Pressed {
                 let point = self.game_option_input_pointer_position;
                 let layout = self.game_option_input_layout();
                 let outcome = point.zip(layout.as_ref()).and_then(|(point, layout)| {
-                    self.game_option_input_dialog.as_mut().map(|dialog| {
+                    self.dialogs.game_option_input.as_mut().map(|dialog| {
                         dialog.controller.request_context_menu_at(
                             point,
                             layout,
@@ -9661,7 +9684,7 @@ impl GameApp {
                     .is_some_and(|(point, layout)| {
                         Self::point_in_input_dialog_bounds(point, layout)
                     });
-            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+            self.game_option_input_pointer_capture = (self.dialogs.game_option_input.is_some()
                 && self.context_menus.open.is_none()
                 && if self.running_chat_controller().is_some() {
                     chat_hit
@@ -9737,7 +9760,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             if self
                 .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)?
             {
@@ -9755,7 +9778,7 @@ impl GameApp {
                     .zip(layout.as_ref())
                     .zip(fonts.as_deref())
                     .and_then(|((point, layout), fonts)| {
-                        self.league_signup_dialog.as_mut().map(|dialog| {
+                        self.dialogs.league_signup.as_mut().map(|dialog| {
                             dialog.controller.handle_pointer_middle_down(
                                 point,
                                 primary.as_deref(),
@@ -9806,7 +9829,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some()
+        if self.dialogs.game_option_input.is_some()
             && self.game_option_input_owns_running_pointer_event()
         {
             if button_state == ElementState::Pressed {
@@ -9818,7 +9841,7 @@ impl GameApp {
                     .ok();
                 let outcome = point.zip(layout.as_ref()).zip(fonts.as_deref()).and_then(
                     |((point, layout), fonts)| {
-                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                        self.dialogs.game_option_input.as_mut().map(|dialog| {
                             dialog.controller.handle_pointer_middle_down(
                                 point,
                                 primary.as_deref(),
@@ -10791,10 +10814,10 @@ impl GameApp {
             // topmost selector itself may acquire this latch.
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.dialogs.messages.is_empty();
-            self.league_signup_pointer_capture = self.league_signup_dialog.is_some()
+            self.league_signup_pointer_capture = self.dialogs.league_signup.is_some()
                 && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty();
-            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+            self.game_option_input_pointer_capture = (self.dialogs.game_option_input.is_some()
                 && self.running_chat_controller().is_none()
                 && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty())
@@ -10914,7 +10937,7 @@ impl GameApp {
             if self.handle_message_dialog_pointer_button(button_state)? {
                 if button_state == ElementState::Pressed {
                     self.set_running_chat_active(false);
-                    self.message_dialog_active_index = message_hit;
+                    self.dialogs.message_active_index = message_hit;
                     if let Some(controller) = self.running_chat_controller_mut() {
                         controller.pointer_left();
                     }
@@ -10941,7 +10964,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             if self.context_menus.open.is_some() {
                 if self.handle_context_menu_pointer_button(
                     button_state,
@@ -11146,7 +11169,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some()
+        if self.dialogs.game_option_input.is_some()
             && self.game_option_input_owns_running_pointer_event()
         {
             self.handle_game_option_input_primary_pointer(button_state)?;
@@ -11187,7 +11210,7 @@ impl GameApp {
         }
         match self.mode {
             AppMode::Menu => {
-                if self.game_over_dialog.is_some() {
+                if self.dialogs.game_over.is_some() {
                     if button_state == ElementState::Released {
                         self.dismiss_game_over_dialog();
                     }
@@ -11733,10 +11756,10 @@ impl GameApp {
         if phase == TouchPhase::Started {
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.dialogs.messages.is_empty();
-            self.league_signup_pointer_capture = self.league_signup_dialog.is_some()
+            self.league_signup_pointer_capture = self.dialogs.league_signup.is_some()
                 && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty();
-            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+            self.game_option_input_pointer_capture = (self.dialogs.game_option_input.is_some()
                 && self.context_menus.open.is_none()
                 && (self.dialogs.messages.is_empty() || self.running_chat_controller().is_some()))
             .then_some(ContextMenuPointerButton::Left);
@@ -11866,7 +11889,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             self.league_signup_pointer_position =
                 (!matches!(phase, TouchPhase::Cancelled)).then_some(position);
             if phase == TouchPhase::Cancelled {
@@ -11901,7 +11924,8 @@ impl GameApp {
             let actions = layout
                 .as_ref()
                 .and_then(|layout| {
-                    self.league_signup_dialog
+                    self.dialogs
+                        .league_signup
                         .as_mut()
                         .map(|dialog| match phase {
                             TouchPhase::Started => {
@@ -12096,7 +12120,7 @@ impl GameApp {
                 }
             }
         }
-        if self.game_option_input_dialog.is_some() {
+        if self.dialogs.game_option_input.is_some() {
             self.game_option_input_pointer_position = Some(position);
             let layout = self.game_option_input_layout();
             let fonts = self.assets.clonk_fonts.clone();
@@ -12104,7 +12128,8 @@ impl GameApp {
                 .as_ref()
                 .zip(fonts.as_deref())
                 .and_then(|(layout, fonts)| {
-                    self.game_option_input_dialog
+                    self.dialogs
+                        .game_option_input
                         .as_mut()
                         .map(|dialog| match phase {
                             TouchPhase::Started => {
@@ -12132,7 +12157,8 @@ impl GameApp {
             self.finish_game_option_input_dialog_actions(actions)?;
             if phase == TouchPhase::Started {
                 self.game_option_input_pointer_capture = self
-                    .game_option_input_dialog
+                    .dialogs
+                    .game_option_input
                     .as_ref()
                     .is_some_and(|dialog| dialog.controller.has_pointer_capture())
                     .then_some(ContextMenuPointerButton::Left);
@@ -12201,20 +12227,21 @@ impl GameApp {
                                 (surface.width(), surface.height())
                             };
                             if !matches!(phase, TouchPhase::Cancelled) {
-                                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                                if let Some(dialog) = self.dialogs.game_over.as_mut() {
                                     dialog
                                         .handle_pointer_move(position.x, position.y, width, height);
                                 }
                             }
                             let action = match phase {
                                 TouchPhase::Started => {
-                                    if let Some(dialog) = self.game_over_dialog.as_mut() {
+                                    if let Some(dialog) = self.dialogs.game_over.as_mut() {
                                         dialog.handle_pointer_down(width, height);
                                     }
                                     None
                                 }
                                 TouchPhase::Ended => self
-                                    .game_over_dialog
+                                    .dialogs
+                                    .game_over
                                     .as_mut()
                                     .and_then(|dialog| dialog.handle_pointer_up(width, height)),
                                 TouchPhase::Cancelled => {
@@ -12224,7 +12251,8 @@ impl GameApp {
                                 TouchPhase::Moved => None,
                             };
                             let sounds = self
-                                .game_over_dialog
+                                .dialogs
+                                .game_over
                                 .as_mut()
                                 .map(GameOverState::take_sound_events)
                                 .unwrap_or_default();
@@ -12290,7 +12318,7 @@ impl GameApp {
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_touch(phase, position, left_double_click);
         }
-        if self.game_over_dialog.is_some() {
+        if self.dialogs.game_over.is_some() {
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                 self.dismiss_game_over_dialog();
             }
@@ -12634,7 +12662,7 @@ impl GameApp {
         {
             return;
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             if let Some(menu) = self.context_menus.open.as_mut() {
                 let _ = menu.handle_pointer_left();
             }
@@ -12691,7 +12719,7 @@ impl GameApp {
         if let Some(menu) = self.context_menus.open.as_mut() {
             let _ = menu.handle_pointer_left();
         }
-        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
             dialog.controller.pointer_left();
             let sounds = dialog.controller.take_sound_events();
             self.play_input_dialog_sound_events(sounds);
@@ -12709,7 +12737,7 @@ impl GameApp {
             }
             return;
         }
-        if let Some(dialog) = self.game_over_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.game_over.as_mut() {
             dialog.pointer_left();
             let sounds = dialog.take_sound_events();
             self.play_game_over_sound_events(sounds);
@@ -12805,7 +12833,7 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
-        if self.game_over_dialog.is_some() || self.definition_selector.is_some() {
+        if self.dialogs.game_over.is_some() || self.definition_selector.is_some() {
             return Ok(());
         }
         if self.mode != AppMode::Menu
@@ -12921,7 +12949,7 @@ impl GameApp {
             if self.running_chat_controller().is_some() {
                 self.game_option_input_consumed_keys.insert(key);
             } else {
-                self.message_dialog_consumed_keys.insert(key);
+                self.dialogs.message_consumed_keys.insert(key);
             }
         }
         self.process_context_menu_outcome(outcome)?;
@@ -13081,7 +13109,8 @@ impl GameApp {
             None
         };
         let actions = self
-            .game_option_input_dialog
+            .dialogs
+            .game_option_input
             .as_mut()
             .map(|dialog| {
                 dialog.controller.apply_context_command(
@@ -13112,7 +13141,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.dialogs.messages.is_empty() {
-            if state == ElementState::Released && self.message_dialog_consumed_keys.remove(&key) {
+            if state == ElementState::Released && self.dialogs.message_consumed_keys.remove(&key) {
                 return Ok(true);
             }
             return Ok(false);
@@ -13161,7 +13190,7 @@ impl GameApp {
             || (key == VirtualKeyCode::Tab && c4_modifiers == ModifiersState::SHIFT);
         if !hotkey_modifiers && !normal_modifiers {
             if state == ElementState::Released {
-                self.message_dialog_consumed_keys.remove(&key);
+                self.dialogs.message_consumed_keys.remove(&key);
             }
             return Ok(true);
         }
@@ -13196,10 +13225,10 @@ impl GameApp {
         }
         match state {
             ElementState::Pressed => {
-                self.message_dialog_consumed_keys.insert(key);
+                self.dialogs.message_consumed_keys.insert(key);
             }
             ElementState::Released => {
-                self.message_dialog_consumed_keys.remove(&key);
+                self.dialogs.message_consumed_keys.remove(&key);
             }
         }
         let backwards = c4_modifiers == ModifiersState::SHIFT;
@@ -13242,7 +13271,7 @@ impl GameApp {
             dialog.state.cancel_pointer_capture();
             sounds.extend(dialog.state.take_sound_events());
         }
-        self.message_dialog_pointer_capture_index = None;
+        self.dialogs.message_pointer_capture_index = None;
         self.play_message_dialog_sound_events(sounds);
     }
 
@@ -13256,8 +13285,8 @@ impl GameApp {
                 dialog.state.take_sound_events()
             })
             .unwrap_or_default();
-        if self.message_dialog_pointer_capture_index == Some(index) {
-            self.message_dialog_pointer_capture_index = None;
+        if self.dialogs.message_pointer_capture_index == Some(index) {
+            self.dialogs.message_pointer_capture_index = None;
         }
         self.play_message_dialog_sound_events(sounds);
     }
@@ -13275,7 +13304,7 @@ impl GameApp {
             self.stop_message_dialog_pointer_drag_at(index, point);
         } else if let Some(dialog) = self.dialogs.messages.get_mut(index) {
             dialog.state.cancel_pointer_capture();
-            self.message_dialog_pointer_capture_index = None;
+            self.dialogs.message_pointer_capture_index = None;
         }
     }
 
@@ -13283,7 +13312,7 @@ impl GameApp {
         if let Some(dialog) = self.dialogs.messages.get_mut(index) {
             dialog.state.stop_pointer_drag_at(point);
         }
-        self.message_dialog_pointer_capture_index = None;
+        self.dialogs.message_pointer_capture_index = None;
     }
 
     fn handle_message_dialog_pointer_move_at(&mut self, index: usize, point: GuiPoint) -> bool {
@@ -13325,7 +13354,7 @@ impl GameApp {
                     .message_dialog_layout_at(target)
                     .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout));
                 if target_is_hit {
-                    self.message_dialog_active_index = Some(target);
+                    self.dialogs.message_active_index = Some(target);
                     let stack_id = self.dialogs.messages[target].running_stack_id;
                     self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
                 }
@@ -13385,14 +13414,14 @@ impl GameApp {
             .unwrap_or_default();
         match state {
             ElementState::Pressed if captures_pointer => {
-                self.message_dialog_pointer_capture_index = Some(index);
+                self.dialogs.message_pointer_capture_index = Some(index);
             }
             ElementState::Pressed => {
-                self.message_dialog_pointer_capture_index = None;
+                self.dialogs.message_pointer_capture_index = None;
             }
             ElementState::Released => {
-                if self.message_dialog_pointer_capture_index == Some(index) {
-                    self.message_dialog_pointer_capture_index = None;
+                if self.dialogs.message_pointer_capture_index == Some(index) {
+                    self.dialogs.message_pointer_capture_index = None;
                 }
             }
         }
@@ -13435,7 +13464,7 @@ impl GameApp {
             && self.mode == AppMode::Running
             && hit_index == Some(target_index)
         {
-            self.message_dialog_active_index = Some(target_index);
+            self.dialogs.message_active_index = Some(target_index);
             let stack_id = self.dialogs.messages[target_index].running_stack_id;
             self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
         }
@@ -13449,11 +13478,11 @@ impl GameApp {
                 .as_ref()
                 .is_some_and(|dialog| dialog.is_info_only())
                 && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
-                && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
-                && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+                && self.dialogs.running_active == Some(RunningDialogStackEntry::RuntimeClientList)
+                && (self.dialogs.game_over.is_none() || self.dialogs.client_list_above_game_over)
                 && self.context_menus.open.is_none()
         } else {
-            (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+            (self.dialogs.game_over.is_none() || self.dialogs.client_list_above_game_over)
                 && self.dialogs.messages.is_empty()
                 && self.context_menus.open.is_none()
         }
@@ -13461,7 +13490,7 @@ impl GameApp {
 
     pub(crate) fn runtime_client_list_mouse_active(&self) -> bool {
         if self.mode == AppMode::Running {
-            (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+            (self.dialogs.game_over.is_none() || self.dialogs.client_list_above_game_over)
                 && self.context_menus.open.is_none()
         } else {
             self.runtime_client_list_keyboard_active()

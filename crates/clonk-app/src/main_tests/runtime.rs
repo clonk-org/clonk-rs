@@ -8876,7 +8876,7 @@ fn runtime_f1_help_toggles_beneath_nonmatching_running_layers() {
     let mut game_over = new_game_over_keyboard_app();
     game_over.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(game_over.dialogs.help_visible);
-    assert!(game_over.game_over_dialog.is_some());
+    assert!(game_over.dialogs.game_over.is_some());
 
     let mut message = new_classic_running_sandbox_app();
     message
@@ -9285,7 +9285,7 @@ fn runtime_pause_applies_direct_script_halt_and_toggle_requests() {
     runtime_assert_eq!(game_over.offline_halt_count => 1, "evaluation keeps the halt acquired by C4GameOverDlg::OnShown");
     game_over.test_modifiers(ModifiersState::ALT);
     game_over.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-    assert!(game_over.game_over_dialog.is_none());
+    assert!(game_over.dialogs.game_over.is_none());
     game_over.test_update();
     assert_eq!(game_over.offline_halt_count, 0);
 }

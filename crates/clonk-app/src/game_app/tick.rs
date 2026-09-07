@@ -88,7 +88,7 @@ impl GameApp {
                 // the game-over and halt returns below; Toggle's own dialog
                 // guard discards it while evaluation is visible.
                 self.apply_engine_pause_game_requests();
-                if self.game_over_dialog.is_some() {
+                if self.dialogs.game_over.is_some() {
                     return Ok(());
                 }
                 if self.pending_league_end.is_some() {

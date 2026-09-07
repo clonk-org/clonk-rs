@@ -3531,12 +3531,12 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     app.open_options_menu();
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenGraphicsScaleText])
         .test_value();
-    app.game_option_input_dialog
+    app.dialogs.game_option_input
         .test_mut()
         .controller
         .set_input_text("225");
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 225);
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 225, false)));
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| dialog.state.message().contains("12 seconds")));

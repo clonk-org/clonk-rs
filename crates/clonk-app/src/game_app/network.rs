@@ -224,7 +224,8 @@ impl GameApp {
         use clonk_frontend::league_signup::{LeagueSignupAction, LeagueSignupMode};
 
         let sounds = self
-            .league_signup_dialog
+            .dialogs
+            .league_signup
             .as_mut()
             .map(|dialog| dialog.controller.take_sound_events())
             .unwrap_or_default();
@@ -288,7 +289,7 @@ impl GameApp {
                                 .as_ref()
                                 .zip(fonts.as_deref())
                                 .and_then(|(layout, fonts)| {
-                                    self.league_signup_dialog.as_mut().map(|dialog| {
+                                    self.dialogs.league_signup.as_mut().map(|dialog| {
                                         dialog.controller.confirm_clipboard_cut(
                                             field,
                                             layout,
@@ -307,7 +308,7 @@ impl GameApp {
                 }
                 LeagueSignupAction::ValidationFailed(failure) => {
                     self.league_signup_pointer_capture = false;
-                    if let Some(dialog) = self.league_signup_dialog.as_mut() {
+                    if let Some(dialog) = self.dialogs.league_signup.as_mut() {
                         dialog.controller.cancel_interaction();
                     }
                     self.push_message_dialog(
@@ -320,7 +321,7 @@ impl GameApp {
                     )?;
                 }
                 LeagueSignupAction::Submitted(submission) => {
-                    let Some(pending) = self.league_signup_dialog.take() else {
+                    let Some(pending) = self.dialogs.league_signup.take() else {
                         break;
                     };
                     self.league_signup_pointer_capture = false;
@@ -354,7 +355,7 @@ impl GameApp {
                     break;
                 }
                 LeagueSignupAction::Aborted { caption, message } => {
-                    let Some(pending) = self.league_signup_dialog.take() else {
+                    let Some(pending) = self.dialogs.league_signup.take() else {
                         break;
                     };
                     self.league_signup_pointer_capture = false;
@@ -593,7 +594,7 @@ impl GameApp {
         &mut self,
         continuation: LeaguePlayerAuthContinuation,
     ) -> Result<LeaguePlayerAuthStatus, EngineError> {
-        if self.pending_league_player_auth.is_some() || self.league_signup_dialog.is_some() {
+        if self.pending_league_player_auth.is_some() || self.dialogs.league_signup.is_some() {
             tracing::warn!("refusing to replace an in-flight league player authentication");
             return Ok(LeaguePlayerAuthStatus::Completed(false));
         }
@@ -1162,7 +1163,7 @@ impl GameApp {
     /// fullscreen Escape binding is reachable during play, and the callback
     /// is conditional on the chart still being the active top dialog.
     pub(crate) fn runtime_modal_above_network_chart(&self) -> bool {
-        self.league_signup_dialog.is_some()
+        self.dialogs.league_signup.is_some()
             || self.definition_selector.is_some()
             || self.startup.options_advanced_dialog.is_some()
             || self.startup.player_properties_dialog.is_some()
@@ -2178,7 +2179,7 @@ impl GameApp {
 
     pub(crate) fn runtime_client_list_owns_game_over(&self) -> bool {
         self.dialogs.client_list.is_some()
-            && self.game_over_dialog.is_some()
+            && self.dialogs.game_over.is_some()
             && self.runtime_default_dialog_is_above(
                 RuntimeDefaultDialog::ClientList,
                 RuntimeDefaultDialog::GameOver,
@@ -2518,7 +2519,7 @@ impl GameApp {
         if self.mode != AppMode::Running
             || self.network.is_none()
             || !self.network_control_running
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
         {
             return NetworkControlPacing::default();
         }
@@ -5233,7 +5234,7 @@ impl GameApp {
     pub(crate) fn league_signup_layout(
         &self,
     ) -> Option<clonk_frontend::league_signup::LeagueSignupLayout> {
-        let dialog = self.league_signup_dialog.as_ref()?;
+        let dialog = self.dialogs.league_signup.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.rendering.graphics.surface();
         Some(
@@ -5307,7 +5308,7 @@ impl GameApp {
         field: clonk_frontend::league_signup::LeagueSignupField,
         command: clonk_frontend::league_signup::LeagueSignupEditContextCommand,
     ) -> Result<(), EngineError> {
-        if self.league_signup_dialog.is_none() {
+        if self.dialogs.league_signup.is_none() {
             tracing::error!(?field, ?command, "stale league-signup context command");
             return Ok(());
         }
@@ -5327,7 +5328,7 @@ impl GameApp {
             .as_ref()
             .zip(fonts.as_deref())
             .and_then(|(layout, fonts)| {
-                self.league_signup_dialog.as_mut().map(|dialog| {
+                self.dialogs.league_signup.as_mut().map(|dialog| {
                     dialog.controller.apply_edit_context_command(
                         field,
                         command,
@@ -7477,7 +7478,7 @@ impl GameApp {
         // C4GameControl::ChangeToLocal preserves FrameCounter, ControlTick and
         // Game.Parameters while changing only the cadence to ControlRate=1
         // (C4GameControl.cpp:93-127).
-        let game_over_dialog_shown = self.game_over_dialog.is_some();
+        let game_over_dialog_shown = self.dialogs.game_over.is_some();
         let local_client = self.control_clients.state(local_client_id).cloned();
         // Continuing the round alone is the opposite of following the host, and
         // this path also leaves `self.network` empty — the very condition the
@@ -8854,7 +8855,7 @@ impl GameApp {
             legacy_presentation_text(&self.snapshot.round_results.network_result_message);
         let stream = self.league_record_stream_status();
         let is_host = matches!(self.network_mode, Some(NetworkMode::Host(_)));
-        self.game_over_dialog.as_mut().is_some_and(|dialog| {
+        self.dialogs.game_over.as_mut().is_some_and(|dialog| {
             dialog.update_network_result(
                 is_host,
                 &result_text,
@@ -9309,7 +9310,7 @@ impl GameApp {
             format!("{scenario_title}: {}", dialog.subtitle())
         };
         self.status_text = status_message;
-        self.game_over_dialog = Some(dialog);
+        self.dialogs.game_over = Some(dialog);
         self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
         // C4GameOverDlg::OnShown delegates to C4Game::Pause after closing the
         // scoreboard and player fullscreen menus. That routes through the
@@ -9756,7 +9757,7 @@ impl GameApp {
             return None;
         }
         let pointer = self.startup_tooltip.eligible_pointer()?;
-        let dialog = self.league_signup_dialog.as_ref()?;
+        let dialog = self.dialogs.league_signup.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let layout = dialog.controller.layout(width, height, &fonts.text);
         let text = dialog.controller.tooltip_at(pointer, &layout)?.to_owned();

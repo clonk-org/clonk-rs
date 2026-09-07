@@ -2408,7 +2408,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::NetworkLobby
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.context_menus.open.is_some()
         {
             return Ok(false);
@@ -2518,7 +2518,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::NetworkLobby
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.context_menus.open.is_some()
             || option == LobbyOptionKind::ControlMode
         {
@@ -7403,15 +7403,15 @@ impl GameApp {
         self.close_lobby_ready_check_continuation();
         self.release_message_dialog_pointer_elements();
         self.dialogs.messages.clear();
-        self.message_dialog_active_index = None;
-        self.message_dialog_pointer_capture_index = None;
-        self.message_dialog_consumed_keys.clear();
-        self.game_option_input_dialog = None;
+        self.dialogs.message_active_index = None;
+        self.dialogs.message_pointer_capture_index = None;
+        self.dialogs.message_consumed_keys.clear();
+        self.dialogs.game_option_input = None;
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
-        self.league_signup_dialog = None;
+        self.dialogs.league_signup = None;
         self.cancelled_league_signup_continuation = None;
         self.league_signup_consumed_keys.clear();
         self.league_signup_pointer_capture = false;
@@ -7797,8 +7797,8 @@ impl GameApp {
         })?;
         let active = self.context_menus.open.is_none()
             && self.definition_selector.is_none()
-            && self.game_option_input_dialog.is_none()
-            && self.league_signup_dialog.is_none()
+            && self.dialogs.game_option_input.is_none()
+            && self.dialogs.league_signup.is_none()
             && self.dialogs.messages.is_empty()
             && self.dialogs.client_list.is_none()
             && !self.chat.external_dialog_visible;
@@ -7834,8 +7834,8 @@ impl GameApp {
         })?;
         let active = self.context_menus.open.is_none()
             && self.definition_selector.is_none()
-            && self.game_option_input_dialog.is_none()
-            && self.league_signup_dialog.is_none()
+            && self.dialogs.game_option_input.is_none()
+            && self.dialogs.league_signup.is_none()
             && self.dialogs.messages.is_empty()
             && self.dialogs.client_list.is_none()
             && !self.chat.external_dialog_visible;

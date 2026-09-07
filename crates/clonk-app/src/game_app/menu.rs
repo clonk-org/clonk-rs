@@ -62,7 +62,7 @@ impl GameApp {
         // MouseInput carries no coordinates. Retain the application's last
         // pointer so a stationary cursor can click the newly opened dialog.
         self.league_signup_pointer_position = pointer_position;
-        self.league_signup_dialog = Some(PendingLeagueSignupDialog {
+        self.dialogs.league_signup = Some(PendingLeagueSignupDialog {
             controller: clonk_frontend::league_signup::LeagueSignupController::new(
                 config,
                 self.league_signup_strings(),
@@ -87,7 +87,7 @@ impl GameApp {
             InputDialogIcon::OPTIONS,
         );
         self.startup_tooltip.pointer_left();
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::ScenarioMissionAccess,
             controller,
         });
@@ -214,7 +214,7 @@ impl GameApp {
             RuntimeDefaultDialog::Scoreboard => self.dialogs.scoreboard.is_some(),
             RuntimeDefaultDialog::NetworkChart => self.dialogs.chart.is_some(),
             RuntimeDefaultDialog::ClientList => self.dialogs.client_list.is_some(),
-            RuntimeDefaultDialog::GameOver => self.game_over_dialog.is_some(),
+            RuntimeDefaultDialog::GameOver => self.dialogs.game_over.is_some(),
             RuntimeDefaultDialog::ExternalIrc => self.chat.external_dialog_visible,
         }
     }
@@ -300,7 +300,7 @@ impl GameApp {
             self.dialogs.chart_elevated =
                 !self.dialogs.messages.is_empty() || self.running_chat_controller().is_some();
             if self.dialogs.chart_elevated {
-                self.message_dialog_active_index = None;
+                self.dialogs.message_active_index = None;
                 self.set_running_chat_active(false);
             }
         } else {
@@ -325,15 +325,15 @@ impl GameApp {
         if dialog == RuntimeDefaultDialog::NetworkChart {
             self.dialogs.chart_elevated = false;
             if chart_owned_input {
-                match self.running_active_dialog {
+                match self.dialogs.running_active {
                     Some(RunningDialogStackEntry::Chat) if self.chat.running.is_some() => {
                         self.set_running_chat_active(true);
                     }
                     Some(RunningDialogStackEntry::Message(stack_id)) => {
-                        self.message_dialog_active_index = self.running_message_index(stack_id);
+                        self.dialogs.message_active_index = self.running_message_index(stack_id);
                     }
                     _ => {
-                        self.message_dialog_active_index = None;
+                        self.dialogs.message_active_index = None;
                     }
                 }
             }
@@ -383,11 +383,11 @@ impl GameApp {
             && self.context_menus.open.is_none()
             && !self.runtime_modal_above_network_chart()
             && (self.network_chart_elevated_owns_input()
-                || (self.dialogs.messages.is_empty() && self.game_option_input_dialog.is_none()))
+                || (self.dialogs.messages.is_empty() && self.dialogs.game_option_input.is_none()))
     }
 
     fn set_running_active_dialog(&mut self, entry: Option<RunningDialogStackEntry>) {
-        self.running_active_dialog = entry;
+        self.dialogs.running_active = entry;
         if let Some(chat) = self.chat.running.as_mut() {
             chat.active = entry == Some(RunningDialogStackEntry::Chat);
         }
@@ -413,7 +413,7 @@ impl GameApp {
     }
 
     pub(crate) fn remove_running_dialog(&mut self, entry: RunningDialogStackEntry) {
-        let was_named_active = self.running_active_dialog == Some(entry);
+        let was_named_active = self.dialogs.running_active == Some(entry);
         let chart_owned_input = self.network_chart_elevated_owns_input();
         let was_active = was_named_active && !chart_owned_input;
         if was_active {
@@ -429,7 +429,7 @@ impl GameApp {
             if self.dialogs.chart_elevated {
                 // Keep the shared Screen projection current without granting
                 // its successor input through the visually higher chart.
-                self.running_active_dialog = next;
+                self.dialogs.running_active = next;
             } else {
                 self.set_running_active_dialog(next);
             }
@@ -548,7 +548,7 @@ impl GameApp {
 
     pub(crate) fn game_over_dialog_contains_point(&self, point: GuiPoint) -> bool {
         let surface = self.rendering.graphics.surface();
-        self.game_over_dialog.as_ref().is_some_and(|dialog| {
+        self.dialogs.game_over.as_ref().is_some_and(|dialog| {
             dialog.classic_dialog_contains_point(
                 point.x,
                 point.y,
@@ -814,7 +814,7 @@ impl GameApp {
     /// screen dialog and capture its one offline `HaltCount` lease.
     pub(crate) fn show_abort_dialog(&mut self, _player: i32) -> bool {
         if !matches!(self.mode, AppMode::Running)
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.dialogs.messages.iter().any(|dialog| {
                 matches!(
                     dialog.continuation,
@@ -1842,7 +1842,7 @@ impl GameApp {
         &mut self,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if self.game_over_dialog.is_some() {
+        if self.dialogs.game_over.is_some() {
             if state == ElementState::Pressed {
                 self.handle_game_over_action(GameOverAction::End)?;
             }
@@ -2226,7 +2226,8 @@ impl GameApp {
                         .running_pointer
                         .is_some_and(|point| self.game_over_pointer_route_hit(point))
                         || self
-                            .game_over_dialog
+                            .dialogs
+                            .game_over
                             .as_ref()
                             .is_some_and(GameOverState::has_pointer_capture);
                     if !hit {
@@ -2237,7 +2238,8 @@ impl GameApp {
                             (surface.width(), surface.height())
                         };
                         let action =
-                            self.game_over_dialog
+                            self.dialogs
+                                .game_over
                                 .as_mut()
                                 .and_then(|dialog| match button_state {
                                     ElementState::Pressed => {
@@ -2249,7 +2251,8 @@ impl GameApp {
                                     }
                                 });
                         let sounds = self
-                            .game_over_dialog
+                            .dialogs
+                            .game_over
                             .as_mut()
                             .map(GameOverState::take_sound_events)
                             .unwrap_or_default();
@@ -3051,7 +3054,7 @@ impl GameApp {
             InputDialogIcon::LOCKED,
         );
         self.startup_tooltip.pointer_left();
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::NetworkJoinPassword,
             controller,
         });
@@ -3115,7 +3118,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::ScenarioBrowser
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.context_menus.open.is_some()
         {
             return Ok(false);
@@ -3977,7 +3980,7 @@ impl GameApp {
     }
 
     pub(crate) fn dismiss_game_over_dialog(&mut self) {
-        if self.game_over_dialog.take().is_some() {
+        if self.dialogs.game_over.take().is_some() {
             self.hide_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
             self.play_ui_sound("DoorClose");
             self.pointer_left_unchecked();
@@ -4124,7 +4127,7 @@ impl GameApp {
         });
         self.show_running_dialog(RunningDialogStackEntry::Message(running_stack_id));
         if !chat_above && !chart_stays_above {
-            self.message_dialog_active_index = self.dialogs.messages.len().checked_sub(1);
+            self.dialogs.message_active_index = self.dialogs.messages.len().checked_sub(1);
         }
         Ok(())
     }
@@ -4212,9 +4215,9 @@ impl GameApp {
             RunningDialogStackEntry::Message(self.dialogs.messages[index].running_stack_id);
         let was_active = if self.mode == AppMode::Running {
             !self.network_chart_elevated_owns_input()
-                && self.running_active_dialog == Some(removed_entry)
+                && self.dialogs.running_active == Some(removed_entry)
         } else {
-            self.message_dialog_active_index == Some(index)
+            self.dialogs.message_active_index == Some(index)
         };
         if was_active {
             self.release_message_dialog_pointer_elements();
@@ -4232,32 +4235,32 @@ impl GameApp {
         }
         let pending = self.dialogs.messages.remove(index);
         self.remove_running_dialog(removed_entry);
-        self.message_dialog_active_index = match self.message_dialog_active_index {
+        self.dialogs.message_active_index = match self.dialogs.message_active_index {
             Some(active) if active > index => Some(active - 1),
             Some(active) if active == index => None,
             active => active,
         };
-        self.message_dialog_pointer_capture_index = match self.message_dialog_pointer_capture_index
-        {
-            Some(captured) if captured > index => Some(captured - 1),
-            Some(captured) if captured == index => None,
-            captured => captured,
-        };
+        self.dialogs.message_pointer_capture_index =
+            match self.dialogs.message_pointer_capture_index {
+                Some(captured) if captured > index => Some(captured - 1),
+                Some(captured) if captured == index => None,
+                captured => captured,
+            };
         if was_active {
             if self.mode == AppMode::Running {
                 if self.dialogs.chart_elevated {
-                    self.message_dialog_active_index = None;
+                    self.dialogs.message_active_index = None;
                     if let Some(chat) = self.chat.running.as_mut() {
                         chat.active = false;
                     }
                 } else {
-                    self.message_dialog_active_index = match self.running_active_dialog {
+                    self.dialogs.message_active_index = match self.dialogs.running_active {
                         Some(RunningDialogStackEntry::Message(stack_id)) => {
                             self.running_message_index(stack_id)
                         }
                         _ => None,
                     };
-                    if self.running_active_dialog == Some(RunningDialogStackEntry::Chat) {
+                    if self.dialogs.running_active == Some(RunningDialogStackEntry::Chat) {
                         if let Some(chat) = self.chat.running.as_mut() {
                             chat.active = true;
                         }
@@ -4266,7 +4269,7 @@ impl GameApp {
             } else if self.chat.running.is_some() {
                 self.set_running_chat_active(true);
             } else {
-                self.message_dialog_active_index = self.dialogs.messages.len().checked_sub(1);
+                self.dialogs.message_active_index = self.dialogs.messages.len().checked_sub(1);
             }
         }
         if self.dialogs.messages.is_empty() && self.running_chat_controller().is_none() {
@@ -4697,17 +4700,18 @@ impl GameApp {
             if self.network_chart_elevated_owns_input() {
                 return None;
             }
-            let RunningDialogStackEntry::Message(stack_id) = self.running_active_dialog? else {
+            let RunningDialogStackEntry::Message(stack_id) = self.dialogs.running_active? else {
                 return None;
             };
             return self.running_message_index(stack_id);
         }
-        self.message_dialog_active_index
+        self.dialogs
+            .message_active_index
             .filter(|index| *index < self.dialogs.messages.len())
     }
 
     pub(crate) fn captured_message_dialog_index(&self) -> Option<usize> {
-        self.message_dialog_pointer_capture_index.filter(|index| {
+        self.dialogs.message_pointer_capture_index.filter(|index| {
             self.dialogs
                 .messages
                 .get(*index)
@@ -4762,7 +4766,7 @@ impl GameApp {
             return None;
         }
         if self.mode == AppMode::Running
-            && self.game_over_dialog.is_none()
+            && self.dialogs.game_over.is_none()
             && !self.dialogs.stack.is_empty()
         {
             return match self.top_scoreboard_message_pointer_target_cached(point) {
@@ -4814,7 +4818,7 @@ impl GameApp {
                 };
             }
         }
-        if self.chat.external_dialog_visible || self.game_option_input_dialog.is_some() {
+        if self.chat.external_dialog_visible || self.dialogs.game_option_input.is_some() {
             return None;
         }
         if self.mode == AppMode::Running {
@@ -4999,15 +5003,15 @@ impl GameApp {
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
         self.dialogs.messages.clear();
-        self.message_dialog_active_index = None;
-        self.message_dialog_pointer_capture_index = None;
-        self.league_signup_dialog = None;
+        self.dialogs.message_active_index = None;
+        self.dialogs.message_pointer_capture_index = None;
+        self.dialogs.league_signup = None;
         self.cancelled_league_signup_continuation = None;
         self.league_signup_consumed_keys.clear();
         self.league_signup_pointer_capture = false;
         self.league_signup_pointer_position = None;
         self.live_input.primary_left_down = false;
-        self.message_dialog_consumed_keys.clear();
+        self.dialogs.message_consumed_keys.clear();
         self.definition_selector = None;
         self.pending_definition_selection = None;
         self.pending_lobby_player_selection = None;
@@ -5017,7 +5021,7 @@ impl GameApp {
         self.close_ingame_menu();
         self.ingame_menus.object = None;
         self.ingame_menus.script_presentations.clear();
-        self.game_over_dialog = None;
+        self.dialogs.game_over = None;
         self.pending_league_end = None;
         self.pending_league_player_auth = None;
         self.dialogs.help_visible = false;
@@ -5029,7 +5033,7 @@ impl GameApp {
         self.viewports.physical_viewports_authoritative = false;
         self.dialogs.client_list = None;
         self.dialogs.stack.clear();
-        self.running_active_dialog = None;
+        self.dialogs.running_active = None;
         self.dialogs.client_list_consumed_keys.clear();
         self.dialogs.client_list_above_game_over = false;
         self.dialogs.scoreboard = None;

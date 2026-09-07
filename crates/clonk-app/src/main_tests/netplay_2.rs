@@ -2857,7 +2857,7 @@ fn fatal_worker_failure_during_game_over_preserves_the_network_halt() {
 
     app.test_network_events();
 
-    main_assert!(app.game_over_dialog.is_some());
+    main_assert!(app.dialogs.game_over.is_some());
     main_assert!(app.network.is_none());
     main_assert!(!app.network_control_running, "ChangeToLocal must not resume beneath the game-over dialog");
     main_assert_ne!(app.offline_halt_count => 0, "the dialog-owned network hold transfers to local control");
@@ -2868,7 +2868,7 @@ fn fatal_worker_failure_during_game_over_preserves_the_network_halt() {
 
     app.handle_game_over_action(GameOverAction::Continue)
         .test_value();
-    main_assert!(app.game_over_dialog.is_none());
+    main_assert!(app.dialogs.game_over.is_none());
     main_assert_eq!(app.offline_halt_count => 0);
     main_assert!(app.network_control_running);
 }
@@ -3188,7 +3188,7 @@ fn a_password_prompt_does_not_cost_the_join_the_name_of_its_game() {
         source_address: "127.0.0.1:1".parse().test_value(),
     }))
     .test_value();
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "hunter2".to_string(),
@@ -3222,12 +3222,12 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_dialog.is_some());
-    main_assert!(app.message_dialog_consumed_keys.contains(&VirtualKeyCode::Escape));
+    main_assert!(app.dialogs.message_consumed_keys.contains(&VirtualKeyCode::Escape));
     main_assert!(sender.send(Err(NetworkStartError::Other("stale result".to_string()))).is_err());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     app.poll_startup_network_connection().test_value();
-    main_assert!(app.message_dialog_consumed_keys.is_empty());
+    main_assert!(app.dialogs.message_consumed_keys.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.status_text.is_empty());
 }
@@ -4399,7 +4399,7 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     main_assert_eq!(settings.netpuncher_address.as_deref() => Some("puncher.invalid:11115"));
     main_assert_eq!(settings.netpuncher_game_ids.ipv4 => 0x1122_3344);
     main_assert_eq!(settings.netpuncher_game_ids.ipv6 => 0x5566_7788);
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
     main_assert!(app.startup_network_connection.is_none());
 }
 
@@ -4445,7 +4445,7 @@ fn network_row_double_click_joins_another_cpp_build() {
             .compatibility_build =>
         clonk_network::CURRENT_GAME_BUILD + 1
     );
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
     main_assert!(app.startup_network_connection.is_none());
 }
 
@@ -4513,7 +4513,7 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     main_assert_eq!(settings.netpuncher_game_ids.ipv4 => 0x1122_3344);
     main_assert_eq!(settings.netpuncher_game_ids.ipv6 => 0x5566_7788);
     main_assert!(settings.password.is_empty());
-    let dialog = app.game_option_input_dialog.test_ref();
+    let dialog = app.dialogs.game_option_input.test_ref();
     main_assert_eq!(dialog.purpose => PendingInputDialogPurpose::NetworkJoinPassword);
     main_assert_eq!(dialog.controller.message() => "Enter password:");
     main_assert_eq!(dialog.controller.caption() => "Enter password:");
@@ -4523,7 +4523,7 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
 }
 
 #[test]
@@ -4553,7 +4553,7 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
 
     app.activate_network_reference_join(reference.clone())
         .test_value();
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
@@ -4654,7 +4654,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
 
     main_assert!(app.startup_network_connection.is_none());
     main_assert_eq!(app.pending_network_join.as_ref().expect("same join remains pending").server_addresses => attempts);
-    let prompt = app.game_option_input_dialog.test_ref();
+    let prompt = app.dialogs.game_option_input.test_ref();
     main_assert_eq!(prompt.purpose => PendingInputDialogPurpose::NetworkJoinPassword);
     main_assert!(prompt.controller.text().is_empty());
 
@@ -4676,7 +4676,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     ));
     app.poll_startup_network_connection().test_value();
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     assert_startup_error_log(&app, "Unable to start network session: join denied");
 }
@@ -5935,7 +5935,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         game_over_list.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         game_over_list.test_key(VirtualKeyCode::Tab, ElementState::Released);
     }
-    main_assert!(matches!(game_over_list.game_over_dialog.as_ref().and_then(GameOverState::focused), Some(GameOverFocus::PlayerList(_))));
+    main_assert!(matches!(game_over_list.dialogs.game_over.as_ref().and_then(GameOverState::focused), Some(GameOverFocus::PlayerList(_))));
     main_assert!(!game_over_list.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowUp, ElementState::Pressed));
 
     let mut vote = configured("Alt+Y");
@@ -13291,7 +13291,7 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     game_over.test_modifiers(ModifiersState::CONTROL);
     game_over.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     main_assert!(game_over.rendering.graphics.debug_draw_flags().show_solid_mask);
-    main_assert!(game_over.game_over_dialog.is_some());
+    main_assert!(game_over.dialogs.game_over.is_some());
     main_assert_eq!(runtime_flash_text(&game_over) => Some("SolidMasks: on"));
     main_assert!(!game_over.exit_requested);
 }

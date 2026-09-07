@@ -6620,7 +6620,7 @@ fn platform_ime_follows_the_shell_mode_and_console_ownership() {
 fn platform_ime_tracks_game_option_and_running_chat_keyboard_focus() {
     let mut app = platform_ime_test_app();
     app.mode = AppMode::Running;
-    app.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+    app.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
         purpose: PendingInputDialogPurpose::GameOption(GameOptionInputKind::Password),
         controller: InputDialogController::new(
             "Password",
@@ -6632,7 +6632,7 @@ fn platform_ime_tracks_game_option_and_running_chat_keyboard_focus() {
     open_platform_ime_test_context(&mut app);
     main_assert!(!app.platform_ime_allowed());
     app.close_context_menu_silently();
-    app.game_option_input_dialog = None;
+    app.dialogs.game_option_input = None;
 
     app.start_running_chat(RunningChatMode::All);
     app.set_running_chat_active(false);
@@ -6647,7 +6647,7 @@ fn platform_ime_tracks_game_option_and_running_chat_keyboard_focus() {
 fn platform_ime_tracks_league_signup_and_its_context_menu() {
     let mut app = platform_ime_test_app();
     app.mode = AppMode::Running;
-    app.league_signup_dialog = Some(PendingLeagueSignupDialog {
+    app.dialogs.league_signup = Some(PendingLeagueSignupDialog {
         controller: clonk_frontend::league_signup::LeagueSignupController::new(
             clonk_frontend::league_signup::LeagueSignupConfig::new(
                 "Player",

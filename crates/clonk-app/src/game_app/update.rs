@@ -383,7 +383,7 @@ impl GameApp {
             .transfer_dialog()
             .cloned()
             .expect("a fresh download controller owns its transfer dialog");
-        self.update_download_dialog = Some(controller);
+        self.dialogs.update_download = Some(controller);
         self.push_message_dialog(transfer, MessageDialogContinuation::UpdateDownloadWait)
     }
 
@@ -421,7 +421,7 @@ impl GameApp {
             // The wrapper decides the percentage, including the unknown-length
             // case where it hides the bar rather than inventing one
             // (`C4DownloadDlg::OnProgress`).
-            let percent = match self.update_download_dialog.as_mut() {
+            let percent = match self.dialogs.update_download.as_mut() {
                 Some(controller) => {
                     controller.on_byte_progress(downloaded, total);
                     controller.progress()
@@ -439,7 +439,7 @@ impl GameApp {
             UpdateDownloadEvent::Prepared { update } => {
                 // A completed transfer leaves no wrapper state behind; only the
                 // failure arms below still need it.
-                self.update_download_dialog = None;
+                self.dialogs.update_download = None;
                 let launched = self
                     .app_paths
                     .as_ref()
@@ -488,10 +488,10 @@ impl GameApp {
         &mut self,
         detail: &str,
     ) -> Option<clonk_frontend::message_dialog::MessageDialogState> {
-        let controller = self.update_download_dialog.as_mut()?;
+        let controller = self.dialogs.update_download.as_mut()?;
         controller.fail_with_error(detail);
         let error = controller.take_error_dialog();
-        self.update_download_dialog = None;
+        self.dialogs.update_download = None;
         error
     }
 
@@ -529,7 +529,8 @@ impl GameApp {
     /// the wrapper asks for is what stops the transfer thread.
     pub(crate) fn abort_update_download(&mut self) {
         let aborted = self
-            .update_download_dialog
+            .dialogs
+            .update_download
             .as_mut()
             .and_then(|controller| {
                 controller.handle_transfer_dialog_result(
@@ -541,14 +542,15 @@ impl GameApp {
             pending.cancel();
         }
         if !aborted {
-            self.update_download_dialog = None;
+            self.dialogs.update_download = None;
             return;
         }
         let error = self
-            .update_download_dialog
+            .dialogs
+            .update_download
             .as_mut()
             .and_then(clonk_frontend::download_dialog::DownloadDialogState::take_error_dialog);
-        self.update_download_dialog = None;
+        self.dialogs.update_download = None;
         if let Some(error) = error {
             if let Err(error) = self.push_message_dialog(error, MessageDialogContinuation::None) {
                 tracing::warn!(%error, "the update user-abort modal could not be shown");

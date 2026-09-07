@@ -862,7 +862,7 @@ fn stage_tutorial_checkpoint(
             app.handle_game_over()
                 .map_err(|error| anyhow::anyhow!("open real evaluation dialog: {error}"))?;
             anyhow::ensure!(
-                app.game_over_dialog.is_some(),
+                app.dialogs.game_over.is_some(),
                 "real game-over path did not open evaluation"
             );
         }
@@ -1069,7 +1069,7 @@ fn render_runtime_layout_capture(
                 .startup_dialog_images
                 .get("GUIIcons2.png")
                 .and_then(clonk_app_menus::game_over::resolve_league_evaluation_icon);
-            let dialog = app.game_over_dialog.as_ref().ok_or_else(|| {
+            let dialog = app.dialogs.game_over.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("evaluation semantic capture has no live game-over dialog")
             })?;
             let layout = dialog.classic_presentation_layout(

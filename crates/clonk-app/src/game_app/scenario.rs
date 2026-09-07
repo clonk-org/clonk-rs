@@ -720,7 +720,7 @@ impl GameApp {
             Some(StartupDialog::NetworkGame) => {
                 self.begin_startup_dialog_fade(StartupDialog::NetworkGame);
                 self.close_context_menu_silently();
-                self.game_option_input_dialog = None;
+                self.dialogs.game_option_input = None;
                 self.game_option_input_consumed_keys.clear();
                 self.game_option_input_pointer_capture = None;
                 self.game_option_consumed_keys.clear();
@@ -756,8 +756,8 @@ impl GameApp {
         self.menu_state.abort_renaming();
         self.close_context_menu_silently();
         self.startup.player_properties_dialog = None;
-        self.game_option_input_dialog = None;
-        self.league_signup_dialog = None;
+        self.dialogs.game_option_input = None;
+        self.dialogs.league_signup = None;
         self.cancelled_league_signup_continuation = None;
         self.league_signup_consumed_keys.clear();
         self.league_signup_pointer_capture = false;
@@ -1086,7 +1086,7 @@ impl GameApp {
         self.pending_definition_selection = None;
         self.pending_lobby_player_selection = None;
         self.definition_selector_last_click = None;
-        self.game_over_dialog = None;
+        self.dialogs.game_over = None;
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
         if scenario.path.is_none() {
             return self.start_sandbox_scenario(scenario);

@@ -2237,7 +2237,7 @@ fn headless_round_end_quits_instead_of_pausing_behind_an_evaluation_dialog() {
     // The graphical path is the control: it does open the dialog and pause.
     let mut windowed = running_browser_sandbox(ScenarioSelectorMode::Local);
     windowed.handle_game_over().test_value();
-    main_assert!(windowed.game_over_dialog.is_some());
+    main_assert!(windowed.dialogs.game_over.is_some());
     main_assert!(windowed.runtime_halt_active());
     main_assert!(!windowed.take_exit_request());
 
@@ -2249,7 +2249,7 @@ fn headless_round_end_quits_instead_of_pausing_behind_an_evaluation_dialog() {
     server.headless = true;
     server.classic_command_line.scenario = Some(PathBuf::from("Server.c4s"));
     server.handle_game_over().test_value();
-    main_assert!(server.game_over_dialog.is_none(), "a dedicated server draws no evaluation dialog");
+    main_assert!(server.dialogs.game_over.is_none(), "a dedicated server draws no evaluation dialog");
     main_assert!(!server.runtime_halt_active(), "and must not pause behind the dialog it never drew");
     main_assert!(server.take_exit_request());
 }
@@ -2268,7 +2268,7 @@ fn a_console_opened_round_parks_the_server_for_the_next_open() {
 
     server.handle_game_over().test_value();
 
-    main_assert!(server.game_over_dialog.is_none(), "a dedicated server still draws no evaluation dialog");
+    main_assert!(server.dialogs.game_over.is_none(), "a dedicated server still draws no evaluation dialog");
     main_assert!(!server.take_exit_request(), "but it parks for the next /open instead of ending the process");
     main_assert!(server.console_startup_active(), "and it parks in the startup state that /open is accepted from");
 
@@ -2298,7 +2298,7 @@ fn local_round_abort_and_evaluation_end_restore_fresh_browser() {
 
     let mut evaluated = running_browser_sandbox(ScenarioSelectorMode::Local);
     evaluated.handle_game_over().test_value();
-    main_assert!(evaluated.game_over_dialog.is_some());
+    main_assert!(evaluated.dialogs.game_over.is_some());
     evaluated
         .handle_game_over_action(GameOverAction::End)
         .test_value();
@@ -2572,7 +2572,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
     .test_value();
 
     main_assert_ne!(app.engine.player(app.players.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
-    main_assert!(app.game_over_dialog.is_some());
+    main_assert!(app.dialogs.game_over.is_some());
     main_assert!(app.chat.running.is_some());
     main_assert!(app.ingame_menus.players.is_none());
 }
@@ -2775,7 +2775,7 @@ fn observer_and_game_over_use_the_ownerless_fullscreen_camera() {
     game_over_observer.handle_game_over().test_value();
     game_over_observer.status_text.clear();
     game_over_observer.snapshot.hud.local_players.clear();
-    main_assert!(game_over_observer.game_over_dialog.is_some());
+    main_assert!(game_over_observer.dialogs.game_over.is_some());
     let game_over_inputs = collect_viewport_inputs(&game_over_observer.snapshot).test_value();
     main_assert_eq!(game_over_inputs.len() => 1);
     main_assert_eq!(game_over_inputs[0].owner => OWNER_NONE);
@@ -2908,7 +2908,7 @@ fn game_over_goal_picture_includes_live_goal_object_overlays() {
     main_assert!(app.engine.definition_picture_image("GOAL").is_none());
     app.handle_game_over().test_value();
     main_assert!(
-        app.game_over_dialog
+        app.dialogs.game_over
             .as_ref()
             .expect("evaluation dialog")
             .evaluation()
@@ -2917,7 +2917,7 @@ fn game_over_goal_picture_includes_live_goal_object_overlays() {
             .is_none(),
         "without a live goal object there is only the definition picture"
     );
-    app.game_over_dialog = None;
+    app.dialogs.game_over = None;
     app.game_over_handled = false;
 
     // A live goal object draws through its own graphics, which this
@@ -2934,7 +2934,7 @@ fn game_over_goal_picture_includes_live_goal_object_overlays() {
         .test_value();
     let expected = app.engine.object_picture_image(object).test_value();
     app.handle_game_over().test_value();
-    let picture = app.game_over_dialog.test_ref().evaluation().goals()[0]
+    let picture = app.dialogs.game_over.test_ref().evaluation().goals()[0]
         .picture
         .clone()
         .test_value();
@@ -2960,7 +2960,7 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
 
     let goal_rects = {
         let surface = app.rendering.graphics.surface();
-        let dialog = app.game_over_dialog.test_ref();
+        let dialog = app.dialogs.game_over.test_ref();
         main_assert_eq!(
             dialog
                 .evaluation()
@@ -2993,7 +2993,7 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
             f64::from(rect.x + rect.w / 2),
             f64::from(rect.y + rect.h / 2),
         ));
-        main_assert_eq!(app.game_over_dialog.as_ref().expect("evaluation dialog").hovered_description() => expected);
+        main_assert_eq!(app.dialogs.game_over.as_ref().expect("evaluation dialog").hovered_description() => expected);
     }
 
     let first = goal_rects[0];
@@ -3021,7 +3021,7 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
     app.startup_tooltip
         .note_pointer_move_at(consumed_pointer, started);
     main_assert_eq!(
-        app.game_over_dialog
+        app.dialogs.game_over
             .as_ref()
             .expect("evaluation dialog")
             .hovered_description() =>
@@ -3044,7 +3044,7 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
         (surface.width(), surface.height())
     };
     let custom = app
-        .game_over_dialog
+        .dialogs.game_over
         .test_ref()
         .classic_evaluation_layout(
             width,
@@ -3062,7 +3062,7 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
     let mut before = vec![0_u8; (width * height * 4) as usize];
     app.test_render(&mut before);
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(app.game_over_dialog.as_ref().expect("evaluation dialog").custom_evaluation_scroll() => 60);
+    main_assert_eq!(app.dialogs.game_over.as_ref().expect("evaluation dialog").custom_evaluation_scroll() => 60);
     let mut after = vec![0_u8; (width * height * 4) as usize];
     app.test_render(&mut after);
     main_assert_ne!(before => after, "routing the wheel into the evaluation must change the rendered frame");
@@ -3072,7 +3072,7 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
     main_assert!(app.runtime_client_list_owns_game_over());
     app.live_input.running_pointer = Some(GuiPoint::new(0.0, 0.0));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(app.game_over_dialog.as_ref().expect("evaluation dialog").custom_evaluation_scroll() => 60);
+    main_assert_eq!(app.dialogs.game_over.as_ref().expect("evaluation dialog").custom_evaluation_scroll() => 60);
 }
 
 /// `C4GraphicsResource::Init` refuses the whole graphics load for any missing
@@ -3187,7 +3187,7 @@ fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
 
     let mut app = new_game_over_keyboard_app();
     let invalid = ImageData::new(1, 1, Vec::new());
-    app.game_over_dialog
+    app.dialogs.game_over
         .test_mut()
         .set_evaluation(EvaluationViewModel::new(
             vec![EvaluationGoal {
@@ -3280,7 +3280,7 @@ fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
     main_assert_eq!(app.runtime_player_big_icons.get(&player_info_id) => Some(&icon), "evaluation hydration must ignore the viewport portrait switch");
     app.runtime_player_big_icons.remove(&player_info_id);
     main_assert_eq!(
-        app.game_over_dialog
+        app.dialogs.game_over
             .as_ref()
             .expect("evaluation dialog")
             .evaluation()
@@ -3365,7 +3365,7 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
 
     app.handle_game_over().test_value();
     main_assert_eq!(
-        app.game_over_dialog
+        app.dialogs.game_over
             .as_ref()
             .expect("evaluation dialog")
             .evaluation()
@@ -3805,7 +3805,7 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
         MessageDialogContinuation::None,
     )
     .test_value();
-    main_assert!(matches!(app.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
+    main_assert!(matches!(app.dialogs.running_active, Some(RunningDialogStackEntry::Message(_))));
 
     let moved_pointer = PhysicalPosition::new(start.x - 24.0, start.y + 17.0);
     let message = app.top_message_dialog_layout().test_value();
@@ -3814,7 +3814,7 @@ fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
     let moved = current_scoreboard_test_layout(&mut app);
     main_assert_eq!(moved.bounds.x => before.bounds.x - 24);
     main_assert_eq!(moved.bounds.y => before.bounds.y + 17);
-    main_assert!(matches!(app.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
+    main_assert!(matches!(app.dialogs.running_active, Some(RunningDialogStackEntry::Message(_))));
     main_assert!(app.live_input.ingame_pointer.is_none());
 
     app.remove_message_dialog_at(0).test_value();
@@ -3929,7 +3929,7 @@ fn synchronous_scoreboard_show_joins_pointer_routing_before_update_or_draw() {
 
     main_assert!(app.dialogs.scoreboard.is_some());
     main_assert!(app.scoreboard_pointer_target_cached(point).is_some());
-    main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Scoreboard),);
+    main_assert_eq!(app.dialogs.running_active => Some(RunningDialogStackEntry::Scoreboard),);
     main_assert!(app.live_input.ingame_pointer.is_none());
 }
 
@@ -4131,7 +4131,7 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
     overlap.test_left_button(ElementState::Pressed);
     main_assert!(overlap.context_menus.open.is_some());
     main_assert!(!overlap.dialogs.scoreboard_close_pointer_capture);
-    main_assert!(matches!(overlap.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
+    main_assert!(matches!(overlap.dialogs.running_active, Some(RunningDialogStackEntry::Message(_))));
     overlap.test_left_button(ElementState::Released);
 
     let mut outside = new_scoreboard_test_app(BOARD);
@@ -4246,7 +4246,7 @@ fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
         f64::from(point.x),
         f64::from(point.y),
     ));
-    main_assert!(matches!(app.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
+    main_assert!(matches!(app.dialogs.running_active, Some(RunningDialogStackEntry::Message(_))));
     main_assert!(app.dialogs.scoreboard_runtime.close_hovered);
     app.test_render(&mut frame);
     let hovered = app.rendering.graphics.surface().pixels().to_vec();
@@ -4340,7 +4340,7 @@ fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert!(!app.running_chat_active());
-    main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Scoreboard),);
+    main_assert_eq!(app.dialogs.running_active => Some(RunningDialogStackEntry::Scoreboard),);
 
     let close = current_scoreboard_test_layout(&mut app)
         .close_button
@@ -4353,7 +4353,7 @@ fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.scoreboard.is_none());
     main_assert!(app.running_chat_active());
-    main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Chat),);
+    main_assert_eq!(app.dialogs.running_active => Some(RunningDialogStackEntry::Chat),);
 }
 
 #[test]
@@ -4584,7 +4584,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         .control_style = true;
     dialog_press.handle_game_over().test_value();
     dialog_press.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
-    main_assert_eq!(dialog_press.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
+    main_assert_eq!(dialog_press.dialogs.game_over.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
     main_assert!(dialog_press.scoreboard_tab_raw_pressed);
     // `C4Game::DoKeyboardInput` records the raw physical edge before the
     // exclusive dialog can claim it (C4Game.cpp:2143-2155), which is what
@@ -4639,13 +4639,13 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
     message.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     message.test_key(VirtualKeyCode::Tab, ElementState::Released);
     main_assert_eq!(message.dialogs.messages[0].state.focused_button() => Some(clonk_frontend::message_dialog::MessageDialogButton::Ok),);
-    main_assert!(message.message_dialog_consumed_keys.is_empty());
+    main_assert!(message.dialogs.message_consumed_keys.is_empty());
 
     let mut game_over = new_classic_scoreboard_test_app(BOARD);
     game_over.handle_game_over().test_value();
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert_eq!(game_over.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
+    main_assert_eq!(game_over.dialogs.game_over.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
     main_assert!(game_over.dialogs.scoreboard.is_none());
 
     let mut context = new_scoreboard_test_app(BOARD);
@@ -5073,7 +5073,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     main_assert_ne!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0,);
     app.open_ingame_menu().test_value();
     call_scoreboard_function_and_update(&mut app, "ShowAndEnd");
-    main_assert!(app.game_over_dialog.is_some());
+    main_assert!(app.dialogs.game_over.is_some());
     main_assert!(app.dialogs.scoreboard.is_none());
     main_assert!(app.ingame_menus.players.is_none());
     main_assert_eq!(
@@ -5094,7 +5094,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
         .test_value();
     app.handle_game_over_action(GameOverAction::Continue)
         .test_value();
-    main_assert!(app.game_over_dialog.is_none());
+    main_assert!(app.dialogs.game_over.is_none());
     main_assert!(app.dialogs.scoreboard.is_none());
     app.test_render(&mut frame);
 
@@ -5105,7 +5105,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     let mut object_menu = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
     main_assert!(object_menu.open_object_menu().expect("open object menu"));
     call_scoreboard_function_and_update(&mut object_menu, "ShowAndEnd");
-    main_assert!(object_menu.game_over_dialog.is_some());
+    main_assert!(object_menu.dialogs.game_over.is_some());
     main_assert!(object_menu.ingame_menus.object.is_some(), "C4Player::CloseMenu does not discard synchronized object menus",);
 }
 
@@ -5126,7 +5126,7 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         app.test_modifiers(modifiers);
         app.test_key(key, ElementState::Pressed);
         main_assert_eq!(app.running_chat_text() => Some(expected_text));
-        main_assert!(app.game_over_dialog.is_some());
+        main_assert!(app.dialogs.game_over.is_some());
     }
 
     for modifiers in [
@@ -5137,13 +5137,13 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         let mut app = new_game_over_keyboard_app();
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-        main_assert!(app.game_over_dialog.is_none());
+        main_assert!(app.dialogs.game_over.is_none());
         main_assert_eq!(app.mode => AppMode::Running);
         main_assert!(!app.sound.ui_log.iter().any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
     }
 
     let mut say = new_game_over_keyboard_app();
-    say.game_over_dialog.test_mut().set_button_content(
+    say.dialogs.game_over.test_mut().set_button_content(
         GameOverAction::Restart,
         "Play again".to_string(),
         "Restart without an R mnemonic".to_string(),
@@ -5151,7 +5151,7 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
     say.test_modifiers(ModifiersState::ALT);
     say.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert_eq!(say.running_chat_text() => Some("\""));
-    main_assert!(say.game_over_dialog.is_some());
+    main_assert!(say.dialogs.game_over.is_some());
 
     for (key, modifiers) in [
         (
@@ -5163,7 +5163,7 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
         say.test_modifiers(modifiers);
         say.test_key(key, ElementState::Pressed);
         say.test_key(key, ElementState::Released);
-        main_assert!(say.game_over_dialog.is_some());
+        main_assert!(say.dialogs.game_over.is_some());
         main_assert_eq!(say.running_chat_text() => Some("\""));
     }
 
@@ -5190,7 +5190,7 @@ fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::NumpadEnter, ElementState::Released);
-    main_assert!(app.game_over_dialog.is_some());
+    main_assert!(app.dialogs.game_over.is_some());
 }
 
 #[test]
@@ -5206,7 +5206,7 @@ fn game_over_mnemonics_use_active_language_resources() {
     app.test_key(VirtualKeyCode::KeyW, ElementState::Pressed);
 
     main_assert_eq!(app.mode => AppMode::Running);
-    main_assert!(app.game_over_dialog.is_none());
+    main_assert!(app.dialogs.game_over.is_none());
     main_assert!(app.running_chat_text().is_none());
     main_assert!(!app.sound.ui_log.iter().any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
 }
@@ -5218,21 +5218,21 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
         list_focus.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         list_focus.test_key(VirtualKeyCode::Tab, ElementState::Released);
     }
-    main_assert_eq!(list_focus.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::PlayerList(0)));
+    main_assert_eq!(list_focus.dialogs.game_over.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::PlayerList(0)));
     list_focus.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert_eq!(list_focus.running_chat_text() => Some(""));
-    main_assert!(list_focus.game_over_dialog.is_some());
+    main_assert!(list_focus.dialogs.game_over.is_some());
 
     let mut keyboard = new_game_over_keyboard_app();
     for _ in 0..4 {
         keyboard.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         keyboard.test_key(VirtualKeyCode::Tab, ElementState::Released);
     }
-    main_assert_eq!(keyboard.game_over_dialog.as_ref().and_then(GameOverState::focused_action) => Some(GameOverAction::Continue));
+    main_assert_eq!(keyboard.dialogs.game_over.as_ref().and_then(GameOverState::focused_action) => Some(GameOverAction::Continue));
     keyboard.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    main_assert!(keyboard.game_over_dialog.is_some());
+    main_assert!(keyboard.dialogs.game_over.is_some());
     keyboard.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(keyboard.game_over_dialog.is_none());
+    main_assert!(keyboard.dialogs.game_over.is_none());
     main_assert!(keyboard.sound.ui_log.iter().any(|sound| sound == "ArrowHit"));
     main_assert!(keyboard.sound.ui_log.iter().any(|sound| sound == "Click"));
 
@@ -5249,13 +5249,13 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
         GuiButtonClass::Low,
         ElementState::Pressed,
     )]);
-    main_assert!(gamepad.game_over_dialog.is_some());
+    main_assert!(gamepad.dialogs.game_over.is_some());
     gamepad.test_gamepad_events([game_over_fixture!(gui_button:
         GamepadSlot::new(0),
         GuiButtonClass::Low,
         ElementState::Released,
     )]);
-    main_assert!(gamepad.game_over_dialog.is_none());
+    main_assert!(gamepad.dialogs.game_over.is_none());
 }
 
 #[test]
@@ -5268,7 +5268,7 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
     let mut continue_point = None;
     'find_button: for y in 0..height {
         for x in 0..width {
-            let dialog = app.game_over_dialog.test_mut();
+            let dialog = app.dialogs.game_over.test_mut();
             dialog.handle_pointer_move(x as f32, y as f32, width, height);
             if dialog.hovered_action() == Some(GameOverAction::Continue) {
                 continue_point = Some(PhysicalPosition::new(f64::from(x), f64::from(y)));
@@ -5279,7 +5279,7 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
     let continue_point = continue_point.test_value();
     app.test_cursor(continue_point);
     main_assert_eq!(
-        app.game_over_dialog
+        app.dialogs.game_over
             .as_ref()
             .and_then(GameOverState::hovered_action) =>
         Some(GameOverAction::Continue),
@@ -5303,7 +5303,7 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
             app.test_key(key, ElementState::Pressed);
             app.test_key(key, ElementState::Released);
             main_assert_eq!(
-                app.game_over_dialog
+                app.dialogs.game_over
                     .as_ref()
                     .and_then(GameOverState::hovered_action) =>
                 Some(GameOverAction::Continue),
@@ -5321,7 +5321,7 @@ fn hover_game_over_action_for_test(app: &mut GameApp, action: GameOverAction) {
     };
     for y in 0..height {
         for x in 0..width {
-            let dialog = app.game_over_dialog.test_mut();
+            let dialog = app.dialogs.game_over.test_mut();
             dialog.handle_pointer_move(x as f32, y as f32, width, height);
             if dialog.hovered_action() == Some(action) {
                 return;
@@ -5424,7 +5424,7 @@ fn closed_exclusive_message_alias_cluster_yields_later_direction_to_game_over() 
         game_over_fixture!(direction: GamepadSlot::new(0), ControlButton::Left, ElementState::Pressed),
     ]);
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert_eq!(app.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Button(2)));
+    main_assert_eq!(app.dialogs.game_over.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Button(2)));
 }
 
 #[test]
@@ -5485,8 +5485,8 @@ fn context_fences_game_over_until_a_post_close_cluster() {
         )
         .test_value();
     main_assert!(axis_transition.context_menus.open.is_some());
-    main_assert!(axis_transition.game_over_dialog.is_some());
-    main_assert_eq!(axis_transition.game_over_dialog.as_ref().and_then(GameOverState::focused) => None);
+    main_assert!(axis_transition.dialogs.game_over.is_some());
+    main_assert_eq!(axis_transition.dialogs.game_over.as_ref().and_then(GameOverState::focused) => None);
 
     let mut pass_through = new_game_over_keyboard_app();
     open_context(&mut pass_through);
@@ -5496,7 +5496,7 @@ fn context_fences_game_over_until_a_post_close_cluster() {
         ElementState::Pressed,
     )]);
     main_assert!(pass_through.context_menus.open.is_some());
-    main_assert_eq!(pass_through.game_over_dialog.as_ref().and_then(GameOverState::focused) => None);
+    main_assert_eq!(pass_through.dialogs.game_over.as_ref().and_then(GameOverState::focused) => None);
 
     let mut closed = new_game_over_keyboard_app();
     open_context(&mut closed);
@@ -5506,7 +5506,7 @@ fn context_fences_game_over_until_a_post_close_cluster() {
         game_over_fixture!(direction: GamepadSlot::new(0), ControlButton::Right, ElementState::Pressed),
     ]);
     main_assert!(closed.context_menus.open.is_none());
-    main_assert_eq!(closed.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
+    main_assert_eq!(closed.dialogs.game_over.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
 }
 
 #[test]
@@ -5532,7 +5532,7 @@ fn game_over_raw_low_opens_all_chat_for_south_and_east_aliases() {
             game_over_fixture!(button: GamepadSlot::new(0), button, ElementState::Pressed),
         ]);
         main_assert_eq!(app.running_chat_text() => Some(""));
-        main_assert!(app.game_over_dialog.is_some(), "{source} is Low/chat even when its abstract alias is Cancel");
+        main_assert!(app.dialogs.game_over.is_some(), "{source} is Low/chat even when its abstract alias is Cancel");
         assert_game_over_fixture_has_no_sound_activity(&app);
     }
 }
@@ -5550,7 +5550,7 @@ fn game_over_raw_left_and_right_reach_exact_focus_targets() {
             button,
             ElementState::Pressed,
         )]);
-        main_assert_eq!(app.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(expected));
+        main_assert_eq!(app.dialogs.game_over.as_ref().and_then(GameOverState::focused) => Some(expected));
     }
 }
 
@@ -5630,7 +5630,7 @@ fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
         GuiButtonClass::Low,
         ElementState::Released,
     )]);
-    main_assert!(cancelled.game_over_dialog.is_some());
+    main_assert!(cancelled.dialogs.game_over.is_some());
     main_assert!(!cancelled.sound.ui_log.iter().any(|sound| sound == "Click"));
 }
 
@@ -5651,7 +5651,7 @@ fn game_over_raw_high_ends_and_consumes_aliases_after_dialog_close() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
-    main_assert!(app.game_over_dialog.is_none());
+    main_assert!(app.dialogs.game_over.is_none());
     main_assert!(app.ingame_menus.players.is_none());
     main_assert!(app.status_text.is_empty());
     main_assert!(!app.exit_requested, "the paired MenuToggle alias must not reach the exposed main menu");
@@ -5744,7 +5744,7 @@ fn game_over_high_capture_ends_at_the_next_raw_physical_cluster() {
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(!app.exit_requested);
-    main_assert!(app.game_over_dialog.is_none());
+    main_assert!(app.dialogs.game_over.is_none());
 }
 
 #[test]
@@ -5787,7 +5787,7 @@ fn exclusive_message_dialog_raw_gamepad_clusters_precede_game_over() {
     main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.mode => AppMode::Running);
     main_assert_eq!(
-        app.game_over_dialog
+        app.dialogs.game_over
             .as_ref()
             .and_then(GameOverState::hovered_action) =>
         None,
@@ -5812,7 +5812,7 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        main_assert_eq!(app.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(expected));
+        main_assert_eq!(app.dialogs.game_over.as_ref().and_then(GameOverState::focused) => Some(expected));
     }
     for modifiers in [
         ModifiersState::CONTROL,
@@ -5824,7 +5824,7 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        main_assert_eq!(app.game_over_dialog.as_ref().and_then(GameOverState::focused) => None);
+        main_assert_eq!(app.dialogs.game_over.as_ref().and_then(GameOverState::focused) => None);
     }
 
     for modifiers in [
@@ -5837,16 +5837,16 @@ fn game_over_tab_and_escape_use_exact_modifier_masks() {
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::Escape, ElementState::Released);
         app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-        main_assert!(app.game_over_dialog.is_some());
+        main_assert!(app.dialogs.game_over.is_some());
     }
 
     for modifiers in [ModifiersState::empty(), ModifiersState::SUPER] {
         let mut ending_app = new_game_over_keyboard_app();
         ending_app.test_modifiers(modifiers);
         ending_app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-        main_assert!(ending_app.game_over_dialog.is_some());
+        main_assert!(ending_app.dialogs.game_over.is_some());
         ending_app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-        main_assert!(ending_app.game_over_dialog.is_none());
+        main_assert!(ending_app.dialogs.game_over.is_none());
         main_assert!(matches!(ending_app.mode, AppMode::Menu));
     }
 }
@@ -5862,26 +5862,26 @@ fn game_over_pending_network_result_preserves_cpp_button_and_escape_latches() {
     };
 
     let mut host = pending_host();
-    let dialog = host.game_over_dialog.test_ref();
+    let dialog = host.dialogs.game_over.test_ref();
     main_assert_eq!(dialog.network_result_label() => Some(""));
     main_assert!(!dialog.is_net_done());
     main_assert!(!dialog.allows_escape_close());
     main_assert!(dialog.actions().contains(&GameOverAction::End));
     main_assert!(dialog.actions().contains(&GameOverAction::Continue));
     host.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(host.game_over_dialog.is_some());
+    main_assert!(host.dialogs.game_over.is_some());
     host.handle_game_over_gamepad_event(game_over_fixture!(gui_button:
         GamepadSlot::new(0),
         GuiButtonClass::High,
         ElementState::Pressed,
     ))
     .test_value();
-    main_assert!(host.game_over_dialog.is_some());
+    main_assert!(host.dialogs.game_over.is_some());
 
     let mut clickable = pending_host();
     clickable.test_modifiers(ModifiersState::ALT);
     clickable.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-    main_assert!(clickable.game_over_dialog.is_none());
+    main_assert!(clickable.dialogs.game_over.is_none());
     main_assert_eq!(clickable.mode => AppMode::Running);
 
     let mut resolved = pending_host();
@@ -5889,20 +5889,20 @@ fn game_over_pending_network_result_preserves_cpp_button_and_escape_latches() {
         Some(clonk_engine::RoundResultsNetworkResult::LeagueOk);
     resolved.snapshot.round_results.network_result_message = b"evaluated".to_vec();
     main_assert!(resolved.sec1_timer().expect("refresh final network result"));
-    let dialog = resolved.game_over_dialog.test_ref();
+    let dialog = resolved.dialogs.game_over.test_ref();
     main_assert_eq!(dialog.network_result_label() => Some("evaluated"));
     main_assert!(dialog.is_net_done());
     main_assert!(dialog.allows_escape_close());
     resolved.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(resolved.game_over_dialog.is_none());
+    main_assert!(resolved.dialogs.game_over.is_none());
 
     let mut client = new_classic_running_sandbox_app();
     configure_runtime_network_role(&mut client, RuntimeNetworkRole::Client);
     client.network_is_league = true;
     client.handle_game_over().test_value();
-    main_assert!(client.game_over_dialog.as_ref().is_some_and(GameOverState::allows_escape_close));
+    main_assert!(client.dialogs.game_over.as_ref().is_some_and(GameOverState::allows_escape_close));
     client.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(client.game_over_dialog.is_none());
+    main_assert!(client.dialogs.game_over.is_none());
 }
 
 #[test]
@@ -5919,7 +5919,7 @@ fn game_over_show_and_continue_use_offline_pause_lifecycle() {
     app.handle_game_over_action(GameOverAction::Continue)
         .test_value();
     main_assert_eq!(app.offline_halt_count => 0);
-    main_assert!(app.game_over_dialog.is_none());
+    main_assert!(app.dialogs.game_over.is_none());
 
     let mut raw_teardown = new_classic_running_sandbox_app();
     raw_teardown.handle_game_over().test_value();
@@ -6105,7 +6105,7 @@ fn older_runtime_f4_dialog_renders_inactive_below_new_game_over_dialog() {
 
     app.handle_game_over().test_value();
     main_assert!(app.dialogs.client_list.is_some());
-    main_assert!(app.game_over_dialog.is_some());
+    main_assert!(app.dialogs.game_over.is_some());
     main_assert!(!app.dialogs.client_list_above_game_over);
     main_assert!(!app.runtime_client_list_mouse_active());
     main_assert!(!app.runtime_client_list_keyboard_active());
@@ -6119,7 +6119,7 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
     route_primary_gamepad_to_local_owner(&mut game_over);
     game_over.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     main_assert!(game_over.dialogs.client_list.is_some());
-    main_assert!(game_over.game_over_dialog.is_some());
+    main_assert!(game_over.dialogs.game_over.is_some());
     main_assert!(game_over.dialogs.client_list_above_game_over);
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     game_over.test_key(VirtualKeyCode::Tab, ElementState::Released);
@@ -6132,7 +6132,7 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
         game_over_fixture!(direction: GamepadSlot::new(0), ControlButton::Right, ElementState::Pressed),
         game_over_fixture!(gui_button: GamepadSlot::new(0), GuiButtonClass::Low, ElementState::Pressed),
     ]);
-    main_assert_eq!(game_over.game_over_dialog.as_ref().and_then(GameOverState::focused) => None);
+    main_assert_eq!(game_over.dialogs.game_over.as_ref().and_then(GameOverState::focused) => None);
     let submitted = game_over_commands.take_submitted_local();
     main_assert_eq!(submitted.len() => 1);
     main_assert!(matches!(submitted[0].1, ControlEvent::Press(ControlButton::Right)));
@@ -6140,7 +6140,7 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
     main_assert!(game_over.dialogs.client_list.is_some());
     game_over.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(game_over.dialogs.client_list.is_none());
-    main_assert!(game_over.game_over_dialog.is_some());
+    main_assert!(game_over.dialogs.game_over.is_some());
 
     let mut message = new_running_sandbox_app();
     configure_runtime_network_role(&mut message, RuntimeNetworkRole::Host);
@@ -6221,7 +6221,7 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
         let mut app = new_game_over_keyboard_app();
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-        main_assert!(app.game_over_dialog.is_none());
+        main_assert!(app.dialogs.game_over.is_none());
         main_assert_eq!(app.mode => AppMode::Running);
         main_assert!(app.running_chat_text().is_none());
     }
@@ -6238,7 +6238,7 @@ fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
             let mut app = new_game_over_keyboard_app();
             app.test_modifiers(modifiers);
             app.test_key(key, ElementState::Pressed);
-            main_assert!(app.game_over_dialog.is_some());
+            main_assert!(app.dialogs.game_over.is_some());
             main_assert!(app.running_chat_text().is_none());
             main_assert!(!app.dialogs.help_visible);
             main_assert!(app.dialogs.client_list.is_none());
@@ -6319,7 +6319,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     game_over
         .apply_ingame_menu_action(MenuAction::Abort)
         .test_value();
-    main_assert!(game_over.game_over_dialog.is_some());
+    main_assert!(game_over.dialogs.game_over.is_some());
     main_assert!(game_over.dialogs.messages.is_empty());
     main_assert!(matches!(game_over.mode, AppMode::Running));
 }
@@ -6501,7 +6501,7 @@ fn next_mission_action_launches_the_catalog_target() {
             definition_root: None,
         }) if modules == &[carried_definition.to_string_lossy().as_ref()]
     ));
-    main_assert!(app.game_over_dialog.is_none());
+    main_assert!(app.dialogs.game_over.is_none());
 }
 
 #[test]
@@ -6580,7 +6580,7 @@ fn game_over_restart_and_next_mission_follow_control_host_film_policy() {
         set_test_scenario_head_flags(&mut app, 0, film);
         app.engine.set_control_host(control_host);
         app.finish_game_over_after_league().test_value();
-        main_assert_eq!(app.game_over_dialog.as_ref().expect("evaluation dialog").actions() => expected, "control_host={control_host}, Film={film}, width={width}");
+        main_assert_eq!(app.dialogs.game_over.as_ref().expect("evaluation dialog").actions() => expected, "control_host={control_host}, Film={film}, width={width}");
     }
 }
 

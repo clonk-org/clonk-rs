@@ -568,7 +568,7 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
     app.poll_classic_direct_reference_query().test_value();
     main_assert!(app.classic_direct_reference_query.is_some());
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
 
     boot_sender
         .send(BootLoadingEvent::Finished(None))
@@ -583,7 +583,7 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
     main_assert!(app.classic_direct_reference_query.is_none());
     main_assert!(app.startup_network_connection.is_none());
     main_assert_eq!(app.pending_network_join.as_ref().expect("resolved join remains pending").server_addresses => attempts);
-    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("password prompt").purpose => PendingInputDialogPurpose::NetworkJoinPassword);
+    main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("password prompt").purpose => PendingInputDialogPurpose::NetworkJoinPassword);
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
