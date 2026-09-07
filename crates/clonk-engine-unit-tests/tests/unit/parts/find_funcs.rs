@@ -3255,3 +3255,154 @@ fn scenario_callback_get_menu_reads_the_live_crew_menu() {
         .test_value();
     unit_assert_eq!(engine.players().find(|player| player.id() == 0).map(Player::wealth) => Some(77));
 }
+
+#[test]
+fn arrow_localn_with_an_explicit_object_binds_that_objects_named_local() {
+    // FnLocalN takes the explicit object over the arrow target and only
+    // defaults to `cthr->Obj` when none is given (C4Script.cpp:4592-4605), so
+    // the KdD magic pack's `pRock->LocalN("pCaster", pRock) = pCaller`
+    // (Luftbindung.c4d/Script.c:50) writes pRock's local and its read twin on
+    // :53 sees it. The port only special-cased the one-argument arrow form
+    // and sent the two-argument one to world dispatch, which has no `LocalN`
+    // (clonk-org/clonk-rs#1531).
+    let caller_script = r#"#strict 2
+        public func WriteExplicit(object target, object other) {
+            target->LocalN("stored", other) = 9;
+            return 1;
+        }
+        public func ReadExplicit(object target, object other) {
+            return target->LocalN("stored", other);
+        }
+        public func WriteDefaulted(object target) {
+            target->LocalN("stored", 0) = 5;
+            return 1;
+        }
+        public func ReadDefaulted(object target) {
+            return target->LocalN("stored", 0);
+        }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    engine.register_test_script_definition("TRGT", "Target", "#strict 2\nlocal stored;\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let other = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let caller_index = engine.test_object_index(caller);
+    let target_index = engine.test_object_index(target);
+    let other_index = engine.test_object_index(other);
+    let both = vec![object_reference_value(target), object_reference_value(other)];
+
+    engine
+        .call_object_function(caller_index, "WriteExplicit", both.clone())
+        .expect("the explicit object's local is the reference");
+    unit_assert_eq!(
+        engine.objects[other_index].state.local_vars.get("stored") => Some(&Value::Int(9)),
+        "the explicit object receives the write"
+    );
+    unit_assert!(
+        !matches!(
+            engine.objects[target_index].state.local_vars.get("stored"),
+            Some(Value::Int(9))
+        ),
+        "the arrow target is not the reference when an object is given"
+    );
+    let read = engine
+        .call_object_function(caller_index, "ReadExplicit", both)
+        .expect("the explicit object's local is read through the arrow");
+    unit_assert_eq!(read => Value::Int(9));
+
+    engine
+        .call_object_function(caller_index, "WriteDefaulted", vec![object_reference_value(target)])
+        .expect("a nil explicit object defaults to the arrow target");
+    unit_assert_eq!(
+        engine.objects[target_index].state.local_vars.get("stored") => Some(&Value::Int(5)),
+        "the arrow target receives the write when the explicit object is nil"
+    );
+    let read = engine
+        .call_object_function(caller_index, "ReadDefaulted", vec![object_reference_value(target)])
+        .expect("a nil explicit object reads the arrow target");
+    unit_assert_eq!(read => Value::Int(5));
+}
+
+#[test]
+fn arrow_local_with_an_explicit_object_binds_that_objects_numbered_local() {
+    // FnLocal has the same explicit-object-first rule as FnLocalN
+    // (C4Script.cpp:3417-3433): `target->Local(0, other)` is other's slot
+    // and a nil object defaults to the arrow target (clonk-org/clonk-rs#1531).
+    let caller_script = r#"#strict 2
+        public func WriteExplicit(object target, object other) {
+            target->Local(0, other) = 3;
+            return 1;
+        }
+        public func ReadExplicit(object target, object other) {
+            return target->Local(0, other);
+        }
+        public func WriteDefaulted(object target) {
+            target->Local(0, 0) = 4;
+            return 1;
+        }
+        public func ReadDefaulted(object target) {
+            return target->Local(0, 0);
+        }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    engine.register_test_script_definition("TRGT", "Target", "#strict 2\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let other = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let caller_index = engine.test_object_index(caller);
+    let both = vec![object_reference_value(target), object_reference_value(other)];
+
+    engine
+        .call_object_function(caller_index, "WriteExplicit", both.clone())
+        .expect("the explicit object's slot is the reference");
+    let read = engine
+        .call_object_function(caller_index, "ReadExplicit", both)
+        .expect("the explicit object's slot is read through the arrow");
+    unit_assert_eq!(read => Value::Int(3));
+    let read_target = engine
+        .call_object_function(caller_index, "ReadDefaulted", vec![object_reference_value(target)])
+        .expect("a nil explicit object reads the arrow target");
+    unit_assert!(read_target != Value::Int(3), "the arrow target's slot was not written");
+
+    engine
+        .call_object_function(caller_index, "WriteDefaulted", vec![object_reference_value(target)])
+        .expect("a nil explicit object defaults to the arrow target");
+    let read = engine
+        .call_object_function(caller_index, "ReadDefaulted", vec![object_reference_value(target)])
+        .expect("the arrow target's slot is read");
+    unit_assert_eq!(read => Value::Int(4));
+}
+
+#[test]
+fn arrow_calls_reach_engine_and_global_functions_with_the_target_as_context() {
+    // A plain `obj->Func()` compiles to AB_CALL with the first function of
+    // that name; at run time FindSameNameFunc returns the engine-owned or
+    // `global func` when the target's definition has none of that name
+    // (C4Aul.cpp:130-148), and it runs with the target as its object
+    // (clonk-org/clonk-rs#1531 reports the LocalN case).
+    let caller_script = r#"#strict 2
+        global func WhoAmI() { return GetID(); }
+        public func EngineThroughArrow(object target) { return target->GetID(); }
+        public func GlobalThroughArrow(object target) { return target->WhoAmI(); }
+        "#;
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CALL", "Caller", caller_script);
+    engine.register_test_script_definition("TRGT", "Target", "#strict 2\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CALL"));
+    let target = engine.spawn_test_object(SpawnConfig::new("TRGT"));
+    let caller_index = engine.test_object_index(caller);
+
+    let engine_call = engine
+        .call_object_function(caller_index, "EngineThroughArrow", vec![object_reference_value(target)])
+        .expect("an engine function resolves through the arrow");
+    let global_call = engine
+        .call_object_function(caller_index, "GlobalThroughArrow", vec![object_reference_value(target)])
+        .expect("a global func resolves through the arrow");
+    unit_assert_eq!(engine_call => global_call.clone(), "both run with the target as their object");
+    unit_assert!(
+        format!("{engine_call:?}").contains("TRGT"),
+        "the target's id is returned, got {engine_call:?}"
+    );
+}

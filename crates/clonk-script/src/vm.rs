@@ -4603,6 +4603,17 @@ impl<'a> Vm<'a> {
             .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'")))
     }
 
+    /// The object an explicit `LocalN`/`Local` object argument selects on an
+    /// arrow call. FnLocalN and FnLocal read the given `pObj` and fall back to
+    /// `cthr->Obj`, the arrow target, only when it is null
+    /// (C4Script.cpp:3417-3433, 4592-4605); a dead object converts to null
+    /// the same way (clonk-org/clonk-rs#1531).
+    fn explicit_local_owner(&self, explicit: Option<Value>) -> Option<Value> {
+        explicit
+            .filter(|value| matches!(value, Value::Object(id) if *id != 0))
+            .filter(|value| self.object_target_available(value))
+    }
+
     /// Resolves a LocalN target cell: falsy targets and the executing
     /// object use the VM's own object locals (FnLocalN's
     /// `if (!pObj) pObj = cthr->Obj`, C4Script.cpp:4593-4596); anything
@@ -11076,10 +11087,13 @@ impl<'a> Vm<'a> {
         // `curr_goal->LocalN("missionPassword")`, of which content has 14
         // call sites). Matches the two-argument `LocalN("name", pObj)` form.
         // A zero target still falls through to the "target is zero" guard, as
-        // the C++ arrow-call check fires before FnLocalN runs.
+        // the C++ arrow-call check fires before FnLocalN runs. With an
+        // explicit second argument (`pRock->LocalN("Combo", pRock)`, KdD
+        // magic pack) that object is the one FnLocalN reads; only a nil one
+        // defaults to the arrow target (clonk-org/clonk-rs#1531).
         if matches!(&target, Value::Object(id) if *id != 0)
             && name == "LocalN"
-            && args.len() == 1
+            && (1..=2).contains(&args.len())
             && !self.functions.contains_key(name)
         {
             let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
@@ -11099,7 +11113,12 @@ impl<'a> Vm<'a> {
                     )))
                 }
             };
-            let cell = self.localn_cell(env, &local_name, Some(target));
+            let explicit = evaluated_args
+                .get(1)
+                .map(|argument| argument.read())
+                .transpose()?;
+            let owner = self.explicit_local_owner(explicit).unwrap_or(target);
+            let cell = self.localn_cell(env, &local_name, Some(owner));
             let value = cell.borrow().clone();
             return Ok(value);
         }
@@ -11107,10 +11126,12 @@ impl<'a> Vm<'a> {
         // C4Script.cpp:3423-3433). Same routing as LocalN — resolve the
         // TARGET's `__local_{n}` slot through the cross-object cell hook, not
         // world dispatch. A negative index reads nil like FnLocal. Hazard's
-        // Ammo.c `return(ammo->Local(0))` depends on it.
+        // Ammo.c `return(ammo->Local(0))` depends on it. An explicit object
+        // argument selects that object like FnLocalN's
+        // (clonk-org/clonk-rs#1531).
         if matches!(&target, Value::Object(id) if *id != 0)
             && name == "Local"
-            && args.len() == 1
+            && (1..=2).contains(&args.len())
             && !self.functions.contains_key(name)
             && !self.has_host_function(name)
         {
@@ -11126,7 +11147,12 @@ impl<'a> Vm<'a> {
             if index < 0 {
                 return Ok(Value::Nil);
             }
-            let cell = self.numbered_local_cell(env, index, Some(target));
+            let explicit = evaluated_args
+                .get(1)
+                .map(|argument| argument.read())
+                .transpose()?;
+            let owner = self.explicit_local_owner(explicit).unwrap_or(target);
+            let cell = self.numbered_local_cell(env, index, Some(owner));
             let value = cell.borrow().clone();
             return Ok(value);
         }
@@ -11388,8 +11414,10 @@ impl<'a> Vm<'a> {
         }
 
         // FnLocal/LocalN return the selected object's live C4Value cell
-        // (C4Script.cpp:3423-3433,4591-4605), including through an arrow.
-        if evaluated_args.len() == 1 && name == "LocalN" {
+        // (C4Script.cpp:3423-3433,4591-4605), including through an arrow. An
+        // explicit object argument selects that object over the arrow
+        // target (clonk-org/clonk-rs#1531).
+        if (1..=2).contains(&evaluated_args.len()) && name == "LocalN" {
             let local_name = match evaluated_args[0].read()? {
                 Value::String(name) => name,
                 other => {
@@ -11399,16 +11427,26 @@ impl<'a> Vm<'a> {
                     )))
                 }
             };
+            let explicit = evaluated_args
+                .get(1)
+                .map(|argument| argument.read())
+                .transpose()?;
+            let owner = self.explicit_local_owner(explicit).unwrap_or(target);
             return Ok(ReturnValue::Reference(self.tracked_cell(self.localn_cell(
                 env,
                 &local_name,
-                Some(target),
+                Some(owner),
             ))));
         }
-        if evaluated_args.len() == 1 && name == "Local" {
+        if (1..=2).contains(&evaluated_args.len()) && name == "Local" {
             let index = Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
+            let explicit = evaluated_args
+                .get(1)
+                .map(|argument| argument.read())
+                .transpose()?;
+            let owner = self.explicit_local_owner(explicit).unwrap_or(target);
             return Ok(ReturnValue::Reference(
-                self.tracked_cell(self.numbered_local_cell(env, index, Some(target))),
+                self.tracked_cell(self.numbered_local_cell(env, index, Some(owner))),
             ));
         }
 
@@ -11476,7 +11514,7 @@ impl<'a> Vm<'a> {
 
         if matches!(&target, Value::Object(id) if *id != 0)
             && name == "LocalN"
-            && evaluated_args.len() == 1
+            && (1..=2).contains(&evaluated_args.len())
             && !self.functions.contains_key(name)
         {
             clear_value_for_object_reference_sweeps(&mut target, target_sweep_cursor);
@@ -11492,8 +11530,13 @@ impl<'a> Vm<'a> {
                     )))
                 }
             };
+            let explicit = evaluated_args
+                .get(1)
+                .map(|argument| argument.read())
+                .transpose()?;
+            let owner = self.explicit_local_owner(explicit).unwrap_or(target);
             return Ok(ReturnValue::Value(TrackedValue::runtime(
-                self.localn_cell(env, &local_name, Some(target))
+                self.localn_cell(env, &local_name, Some(owner))
                     .borrow()
                     .clone(),
             )));
@@ -11501,7 +11544,7 @@ impl<'a> Vm<'a> {
 
         if matches!(&target, Value::Object(id) if *id != 0)
             && name == "Local"
-            && evaluated_args.len() == 1
+            && (1..=2).contains(&evaluated_args.len())
             && !self.functions.contains_key(name)
             && !self.has_host_function(name)
         {
@@ -11513,8 +11556,13 @@ impl<'a> Vm<'a> {
             if index < 0 {
                 return Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)));
             }
+            let explicit = evaluated_args
+                .get(1)
+                .map(|argument| argument.read())
+                .transpose()?;
+            let owner = self.explicit_local_owner(explicit).unwrap_or(target);
             return Ok(ReturnValue::Value(TrackedValue::runtime(
-                self.numbered_local_cell(env, index, Some(target))
+                self.numbered_local_cell(env, index, Some(owner))
                     .borrow()
                     .clone(),
             )));
@@ -12396,13 +12444,17 @@ impl<'a> Vm<'a> {
                 )
             }
             // `LocalN("name", obj) += v` and friends: the foreign-local
-            // cell IS the reference (FnLocalN, C4Script.cpp:4591-4605).
+            // cell IS the reference (FnLocalN, C4Script.cpp:4591-4605). The
+            // arrow form may still name an explicit object
+            // (`pRock->LocalN("pCaster", pRock) = pCaller`, KdD magic pack),
+            // which FnLocalN takes over the arrow target
+            // (clonk-org/clonk-rs#1531).
             AssignmentTarget::MethodSlot {
                 object,
                 method,
                 args,
                 is_arrow,
-            } if method == "LocalN" && args.len() == 1 => {
+            } if method == "LocalN" && (1..=2).contains(&args.len()) => {
                 let (object_value, evaluated_args, _target_slot, _parameter_slots) = self
                     .evaluate_method_slot_operands(
                         object, args, *is_arrow, None, None, 2, env, depth,
@@ -12428,16 +12480,23 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                Ok(self.tracked_cell(self.localn_cell(env, &local_name, Some(object_value))))
+                let explicit = evaluated_args
+                    .get(1)
+                    .map(|argument| argument.read())
+                    .transpose()?;
+                let owner = self.explicit_local_owner(explicit).unwrap_or(object_value);
+                Ok(self.tracked_cell(self.localn_cell(env, &local_name, Some(owner))))
             }
             // `Local(n, obj)` by reference: FnLocal returns
-            // `pObj->Local[iIndex].GetRef()` (C4Script.cpp:3423-3433).
+            // `pObj->Local[iIndex].GetRef()` (C4Script.cpp:3423-3433). The
+            // arrow form may still name an explicit object, which wins over
+            // the arrow target (clonk-org/clonk-rs#1531).
             AssignmentTarget::MethodSlot {
                 object,
                 method,
                 args,
                 is_arrow,
-            } if method == "Local" && args.len() == 1 => {
+            } if method == "Local" && (1..=2).contains(&args.len()) => {
                 let (object_value, evaluated_args, _target_slot, _parameter_slots) = self
                     .evaluate_method_slot_operands(
                         object, args, *is_arrow, None, None, 2, env, depth,
@@ -12455,7 +12514,12 @@ impl<'a> Vm<'a> {
                     return Err(RuntimeError::new("Object call: target is zero!"));
                 }
                 let index = Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
-                Ok(self.tracked_cell(self.numbered_local_cell(env, index, Some(object_value))))
+                let explicit = evaluated_args
+                    .get(1)
+                    .map(|argument| argument.read())
+                    .transpose()?;
+                let owner = self.explicit_local_owner(explicit).unwrap_or(object_value);
+                Ok(self.tracked_cell(self.numbered_local_cell(env, index, Some(owner))))
             }
             AssignmentTarget::MethodSlot {
                 object,
