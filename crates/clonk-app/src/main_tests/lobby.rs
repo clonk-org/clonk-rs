@@ -1896,7 +1896,7 @@ fn classic_lobby_password_button_clears_then_presets_and_sets_live_password() {
     );
 
     process_lobby_game_option(&mut app, LobbyGameOptionInput::Hotkey('P'));
-    main_assert_eq!(some(&app.game_option_input_dialog).controller.text() => "remembered password");
+    main_assert_eq!(some(&app.dialogs.game_option_input).controller.text() => "remembered password");
     accept_game_option_input(&mut app, "unsupported 🔒");
     main_assert!(app.scenario_game_options.values().password.is_empty());
     main_assert_eq!(app.scenario_game_options.values().last_password => "remembered password");
@@ -9194,7 +9194,7 @@ fn go_status_request_deletes_client_lobby_and_suppresses_stale_ready_reply() {
         "DoLobby closes lobby-owned dialogs while entering the loader"
     );
     main_assert!(
-        app.game_option_input_dialog.is_none(),
+        app.dialogs.game_option_input.is_none(),
         "CloseAllDialogs also removes lobby option input"
     );
     main_assert!(commands.take_submitted_ready_checks().is_empty());

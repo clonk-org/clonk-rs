@@ -1547,21 +1547,21 @@ fn chart_restores_projected_successor_after_active_underlay_is_removed() {
     app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
     main_assert!(app.network_chart_elevated_owns_input());
 
-    app.message_dialog_active_index = Some(1);
+    app.dialogs.message_active_index = Some(1);
     app.activate_running_dialog(RunningDialogStackEntry::Message(removed));
     main_assert!(app.network_chart_renders_elevated());
     main_assert!(!app.network_chart_is_active_dialog());
 
     let (_, was_active) = app.remove_message_dialog_at(1).test_value();
     main_assert!(was_active);
-    main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Message(successor)));
+    main_assert_eq!(app.dialogs.running_active => Some(RunningDialogStackEntry::Message(successor)));
     main_assert!(app.network_chart_elevated_owns_input());
     main_assert!(app.network_chart_is_active_dialog());
     main_assert_eq!(app.active_message_dialog_index() => None);
 
     app.toggle_network_chart();
     main_assert!(app.dialogs.chart.is_none());
-    main_assert_eq!(app.message_dialog_active_index => Some(0));
+    main_assert_eq!(app.dialogs.message_active_index => Some(0));
     main_assert_eq!(app.active_message_dialog_index() => Some(0));
 }
 
@@ -1580,17 +1580,17 @@ fn chart_hide_restores_projected_message_instead_of_inactive_chat() {
     let message = app.dialogs.messages[0].running_stack_id;
     app.start_running_chat(RunningChatMode::All);
     app.set_running_chat_active(false);
-    app.message_dialog_active_index = Some(0);
+    app.dialogs.message_active_index = Some(0);
     app.activate_running_dialog(RunningDialogStackEntry::Message(message));
 
     app.toggle_network_chart();
     app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
     main_assert!(app.network_chart_elevated_owns_input());
-    main_assert_eq!(app.running_active_dialog => Some(RunningDialogStackEntry::Message(message)));
+    main_assert_eq!(app.dialogs.running_active => Some(RunningDialogStackEntry::Message(message)));
 
     app.toggle_network_chart();
     main_assert!(app.dialogs.chart.is_none());
-    main_assert_eq!(app.message_dialog_active_index => Some(0));
+    main_assert_eq!(app.dialogs.message_active_index => Some(0));
     main_assert!(!app.running_chat_active());
 }
 
@@ -1857,9 +1857,9 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(button.y + button.h / 2),
     ));
     cursor_exit.test_left_button(ElementState::Pressed);
-    main_assert_eq!(cursor_exit.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(cursor_exit.dialogs.message_pointer_capture_index => Some(0));
     cursor_exit.resize(360, 240).test_value();
-    main_assert_eq!(cursor_exit.message_dialog_pointer_capture_index => None);
+    main_assert_eq!(cursor_exit.dialogs.message_pointer_capture_index => None);
     main_assert!(!cursor_exit.dialogs.messages[0].state.has_pointer_capture());
     main_assert!(!cursor_exit.dialogs.messages[0].state.has_pointer_hover());
 
@@ -1896,7 +1896,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     );
     menu.test_cursor(input_start);
     menu.test_left_button(ElementState::Pressed);
-    main_assert!(menu.game_option_input_dialog.as_ref().expect("regular input dialog").controller.has_positional_pointer_drag());
+    main_assert!(menu.dialogs.game_option_input.as_ref().expect("regular input dialog").controller.has_positional_pointer_drag());
     menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     let input_context = menu.context_menus.open.test_ref().layout().panels[0].bounds;
@@ -1905,7 +1905,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
         f64::from(input_context.y + 1),
     ));
     menu.test_left_button(ElementState::Released);
-    main_assert!(!menu.game_option_input_dialog.as_ref().expect("regular input remains open").controller.has_pointer_capture());
+    main_assert!(!menu.dialogs.game_option_input.as_ref().expect("regular input remains open").controller.has_pointer_capture());
 }
 
 #[test]

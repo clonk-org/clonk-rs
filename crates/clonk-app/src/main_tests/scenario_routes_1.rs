@@ -1932,7 +1932,7 @@ fn app_virtual_keyboard_completes_real_tutorial01_route() {
         app.engine.next_mission().path == r"Tutorial.c4f\Tutorial02.c4s"
     });
     advance_app_until(&mut app, "Tutorial01 reaches GameOver", 320, |app| {
-        app.snapshot.game_over && app.game_over_dialog.is_some()
+        app.snapshot.game_over && app.dialogs.game_over.is_some()
     });
     main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial01 must fulfill its real SCRG before GameOver");
     main_assert_eq!(
@@ -2728,7 +2728,7 @@ fn app_virtual_keyboard_completes_real_tutorial02_route() {
         app.engine.next_mission().path == r"Tutorial.c4f\Tutorial03.c4s"
     });
     advance_app_until(&mut app, "Tutorial02 reaches GameOver", 320, |app| {
-        app.snapshot.game_over && app.game_over_dialog.is_some()
+        app.snapshot.game_over && app.dialogs.game_over.is_some()
     });
     main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial02 must fulfill SCRG before GameOver");
     main_assert_eq!(
@@ -3288,7 +3288,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         app.engine.next_mission().path == r"Tutorial.c4f\Tutorial04.c4s"
     });
     advance_app_until(&mut app, "Tutorial03 reaches GameOver", 320, |app| {
-        app.snapshot.game_over && app.game_over_dialog.is_some()
+        app.snapshot.game_over && app.dialogs.game_over.is_some()
     });
     main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial03 must fulfill SCRG before GameOver");
     main_assert_eq!(

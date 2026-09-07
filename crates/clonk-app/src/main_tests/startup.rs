@@ -1515,7 +1515,7 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
         clonk_frontend::startup_plrsel::PlrSelAction::SetCrewDeathMessage(0),
     ])
     .test_value();
-    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("crew death-message input").controller.max_text() => 75);
+    main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("crew death-message input").controller.max_text() => 75);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         "Farewell".to_string(),
     )])

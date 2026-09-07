@@ -434,14 +434,14 @@ impl GameApp {
         );
         self.suspend_ingame_pointer_for_gui();
         self.dialogs.chart_elevated = false;
-        self.message_dialog_active_index = None;
+        self.dialogs.message_active_index = None;
         self.chat.running = Some(RunningChatState {
             history_index: -1,
             active: true,
             kind: RunningChatKind::Ordinary,
         });
         self.show_running_dialog(RunningDialogStackEntry::Chat);
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::RunningChat,
             controller: InputDialogController::new_chat(label, &text).with_chat_tooltip(tooltip),
         });
@@ -470,14 +470,14 @@ impl GameApp {
         };
         self.suspend_ingame_pointer_for_gui();
         self.dialogs.chart_elevated = false;
-        self.message_dialog_active_index = None;
+        self.dialogs.message_active_index = None;
         self.chat.running = Some(RunningChatState {
             history_index: -1,
             active: true,
             kind: RunningChatKind::MessageBoardInput(input),
         });
         self.show_running_dialog(RunningDialogStackEntry::Chat);
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::RunningChat,
             controller,
         });
@@ -508,8 +508,8 @@ impl GameApp {
             active = self.engine.active_message_board_input().cloned();
         }
         if self.chat.running.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
+            || self.dialogs.game_over.is_some()
             || self.top_message_dialog_is_exclusive()
             || self.chat.external_dialog_visible
             || self.context_menus.open.is_some()
@@ -528,13 +528,13 @@ impl GameApp {
     }
 
     pub(crate) fn running_chat_controller(&self) -> Option<&InputDialogController> {
-        self.game_option_input_dialog.as_ref().and_then(|dialog| {
+        self.dialogs.game_option_input.as_ref().and_then(|dialog| {
             (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
         })
     }
 
     pub(crate) fn running_chat_controller_mut(&mut self) -> Option<&mut InputDialogController> {
-        self.game_option_input_dialog.as_mut().and_then(|dialog| {
+        self.dialogs.game_option_input.as_mut().and_then(|dialog| {
             (dialog.purpose == PendingInputDialogPurpose::RunningChat)
                 .then_some(&mut dialog.controller)
         })
@@ -558,7 +558,7 @@ impl GameApp {
     ) {
         // A dialog is modal over the startup menu, so it owns the composition
         // whenever one is open; the scenario search takes it otherwise.
-        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
             dialog.controller.set_composition(composition);
         } else if self.menu_state.search_focused() {
             self.menu_state.search_edit.set_composition(composition);
@@ -569,7 +569,7 @@ impl GameApp {
     /// IME candidate window. `None` when no field is taking text.
     pub(crate) fn ime_caret_area(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        if let Some(dialog) = self.game_option_input_dialog.as_ref() {
+        if let Some(dialog) = self.dialogs.game_option_input.as_ref() {
             let layout = self.game_option_input_layout()?;
             return Some(dialog.controller.caret_area(&layout, &fonts.text));
         }
@@ -594,7 +594,7 @@ impl GameApp {
     pub(crate) fn running_chat_active(&self) -> bool {
         self.chat.running.as_ref().is_some_and(|chat| chat.active)
             && (self.mode != AppMode::Running
-                || self.running_active_dialog == Some(RunningDialogStackEntry::Chat))
+                || self.dialogs.running_active == Some(RunningDialogStackEntry::Chat))
     }
 
     pub(crate) fn running_chat_keyboard_active(&self) -> bool {
@@ -606,7 +606,7 @@ impl GameApp {
             chat.active = active;
         }
         if active {
-            self.message_dialog_active_index = None;
+            self.dialogs.message_active_index = None;
             self.activate_running_dialog(RunningDialogStackEntry::Chat);
         }
     }
@@ -638,11 +638,12 @@ impl GameApp {
         self.chat.running = None;
         self.remove_running_dialog(RunningDialogStackEntry::Chat);
         if self
-            .game_option_input_dialog
+            .dialogs
+            .game_option_input
             .as_ref()
             .is_some_and(|dialog| dialog.purpose == PendingInputDialogPurpose::RunningChat)
         {
-            self.game_option_input_dialog = None;
+            self.dialogs.game_option_input = None;
         }
         if self.dialogs.messages.is_empty() {
             self.dialogs.chart_elevated = false;
@@ -650,10 +651,10 @@ impl GameApp {
         self.close_context_menu_silently();
         self.game_option_input_last_click = None;
         if was_active {
-            self.message_dialog_active_index = if self.dialogs.chart_elevated {
+            self.dialogs.message_active_index = if self.dialogs.chart_elevated {
                 None
             } else {
-                match self.running_active_dialog {
+                match self.dialogs.running_active {
                     Some(RunningDialogStackEntry::Message(stack_id)) => {
                         self.running_message_index(stack_id)
                     }
@@ -701,7 +702,7 @@ impl GameApp {
     }
 
     fn complete_running_chat_nick(&mut self) {
-        let Some(controller) = self.game_option_input_dialog.as_ref().and_then(|dialog| {
+        let Some(controller) = self.dialogs.game_option_input.as_ref().and_then(|dialog| {
             (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
         }) else {
             return;
@@ -1363,7 +1364,7 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
         ordered_native: bool,
     ) -> Result<()> {
-        let Some(controller) = self.game_option_input_dialog.as_ref().and_then(|dialog| {
+        let Some(controller) = self.dialogs.game_option_input.as_ref().and_then(|dialog| {
             (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
         }) else {
             return Ok(());
@@ -1406,7 +1407,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        let Some(controller) = self.game_option_input_dialog.as_ref().and_then(|dialog| {
+        let Some(controller) = self.dialogs.game_option_input.as_ref().and_then(|dialog| {
             (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
         }) else {
             return Ok(());

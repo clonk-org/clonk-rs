@@ -840,7 +840,7 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
-        let Some(dialog) = self.league_signup_dialog.as_ref() else {
+        let Some(dialog) = self.dialogs.league_signup.as_ref() else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
@@ -896,7 +896,8 @@ impl GameApp {
             (surface.width(), surface.height())
         };
         let text = self
-            .game_over_dialog
+            .dialogs
+            .game_over
             .as_ref()
             .map(|dialog| dialog.tooltip_at(pointer.x, pointer.y, surface_width, surface_height))
             .filter(|text| !text.is_empty())
@@ -924,7 +925,7 @@ impl GameApp {
         surface: &mut Surface,
         gamma: &clonk_graphics::GammaRamp,
     ) -> Result<()> {
-        let Some(dialog) = self.league_signup_dialog.as_ref() else {
+        let Some(dialog) = self.dialogs.league_signup.as_ref() else {
             return Ok(());
         };
         let resources = self
@@ -1199,11 +1200,11 @@ impl GameApp {
     pub(crate) fn runtime_client_list_draw_active(&self) -> bool {
         if self.mode == AppMode::Running {
             self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
-                && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
-                && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+                && self.dialogs.running_active == Some(RunningDialogStackEntry::RuntimeClientList)
+                && (self.dialogs.game_over.is_none() || self.dialogs.client_list_above_game_over)
                 && self.context_menus.open.is_none()
         } else {
-            (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
+            (self.dialogs.game_over.is_none() || self.dialogs.client_list_above_game_over)
                 && self.dialogs.messages.is_empty()
                 && self.context_menus.open.is_none()
         }
@@ -1486,13 +1487,13 @@ impl GameApp {
                             self.next_pending_native_overlay();
                         }
                     }
-                    if self.game_option_input_dialog.is_some() {
+                    if self.dialogs.game_option_input.is_some() {
                         self.render_game_option_input_dialog(gamma.as_ref())?;
                         if ordered_native {
                             self.next_pending_native_overlay();
                         }
                     }
-                    if self.league_signup_dialog.is_some() {
+                    if self.dialogs.league_signup.is_some() {
                         self.render_league_signup_dialog(gamma.as_ref())?;
                         if ordered_native {
                             self.next_pending_native_overlay();
@@ -1519,12 +1520,12 @@ impl GameApp {
                         self.render_message_dialogs(gamma.as_ref())?;
                     }
                     if ordered_native
-                        && self.game_option_input_dialog.is_none()
+                        && self.dialogs.game_option_input.is_none()
                         && self.context_menus.open.is_some()
                     {
                         self.next_pending_native_overlay();
                         self.render_ordered_context_menu(gamma.as_ref())?;
-                    } else if !ordered_native && self.game_option_input_dialog.is_none() {
+                    } else if !ordered_native && self.dialogs.game_option_input.is_none() {
                         if let Some(context_menu) = self.context_menus.open.as_ref() {
                             context_menu.render_panels(
                                 self.rendering.graphics.surface_mut(),
@@ -1630,8 +1631,8 @@ impl GameApp {
                     .as_ref()
                     .is_some_and(|fade| fade.step < STARTUP_DIALOG_FADE_STEPS);
                 let definition_selector_open = self.definition_selector.is_some();
-                let game_option_input_open = self.game_option_input_dialog.is_some();
-                let league_signup_open = self.league_signup_dialog.is_some();
+                let game_option_input_open = self.dialogs.game_option_input.is_some();
+                let league_signup_open = self.dialogs.league_signup.is_some();
                 // A fading C4GUI::Dialog is inactive even when it retains its
                 // focused control. Reuse the renderer's inactive-focus path.
                 let context_menu_open = self.context_menus.open.is_some()
@@ -2007,8 +2008,8 @@ impl GameApp {
     pub(crate) fn ingame_selection_frame(&self) -> Option<(Vec<ObjectId>, Vector2, GuiPoint)> {
         if !self.mouse_control
             || !matches!(self.mode, AppMode::Running)
-            || self.game_over_dialog.is_some()
-            || self.game_option_input_dialog.is_some()
+            || self.dialogs.game_over.is_some()
+            || self.dialogs.game_option_input.is_some()
             || !self.dialogs.messages.is_empty()
         {
             return None;
@@ -2094,7 +2095,7 @@ impl GameApp {
             && !defer_native_text
             && !ordered_native
             && self.dialogs.messages.is_empty()
-            && self.league_signup_dialog.is_none()
+            && self.dialogs.league_signup.is_none()
             && !self
                 .network_start_wait
                 .as_ref()
@@ -2156,7 +2157,7 @@ impl GameApp {
             }
             self.render_league_signup_dialog(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
-            if self.league_signup_dialog.is_some() {
+            if self.dialogs.league_signup.is_some() {
                 self.next_pending_native_overlay();
             }
             self.render_message_dialogs(Some(gamma))
@@ -5614,7 +5615,7 @@ impl GameApp {
             .require_classic_hud_resources_with_hud(self.current_hud_graphics_ref())
             .map_err(report_classic_parity_boundary)?;
         self.preflight_visible_gui_overlay_resources()?;
-        if let Some(dialog) = self.game_over_dialog.as_ref() {
+        if let Some(dialog) = self.dialogs.game_over.as_ref() {
             self.assets
                 .require_classic_game_over_resources_with_hud_and_evaluation(
                     self.current_hud_graphics_ref(),
@@ -6916,7 +6917,7 @@ impl GameApp {
                     self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
                 }
                 RuntimeDefaultDialog::GameOver => {
-                    if let Some(dialog) = self.game_over_dialog.as_ref() {
+                    if let Some(dialog) = self.dialogs.game_over.as_ref() {
                         let font = self.assets.font_arc();
                         let hud = self.current_hud_graphics();
                         let classic = self
@@ -6945,7 +6946,7 @@ impl GameApp {
             }
         }
         self.render_league_signup_dialog(Some(&frame_gamma))?;
-        if ordered_native && self.league_signup_dialog.is_some() {
+        if ordered_native && self.dialogs.league_signup.is_some() {
             self.next_pending_native_overlay();
         }
         if use_running_dialog_stack {

@@ -4576,7 +4576,7 @@ fn begin_construction_drag(app: &mut GameApp, menu_point: GuiPoint, drop_point: 
 fn new_game_over_keyboard_app() -> GameApp {
     let mut app = new_classic_running_sandbox_app();
     app.handle_game_over().test_value();
-    assert!(app.game_over_dialog.is_some());
+    assert!(app.dialogs.game_over.is_some());
     if let Some(audio) = app.sound.context.as_ref() {
         // Isolate game-over input from InitGameFinal's intentional
         // CloseViewport feedback instance.
@@ -4631,13 +4631,15 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
                 )
             })
             .collect(),
-        game_over_open: app.game_over_dialog.is_some(),
+        game_over_open: app.dialogs.game_over.is_some(),
         game_over_hovered_action: app
-            .game_over_dialog
+            .dialogs
+            .game_over
             .as_ref()
             .and_then(GameOverState::hovered_action),
         game_over_focus: app
-            .game_over_dialog
+            .dialogs
+            .game_over
             .as_ref()
             .and_then(GameOverState::focused),
         ingame_page: app.ingame_menus.players.as_ref().map(IngameMenuState::page),
@@ -4648,7 +4650,7 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
             .map(|(_, menu)| menu.style),
         context_menu_open: app.context_menus.open.is_some(),
         definition_selector_open: app.definition_selector.is_some(),
-        game_option_input_open: app.game_option_input_dialog.is_some(),
+        game_option_input_open: app.dialogs.game_option_input.is_some(),
         game_over_handled: app.game_over_handled,
         runtime_help_visible: app.dialogs.help_visible,
         runtime_flash_message: app.runtime_flash_message.clone(),
@@ -4658,7 +4660,7 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
         scoreboard_initial_reconcile_pending: app.dialogs.scoreboard_initial_reconcile_pending,
         scoreboard_close_pointer_capture: app.dialogs.scoreboard_close_pointer_capture,
         pressed_engine_keys: app.live_input.pressed_engine_keys.clone(),
-        message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
+        message_dialog_consumed_keys: app.dialogs.message_consumed_keys.clone(),
     }
 }
 

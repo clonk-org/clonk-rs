@@ -167,7 +167,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     ));
     f2.test_left_button(ElementState::Pressed);
     main_assert!(f2.dialogs.messages[0].state.has_pointer_capture());
-    main_assert_eq!(f2.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(f2.dialogs.message_pointer_capture_index => Some(0));
     f2.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     main_assert_eq!(f2.running_chat_text() => Some(""));
     main_assert_eq!(f2.dialogs.messages.len() => 1);
@@ -190,7 +190,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     focus_loss.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     focus_loss.handle_focus_lost().test_value();
     main_assert!(!focus_loss.dialogs.messages[0].state.has_pointer_capture());
-    main_assert_eq!(focus_loss.message_dialog_pointer_capture_index => None);
+    main_assert_eq!(focus_loss.dialogs.message_pointer_capture_index => None);
     main_assert!(!focus_loss.live_input.primary_left_down);
     focus_loss.test_left_button(ElementState::Released);
     main_assert_eq!(focus_loss.dialogs.messages.len() => 1);
@@ -370,10 +370,10 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         f64::from(chat_layout.edit.y + chat_layout.edit.h / 2),
     ));
     main_assert!(close_active_chat.running_chat_active());
-    main_assert_eq!(close_active_chat.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(close_active_chat.dialogs.message_pointer_capture_index => Some(0));
     close_active_chat.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(close_active_chat.chat.running.is_none());
-    main_assert_eq!(close_active_chat.message_dialog_pointer_capture_index => None);
+    main_assert_eq!(close_active_chat.dialogs.message_pointer_capture_index => None);
     main_assert!(!close_active_chat.dialogs.messages[0].state.has_pointer_capture());
 
     let mut stacked_active = boxed_running_sandbox_app();
@@ -443,7 +443,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     );
     stacked_capture.test_cursor(button_point);
     stacked_capture.test_left_button(ElementState::Pressed);
-    main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(stacked_capture.dialogs.message_pointer_capture_index => Some(0));
     stacked_capture
         .push_message_dialog(small_vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
@@ -460,7 +460,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     stacked_capture.test_left_button(ElementState::Released);
     main_assert_eq!(stacked_capture.dialogs.messages.len() => 2);
     main_assert_eq!(stacked_capture.active_message_dialog_index() => Some(0));
-    main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => None);
+    main_assert_eq!(stacked_capture.dialogs.message_pointer_capture_index => None);
     main_assert!(stacked_capture.dialogs.messages.iter().all(|dialog| !dialog.state.has_pointer_capture()));
 
     let mut exposed_lower = boxed_running_sandbox_app();
@@ -481,20 +481,20 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     exposed_lower.test_cursor(exposed_point);
     exposed_lower.test_left_button(ElementState::Pressed);
     main_assert_eq!(exposed_lower.active_message_dialog_index() => Some(0));
-    main_assert_eq!(exposed_lower.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(exposed_lower.dialogs.message_pointer_capture_index => Some(0));
     let top_point = PhysicalPosition::new(
         f64::from(small_layout.bounds.x + small_layout.bounds.w / 2),
         f64::from(small_layout.bounds.y + small_layout.bounds.h / 2),
     );
     exposed_lower.test_cursor(top_point);
     main_assert_eq!(exposed_lower.active_message_dialog_index() => Some(1));
-    main_assert_eq!(exposed_lower.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(exposed_lower.dialogs.message_pointer_capture_index => Some(0));
     exposed_lower.test_cursor(exposed_point);
     main_assert_eq!(exposed_lower.active_message_dialog_index() => Some(1));
-    main_assert_eq!(exposed_lower.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(exposed_lower.dialogs.message_pointer_capture_index => Some(0));
     exposed_lower.test_left_button(ElementState::Released);
     main_assert_eq!(exposed_lower.dialogs.messages.len() => 2);
-    main_assert_eq!(exposed_lower.message_dialog_pointer_capture_index => None);
+    main_assert_eq!(exposed_lower.dialogs.message_pointer_capture_index => None);
 
     let mut inserted_capture = boxed_running_sandbox_app();
     inserted_capture
@@ -512,7 +512,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .push_message_dialog(small_vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
     main_assert_eq!(inserted_capture.active_message_dialog_index() => Some(1));
-    main_assert_eq!(inserted_capture.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(inserted_capture.dialogs.message_pointer_capture_index => Some(0));
     main_assert!(inserted_capture.dialogs.messages[0].state.has_pointer_capture());
     let small_layout = inserted_capture.top_message_dialog_layout().test_value();
     let top_point = PhysicalPosition::new(
@@ -522,7 +522,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     inserted_capture.test_cursor(top_point);
     inserted_capture.test_left_button(ElementState::Released);
     main_assert_eq!(inserted_capture.dialogs.messages.len() => 2);
-    main_assert_eq!(inserted_capture.message_dialog_pointer_capture_index => None);
+    main_assert_eq!(inserted_capture.dialogs.message_pointer_capture_index => None);
 
     let exposed_point = PhysicalPosition::new(
         f64::from(regular_layout.bounds.x + 5),
@@ -541,15 +541,15 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .push_message_dialog(small_vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
     stacked_capture.test_cursor(button_point);
-    main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(stacked_capture.dialogs.message_pointer_capture_index => Some(0));
     main_assert_eq!(stacked_capture.active_message_dialog_index() => Some(1));
     stacked_capture.test_cursor(a_only_point);
-    main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => Some(0));
+    main_assert_eq!(stacked_capture.dialogs.message_pointer_capture_index => Some(0));
     main_assert_eq!(stacked_capture.active_message_dialog_index() => Some(1));
     stacked_capture.test_left_button(ElementState::Released);
     main_assert_eq!(stacked_capture.dialogs.messages.len() => 2);
     main_assert_eq!(stacked_capture.active_message_dialog_index() => Some(1));
-    main_assert_eq!(stacked_capture.message_dialog_pointer_capture_index => None);
+    main_assert_eq!(stacked_capture.dialogs.message_pointer_capture_index => None);
     main_assert!(stacked_capture.dialogs.messages.iter().all(|dialog| !dialog.state.has_pointer_capture()));
 
     let mut vote_pointer = boxed_running_sandbox_app();
@@ -612,7 +612,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     handled_message_hotkey.test_modifiers(ModifiersState::ALT);
     main_assert!(handled_message_hotkey.handle_message_dialog_key(VirtualKeyCode::KeyD, ElementState::Pressed).expect("checkbox mnemonic down is handled"));
     main_assert_eq!(handled_message_hotkey.dialogs.messages[0].state.checkbox_checked() => Some(true));
-    main_assert!(!handled_message_hotkey.message_dialog_consumed_keys.contains(&VirtualKeyCode::KeyD));
+    main_assert!(!handled_message_hotkey.dialogs.message_consumed_keys.contains(&VirtualKeyCode::KeyD));
     main_assert!(!handled_message_hotkey
         .handle_message_dialog_key(VirtualKeyCode::KeyD, ElementState::Released)
         .expect("mnemonic release is not owned by the dialog"));
@@ -921,7 +921,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     main_assert!(!app.chat.external_dialog_visible);
     app.test_modifiers(ModifiersState::empty());
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
     main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.message_board_line() => board_before);
@@ -3279,7 +3279,7 @@ fn window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
 
     let mut game_over = new_game_over_keyboard_app();
     game_over.handle_window_close_requested();
-    main_assert!(game_over.game_over_dialog.is_some());
+    main_assert!(game_over.dialogs.game_over.is_some());
     main_assert!(game_over.ingame_menus.players.is_none());
     main_assert!(game_over.dialogs.messages.is_empty());
     main_assert!(!game_over.take_exit_request());

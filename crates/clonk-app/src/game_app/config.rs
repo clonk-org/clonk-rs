@@ -181,7 +181,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.game_option_input_dialog.is_none() {
+        if self.dialogs.game_option_input.is_none() {
             return Ok(false);
         }
         if self.running_chat_controller().is_some() && !self.running_chat_keyboard_active() {
@@ -214,7 +214,8 @@ impl GameApp {
                 return Ok(false);
             }
             if !self
-                .game_option_input_dialog
+                .dialogs
+                .game_option_input
                 .as_ref()
                 .is_some_and(|dialog| dialog.controller.has_hotkey(hotkey))
             {
@@ -231,7 +232,8 @@ impl GameApp {
             && key == VirtualKeyCode::ContextMenu
             && c4_modifiers.is_empty()
         {
-            self.game_option_input_dialog
+            self.dialogs
+                .game_option_input
                 .as_mut()
                 .map(|dialog| {
                     dialog.controller.request_context_menu_from_key(
@@ -266,7 +268,8 @@ impl GameApp {
             let clipboard = matches!(shortcut, InputDialogClipboardShortcut::Paste)
                 .then(clipboard_text)
                 .flatten();
-            self.game_option_input_dialog
+            self.dialogs
+                .game_option_input
                 .as_mut()
                 .map(|dialog| {
                     dialog.controller.handle_clipboard_shortcut(
@@ -302,7 +305,8 @@ impl GameApp {
                 if edit_key.is_some() && c4_modifiers.alt_key() {
                     Vec::new()
                 } else if let Some(edit_key) = edit_key {
-                    self.game_option_input_dialog
+                    self.dialogs
+                        .game_option_input
                         .as_mut()
                         .map(|dialog| {
                             dialog.controller.handle_edit_key_down(
@@ -316,13 +320,15 @@ impl GameApp {
                 } else if hotkey_modifiers {
                     dialog_hotkey
                         .and_then(|hotkey| {
-                            self.game_option_input_dialog
+                            self.dialogs
+                                .game_option_input
                                 .as_mut()
                                 .map(|dialog| dialog.controller.handle_hotkey(hotkey))
                         })
                         .unwrap_or_default()
                 } else if let Some(gui_key) = map_key_code(key) {
-                    self.game_option_input_dialog
+                    self.dialogs
+                        .game_option_input
                         .as_mut()
                         .map(|dialog| {
                             dialog.controller.route_key_down(
@@ -342,7 +348,8 @@ impl GameApp {
                 }
             }
         } else if let Some(gui_key) = map_key_code(key) {
-            self.game_option_input_dialog
+            self.dialogs
+                .game_option_input
                 .as_mut()
                 .map(|dialog| dialog.controller.route_key_up(gui_key))
                 .map(|outcome| outcome.actions)
@@ -367,7 +374,7 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::ScenarioBrowser
-            || self.game_option_input_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
             || self.context_menus.open.is_some()
         {
             return Ok(false);
@@ -467,11 +474,11 @@ impl GameApp {
         };
         match state {
             ElementState::Released => {
-                self.message_dialog_consumed_keys.remove(&key);
+                self.dialogs.message_consumed_keys.remove(&key);
                 return Ok(true);
             }
             ElementState::Pressed => {
-                self.message_dialog_consumed_keys.insert(key);
+                self.dialogs.message_consumed_keys.insert(key);
             }
         }
         let c4_modifiers = self.live_input.modifiers
@@ -543,7 +550,8 @@ impl GameApp {
         let layout = self.game_option_input_layout();
         let fonts = self.assets.clonk_fonts.clone();
         let actions = self
-            .game_option_input_dialog
+            .dialogs
+            .game_option_input
             .as_mut()
             .map(|dialog| match event {
                 GamepadEvent::Direction {
@@ -651,7 +659,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.context_menus.open.is_some()
         {
             return Ok(false);
@@ -679,7 +687,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.context_menus.open.is_some()
         {
             return Ok(false);
@@ -707,7 +715,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.context_menus.open.is_some()
         {
             return Ok(false);
@@ -1695,11 +1703,11 @@ impl GameApp {
         }
         match state {
             ElementState::Released => {
-                self.message_dialog_consumed_keys.remove(&key);
+                self.dialogs.message_consumed_keys.remove(&key);
                 return Ok(true);
             }
             ElementState::Pressed => {
-                self.message_dialog_consumed_keys.insert(key);
+                self.dialogs.message_consumed_keys.insert(key);
             }
         }
         let c4_modifiers = self.live_input.modifiers
@@ -1833,7 +1841,7 @@ impl GameApp {
             .with_max_text(max_text)
             .with_input_text(&initial);
         self.startup_tooltip.pointer_left();
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::OptionsNetwork(field),
             controller,
         });
@@ -1866,7 +1874,7 @@ impl GameApp {
         .with_max_text(4)
         .with_input_text(&scale.to_string());
         self.startup_tooltip.pointer_left();
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::OptionsGraphicsScale,
             controller,
         });
@@ -2504,7 +2512,7 @@ impl GameApp {
             .with_max_text(request.max_text)
             .with_input_text(&request.initial_text);
         self.startup_tooltip.pointer_left();
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+        self.dialogs.game_option_input = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::GameOption(request.kind),
             controller,
         });
@@ -2518,7 +2526,7 @@ impl GameApp {
     pub(crate) fn game_option_input_layout(
         &self,
     ) -> Option<clonk_frontend::input_dialog::InputDialogLayout> {
-        let dialog = self.game_option_input_dialog.as_ref()?;
+        let dialog = self.dialogs.game_option_input.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.rendering.graphics.surface();
         Some(
@@ -2541,7 +2549,8 @@ impl GameApp {
 
     pub(crate) fn release_game_option_input_pointer_elements(&mut self) {
         let sounds = self
-            .game_option_input_dialog
+            .dialogs
+            .game_option_input
             .as_mut()
             .map(|dialog| {
                 dialog.controller.release_pointer_elements();
@@ -2557,7 +2566,7 @@ impl GameApp {
         let layout = self.game_option_input_layout();
         let fonts = self.assets.clonk_fonts.clone();
         if let Some(((point, layout), fonts)) = point.zip(layout).zip(fonts.as_deref()) {
-            if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
                 dialog
                     .controller
                     .stop_pointer_drag_at(point, &layout, &fonts.text);
@@ -2583,7 +2592,8 @@ impl GameApp {
             .zip(layout.as_ref())
             .zip(fonts.as_deref())
             .and_then(|((point, layout), fonts)| {
-                self.game_option_input_dialog
+                self.dialogs
+                    .game_option_input
                     .as_mut()
                     .map(|dialog| match button_state {
                         ElementState::Pressed => {
@@ -2602,7 +2612,7 @@ impl GameApp {
         self.finish_game_option_input_dialog_actions(actions)?;
         if button_state == ElementState::Released
             && clicked_edit
-            && self.game_option_input_dialog.is_some()
+            && self.dialogs.game_option_input.is_some()
         {
             let now = Instant::now();
             let is_double = self
@@ -2614,7 +2624,7 @@ impl GameApp {
                     .zip(layout.as_ref())
                     .zip(fonts.as_deref())
                     .and_then(|((point, layout), fonts)| {
-                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                        self.dialogs.game_option_input.as_mut().map(|dialog| {
                             dialog.controller.handle_pointer_double_click(
                                 point,
                                 layout,
@@ -2634,7 +2644,8 @@ impl GameApp {
         actions: Vec<InputDialogAction>,
     ) -> Result<(), EngineError> {
         let sounds = self
-            .game_option_input_dialog
+            .dialogs
+            .game_option_input
             .as_mut()
             .map(|dialog| dialog.controller.take_sound_events())
             .unwrap_or_default();
@@ -2651,7 +2662,8 @@ impl GameApp {
                 InputDialogAction::FocusChanged(_) | InputDialogAction::TextChanged(_) => {}
                 InputDialogAction::SubmittedLine(text) => {
                     if self
-                        .game_option_input_dialog
+                        .dialogs
+                        .game_option_input
                         .as_ref()
                         .is_some_and(|pending| {
                             pending.purpose == PendingInputDialogPurpose::RunningChat
@@ -2691,7 +2703,7 @@ impl GameApp {
                     self.open_context_menu_at(entries, request.anchor)?;
                 }
                 InputDialogAction::Accepted(text) => {
-                    let Some(pending) = self.game_option_input_dialog.take() else {
+                    let Some(pending) = self.dialogs.game_option_input.take() else {
                         continue;
                     };
                     self.startup_tooltip.pointer_left();
@@ -2764,7 +2776,7 @@ impl GameApp {
                     break;
                 }
                 InputDialogAction::Cancelled => {
-                    let Some(pending) = self.game_option_input_dialog.take() else {
+                    let Some(pending) = self.dialogs.game_option_input.take() else {
                         continue;
                     };
                     self.startup_tooltip.pointer_left();
@@ -2810,7 +2822,7 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
-        if self.game_option_input_dialog.is_none() {
+        if self.dialogs.game_option_input.is_none() {
             return Ok(());
         }
         let assets = Arc::clone(&self.assets);
@@ -2818,7 +2830,8 @@ impl GameApp {
             .input_dialog_resources()
             .with_context(|| "classic C4GUI::InputDialog resources are unavailable")?;
         let (keyboard_active, _) = self.game_option_input_activity();
-        self.game_option_input_dialog
+        self.dialogs
+            .game_option_input
             .as_ref()
             .expect("checked above")
             .controller
@@ -2852,7 +2865,7 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<bool> {
         let (_, mouse_active) = self.game_option_input_activity();
-        let Some(dialog) = self.game_option_input_dialog.as_ref() else {
+        let Some(dialog) = self.dialogs.game_option_input.as_ref() else {
             return Ok(false);
         };
         let assets = Arc::clone(&self.assets);

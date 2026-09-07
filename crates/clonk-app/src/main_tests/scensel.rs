@@ -310,7 +310,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     let native_password = clonk_script::c4_string_from_bytes(b"Secr\x80t");
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
+    main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("Mission Access dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
         " secret ".to_string(),
     )])
@@ -1650,32 +1650,32 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access input dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
+    main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("Mission Access input dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     main_assert_eq!(app.scenario_game_options.values().comment => "unchanged comment");
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
     main_assert_eq!(
-        app.game_option_input_dialog
+        app.dialogs.game_option_input
             .as_ref()
             .expect("Comment input dialog")
             .purpose =>
         PendingInputDialogPurpose::GameOption(GameOptionInputKind::Comment)
     );
-    app.game_option_input_dialog = None;
+    app.dialogs.game_option_input = None;
     app.game_option_input_consumed_keys.clear();
     app.game_option_consumed_keys.clear();
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SUPER);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access input dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
+    main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("Mission Access input dialog").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
 
@@ -1687,7 +1687,7 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
     main_assert!(app.context_menus.open.is_some());
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
     main_assert_eq!(app.scenario_game_options.values().comment => "unchanged comment");
     app.close_context_menu_silently();
 
@@ -1775,7 +1775,7 @@ fn scensel_rename_restores_search_and_specific_option_focus() {
     main_assert!(app.menu_state.rename_edit.is_some());
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
     main_assert!(app.menu_state.rename_edit.is_some());
-    main_assert_eq!(app.game_option_input_dialog.as_ref().expect("Mission Access input").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
+    main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("Mission Access input").purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
     main_assert!(app.menu_state.rename_edit.is_some());
@@ -2371,7 +2371,7 @@ fn scensel_alt_m_updates_shared_and_persisted_mission_access() {
     app.open_network_host_scenario_browser();
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    let dialog = app.game_option_input_dialog.test_ref();
+    let dialog = app.dialogs.game_option_input.test_ref();
     main_assert_eq!(dialog.purpose => PendingInputDialogPurpose::ScenarioMissionAccess);
     main_assert_eq!(dialog.controller.caption() => "Mission Access");
     main_assert_eq!(dialog.controller.message() => "Enter mission password:");
@@ -3094,7 +3094,7 @@ fn folder_map_f5_refresh_preserves_map_and_book_only_shortcuts() {
     main_assert!(app.dialogs.messages.is_empty());
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
     app.test_modifiers(ModifiersState::empty());
 
     let beta_path = map_path.join("Beta.c4s");

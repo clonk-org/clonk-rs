@@ -1579,7 +1579,7 @@ fn app_virtual_keyboard_completes_real_tutorial05_route() {
         app.engine.next_mission().path == r"Tutorial.c4f\Tutorial06.c4s"
     });
     advance_app_until(&mut app, "Tutorial05 reaches GameOver", 400, |app| {
-        app.snapshot.game_over && app.game_over_dialog.is_some()
+        app.snapshot.game_over && app.dialogs.game_over.is_some()
     });
     main_assert!(app.snapshot.round_results.fulfilled_goals.iter().any(|goal| goal == "SCRG"), "Tutorial05 must fulfill its real SCRG before GameOver");
     main_assert_eq!(

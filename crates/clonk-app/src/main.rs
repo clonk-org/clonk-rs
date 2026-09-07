@@ -3246,7 +3246,6 @@ impl GameApp {
             update_check_requested: false,
             update_check: None,
             update_download: None,
-            update_download_dialog: None,
             automatic_update_check_allowed: !cfg!(test),
             free_view_scroll_momentum: FreeViewScrollMomentum::default(),
             // C4MouseControl::Default starts with fMouseOwned set even while
@@ -3269,6 +3268,14 @@ impl GameApp {
                 chart_consumed_keys: HashSet::new(),
                 chart_pointer_capture: false,
                 chart_elevated: false,
+                running_active: None,
+                game_over: None,
+                league_signup: None,
+                game_option_input: None,
+                update_download: None,
+                message_active_index: None,
+                message_pointer_capture_index: None,
+                message_consumed_keys: HashSet::new(),
             },
             ingame_mouse_help_caption: None,
             mouse_state: None,
@@ -3281,23 +3288,17 @@ impl GameApp {
             exit_requested: false,
             exit_reason: None,
             configuration_reset_requested: false,
-            game_over_dialog: None,
             game_over_handled: false,
             pending_league_end: None,
             runtime_key_config_cache: OnceLock::new(),
             runtime_flash_resources_cache,
             runtime_flash_message: None,
             film_view_player: None,
-            running_active_dialog: None,
             next_running_message_stack_id: 1,
-            league_signup_dialog: None,
             cancelled_league_signup_continuation: None,
-            message_dialog_active_index: None,
-            message_dialog_pointer_capture_index: None,
             definition_selector: None,
             pending_definition_selection: None,
             pending_lobby_player_selection: None,
-            game_option_input_dialog: None,
             context_menus: ContextMenuState {
                 open: None,
                 lobby_team_player: None,
@@ -3317,7 +3318,6 @@ impl GameApp {
                 script_close_pointer_capture: None,
                 construction_drag: None,
             },
-            message_dialog_consumed_keys: HashSet::new(),
             league_signup_consumed_keys: HashSet::new(),
             league_signup_pointer_capture: false,
             league_signup_pointer_position: None,
@@ -3457,8 +3457,8 @@ impl GameApp {
             && self.dialogs.client_list.is_none()
             && self.dialogs.chart.is_none()
             && self.dialogs.scoreboard.is_none()
-            && self.game_over_dialog.is_none()
-            && self.game_option_input_dialog.is_none()
+            && self.dialogs.game_over.is_none()
+            && self.dialogs.game_option_input.is_none()
             && self.dialogs.messages.is_empty()
             && self.context_menus.open.is_none()
             && self
@@ -3716,14 +3716,14 @@ impl GameApp {
         self.startup_tooltip.pointer_left();
         self.release_message_dialog_pointer_elements();
         self.context_menus.pointer_capture = None;
-        if let Some(dialog) = self.league_signup_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.league_signup.as_mut() {
             dialog.controller.cancel_interaction();
             dialog.controller.reset_location();
         }
         self.league_signup_consumed_keys.clear();
         self.league_signup_pointer_capture = false;
         self.league_signup_pointer_position = None;
-        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
             dialog.controller.cancel_interaction();
         }
         self.scenario_game_options.cancel_interaction();
@@ -4256,7 +4256,7 @@ impl GameApp {
     fn toggle_runtime_pause(&mut self) {
         // C4Game::TogglePause refuses while the evaluation dialog owns its
         // temporary halt. This guard applies to the console Pause key too.
-        if self.game_over_dialog.is_some() {
+        if self.dialogs.game_over.is_some() {
             return;
         }
         let paused = match self.runtime_network_role() {
@@ -4271,7 +4271,7 @@ impl GameApp {
 
     fn apply_engine_pause_game_requests(&mut self) {
         let requests = self.engine.take_pause_game_requests();
-        if !matches!(self.mode, AppMode::Running) || self.game_over_dialog.is_some() {
+        if !matches!(self.mode, AppMode::Running) || self.dialogs.game_over.is_some() {
             // The evaluation dialog owns native's temporary game pause.
             // PauseGame(true) is guarded by TogglePause, while PauseGame()
             // sees the existing hold and is a no-op. Rust freezes evaluation
@@ -4601,7 +4601,7 @@ impl GameApp {
     }
 
     fn scoreboard_opening_blocked_by_game_over(&self) -> bool {
-        self.game_over_dialog.is_some() || (self.snapshot.game_over && !self.game_over_handled)
+        self.dialogs.game_over.is_some() || (self.snapshot.game_over && !self.game_over_handled)
     }
 
     /// Arms runtime request capture only after scenario initialization or save
@@ -4676,19 +4676,19 @@ impl GameApp {
         for dialog in &mut self.dialogs.messages {
             dialog.state.cancel_interaction();
         }
-        self.message_dialog_pointer_capture_index = None;
+        self.dialogs.message_pointer_capture_index = None;
         if let Some(controller) = self.definition_selector.as_mut() {
             controller.cancel_interaction();
         }
-        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
             dialog.controller.cancel_interaction();
         }
-        if let Some(dialog) = self.league_signup_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.league_signup.as_mut() {
             dialog.controller.cancel_interaction();
         }
         self.scenario_game_options.cancel_interaction();
         self.cancel_classic_lobby_interaction();
-        self.message_dialog_consumed_keys.clear();
+        self.dialogs.message_consumed_keys.clear();
         self.dialogs.chart_consumed_keys.clear();
         self.dialogs.client_list_consumed_keys.clear();
         self.definition_selector_consumed_keys.clear();
@@ -5885,10 +5885,10 @@ impl GameApp {
             || !self.runtime_default_dialog_order_snapshot().is_empty()
             || self.context_menus.open.is_some()
             || self.definition_selector.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.league_signup_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
+            || self.dialogs.league_signup.is_some()
             || !self.dialogs.messages.is_empty()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_over.is_some()
             || self.dialogs.chart.is_some()
             || self.dialogs.client_list.is_some()
             || self.chat.external_dialog_visible
@@ -5972,8 +5972,8 @@ impl GameApp {
             || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
             || self.context_menus.open.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.game_over_dialog.is_some()
+            || self.dialogs.game_option_input.is_some()
+            || self.dialogs.game_over.is_some()
             || self.dialogs.chart_pointer_capture
         {
             return Ok(None);
@@ -6774,15 +6774,15 @@ impl GameApp {
             .unwrap_or_default();
         self.process_startup_player_properties_actions(portrait_actions);
         self.pointer_left_unchecked();
-        if self.game_over_dialog.is_some() {
+        if self.dialogs.game_over.is_some() {
             return;
         }
-        if let Some(dialog) = self.league_signup_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.league_signup.as_mut() {
             dialog.controller.cancel_interaction();
             self.league_signup_pointer_capture = false;
             return;
         }
-        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+        if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
             dialog.controller.cancel_interaction();
             return;
         }
@@ -8470,13 +8470,13 @@ impl GameApp {
                 },
             )?;
         }
-        if self.game_option_input_dialog.is_some() {
+        if self.dialogs.game_option_input.is_some() {
             check(
                 self.assets.input_dialog_resources().map(|_| ()),
                 "C4GUI::InputDialog",
             )?;
         }
-        if self.league_signup_dialog.is_some() {
+        if self.dialogs.league_signup.is_some() {
             check(
                 self.assets
                     .league_signup_resources()
@@ -9480,7 +9480,7 @@ impl GameApp {
         self.runtime_flash_message = None;
         self.dialogs.client_list = None;
         self.dialogs.stack.clear();
-        self.running_active_dialog = None;
+        self.dialogs.running_active = None;
         self.dialogs.client_list_consumed_keys.clear();
         self.runtime_key_config_cache = OnceLock::new();
         let _ = self.runtime_key_config_cache.set(
@@ -9507,8 +9507,8 @@ impl GameApp {
         // every game. A runtime multi-line count therefore collapses back to
         // ordinary one-line mode on the next initialization.
         self.chat.running = None;
-        self.game_option_input_dialog = None;
-        self.league_signup_dialog = None;
+        self.dialogs.game_option_input = None;
+        self.dialogs.league_signup = None;
         self.cancelled_league_signup_continuation = None;
         self.league_signup_consumed_keys.clear();
         self.league_signup_pointer_capture = false;

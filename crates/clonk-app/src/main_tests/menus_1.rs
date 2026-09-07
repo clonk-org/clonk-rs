@@ -1232,7 +1232,7 @@ fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
         GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
     let actions = app.scenario_game_options.handle_hotkey('P');
     app.finish_game_option_input(actions).test_value();
-    let dialog = app.game_option_input_dialog.test_ref();
+    let dialog = app.dialogs.game_option_input.test_ref();
     main_assert_eq!(dialog.purpose => PendingInputDialogPurpose::GameOption(GameOptionInputKind::Password));
     main_assert_eq!(dialog.controller.caption() => "Password");
     main_assert_eq!(dialog.controller.text() => "old password");
@@ -1362,11 +1362,11 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     app.test_modifiers(ModifiersState::CONTROL | ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyO, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyO, ElementState::Released);
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
     app.test_modifiers(ModifiersState::empty());
 
     for key in [
@@ -1398,7 +1398,7 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     main_assert_eq!(app.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Left));
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.game_option_input_pointer_capture => None);
     main_assert_eq!(app.menu_state.menu.selected_index() => selected);
@@ -1467,7 +1467,7 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
     main_assert!(!app.game_option_input_consumed_keys.is_empty());
     main_assert!(app.game_option_input_pointer_position.is_some());
     app.resize(1280, 720).test_value();
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
     main_assert_eq!(app.game_option_input_pointer_capture => None);
     main_assert!(app.game_option_input_consumed_keys.is_empty());
     main_assert!(app.game_option_input_pointer_position.is_none());
@@ -1475,7 +1475,7 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
     main_assert!(!app.game_option_pointer_capture);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     app.test_left_button(ElementState::Released);
-    main_assert!(app.game_option_input_dialog.is_some());
+    main_assert!(app.dialogs.game_option_input.is_some());
     reset_cached_app_paths();
 }
 
@@ -2708,7 +2708,7 @@ fn startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
     app.show_main_menu();
     app.handle_game_over().test_value();
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
-    main_assert!(app.game_over_dialog.is_some());
+    main_assert!(app.dialogs.game_over.is_some());
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
 }
 
@@ -2799,7 +2799,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     main_assert!(rename.edit.is_focused());
     main_assert_eq!(rename.edit.selected_text() => Some("Alpha"));
     main_assert!(app.startup_crew_rename_rect().is_some());
-    main_assert!(app.game_option_input_dialog.is_none());
+    main_assert!(app.dialogs.game_option_input.is_none());
     for character in "Draft".chars() {
         app.test_text_input(character);
     }
@@ -4367,9 +4367,9 @@ fn message_dialog_focus_loss_cancels_held_input_and_stale_release_guards() {
     main_assert_eq!(app.dialogs.messages.len() => 1, "a release missing its pre-focus-loss press must not activate");
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.message_dialog_consumed_keys.contains(&VirtualKeyCode::Escape));
+    main_assert!(app.dialogs.message_consumed_keys.contains(&VirtualKeyCode::Escape));
     app.handle_focus_lost().test_value();
-    main_assert!(app.message_dialog_consumed_keys.is_empty());
+    main_assert!(app.dialogs.message_consumed_keys.is_empty());
 }
 
 #[test]

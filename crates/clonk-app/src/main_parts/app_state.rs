@@ -300,6 +300,36 @@ pub(crate) struct RuntimeDialogState {
     pub(crate) help_text_cache: OnceLock<std::result::Result<RuntimeHelpColumns, String>>,
     /// Wooden menu title currently moving its owning dialog.
     pub(crate) menu_title_drag: Option<MenuTitleDrag>,
+    /// The pending single-instance dialogs and the message-dialog latches
+    /// (clonk-org/clonk-rs#1236): a keyboard-active z=+1 dialog can differ
+    /// from the visual top while a z=+2 chat exists, and a modal that closes
+    /// on key-down or pointer-down keeps what it consumed until release.
+    pub(crate) running_active: Option<RunningDialogStackEntry>,
+    pub(crate) game_over: Option<GameOverState>,
+    /// Native C4LeagueSignupDialog kept below its validation/cancellation
+    /// MessageDialog while the current local player auth is suspended.
+    pub(crate) league_signup: Option<PendingLeagueSignupDialog>,
+    /// Classic input dialog shared by startup prompts, game options, and the
+    /// compact running-chat layout.
+    pub(crate) game_option_input: Option<PendingGameOptionInputDialog>,
+    /// The reusable `C4DownloadDlg` controller that owns this transfer's
+    /// progress, its cancel semantics and its terminal error text.
+    ///
+    /// `C4UpdateDlg::DoUpdate` downloads through `C4DownloadDlg::DownloadFile`
+    /// rather than presenting its own transfer UI (`C4UpdateDlg.cpp:165`), so
+    /// the wrapper — not this module — composes `IDS_PRC_DOWNLOADERROR` and
+    /// appends `IDS_MSG_UPDATENOTAVAILABLE` to a 404.
+    pub(crate) update_download: Option<clonk_frontend::download_dialog::DownloadDialogState>,
+    /// Keyboard-active z=+1 dialog. This can differ from the visual top while
+    /// a z=+2 chat exists: inserting another message below chat does not call
+    /// `Screen::ActivateDialog`.
+    pub(crate) message_active_index: Option<usize>,
+    /// Dialog whose button owns `CMouse::pDragElement`. A newer z=+1 dialog
+    /// may be inserted above it while z=+2 chat keeps the old dialog active.
+    pub(crate) message_pointer_capture_index: Option<usize>,
+    /// A modal may close on key-down. Retain consumed physical keys until
+    /// their matching key-up so the underlying screen cannot activate.
+    pub(crate) message_consumed_keys: HashSet<VirtualKeyCode>,
 }
 
 /// Live keyboard and pointer state: what the platform last told us, and
@@ -1372,14 +1402,6 @@ pub(crate) struct GameApp {
     /// A release whose components are being downloaded and verified after the
     /// user accepted the update prompt.
     pub(crate) update_download: Option<PendingUpdateDownload>,
-    /// The reusable `C4DownloadDlg` controller that owns this transfer's
-    /// progress, its cancel semantics and its terminal error text.
-    ///
-    /// `C4UpdateDlg::DoUpdate` downloads through `C4DownloadDlg::DownloadFile`
-    /// rather than presenting its own transfer UI (`C4UpdateDlg.cpp:165`), so
-    /// the wrapper — not this module — composes `IDS_PRC_DOWNLOADERROR` and
-    /// appends `IDS_MSG_UPDATENOTAVAILABLE` to a 404.
-    pub(crate) update_download_dialog: Option<clonk_frontend::download_dialog::DownloadDialogState>,
     /// Whether showing the main menu may start the *automatic* check
     /// (`C4StartupMainDlg.cpp:270-275`).
     ///
@@ -1426,7 +1448,6 @@ pub(crate) struct GameApp {
     /// this latched after `take_exit_request` so the event-loop tail cannot
     /// merge stale display values back into the freshly reset config.
     pub(crate) configuration_reset_requested: bool,
-    pub(crate) game_over_dialog: Option<GameOverState>,
     pub(crate) game_over_handled: bool,
     pub(crate) pending_league_end: Option<PendingLeagueEnd>,
     /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
@@ -1444,22 +1465,11 @@ pub(crate) struct GameApp {
     pub(crate) film_view_player: Option<i32>,
     /// The runtime dialogs and the stack that orders them.
     pub(crate) dialogs: RuntimeDialogState,
-    pub(crate) running_active_dialog: Option<RunningDialogStackEntry>,
     pub(crate) next_running_message_stack_id: u64,
-    /// Native C4LeagueSignupDialog kept below its validation/cancellation
-    /// MessageDialog while the current local player auth is suspended.
-    pub(crate) league_signup_dialog: Option<PendingLeagueSignupDialog>,
     /// UserClose(false) blocks inside its cancellation notification before
     /// returning failure to LeaguePlrAuth. Reject the current player and
     /// resume the remaining players only after that notification closes.
     pub(crate) cancelled_league_signup_continuation: Option<LeaguePlayerAuthContinuation>,
-    /// Keyboard-active z=+1 dialog. This can differ from the visual top while
-    /// a z=+2 chat exists: inserting another message below chat does not call
-    /// `Screen::ActivateDialog`.
-    pub(crate) message_dialog_active_index: Option<usize>,
-    /// Dialog whose button owns `CMouse::pDragElement`. A newer z=+1 dialog
-    /// may be inserted above it while z=+2 chat keeps the old dialog active.
-    pub(crate) message_dialog_pointer_capture_index: Option<usize>,
     /// The modal C4DefinitionSelDlg opened from the scenario book's
     /// "Choose definitions" checkbox. Its nested error message is kept in
     /// `message_dialogs`, so this controller remains alive underneath it.
@@ -1468,12 +1478,6 @@ pub(crate) struct GameApp {
     pub(crate) pending_definition_selection: Option<PendingDefinitionSelection>,
     /// Local-client target and path/wire-name map for C4PlayerSelDlg.
     pub(crate) pending_lobby_player_selection: Option<PendingLobbyPlayerSelection>,
-    /// Classic input dialog shared by startup prompts, game options, and the
-    /// compact running-chat layout.
-    pub(crate) game_option_input_dialog: Option<PendingGameOptionInputDialog>,
-    /// A modal may close on key-down. Retain consumed physical keys until
-    /// their matching key-up so the underlying screen cannot activate.
-    pub(crate) message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
     pub(crate) league_signup_consumed_keys: HashSet<VirtualKeyCode>,
     pub(crate) league_signup_pointer_capture: bool,
     pub(crate) league_signup_pointer_position: Option<GuiPoint>,
