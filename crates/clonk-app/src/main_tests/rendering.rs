@@ -4920,7 +4920,7 @@ fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     app.local_controls = LocalControlRegistry::default();
     app.snapshot = app.engine.snapshot();
     app.refresh_non_authoritative_physical_viewports();
-    main_assert!(app.primary_physical_viewport_is_no_owner());
+    main_assert!(app.viewports.primary_physical_viewport_is_no_owner());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));

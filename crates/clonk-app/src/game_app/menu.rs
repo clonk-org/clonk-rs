@@ -1460,7 +1460,7 @@ impl GameApp {
                 self.kick_ingame_menu_client(player, client_id)?;
             }
             MenuAction::ActivateObserver => {
-                let Some(current_player) = self.observer_viewport_player() else {
+                let Some(current_player) = self.viewports.observer_viewport_player() else {
                     return Ok(());
                 };
                 let players = self.observer_player_entries();

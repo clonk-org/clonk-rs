@@ -3268,7 +3268,7 @@ fn window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
     observer.local_controls = LocalControlRegistry::default();
     observer.snapshot = observer.engine.snapshot();
     observer.refresh_non_authoritative_physical_viewports();
-    main_assert!(observer.primary_physical_viewport_is_no_owner());
+    main_assert!(observer.viewports.primary_physical_viewport_is_no_owner());
 
     observer.handle_window_close_requested();
     observer.handle_window_close_requested();

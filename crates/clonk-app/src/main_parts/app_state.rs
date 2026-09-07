@@ -519,6 +519,52 @@ pub(crate) struct RenderingResources {
     pub(crate) graphics_smoke_level: i32,
 }
 
+impl ViewportState {
+    /// Rust creates the fullscreen physical observer viewport from the
+    /// absence of local player viewports. A temporary film target changes
+    /// only its displayed owner, not this classification.
+    pub(crate) fn primary_physical_viewport_is_no_owner(&self) -> bool {
+        self.physical_viewports
+            .iter()
+            .any(|viewport| viewport.matches_close(OWNER_NONE))
+    }
+    pub(crate) fn primary_viewport_player(&self) -> Option<i32> {
+        self.physical_viewports
+            .first()
+            .map(|viewport| viewport.displayed_player)
+    }
+    pub(crate) fn allocate_physical_viewport_identity(&mut self) -> u64 {
+        let identity = self.next_physical_viewport_identity;
+        self.next_physical_viewport_identity = self.next_physical_viewport_identity.wrapping_add(1);
+        identity
+    }
+    pub(crate) fn observer_viewport_index(&self) -> Option<usize> {
+        self.physical_viewports
+            .iter()
+            .position(|viewport| viewport.is_no_owner_viewport)
+    }
+    pub(crate) fn observer_viewport_player(&self) -> Option<i32> {
+        self.observer_viewport_index()
+            .map(|index| self.physical_viewports[index].displayed_player)
+    }
+    /// `C4Viewport::PlayerLock` for one console viewport window.
+    pub(crate) fn console_viewport_player_lock(&self, identity: u64) -> bool {
+        self.physical_viewports
+            .iter()
+            .find(|viewport| viewport.physical_identity == identity)
+            .is_some_and(|viewport| viewport.player_lock)
+    }
+}
+
+impl RenderingResources {
+    /// Keep the in-game menu gates synchronized with the live window mode.
+    /// The process-wide display settings remain owned by the window loop;
+    /// `DisplayFlags` is their presentation projection for running menus.
+    pub(crate) fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.display_flags.is_fullscreen = matches!(mode, DisplayMode::Fullscreen);
+    }
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
