@@ -7641,25 +7641,24 @@ impl MenuState {
         let old_selection = self
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
-        let mut hits = Vec::new();
-        let mut ancestors = Vec::new();
-        let mut order = 0;
-        if let Some(root) = self.stack.first() {
-            collect_enhanced_scenario_search_matches(
-                &root.entries,
-                &normalized_query,
-                &mut ancestors,
-                &mut order,
-                &mut hits,
-            );
-        }
-        self.enhanced_search_total = order;
-        hits.sort_by_key(|hit| (hit.rank, hit.order));
+        let index = ScenarioSearchIndex::build(
+            self.stack
+                .first()
+                .map(|layer| layer.entries.as_slice())
+                .unwrap_or_default(),
+        );
+        self.enhanced_search_total = index.len();
+        let hits = index.search(&normalized_query);
         self.visible_entry_contexts = hits
             .iter()
-            .map(|hit| (!hit.context.is_empty()).then(|| hit.context.clone()))
+            .map(|document| {
+                (!document.context().is_empty()).then(|| document.context().to_string())
+            })
             .collect();
-        self.visible_entries = hits.into_iter().map(|hit| hit.entry).collect();
+        self.visible_entries = hits
+            .into_iter()
+            .map(|document| document.entry().clone())
+            .collect();
         let entries = build_menu_entries(&self.visible_entries, self.include_back);
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu search results");
@@ -7885,11 +7884,129 @@ impl MenuState {
     }
 }
 
-struct EnhancedScenarioSearchHit {
+/// One non-folder catalog entry with every searchable field folded by
+/// `normalize_scenario_search_text` ahead of time, so ranking a query is
+/// substring tests over prepared strings rather than a fresh Unicode
+/// normalization of each scenario's prose description.
+pub(crate) struct ScenarioSearchDocument {
     entry: FrontendScenario,
+    /// Ancestor folder titles, markup stripped, as the result row shows them.
     context: String,
-    rank: u16,
-    order: usize,
+    title: String,
+    title_words: Vec<String>,
+    identifier: String,
+    folder_trail: String,
+    author: String,
+    description: String,
+}
+
+impl ScenarioSearchDocument {
+    fn new(entry: &FrontendScenario, ancestors: &[String]) -> Self {
+        let title = normalize_scenario_search_field(&entry.title);
+        let title_words = title.split_whitespace().map(str::to_string).collect();
+        Self {
+            entry: entry.clone(),
+            context: ancestors.join(" / "),
+            identifier: normalize_scenario_search_text(&entry.identifier),
+            folder_trail: normalize_scenario_search_text(&ancestors.join(" ")),
+            author: entry
+                .author
+                .as_deref()
+                .map(normalize_scenario_search_field)
+                .unwrap_or_default(),
+            description: entry
+                .description
+                .as_deref()
+                .map(normalize_scenario_search_field)
+                .unwrap_or_default(),
+            title,
+            title_words,
+        }
+    }
+
+    pub(crate) fn entry(&self) -> &FrontendScenario {
+        &self.entry
+    }
+
+    pub(crate) fn context(&self) -> &str {
+        &self.context
+    }
+
+    /// Lower ranks list first: title matches outrank matches confined to
+    /// the metadata fields, and a conservative title typo ranks last by its
+    /// edit distance. `query` is the normalized text and `terms` its words.
+    fn rank(&self, query: &str, terms: &[&str]) -> Option<u16> {
+        // Ranks 3..=7 follow this field order; rank 8 lets the terms span it.
+        let fields = [
+            self.title.as_str(),
+            self.identifier.as_str(),
+            self.folder_trail.as_str(),
+            self.author.as_str(),
+            self.description.as_str(),
+        ];
+        let title_rank = if self.title == query {
+            Some(0)
+        } else if self.title.starts_with(query) {
+            Some(1)
+        } else if self.title.contains(query) {
+            Some(2)
+        } else {
+            None
+        };
+        title_rank
+            .or_else(|| {
+                fields
+                    .iter()
+                    .position(|field| scenario_search_field_contains_all(field, terms))
+                    .and_then(|field| u16::try_from(field).ok())
+                    .map(|field| 3 + field)
+            })
+            .or_else(|| {
+                terms
+                    .iter()
+                    .all(|term| fields.iter().any(|field| field.contains(term)))
+                    .then_some(8)
+            })
+            .or_else(|| {
+                scenario_search_fuzzy_title_score(&self.title_words, terms)
+                    .map(|distance| 100_u16.saturating_add(distance))
+            })
+    }
+}
+
+/// Every non-folder entry of the discovered catalog prepared for the
+/// enhanced search, in catalog order. Built from the root layer so a result
+/// can surface a scenario from any folder.
+pub(crate) struct ScenarioSearchIndex {
+    documents: Vec<ScenarioSearchDocument>,
+}
+
+impl ScenarioSearchIndex {
+    pub(crate) fn build(entries: &[FrontendScenario]) -> Self {
+        let mut documents = Vec::new();
+        collect_scenario_search_documents(entries, &mut Vec::new(), &mut documents);
+        Self { documents }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.documents.len()
+    }
+
+    pub(crate) fn documents(&self) -> impl Iterator<Item = &ScenarioSearchDocument> {
+        self.documents.iter()
+    }
+
+    /// Matching documents by ascending rank; equal ranks keep catalog order.
+    fn search(&self, query: &str) -> Vec<&ScenarioSearchDocument> {
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        let mut hits = self
+            .documents
+            .iter()
+            .filter_map(|document| document.rank(query, &terms).map(|rank| (rank, document)))
+            .collect::<Vec<_>>();
+        hits.sort_by_key(|(rank, _)| *rank);
+        hits.into_iter().map(|(_, document)| document).collect()
+    }
 }
 
 fn normalize_scenario_search_text(text: &str) -> String {
@@ -7925,10 +8042,9 @@ fn scenario_search_field_contains_all(field: &str, terms: &[&str]) -> bool {
     terms.iter().all(|term| field.contains(term))
 }
 
-fn scenario_search_fuzzy_title_score(title: &str, terms: &[&str]) -> Option<u16> {
-    let title_terms = title.split_whitespace().collect::<Vec<_>>();
+fn scenario_search_fuzzy_title_score(title_words: &[String], terms: &[&str]) -> Option<u16> {
     terms.iter().try_fold(0_u16, |score, term| {
-        if title_terms.iter().any(|candidate| candidate.contains(term)) {
+        if title_words.iter().any(|candidate| candidate.contains(term)) {
             return Some(score);
         }
         let length = term.chars().count();
@@ -7939,7 +8055,7 @@ fn scenario_search_fuzzy_title_score(title: &str, terms: &[&str]) -> Option<u16>
         } else {
             1
         };
-        title_terms
+        title_words
             .iter()
             .map(|candidate| damerau_levenshtein(term, candidate))
             .min()
@@ -7949,81 +8065,20 @@ fn scenario_search_fuzzy_title_score(title: &str, terms: &[&str]) -> Option<u16>
     })
 }
 
-fn collect_enhanced_scenario_search_matches(
+fn collect_scenario_search_documents(
     entries: &[FrontendScenario],
-    query: &str,
     ancestors: &mut Vec<String>,
-    order: &mut usize,
-    matches: &mut Vec<EnhancedScenarioSearchHit>,
+    documents: &mut Vec<ScenarioSearchDocument>,
 ) {
-    let terms = query.split_whitespace().collect::<Vec<_>>();
     for entry in entries {
         if matches!(entry.kind, ScenarioKind::Folder) {
             let mut title = entry.title.clone();
             Markup::strip_markup(&mut title);
             ancestors.push(title);
-            collect_enhanced_scenario_search_matches(
-                &entry.children,
-                query,
-                ancestors,
-                order,
-                matches,
-            );
+            collect_scenario_search_documents(&entry.children, ancestors, documents);
             ancestors.pop();
-            continue;
-        }
-        let entry_order = *order;
-        *order = order.saturating_add(1);
-        let title = normalize_scenario_search_field(&entry.title);
-        let identifier = normalize_scenario_search_text(&entry.identifier);
-        let context = normalize_scenario_search_text(&ancestors.join(" "));
-        let author = entry
-            .author
-            .as_deref()
-            .map(normalize_scenario_search_field)
-            .unwrap_or_default();
-        let description = entry
-            .description
-            .as_deref()
-            .map(normalize_scenario_search_field)
-            .unwrap_or_default();
-        let all_fields = [
-            title.as_str(),
-            identifier.as_str(),
-            context.as_str(),
-            author.as_str(),
-            description.as_str(),
-        ]
-        .join(" ");
-        let rank = if title == query {
-            Some(0)
-        } else if title.starts_with(query) {
-            Some(1)
-        } else if title.contains(query) {
-            Some(2)
-        } else if scenario_search_field_contains_all(&title, &terms) {
-            Some(3)
-        } else if scenario_search_field_contains_all(&identifier, &terms) {
-            Some(4)
-        } else if scenario_search_field_contains_all(&context, &terms) {
-            Some(5)
-        } else if scenario_search_field_contains_all(&author, &terms) {
-            Some(6)
-        } else if scenario_search_field_contains_all(&description, &terms) {
-            Some(7)
-        } else if scenario_search_field_contains_all(&all_fields, &terms) {
-            Some(8)
         } else {
-            scenario_search_fuzzy_title_score(&title, &terms)
-                .map(|distance| 100_u16.saturating_add(distance))
-        };
-        if let Some(rank) = rank {
-            matches.push(EnhancedScenarioSearchHit {
-                entry: entry.clone(),
-                context: ancestors.join(" / "),
-                rank,
-                order: entry_order,
-            });
+            documents.push(ScenarioSearchDocument::new(entry, ancestors));
         }
     }
 }
