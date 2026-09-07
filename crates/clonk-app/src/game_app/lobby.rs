@@ -3338,7 +3338,7 @@ impl GameApp {
             // A check that somehow starts over an unresolved one takes the
             // older toast down first, so only the live prompt is ever shown.
             self.dismiss_ready_check_notification();
-            match crate::ready_check_backend::platform_sink(&notification) {
+            match self.ready_check_toast_backend.sink_for(&notification) {
                 Some(sink) => {
                     // The watcher shows the toast and routes its buttons into
                     // this continuation; the app keeps the same sink so an

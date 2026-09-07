@@ -3129,6 +3129,7 @@ impl GameApp {
             next_desktop_notification_id: 0,
             lobby_ready_check_continuation: None,
             lobby_ready_check_sink: std::sync::Arc::new(ready_check_notification::SilentSink),
+            ready_check_toast_backend: ready_check_backend::ReadyCheckToastBackend::default(),
             control_messages,
             league_votes: LeagueVoteState::default(),
             startup_network_connection: None,

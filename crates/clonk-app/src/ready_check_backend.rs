@@ -41,6 +41,49 @@ pub(crate) trait ActionableSink: NotificationSink + Send + Sync {
 /// A backend that fails to initialise is reported and treated the same, so
 /// the caller leaves `SilentSink` in place and the in-window dialog stays the
 /// answer path (clonk-org/clonk-rs#1308).
+/// How the lobby obtains a desktop toast whose buttons answer the ready check.
+///
+/// The app owns this rather than calling [`platform_sink`] directly so the
+/// choice is made at the composition root: production asks the platform, and
+/// a test that wants the actionable branch injects a sink of its own.
+pub(crate) struct ReadyCheckToastBackend(Box<SinkChooser>);
+
+type SinkChooser = dyn Fn(&DesktopNotification) -> Option<Arc<dyn ActionableSink>>;
+
+impl ReadyCheckToastBackend {
+    /// The sink to show `notification` through, if this desktop has one.
+    pub(crate) fn sink_for(
+        &self,
+        notification: &DesktopNotification,
+    ) -> Option<Arc<dyn ActionableSink>> {
+        (self.0)(notification)
+    }
+
+    /// A backend that always offers `sink`.
+    #[cfg(test)]
+    pub(crate) fn with_sink(sink: Arc<dyn ActionableSink>) -> Self {
+        Self(Box::new(move |_| Some(Arc::clone(&sink))))
+    }
+}
+
+impl Default for ReadyCheckToastBackend {
+    #[cfg(not(test))]
+    fn default() -> Self {
+        Self(Box::new(platform_sink))
+    }
+
+    /// Under test the default offers no actionable sink on any platform, so
+    /// the app suite observes the notification queue the app owns everywhere.
+    /// Without this a Linux run took the freedesktop branch and a test that
+    /// expected the queued toast passed on macOS and failed on the Linux
+    /// runner. A test that wants the actionable branch injects its own sink
+    /// with [`ReadyCheckToastBackend::with_sink`].
+    #[cfg(test)]
+    fn default() -> Self {
+        Self(Box::new(|_| None))
+    }
+}
+
 pub(crate) fn platform_sink(notification: &DesktopNotification) -> Option<Arc<dyn ActionableSink>> {
     #[cfg(target_os = "linux")]
     {
