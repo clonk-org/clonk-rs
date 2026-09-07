@@ -5823,6 +5823,135 @@ fn packed_solid_rect_instance(
     })
 }
 
+/// A half-open physical rectangle of one colour, grown from adjacent line
+/// fragments.
+#[derive(Clone, Copy, PartialEq)]
+struct LineFragmentSpan {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+    color: [f32; 4],
+}
+
+impl LineFragmentSpan {
+    fn pixel(x: i64, y: i64, color: [f32; 4]) -> Self {
+        Self {
+            left: x,
+            top: y,
+            right: x + 1,
+            bottom: y + 1,
+            color,
+        }
+    }
+
+    /// Grows by one pixel that touches this span on one side while the span
+    /// is one pixel thick across that direction, so the union stays a
+    /// rectangle. A one-pixel span accepts either axis.
+    fn absorb_pixel(&mut self, x: i64, y: i64, color: [f32; 4]) -> bool {
+        if color != self.color {
+            return false;
+        }
+        let one_row = self.bottom - self.top == 1 && y == self.top;
+        let one_column = self.right - self.left == 1 && x == self.left;
+        if one_row && x == self.right {
+            self.right += 1;
+        } else if one_row && x + 1 == self.left {
+            self.left -= 1;
+        } else if one_column && y == self.bottom {
+            self.bottom += 1;
+        } else if one_column && y + 1 == self.top {
+            self.top -= 1;
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Grows by a whole span that shares this span's extent across one axis
+    /// and touches it along the other, the way the replicated columns of a
+    /// wide line line up.
+    fn absorb_span(&mut self, other: Self) -> bool {
+        if other.color != self.color {
+            return false;
+        }
+        let same_rows = other.top == self.top && other.bottom == self.bottom;
+        let same_columns = other.left == self.left && other.right == self.right;
+        if same_rows && other.left == self.right {
+            self.right = other.right;
+        } else if same_rows && other.right == self.left {
+            self.left = other.left;
+        } else if same_columns && other.top == self.bottom {
+            self.bottom = other.bottom;
+        } else if same_columns && other.bottom == self.top {
+            self.top = other.top;
+        } else {
+            return false;
+        }
+        true
+    }
+}
+
+/// Folds the fragment stream of one aliased line into rectangles of
+/// identical coverage: a *strip* grows fragment by fragment along one axis,
+/// and finished strips of equal extent fold into a *run* across the other.
+struct LineFragmentSpans<'a> {
+    instances: &'a mut Vec<PackedSolidRectInstance>,
+    strip: Option<LineFragmentSpan>,
+    run: Option<LineFragmentSpan>,
+    gamma: bool,
+    projection: &'a DrawProjection,
+}
+
+impl LineFragmentSpans<'_> {
+    fn push(&mut self, x: i64, y: i64, color: [f32; 4]) -> Result<(), GpuRendererError> {
+        if self
+            .strip
+            .as_mut()
+            .is_some_and(|strip| strip.absorb_pixel(x, y, color))
+        {
+            return Ok(());
+        }
+        self.finish_strip()?;
+        self.strip = Some(LineFragmentSpan::pixel(x, y, color));
+        Ok(())
+    }
+
+    fn finish_strip(&mut self) -> Result<(), GpuRendererError> {
+        let Some(strip) = self.strip.take() else {
+            return Ok(());
+        };
+        if self.run.as_mut().is_some_and(|run| run.absorb_span(strip)) {
+            return Ok(());
+        }
+        self.flush_run()?;
+        self.run = Some(strip);
+        Ok(())
+    }
+
+    fn flush_run(&mut self) -> Result<(), GpuRendererError> {
+        if let Some(run) = self.run.take() {
+            self.instances.push(packed_solid_rect_instance(
+                [
+                    run.left as f64,
+                    run.top as f64,
+                    run.right as f64,
+                    run.bottom as f64,
+                ],
+                run.color,
+                self.gamma,
+                self.projection,
+            )?);
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), GpuRendererError> {
+        self.finish_strip()?;
+        self.flush_run()
+    }
+}
+
 fn append_line_fragment_instances(
     instances: &mut Vec<PackedSolidRectInstance>,
     start: GpuSolidVertex,
@@ -5836,19 +5965,22 @@ fn append_line_fragment_instances(
     // that base fragment in the minor direction. An oriented rectangle is
     // observably wrong: it is direction-invariant and can cover two pixels in
     // one major column on a diagonal. Generate the exact half-open fragment
-    // stream, then emit one one-pixel rectangle per selected fragment.
-    walk_aliased_line_fragments(start, end, projection, |x, y, t| {
-        let color = line_color_at_parameter(start, end, t)?;
-        let left = x as f64;
-        let top = y as f64;
-        instances.push(packed_solid_rect_instance(
-            [left, top, left + 1.0, top + 1.0],
-            color,
-            gamma,
-            projection,
-        )?);
-        Ok(())
-    })
+    // stream, then emit one rectangle per maximal run of adjacent fragments
+    // of one colour: the coverage is the fragment set to the pixel, while a
+    // shallow or steep line costs one instance instead of one per fragment
+    // (clonk-org/clonk-rs#1529: 17,000 fragment instances a frame).
+    let mut spans = LineFragmentSpans {
+        instances,
+        strip: None,
+        run: None,
+        gamma,
+        projection,
+    };
+    let fragments = walk_aliased_line_fragments(start, end, projection, |x, y, t| {
+        spans.push(x, y, line_color_at_parameter(start, end, t)?)
+    })?;
+    spans.finish()?;
+    Ok(fragments)
 }
 
 fn projected_physical_position(
@@ -9655,26 +9787,111 @@ mod tests {
         )
         .expect("expand line pair");
 
-        let mut origins = instances
-            .iter()
-            .map(|instance| {
-                let [left, top, right, bottom] = physical_rect(*instance, &projection);
-                assert_eq!(
-                    [right - left, bottom - top],
-                    [1.0, 1.0],
-                    "a line fragment covers exactly one physical pixel"
-                );
-                [left, top]
-            })
-            .collect::<Vec<_>>();
-        origins.sort_by(|left, right| left.partial_cmp(right).expect("finite physical origin"));
-        let mut expected = (2..8)
-            .flat_map(|x| (2..4).map(move |y| [f64::from(x), f64::from(y)]))
-            .collect::<Vec<_>>();
-        expected.sort_by(|left, right| left.partial_cmp(right).expect("finite expected origin"));
-        assert_eq!(origins, expected);
-        assert_eq!(instances.len(), 6 * 2);
+        let expected = (2..8)
+            .flat_map(|x| (2..4).map(move |y| (x, y)))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(covered_pixels(&instances, &projection), expected);
+        assert_eq!(
+            instances.len(),
+            1,
+            "the twelve adjacent fragments of one colour are one span"
+        );
         assert!(instances.iter().all(|instance| instance.color == color));
+    }
+
+    /// The physical pixels a set of solid-rect instances covers, asserting
+    /// that no two instances overlap.
+    fn covered_pixels(
+        instances: &[PackedSolidRectInstance],
+        projection: &DrawProjection,
+    ) -> std::collections::BTreeSet<(i64, i64)> {
+        let mut covered = std::collections::BTreeSet::new();
+        for instance in instances {
+            let [left, top, right, bottom] = physical_rect(*instance, projection);
+            for x in left as i64..right as i64 {
+                for y in top as i64..bottom as i64 {
+                    assert!(covered.insert((x, y)), "instances overlap at ({x}, {y})");
+                }
+            }
+        }
+        covered
+    }
+
+    #[test]
+    fn adjacent_line_fragments_of_one_color_merge_into_spans() {
+        // A force bridge in SkyBridge is one aliased line per logical pixel
+        // row at Scale=300, and every physical fragment cost a 36-byte
+        // instance: 17,000 instances and 615 KB of upload per frame
+        // (clonk-org/clonk-rs#1529). Fragments that are adjacent along a row
+        // or a column and carry the same colour are one rectangle with the
+        // same coverage; a colour gradient or a diagonal keeps one instance
+        // per fragment, so the pixel set never changes.
+        let presentation = GpuPresentation::identity(10, 6);
+        let projection = draw_projection(None, [10, 6], &presentation)
+            .expect("valid line presentation")
+            .expect("line clip intersects the framebuffer");
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let expand = |start: GpuSolidVertex, end: GpuSolidVertex| {
+            let mut instances = Vec::new();
+            append_line_fragment_instances(&mut instances, start, end, false, &projection)
+                .expect("expand line");
+            let mut fragments = std::collections::BTreeSet::new();
+            walk_aliased_line_fragments(start, end, &projection, |x, y, _| {
+                fragments.insert((x, y));
+                Ok(())
+            })
+            .expect("walk line");
+            assert_eq!(
+                covered_pixels(&instances, &projection),
+                fragments,
+                "merged instances cover exactly the walked fragments"
+            );
+            (instances, fragments)
+        };
+
+        let (horizontal, fragments) =
+            expand(solid_vertex(0.5, 1.5, red), solid_vertex(8.5, 1.5, red));
+        assert_eq!(fragments.len(), 8, "the directed final fragment is omitted");
+        assert_eq!(
+            horizontal.len(),
+            1,
+            "eight fragments in one row are one span"
+        );
+        let (left, top) = *fragments.first().expect("walked fragments");
+        assert_eq!(
+            physical_rect(horizontal[0], &projection),
+            [left as f64, top as f64, left as f64 + 8.0, top as f64 + 1.0],
+            "the span is the fragments' bounding row"
+        );
+
+        let (vertical, _) = expand(solid_vertex(3.5, 0.5, red), solid_vertex(3.5, 5.5, red));
+        assert_eq!(
+            vertical.len(),
+            1,
+            "five fragments in one column are one span"
+        );
+
+        let (gradient, _) = expand(solid_vertex(0.5, 1.5, red), solid_vertex(8.5, 1.5, blue));
+        assert_eq!(
+            gradient.len(),
+            8,
+            "a colour gradient keeps its per-fragment colours"
+        );
+
+        let (diagonal, _) = expand(solid_vertex(0.5, 0.5, red), solid_vertex(5.5, 5.5, red));
+        assert_eq!(
+            diagonal.len(),
+            5,
+            "a diagonal has no adjacent fragments to merge"
+        );
+
+        let (leftward, _) = expand(solid_vertex(8.5, 2.5, red), solid_vertex(0.5, 2.5, red));
+        assert_eq!(
+            leftward.len(),
+            1,
+            "a line walked leftward merges the same way"
+        );
     }
 
     #[test]
@@ -10950,10 +11167,13 @@ mod tests {
             .expect("walk fixture line");
         }
 
-        assert_eq!(stats.solid_rect_instances, covered.len());
+        // Each line's three adjacent fragments of one colour are one span,
+        // so two lines cost two instances while covering every fragment.
+        assert_eq!(covered.len(), 6, "two three-fragment lines");
+        assert_eq!(stats.solid_rect_instances, 2);
         assert_eq!(
             stats.solid_rect_upload_bytes,
-            covered.len() * PACKED_SOLID_RECT_INSTANCE_STRIDE as usize
+            2 * PACKED_SOLID_RECT_INSTANCE_STRIDE as usize
         );
         assert_eq!(
             stats.draw_calls, 1,
