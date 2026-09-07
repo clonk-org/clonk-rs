@@ -2298,7 +2298,7 @@ impl GameApp {
         self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
-        self.construction_menu_drag = None;
+        self.ingame_menus.construction_drag = None;
         self.ingame_dragged_objects.clear();
         self.mouse_control_allowed = !scenario_data.disables_mouse();
         self.mouse_control = self.mouse_control_allowed;
@@ -2586,7 +2586,7 @@ impl GameApp {
             .is_some()
             .then(|| std::mem::take(&mut self.control_player_infos));
         self.rendering.active_game_graphics = Some(active_game_graphics);
-        self.ingame_menu_gfx = None;
+        self.ingame_menus.graphics = None;
         self.configure_running_state(label, ground);
         // PlayScenarioMusic one-way enables Game.IsMusicEnabled when the
         // local RXMusic option is on, while configured-off clients retain a
@@ -2691,7 +2691,7 @@ impl GameApp {
             configured_auto_frame_skip(&load_native_config_bytes(self.app_paths.as_ref()));
 
         self.rendering.active_game_graphics = None;
-        self.ingame_menu_gfx = None;
+        self.ingame_menus.graphics = None;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
         self.restore_startup_gui_sheets();
@@ -2737,7 +2737,7 @@ impl GameApp {
         self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
-        self.construction_menu_drag = None;
+        self.ingame_menus.construction_drag = None;
         self.ingame_dragged_objects.clear();
         self.mouse_control_allowed = true;
         self.mouse_control = true;

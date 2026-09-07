@@ -208,7 +208,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
     app.test_right_button(ElementState::Released);
     app.test_update();
 
-    main_assert!(app.object_menu.is_none(), "mouse context must use the classic engine menu, not the app fallback");
+    main_assert!(app.ingame_menus.object.is_none(), "mouse context must use the classic engine menu, not the app fallback");
     let context = app.engine.cursor_object_menu(owner).test_value().1.clone();
     main_assert_eq!(context.style => 1);
     main_assert!(!context.permanent);
@@ -231,7 +231,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
     let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     app.test_render(&mut frame);
     let latched_screen = app
-        .script_menu_presentations
+        .ingame_menus.script_presentations
         .get(&owner)
         .and_then(|state| state.location)
         .test_value();
@@ -241,7 +241,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
     );
     main_assert!(latched_local.x <= click_location.x && latched_local.y <= click_location.y, "right/bottom edges may clamp the menu back into the viewport");
     main_assert_eq!(
-        app.ingame_menu_gfx
+        app.ingame_menus.graphics
             .as_ref()
             .and_then(|gfx| gfx.menu_location) =>
         Some(latched_screen),
@@ -263,7 +263,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         .test_value();
     app.test_render(&mut frame);
     main_assert_eq!(
-        app.script_menu_presentations
+        app.ingame_menus.script_presentations
             .get(&owner)
             .and_then(|state| state.location) =>
         Some((
@@ -290,7 +290,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         .test_value();
     app.test_render(&mut frame);
     let edge_latched = app
-        .script_menu_presentations
+        .ingame_menus.script_presentations
         .get(&owner)
         .and_then(|state| state.location)
         .test_value();
@@ -306,7 +306,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         .test_value();
     app.test_render(&mut frame);
     main_assert_eq!(
-        app.script_menu_presentations
+        app.ingame_menus.script_presentations
             .get(&owner)
             .and_then(|state| state.location) =>
         Some(edge_latched),

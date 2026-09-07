@@ -4562,7 +4562,7 @@ fn begin_construction_drag(app: &mut GameApp, menu_point: GuiPoint, drop_point: 
     .test_value();
     app.handle_mouse_button(ElementState::Pressed).test_value();
     assert!(matches!(
-        app.construction_menu_drag.as_ref(),
+        app.ingame_menus.construction_drag.as_ref(),
         Some(ConstructionMenuDrag::Candidate { .. })
     ));
     app.handle_cursor_moved(PhysicalPosition::new(
@@ -4640,8 +4640,8 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
             .game_over_dialog
             .as_ref()
             .and_then(GameOverState::focused),
-        ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
-        object_menu_open: app.object_menu.is_some(),
+        ingame_page: app.ingame_menus.players.as_ref().map(IngameMenuState::page),
+        object_menu_open: app.ingame_menus.object.is_some(),
         engine_menu_style: app
             .engine
             .cursor_object_menu(app.players.local_owner)

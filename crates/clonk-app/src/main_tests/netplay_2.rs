@@ -5871,7 +5871,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     let observer = observer_menu.ownerless_physical_viewport_state();
     observer_menu.viewports.physical_viewports.push(observer);
     observer_menu.viewports.physical_viewports_authoritative = true;
-    observer_menu.ingame_menu.replace(
+    observer_menu.ingame_menus.players.replace(
         observer_menu.players.local_owner,
         IngameMenuState::main_menu(
             &MainMenuConditions {
@@ -6772,7 +6772,7 @@ fn offline_runtime_join_player_local_no_network() {
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
     main_assert!(app
-        .ingame_menu
+        .ingame_menus.players
         .as_ref()
         .expect("other runtime player rows keep the menu open")
         .items()
@@ -8626,16 +8626,16 @@ fn synchronized_goal_menu_evaluates_before_opening_only_for_local_player() {
     app.engine.set_local_players([player]);
     app.apply_ready_controls(12, vec![control.clone()])
         .test_value();
-    let menu = app.ingame_menu.get(player).test_value();
+    let menu = app.ingame_menus.players.get(player).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::Goals);
     main_assert_eq!(menu.items().len() => 1);
     main_assert_eq!(menu.items()[0].action => MenuAction::GoalInfo("IGOL".to_string()));
     main_assert_eq!(menu.items()[0].info_caption.as_deref() => Some("Reach the target"));
 
-    app.ingame_menu.replace(player, None);
+    app.ingame_menus.players.replace(player, None);
     app.engine.set_local_players([]);
     app.apply_ready_controls(13, vec![control]).test_value();
-    main_assert!(app.ingame_menu.get(player).is_none());
+    main_assert!(app.ingame_menus.players.get(player).is_none());
     main_assert_eq!(app.executing_ready_tick => None);
 }
 
@@ -10132,7 +10132,7 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
     main_assert!(app.network_is_league);
     main_assert!(app.engine.player(local_player).is_some());
     main_assert!(app.engine.player(remote_player).is_none());
-    main_assert_eq!(app.ingame_menu.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
+    main_assert_eq!(app.ingame_menus.players.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
     let engine_results = app.engine.snapshot().round_results;
     main_assert_eq!(engine_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::NetworkError));
     main_assert_eq!(engine_results.network_result_message => b"Network: host Host disconnected!");
@@ -11186,11 +11186,11 @@ fn network_main_menu_is_local_and_clears_only_when_user_closes_it() {
     };
 
     app.dispatch_control_event(player_menu).test_value();
-    main_assert!(app.ingame_menu.is_some(), "player menu opens immediately");
+    main_assert!(app.ingame_menus.players.is_some(), "player menu opens immediately");
     main_assert!(commands.take_submitted_local().is_empty(), "opening C4MainMenu does not submit synchronized control");
 
     app.dispatch_control_event(player_menu).test_value();
-    main_assert!(app.ingame_menu.is_none(), "player menu closes immediately");
+    main_assert!(app.ingame_menus.players.is_none(), "player menu closes immediately");
     main_assert_eq!(
         commands.take_submitted_local() =>
         vec![(app.players.local_owner, ControlEvent::ClearPressed, tick)],
@@ -11206,7 +11206,7 @@ fn eliminated_owner_cannot_submit_cached_valid_construction_drop() {
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     begin_construction_drag(&mut app, menu_point, valid_point);
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
 
     app.engine
         .set_player_status(owner, PlayerStatus::Eliminated)
@@ -11217,7 +11217,7 @@ fn eliminated_owner_cannot_submit_cached_valid_construction_drop() {
     main_assert!(controls.is_empty());
     main_assert!(commands.is_empty());
     main_assert!(selections.is_empty());
-    main_assert!(app.construction_menu_drag.is_none());
+    main_assert!(app.ingame_menus.construction_drag.is_none());
 }
 
 #[test]

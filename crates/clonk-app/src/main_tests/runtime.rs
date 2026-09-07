@@ -8911,13 +8911,13 @@ fn runtime_f1_help_toggles_beneath_nonmatching_running_layers() {
     assert!(object.open_object_menu().expect("open object menu"));
     object.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(object.dialogs.help_visible);
-    assert!(object.object_menu.is_some());
+    assert!(object.ingame_menus.object.is_some());
 
     let mut ingame = new_classic_running_sandbox_app();
     ingame.open_ingame_menu().test_value();
     ingame.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(ingame.dialogs.help_visible);
-    assert!(ingame.ingame_menu.is_some());
+    assert!(ingame.ingame_menus.players.is_some());
 }
 
 #[test]
@@ -8941,7 +8941,7 @@ fn custom_player_f1_binding_outranks_help_when_control_scope_is_active() {
     menu.open_ingame_menu().test_value();
     menu.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(!menu.dialogs.help_visible);
-    assert!(menu.ingame_menu.is_some());
+    assert!(menu.ingame_menus.players.is_some());
 }
 
 #[test]
@@ -9439,7 +9439,7 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
 
     app.apply_ingame_menu_action(MenuAction::ActivateDisplay)
         .test_value();
-    app.ingame_menu
+    app.ingame_menus.players
         .get_mut(app.players.local_owner)
         .test_mut()
         .set_selection(1);
@@ -9463,7 +9463,7 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
             .test_value();
     }
 
-    runtime_assert_eq!(app.ingame_menu.get(app.players.local_owner).test_value().selection() => 1);
+    runtime_assert_eq!(app.ingame_menus.players.get(app.players.local_owner).test_value().selection() => 1);
     assert!(!app.rendering.display_flags.player_names);
     assert!(!app.rendering.display_flags.clonk_names);
     assert!(app.rendering.display_flags.clock);

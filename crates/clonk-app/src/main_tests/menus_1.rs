@@ -131,7 +131,7 @@ fn eliminated_player_mouse_menu_keeps_new_player_reentry_surface() {
     )
     .test_value();
 
-    let menu = app.ingame_menu.get(owner).test_value();
+    let menu = app.ingame_menus.players.get(owner).test_value();
     main_assert!(menu.items().iter().any(|item| item.action == MenuAction::ActivateNewPlayer));
     main_assert!(app.ingame_menu_has_visible_surface(owner), "the eliminated viewport still exposes the C++ PlayerMenu re-entry surface");
     main_assert_eq!(app.engine.snapshot().players => before_players, "opening the local PlayerMenu does not mutate synchronized player state");
@@ -252,14 +252,14 @@ fn viewport_buttons_dispatch_help_and_player_menu_locally() {
     main_assert!(app.ingame_menu_belongs_to(owner));
     main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "mouse COM_PlayerMenu is consumed by the local menu");
 
-    app.ingame_menu.get_mut(owner).test_value().set_selection(2);
+    app.ingame_menus.players.get_mut(owner).test_value().set_selection(2);
     physical_left_click_with_modifiers(
         &mut app,
         menu,
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    main_assert_eq!(app.ingame_menu.get(owner).expect("mouse menu remains open").selection() => 0, "a second mouse activation reinitializes the main menu");
+    main_assert_eq!(app.ingame_menus.players.get(owner).expect("mouse menu remains open").selection() => 0, "a second mouse activation reinitializes the main menu");
     main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "reinitializing the mouse menu remains entirely local");
 
     app.rendering.display_flags.show_commands = false;
@@ -316,7 +316,7 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.live_input.ingame_mouse_help);
     main_assert!(app.ingame_help_cursor_active(), "ownerless Help uses the native Help cursor too");
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
 
     app.test_right_button(ElementState::Pressed);
     main_assert!(app.live_input.ingame_mouse_help, "right-down retains passive Help");
@@ -327,10 +327,10 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     let menu = center(menu_rect);
     app.test_cursor(PhysicalPosition::new(f64::from(menu.x), f64::from(menu.y)));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.ingame_menu.is_none(), "passive buttons wait for LeftUp");
+    main_assert!(app.ingame_menus.players.is_none(), "passive buttons wait for LeftUp");
     app.test_left_button(ElementState::Released);
     main_assert!(app.ingame_menu_belongs_to(OWNER_NONE));
-    main_assert_eq!(app.ingame_menu.get(OWNER_NONE).expect("observer fullscreen menu").page() => ingame_menu::MenuPage::Main);
+    main_assert_eq!(app.ingame_menus.players.get(OWNER_NONE).expect("observer fullscreen menu").page() => ingame_menu::MenuPage::Main);
 
     render_mouse_test_app(&mut app);
     let surface = app.rendering.graphics.surface();
@@ -348,10 +348,10 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
         f64::from(menu_target.0.x),
         f64::from(menu_target.0.y),
     ));
-    main_assert_eq!(app.ingame_menu.get(OWNER_NONE).expect("observer menu remains open").selection() => menu_target.1);
+    main_assert_eq!(app.ingame_menus.players.get(OWNER_NONE).expect("observer menu remains open").selection() => menu_target.1);
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
     main_assert_eq!(
         network_commands.take_submitted_player_inputs() =>
         (Vec::new(), Vec::new(), Vec::new()),
@@ -3199,7 +3199,7 @@ fn active_scenario_gui_overrides_reach_dialogs_and_script_menus() {
         pristine_scroll.pixels().as_ptr(),
         "teardown must restore the pristine scroll surface"
     );
-    main_assert!(app.ingame_menu_gfx.is_none(), "cached script-menu graphics must not outlive the rebound sheets");
+    main_assert!(app.ingame_menus.graphics.is_none(), "cached script-menu graphics must not outlive the rebound sheets");
 }
 
 #[test]
@@ -3500,7 +3500,7 @@ fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
     main_assert_eq!(pages.len() => 10, "MenuPage exhaustiveness changed");
     for (label, page) in pages {
         let mut app = new_running_sandbox_app();
-        app.ingame_menu.replace(app.players.local_owner, Some(page));
+        app.ingame_menus.players.replace(app.players.local_owner, Some(page));
         check(app, label);
     }
 
@@ -3594,7 +3594,7 @@ fn ingame_menu_abort_routes_to_the_same_confirmation() {
         .position(|item| item.action == MenuAction::Abort)
         .test_value();
     menu.set_selection(abort);
-    app.ingame_menu.replace(app.players.local_owner, Some(menu));
+    app.ingame_menus.players.replace(app.players.local_owner, Some(menu));
     app.status_text.clear();
 
     app.handle_menu_command_failsafe(
@@ -3604,7 +3604,7 @@ fn ingame_menu_abort_routes_to_the_same_confirmation() {
     )
     .test_value();
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
-    main_assert!(app.ingame_menu.is_none(), "C4Menu::Enter closes the nonpermanent main menu before Abort");
+    main_assert!(app.ingame_menus.players.is_none(), "C4Menu::Enter closes the nonpermanent main menu before Abort");
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(app.status_text.is_empty());
 }
@@ -3640,7 +3640,7 @@ fn engine_owned_object_menu_requests_are_consumed_and_stale_ones_ignored() {
             position: None,
         },
     ] {
-        app.object_menu = None;
+        app.ingame_menus.object = None;
         app.snapshot.menu_requests = vec![clonk_engine::MenuRequest {
             crew_id,
             owner: app.players.local_owner,
@@ -3649,7 +3649,7 @@ fn engine_owned_object_menu_requests_are_consumed_and_stale_ones_ignored() {
         app.handle_menu_requests()
             .unwrap_or_else(|error| panic!("a stale {kind:?} request is not a failure: {error}"));
         main_assert!(
-            app.object_menu.is_none(),
+            app.ingame_menus.object.is_none(),
             "a stale {kind:?} request opens no app-owned pane"
         );
     }
@@ -3670,8 +3670,8 @@ fn running_function_keys_without_bindings_are_ignored() {
     ] {
         app.handle_key(key, ElementState::Pressed)
             .unwrap_or_else(|error| panic!("unsupported {label} must be ignored: {error}"));
-        main_assert!(app.ingame_menu.is_none());
-        main_assert!(app.object_menu.is_none());
+        main_assert!(app.ingame_menus.players.is_none());
+        main_assert!(app.ingame_menus.object.is_none());
         main_assert!(app.pending_screenshots.is_empty());
     }
 }
@@ -3684,7 +3684,7 @@ fn activate_savegame_opens_classic_ten_slot_menu() {
 
     // C4MainMenu::ActivateSavegame constructs slots 1..10 before returning
     // to the main menu (C4MainMenu.cpp:422-500).
-    let menu = app.ingame_menu.get(app.players.local_owner).test_value();
+    let menu = app.ingame_menus.players.get(app.players.local_owner).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::Savegame);
     main_assert_eq!(menu.items().len() => 10);
     main_assert!(menu.items().iter().enumerate().all(|(index, item)| item.action == MenuAction::SaveSlot((index + 1) as u8)));
@@ -4450,7 +4450,7 @@ fn configured_gamepad_button10_routes_player_menu_to_control_set_five_owner() {
         ElementState::Pressed,
     )]);
 
-    main_assert!(app.ingame_menu.is_some(), "Button10 must dispatch PlayerMenu to the control-set 5 owner");
+    main_assert!(app.ingame_menus.players.is_some(), "Button10 must dispatch PlayerMenu to the control-set 5 owner");
 }
 
 #[test]

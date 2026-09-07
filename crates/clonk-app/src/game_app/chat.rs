@@ -1141,8 +1141,8 @@ impl GameApp {
         if self.mode == AppMode::Running {
             self.cancel_ingame_mouse_gestures();
             self.dialogs.menu_title_drag = None;
-            self.ingame_menu_close_pointer_capture = None;
-            self.script_menu_close_pointer_capture = None;
+            self.ingame_menus.close_pointer_capture = None;
+            self.ingame_menus.script_close_pointer_capture = None;
         }
         self.close_context_menu_silently();
         if self.running_chat_controller().is_some() {

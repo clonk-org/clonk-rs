@@ -3870,7 +3870,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
     let mut invalid_hidden_menu = two_item_script_menu(cursor);
     invalid_hidden_menu.style = 99;
     install_test_cursor_menu(&mut app, cursor, invalid_hidden_menu);
-    app.ingame_menu.replace(
+    app.ingame_menus.players.replace(
         owner,
         IngameMenuState::main_menu(
             &MainMenuConditions {
@@ -3910,7 +3910,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         "suppressed HUD regions cannot consume film input"
     );
 
-    app.ingame_menu.clear();
+    app.ingame_menus.players.clear();
     app.engine
         .apply_object_update(cursor, saves_fixture!(object_update))
         .test_value();

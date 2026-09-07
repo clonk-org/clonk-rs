@@ -688,6 +688,30 @@ pub(crate) struct ContextMenuState {
     pub(crate) pointer_capture: Option<ContextMenuPointerButton>,
 }
 
+/// The in-game menu half of the app: what C4Menu shows per player and per
+/// object, the presentation-only script-menu timing, and the pointer
+/// latches its close buttons and construction drag keep. `GameApp` composes
+/// it as `ingame_menus`.
+pub(crate) struct IngameMenus {
+    pub(crate) object: Option<ObjectMenuState>,
+    pub(crate) players: PlayerIngameMenus,
+    /// Cached Graphics.c4g sheets for the in-game menu renderer.
+    pub(crate) graphics: Option<IngameMenuGraphics>,
+    /// Per-viewport-owner async C4Menu::TimeOnSelection presentation state.
+    /// This is deliberately outside the deterministic engine menu state
+    /// (C4Menu.cpp:804-821).
+    pub(crate) script_presentations: BTreeMap<i32, ScriptMenuPresentationState>,
+    /// Player menu whose title close button retained the current left-down.
+    /// C4GUI::Button invokes only when that same button receives left-up.
+    pub(crate) close_pointer_capture: Option<i32>,
+    /// Script menu close button retaining the current left-down.
+    pub(crate) script_close_pointer_capture: Option<(i32, ObjectId)>,
+    /// C4Menu's retained drag element begins in GUI coordinates and becomes
+    /// a C4MouseControl construction drag only after the menu sensitivity is
+    /// crossed, so it cannot share the world-origin button state above.
+    pub(crate) construction_drag: Option<ConstructionMenuDrag>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -770,6 +794,11 @@ pub(crate) struct GameApp {
     /// outside click or a closing action from reaching the screen underneath
     /// (clonk-org/clonk-rs#1236).
     pub(crate) context_menus: ContextMenuState,
+    /// The in-game menus: the object menu, the per-player C4Menu instances
+    /// and their cached sheets, the asynchronous script-menu presentations,
+    /// the close-button pointer latches and the construction drag
+    /// (clonk-org/clonk-rs#1236).
+    pub(crate) ingame_menus: IngameMenus,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
@@ -836,19 +865,11 @@ pub(crate) struct GameApp {
     /// displace the dialog reopened after the round ends.
     pub(crate) last_startup_dialog: StartupDialog,
     pub(crate) scenario_game_options: GameOptionButtons,
-    pub(crate) object_menu: Option<ObjectMenuState>,
-    pub(crate) ingame_menu: PlayerIngameMenus,
-    /// Cached Graphics.c4g sheets for the in-game menu renderer.
-    pub(crate) ingame_menu_gfx: Option<IngameMenuGraphics>,
     /// `C4Player::BigIcon` equivalents keyed by stable C4PlayerInfo ID. The
     /// renderer projects these onto the current runtime player numbers.
     pub(crate) runtime_player_big_icons: HashMap<i32, ImageData>,
     /// Player-info sources already checked without finding a usable BigIcon.
     pub(crate) runtime_player_big_icon_misses: HashSet<i32>,
-    /// Per-viewport-owner async C4Menu::TimeOnSelection presentation state.
-    /// This is deliberately outside the deterministic engine menu state
-    /// (C4Menu.cpp:804-821).
-    pub(crate) script_menu_presentations: BTreeMap<i32, ScriptMenuPresentationState>,
     /// `Config.General.UseWhiteLobbyChat`, which is intentionally distinct
     /// from the in-game white-chat display toggle.
     pub(crate) white_lobby_chat: bool,
@@ -1374,20 +1395,11 @@ pub(crate) struct GameApp {
     /// MostRecentScrolling clock. Repeated bare arrows carry the complete
     /// prior vector for 100ms without mutating deterministic player state.
     pub(crate) free_view_scroll_momentum: FreeViewScrollMomentum,
-    /// Player menu whose title close button retained the current left-down.
-    /// C4GUI::Button invokes only when that same button receives left-up.
-    pub(crate) ingame_menu_close_pointer_capture: Option<i32>,
-    /// Script menu close button retaining the current left-down.
-    pub(crate) script_menu_close_pointer_capture: Option<(i32, ObjectId)>,
     /// Tooltip-style caption installed by a Help-mode object click or region
     /// hover, including C4MouseControl's move-count lifetime.
     pub(crate) ingame_mouse_help_caption: Option<IngameMouseHelpCaption>,
     pub(crate) mouse_state: Option<IngameButtonMouseState>,
     pub(crate) ingame_right_mouse_state: Option<IngameButtonMouseState>,
-    /// C4Menu's retained drag element begins in GUI coordinates and becomes
-    /// a C4MouseControl construction drag only after the menu sensitivity is
-    /// crossed, so it cannot share the world-origin button state above.
-    pub(crate) construction_menu_drag: Option<ConstructionMenuDrag>,
     /// C4MouseControl::Selection for object-only landscape frames. Unlike a
     /// crew frame, C++ retains this local list after button-up so a later
     /// object drag can issue Set + Append commands for the whole group.

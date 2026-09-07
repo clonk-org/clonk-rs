@@ -785,7 +785,7 @@ impl GameApp {
         if player == self.players.local_owner {
             self.close_object_menu();
         }
-        self.ingame_menu.replace(
+        self.ingame_menus.players.replace(
             player,
             IngameMenuState::main_menu(
                 &self.main_menu_conditions_for(player),

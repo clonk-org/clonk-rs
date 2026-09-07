@@ -596,13 +596,13 @@ impl GameApp {
     }
 
     pub(crate) fn ingame_menu_belongs_to(&self, owner: i32) -> bool {
-        self.ingame_menu.contains(owner)
+        self.ingame_menus.players.contains(owner)
     }
 
     pub(crate) fn menu_controls_active_for(&self, owner: i32) -> bool {
         matches!(self.mode, AppMode::Running)
             && (self.ingame_menu_belongs_to(owner)
-                || (owner == self.players.local_owner && self.object_menu.is_some()))
+                || (owner == self.players.local_owner && self.ingame_menus.object.is_some()))
     }
 
     /// Opens the player menu (`C4Player::ActivateMenuMain` ->
@@ -612,7 +612,7 @@ impl GameApp {
     }
 
     pub(crate) fn open_ingame_menu_for_player(&mut self, player: i32) -> Result<(), EngineError> {
-        if !matches!(self.mode, AppMode::Running) || self.ingame_menu.contains(player) {
+        if !matches!(self.mode, AppMode::Running) || self.ingame_menus.players.contains(player) {
             return Ok(());
         }
         self.activate_ingame_main_menu_for_player(player)
@@ -622,7 +622,7 @@ impl GameApp {
         let menu = self
             .hostility_entries_for_player(player)
             .map(|entries| IngameMenuState::hostility_menu(&entries, &self.ingame_menu_labels()));
-        self.ingame_menu.replace(player, menu);
+        self.ingame_menus.players.replace(player, menu);
     }
 
     /// Resolve every in-game menu string through the active language table,
@@ -768,7 +768,8 @@ impl GameApp {
     /// team page follows live joins, switches and the generated-team row.
     pub(crate) fn refresh_team_menus(&mut self) {
         let players = self
-            .ingame_menu
+            .ingame_menus
+            .players
             .iter()
             .filter_map(|(player, menu)| {
                 (menu.page() == ingame_menu::MenuPage::TeamSelection)
@@ -782,7 +783,7 @@ impl GameApp {
         self.cache_team_selection_icons(&entries);
         let labels = self.ingame_menu_labels();
         for (player, switching) in players {
-            if let Some(menu) = self.ingame_menu.get_mut(player) {
+            if let Some(menu) = self.ingame_menus.players.get_mut(player) {
                 menu.refill_team(&entries, switching, &labels);
             }
         }
@@ -790,7 +791,8 @@ impl GameApp {
 
     pub(crate) fn refresh_hostility_menus(&mut self) {
         let players = self
-            .ingame_menu
+            .ingame_menus
+            .players
             .iter()
             .filter_map(|(player, menu)| {
                 (menu.page() == ingame_menu::MenuPage::Hostility).then_some(player)
@@ -802,7 +804,7 @@ impl GameApp {
                 self.close_ingame_menu_for_player(player);
                 continue;
             };
-            if let Some(menu) = self.ingame_menu.get_mut(player) {
+            if let Some(menu) = self.ingame_menus.players.get_mut(player) {
                 menu.refill_hostility(&entries, &labels);
             }
         }
@@ -857,8 +859,8 @@ impl GameApp {
     }
 
     pub(crate) fn close_ingame_menu(&mut self) {
-        self.ingame_menu.clear();
-        self.ingame_menu_close_pointer_capture = None;
+        self.ingame_menus.players.clear();
+        self.ingame_menus.close_pointer_capture = None;
         if matches!(
             self.dialogs.menu_title_drag,
             Some(MenuTitleDrag::Ingame { .. })
@@ -868,9 +870,9 @@ impl GameApp {
     }
 
     pub(crate) fn close_ingame_menu_for_player(&mut self, player: i32) {
-        self.ingame_menu.remove(player);
-        if self.ingame_menu_close_pointer_capture == Some(player) {
-            self.ingame_menu_close_pointer_capture = None;
+        self.ingame_menus.players.remove(player);
+        if self.ingame_menus.close_pointer_capture == Some(player) {
+            self.ingame_menus.close_pointer_capture = None;
         }
         if matches!(
             self.dialogs.menu_title_drag,
@@ -888,9 +890,9 @@ impl GameApp {
     }
 
     fn close_ingame_menu_by_user_for_player(&mut self, player: i32) -> Result<(), EngineError> {
-        if self.ingame_menu.remove(player).is_some() {
-            if self.ingame_menu_close_pointer_capture == Some(player) {
-                self.ingame_menu_close_pointer_capture = None;
+        if self.ingame_menus.players.remove(player).is_some() {
+            if self.ingame_menus.close_pointer_capture == Some(player) {
+                self.ingame_menus.close_pointer_capture = None;
             }
             if matches!(
                 self.dialogs.menu_title_drag,
@@ -913,7 +915,7 @@ impl GameApp {
     }
 
     pub(crate) fn open_object_menu(&mut self) -> Result<bool, EngineError> {
-        if !matches!(self.mode, AppMode::Running) || self.object_menu.is_some() {
+        if !matches!(self.mode, AppMode::Running) || self.ingame_menus.object.is_some() {
             return Ok(false);
         }
         match ObjectMenuState::for_player(
@@ -923,7 +925,7 @@ impl GameApp {
         ) {
             Some(menu) => {
                 self.clear_local_control(self.players.local_owner)?;
-                self.object_menu = Some(menu);
+                self.ingame_menus.object = Some(menu);
                 self.close_ingame_menu_for_player(self.players.local_owner);
                 if self.status_text.is_empty() {
                     self.status_text = "Inventory open".to_string();
@@ -940,8 +942,8 @@ impl GameApp {
     }
 
     pub(crate) fn close_object_menu(&mut self) {
-        if self.object_menu.is_some() {
-            self.object_menu = None;
+        if self.ingame_menus.object.is_some() {
+            self.ingame_menus.object = None;
             if self.status_text == "Inventory open" {
                 self.status_text.clear();
             }
@@ -971,7 +973,8 @@ impl GameApp {
                 | ControlCommand::MenuUp
         );
 
-        let owns_object_menu = owner == self.players.local_owner && self.object_menu.is_some();
+        let owns_object_menu =
+            owner == self.players.local_owner && self.ingame_menus.object.is_some();
         if menu_command && !owns_object_menu && !self.ingame_menu_belongs_to(owner) {
             return Ok(false);
         }
@@ -991,7 +994,7 @@ impl GameApp {
         }
 
         if owns_object_menu {
-            let Some(menu) = self.object_menu.as_mut() else {
+            let Some(menu) = self.ingame_menus.object.as_mut() else {
                 return Ok(false);
             };
             if let Some(action) = menu.handle_command(command, kind) {
@@ -1004,7 +1007,7 @@ impl GameApp {
             return Ok(false);
         }
         let (outcome, preview_target) = {
-            let Some(menu) = self.ingame_menu.get_mut(owner) else {
+            let Some(menu) = self.ingame_menus.players.get_mut(owner) else {
                 return Ok(menu_command);
             };
             let previous_target = menu.selected_observer_target();
@@ -1046,11 +1049,11 @@ impl GameApp {
                     if handled {
                         self.refresh_object_menu();
                         self.refresh_focus();
-                        self.object_menu = None;
+                        self.ingame_menus.object = None;
                         self.status_text = format!("Executed {} via script", selection.label);
                         return Ok(());
                     }
-                    self.object_menu = None;
+                    self.ingame_menus.object = None;
                     self.focus_id = Some(selection.primary_id);
                     self.focus_snapshot = self.snapshot.object(selection.primary_id).cloned();
                     self.status_text =
@@ -1097,7 +1100,7 @@ impl GameApp {
                 self.refresh_object_menu();
                 self.refresh_focus();
                 if handled {
-                    self.object_menu = None;
+                    self.ingame_menus.object = None;
                     self.status_text = format!("Executed {}", selection.label);
                 } else if let Some(description) = selection.description.as_deref() {
                     self.status_text = description.to_string();
@@ -1112,7 +1115,7 @@ impl GameApp {
                 }
                 let Some(crew_snapshot) = self.snapshot.object(selection.crew_id).cloned() else {
                     self.status_text = "Crew no longer available".to_string();
-                    self.object_menu = None;
+                    self.ingame_menus.object = None;
                     return Ok(());
                 };
                 let available = self
@@ -1195,9 +1198,9 @@ impl GameApp {
     }
 
     pub(crate) fn refresh_object_menu(&mut self) {
-        if let Some(menu) = self.object_menu.as_mut() {
+        if let Some(menu) = self.ingame_menus.object.as_mut() {
             if !menu.refresh(&mut self.engine, &self.snapshot) {
-                self.object_menu = None;
+                self.ingame_menus.object = None;
             }
         }
     }
@@ -1288,7 +1291,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         match action {
             MenuAction::ActivateMain => {
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     IngameMenuState::main_menu(
                         &self.main_menu_conditions_for(player),
@@ -1328,7 +1331,7 @@ impl GameApp {
             MenuAction::ActivateRules => {
                 let rules = self.goal_rule_entries(C4D_RULE);
                 self.cache_definition_icons(&rules)?;
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::rules_menu(
                         &rules,
@@ -1342,7 +1345,7 @@ impl GameApp {
                     return Ok(());
                 }
                 let players = self.available_runtime_player_files();
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::new_player_menu(
                         &players,
@@ -1351,7 +1354,7 @@ impl GameApp {
                 );
             }
             MenuAction::ActivateOptions => {
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
@@ -1361,7 +1364,7 @@ impl GameApp {
                 );
             }
             MenuAction::ActivateDisplay => {
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::display_menu(
                         &self.rendering.display_flags,
@@ -1375,7 +1378,7 @@ impl GameApp {
                 // (C4Game.cpp:2205-2223) — the menu simply stays closed.
                 if self.can_quick_save() {
                     let slots = self.savegame_slots();
-                    self.ingame_menu.replace(
+                    self.ingame_menus.players.replace(
                         player,
                         Some(IngameMenuState::savegame_menu(
                             &slots,
@@ -1385,13 +1388,13 @@ impl GameApp {
                 }
             }
             MenuAction::ActivateSurrender => {
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::surrender_menu(&self.ingame_menu_labels())),
                 );
             }
             MenuAction::ActivateClientDisconnect => {
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::client_disconnect_menu(
                         &self.ingame_menu_labels(),
@@ -1448,7 +1451,7 @@ impl GameApp {
                         activated: client.activated,
                     })
                     .collect::<Vec<_>>();
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::host_disconnect_menu(
                         &clients,
@@ -1476,7 +1479,7 @@ impl GameApp {
                 let selected = menu
                     .selected_observer_target()
                     .unwrap_or(ObserverTarget::Free);
-                self.ingame_menu.replace(OWNER_NONE, Some(menu));
+                self.ingame_menus.players.replace(OWNER_NONE, Some(menu));
                 let _ = self.apply_observer_target(selected);
             }
             MenuAction::ActivateTeamSelection => {
@@ -1491,7 +1494,7 @@ impl GameApp {
                     } else {
                         IngameMenuState::team_switch_menu(&entries, &self.ingame_menu_labels())
                     };
-                    self.ingame_menu.replace(player, Some(menu));
+                    self.ingame_menus.players.replace(player, Some(menu));
                 }
             }
             MenuAction::Abort => {
@@ -1572,9 +1575,9 @@ impl GameApp {
                 // "Save:Game:<file>:<title>" -> Game.QuickSave + reopen the
                 // savegame menu (C4MainMenu.cpp:797-804).
                 self.save_to_slot(slot);
-                if self.ingame_menu.contains(player) {
+                if self.ingame_menus.players.contains(player) {
                     let slots = self.savegame_slots();
-                    self.ingame_menu.replace(
+                    self.ingame_menus.players.replace(
                         player,
                         Some(IngameMenuState::savegame_menu(
                             &slots,
@@ -1588,7 +1591,7 @@ impl GameApp {
                 // previous selection (C4MainMenu.cpp:842-852).
                 let selection = self.ingame_menu_selection(player);
                 self.toggle_sound_option()?;
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
@@ -1600,7 +1603,7 @@ impl GameApp {
             MenuAction::ToggleMusic => {
                 let selection = self.ingame_menu_selection(player);
                 self.toggle_music_option()?;
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
@@ -1621,7 +1624,7 @@ impl GameApp {
                         self.reset_ingame_mouse_control();
                     }
                 }
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::options_menu(
                         &self.option_flags(player),
@@ -1643,7 +1646,7 @@ impl GameApp {
                         game_time_seconds,
                     );
                 }
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::display_menu(
                         &self.rendering.display_flags,
@@ -1756,7 +1759,8 @@ impl GameApp {
     }
 
     fn ingame_menu_selection(&self, player: i32) -> usize {
-        self.ingame_menu
+        self.ingame_menus
+            .players
             .get(player)
             .map(IngameMenuState::selection)
             .unwrap_or(0)
@@ -1785,7 +1789,7 @@ impl GameApp {
                 })
                 .collect::<Vec<_>>();
             self.cache_definition_icons(&entries)?;
-            self.ingame_menu.replace(
+            self.ingame_menus.players.replace(
                 request.player,
                 Some(IngameMenuState::goals_menu(
                     &entries,
@@ -1912,7 +1916,7 @@ impl GameApp {
                 start_pointer,
                 start_location,
             } => {
-                let Some(menu) = self.ingame_menu.get_mut(player) else {
+                let Some(menu) = self.ingame_menus.players.get_mut(player) else {
                     self.dialogs.menu_title_drag = None;
                     return false;
                 };
@@ -1930,7 +1934,8 @@ impl GameApp {
                     .is_some_and(|(current, menu)| {
                         current == target
                             && self
-                                .script_menu_presentations
+                                .ingame_menus
+                                .script_presentations
                                 .get(&owner)
                                 .is_some_and(|state| {
                                     same_script_menu_presentation(state, target, menu)
@@ -1940,7 +1945,7 @@ impl GameApp {
                     self.dialogs.menu_title_drag = None;
                     return false;
                 }
-                if let Some(state) = self.script_menu_presentations.get_mut(&owner) {
+                if let Some(state) = self.ingame_menus.script_presentations.get_mut(&owner) {
                     state.location = Some(moved(start_pointer, start_location));
                     state.location_needs_initialization = false;
                 }
@@ -1962,7 +1967,7 @@ impl GameApp {
     }
 
     pub(crate) fn construction_menu_drag_captured(&self) -> bool {
-        self.construction_menu_drag.is_some()
+        self.ingame_menus.construction_drag.is_some()
     }
 
     pub(crate) fn arm_construction_menu_drag(
@@ -1972,10 +1977,10 @@ impl GameApp {
         down: GuiPoint,
     ) {
         let Some(drag) = self.engine.object_menu_construction_drag(owner, item_index) else {
-            self.construction_menu_drag = None;
+            self.ingame_menus.construction_drag = None;
             return;
         };
-        self.construction_menu_drag = Some(ConstructionMenuDrag::Candidate {
+        self.ingame_menus.construction_drag = Some(ConstructionMenuDrag::Candidate {
             owner,
             menu_object_id: drag.menu_object_id,
             item_index,
@@ -1992,7 +1997,7 @@ impl GameApp {
         &mut self,
         point: GuiPoint,
     ) -> Result<bool, EngineError> {
-        let Some(drag) = self.construction_menu_drag.clone() else {
+        let Some(drag) = self.ingame_menus.construction_drag.clone() else {
             return Ok(false);
         };
         match drag {
@@ -2017,14 +2022,14 @@ impl GameApp {
                             && current.definition_c4id == definition_c4id
                     });
                 if !still_same_item {
-                    self.construction_menu_drag = None;
+                    self.ingame_menus.construction_drag = None;
                     return Ok(false);
                 }
 
                 // C4GUI::CMouse::ReleaseButtons drops its menu capture before
                 // C4MouseControl starts receiving the construction drag.
                 self.clear_ingame_world_mouse_gestures();
-                self.construction_menu_drag = Some(ConstructionMenuDrag::Active {
+                self.ingame_menus.construction_drag = Some(ConstructionMenuDrag::Active {
                     owner,
                     definition_id,
                     definition_c4id,
@@ -2049,7 +2054,7 @@ impl GameApp {
             owner,
             definition_id,
             ..
-        }) = self.construction_menu_drag.as_ref()
+        }) = self.ingame_menus.construction_drag.as_ref()
         else {
             return;
         };
@@ -2097,7 +2102,7 @@ impl GameApp {
             pointer: stored_pointer,
             site_valid: stored_valid,
             ..
-        }) = self.construction_menu_drag.as_mut()
+        }) = self.ingame_menus.construction_drag.as_mut()
         {
             *stored_viewport_index =
                 pointer.and(retained_viewport.map(|mouse| mouse.viewport_index));
@@ -2107,7 +2112,7 @@ impl GameApp {
     }
 
     pub(crate) fn finish_construction_menu_drag(&mut self) -> Result<bool, EngineError> {
-        let Some(drag) = self.construction_menu_drag.take() else {
+        let Some(drag) = self.ingame_menus.construction_drag.take() else {
             return Ok(false);
         };
         let ConstructionMenuDrag::Active {
@@ -2153,7 +2158,7 @@ impl GameApp {
     }
 
     pub(crate) fn running_external_menu_is_shown(&self) -> bool {
-        self.ingame_menu.is_some() || self.engine.has_active_object_menu()
+        self.ingame_menus.players.is_some() || self.engine.has_active_object_menu()
     }
 
     pub(crate) fn ingame_menu_area(&self, player: i32) -> Option<Rect> {
@@ -2180,14 +2185,15 @@ impl GameApp {
             ..IngameMenuGraphics::default()
         };
         let Some(bounds) = self
-            .ingame_menu
+            .ingame_menus
+            .players
             .get(player)
             .map(|menu| menu.bounds(area, &font, &gfx))
         else {
             return false;
         };
         let start_location = (bounds.x, bounds.y);
-        if let Some(menu) = self.ingame_menu.get_mut(player) {
+        if let Some(menu) = self.ingame_menus.players.get_mut(player) {
             menu.set_location(start_location);
         }
         self.dialogs.menu_title_drag = Some(MenuTitleDrag::Ingame {
@@ -2296,7 +2302,7 @@ impl GameApp {
             selection: menu.selection,
             location: menu.location,
         };
-        let mut next = match self.script_menu_presentations.remove(&owner) {
+        let mut next = match self.ingame_menus.script_presentations.remove(&owner) {
             Some(state) if state.key == key => state,
             Some(mut state) if same_script_menu_presentation(&state, target, &menu) => {
                 state.key = key;
@@ -2334,7 +2340,7 @@ impl GameApp {
             next.applied_menu_lines = menu.lines;
         }
         sync_script_menu_presentation_location_reset(&mut next, &menu);
-        self.script_menu_presentations.insert(owner, next);
+        self.ingame_menus.script_presentations.insert(owner, next);
         true
     }
 
@@ -2371,7 +2377,8 @@ impl GameApp {
         let font_images =
             resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources());
         let presentation = self
-            .script_menu_presentations
+            .ingame_menus
+            .script_presentations
             .get(&owner)
             .filter(|state| same_script_menu_presentation(state, target, menu));
         let location = presentation
@@ -2447,7 +2454,8 @@ impl GameApp {
             Default::default()
         };
         let presentation = self
-            .script_menu_presentations
+            .ingame_menus
+            .script_presentations
             .get(&owner)
             .filter(|state| same_script_menu_presentation(state, target, menu));
         let location = presentation
@@ -2499,7 +2507,8 @@ impl GameApp {
         };
         let start_location = (geometry.bounds.x, geometry.bounds.y);
         let Some(state) = self
-            .script_menu_presentations
+            .ingame_menus
+            .script_presentations
             .get_mut(&owner)
             .filter(|state| state.key.target == target)
         else {
@@ -4863,7 +4872,7 @@ impl GameApp {
             return true;
         }
         menu_owner != OWNER_NONE
-            && self.ingame_menu.contains(menu_owner)
+            && self.ingame_menus.players.contains(menu_owner)
             && self
                 .snapshot
                 .players
@@ -4964,7 +4973,7 @@ impl GameApp {
             audio.stop_lobby_elevator();
         }
         self.rendering.active_game_graphics = None;
-        self.ingame_menu_gfx = None;
+        self.ingame_menus.graphics = None;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
         self.restore_startup_gui_sheets();
@@ -5006,8 +5015,8 @@ impl GameApp {
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
         self.close_ingame_menu();
-        self.object_menu = None;
-        self.script_menu_presentations.clear();
+        self.ingame_menus.object = None;
+        self.ingame_menus.script_presentations.clear();
         self.game_over_dialog = None;
         self.pending_league_end = None;
         self.pending_league_player_auth = None;
@@ -5062,7 +5071,7 @@ impl GameApp {
         self.live_input.running_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
-        self.construction_menu_drag = None;
+        self.ingame_menus.construction_drag = None;
         self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;

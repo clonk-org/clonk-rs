@@ -138,7 +138,7 @@ impl GameApp {
         (!self.runtime_gui_has_keyboard_focus() || self.dialogs.chart_elevated)
             && !self.runtime_top_default_dialog_is_exclusive()
             && !(self.viewports.primary_physical_viewport_is_no_owner()
-                && self.ingame_menu.is_some())
+                && self.ingame_menus.players.is_some())
     }
 
     pub(crate) fn viewport_scope_excludes_player_control(&self) -> bool {
@@ -177,7 +177,7 @@ impl GameApp {
     }
 
     pub(crate) fn ensure_ingame_menu_gfx(&mut self) -> &mut IngameMenuGraphics {
-        if self.ingame_menu_gfx.is_none() {
+        if self.ingame_menus.graphics.is_none() {
             let hud = self.current_hud_graphics();
             let throw_key = self
                 .bindings
@@ -194,7 +194,7 @@ impl GameApp {
                 .key_for(ControlBindingId::Special2)
                 .map(format_key_label)
                 .unwrap_or_default();
-            self.ingame_menu_gfx = Some(IngameMenuGraphics {
+            self.ingame_menus.graphics = Some(IngameMenuGraphics {
                 hud: hud.as_ref().clone(),
                 menu: hud
                     .menu
@@ -220,7 +220,8 @@ impl GameApp {
                 ..Default::default()
             });
         }
-        self.ingame_menu_gfx
+        self.ingame_menus
+            .graphics
             .as_mut()
             .expect("ingame menu gfx initialised above")
     }
@@ -319,18 +320,18 @@ impl GameApp {
             .collect::<Vec<_>>();
         changed.extend(current.keys().copied().filter(|owner| {
             !self.viewports.menu_viewport_rects.contains_key(owner)
-                && (self.ingame_menu.contains(*owner)
-                    || self.script_menu_presentations.contains_key(owner))
+                && (self.ingame_menus.players.contains(*owner)
+                    || self.ingame_menus.script_presentations.contains_key(owner))
         }));
         if changed.is_empty() {
             self.viewports.menu_viewport_rects = current;
             return;
         }
         for &owner in &changed {
-            if let Some(menu) = self.ingame_menu.get_mut(owner) {
+            if let Some(menu) = self.ingame_menus.players.get_mut(owner) {
                 menu.reset_location();
             }
-            if let Some(state) = self.script_menu_presentations.get_mut(&owner) {
+            if let Some(state) = self.ingame_menus.script_presentations.get_mut(&owner) {
                 if state.free_aligned {
                     if let (Some((x, y)), Some(previous), Some(next)) = (
                         state.location,
@@ -356,16 +357,18 @@ impl GameApp {
             self.dialogs.menu_title_drag = None;
         }
         if self
-            .ingame_menu_close_pointer_capture
+            .ingame_menus
+            .close_pointer_capture
             .is_some_and(|owner| changed.contains(&owner))
         {
-            self.ingame_menu_close_pointer_capture = None;
+            self.ingame_menus.close_pointer_capture = None;
         }
         if self
-            .script_menu_close_pointer_capture
+            .ingame_menus
+            .script_close_pointer_capture
             .is_some_and(|(owner, _)| changed.contains(&owner))
         {
-            self.script_menu_close_pointer_capture = None;
+            self.ingame_menus.script_close_pointer_capture = None;
         }
         self.viewports.menu_viewport_rects = current;
     }
@@ -5622,7 +5625,7 @@ impl GameApp {
         if viewport_overlays_visible
             && self.menu_owner_has_unsuppressed_viewport(self.players.local_owner)
         {
-            if let Some(menu) = self.object_menu.as_ref() {
+            if let Some(menu) = self.ingame_menus.object.as_ref() {
                 let boundary = report_classic_parity_boundary(
                     ClassicParityBoundary::AppObjectMenu(menu.mode()),
                 );
@@ -5650,7 +5653,8 @@ impl GameApp {
         }
         let has_visible_ingame_menu = viewport_overlays_visible
             && self
-                .ingame_menu
+                .ingame_menus
+                .players
                 .iter()
                 .any(|(owner, _)| self.ingame_menu_has_visible_surface(owner));
         let has_visible_script_menu = viewport_overlays_visible
@@ -5786,7 +5790,7 @@ impl GameApp {
         // (src/C4Object.cpp:2952).
         if viewport_overlays_visible
             && self.rendering.display_flags.show_commands
-            && self.object_menu.is_none()
+            && self.ingame_menus.object.is_none()
             && self
                 .engine
                 .cursor_object_menu(self.players.local_owner)
@@ -5946,7 +5950,8 @@ impl GameApp {
         self.refresh_construction_menu_drag();
 
         let engine = &self.engine;
-        self.script_menu_presentations
+        self.ingame_menus
+            .script_presentations
             .retain(|owner, _| engine.cursor_object_menu(*owner).is_some());
         let has_visible_script_menu = script_menu_owners
             .iter()
@@ -5974,7 +5979,11 @@ impl GameApp {
                         location: menu.location,
                     };
                     let progressing = menu.text_progressing;
-                    match self.script_menu_presentations.remove(&script_menu_owner) {
+                    match self
+                        .ingame_menus
+                        .script_presentations
+                        .remove(&script_menu_owner)
+                    {
                         Some(mut state) if state.key == key => {
                             if state.location.is_none() {
                                 state.location = initial_script_menu_location;
@@ -5986,7 +5995,8 @@ impl GameApp {
                                 state.time_on_selection = state.time_on_selection.saturating_add(1);
                             }
                             let time = state.time_on_selection;
-                            self.script_menu_presentations
+                            self.ingame_menus
+                                .script_presentations
                                 .insert(script_menu_owner, state);
                             time
                         }
@@ -6002,13 +6012,14 @@ impl GameApp {
                             state.selection_needs_adjustment |=
                                 state.scroll_selection != menu.selection;
                             let time = state.time_on_selection;
-                            self.script_menu_presentations
+                            self.ingame_menus
+                                .script_presentations
                                 .insert(script_menu_owner, state);
                             time
                         }
                         _ => {
                             let time_on_selection = u32::from(!progressing);
-                            self.script_menu_presentations.insert(
+                            self.ingame_menus.script_presentations.insert(
                                 script_menu_owner,
                                 ScriptMenuPresentationState {
                                     key,
@@ -6035,12 +6046,15 @@ impl GameApp {
                     }
                 })
                 .unwrap_or_else(|| {
-                    self.script_menu_presentations.remove(&script_menu_owner);
+                    self.ingame_menus
+                        .script_presentations
+                        .remove(&script_menu_owner);
                     if self
-                        .script_menu_close_pointer_capture
+                        .ingame_menus
+                        .script_close_pointer_capture
                         .is_some_and(|(owner, _)| owner == script_menu_owner)
                     {
-                        self.script_menu_close_pointer_capture = None;
+                        self.ingame_menus.script_close_pointer_capture = None;
                     }
                     if matches!(
                         self.dialogs.menu_title_drag,
@@ -6110,7 +6124,8 @@ impl GameApp {
                 // so a SetMenuSize on an already-displayed menu keeps its
                 // explicit row count (C4Menu.cpp:635-640).
                 if let Some(state) = self
-                    .script_menu_presentations
+                    .ingame_menus
+                    .script_presentations
                     .get_mut(&script_menu_owner)
                     .filter(|state| {
                         !state.location_reset_pending && state.applied_menu_lines != menu.lines
@@ -6119,7 +6134,11 @@ impl GameApp {
                     state.explicit_lines = (menu.lines > 0).then_some(menu.lines);
                     state.applied_menu_lines = menu.lines;
                 }
-                if let Some(state) = self.script_menu_presentations.get_mut(&script_menu_owner) {
+                if let Some(state) = self
+                    .ingame_menus
+                    .script_presentations
+                    .get_mut(&script_menu_owner)
+                {
                     sync_script_menu_presentation_location_reset(state, menu);
                     state.location_reset_pending = false;
                 }
@@ -6130,7 +6149,8 @@ impl GameApp {
                     initialize_location,
                     explicit_lines,
                 ) = self
-                    .script_menu_presentations
+                    .ingame_menus
+                    .script_presentations
                     .get(&script_menu_owner)
                     .filter(|state| same_script_menu_presentation(state, *target, menu))
                     .map(|state| {
@@ -6207,7 +6227,8 @@ impl GameApp {
                     (menu_location, retained_scroll_y)
                 };
                 if let Some(state) = self
-                    .script_menu_presentations
+                    .ingame_menus
+                    .script_presentations
                     .get_mut(&script_menu_owner)
                     .filter(|state| same_script_menu_presentation(state, *target, menu))
                 {
@@ -6261,14 +6282,17 @@ impl GameApp {
                 // src/C4Menu.cpp:351-356,1270-1276;
                 // src/C4GuiDialogs.cpp:400-422).
                 let show_script_menu_close_button = true;
-                if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
+                if let Some(gfx) = self.ingame_menus.graphics.as_ref() {
                     let font =
                         clonk_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
                     let tiny = fonts
                         .as_deref()
                         .map(|set| clonk_frontend::hud::HudFont::Clonk(&set.mini));
-                    let dim_for_construction_drag =
-                        self.construction_menu_drag.as_ref().is_some_and(|drag| {
+                    let dim_for_construction_drag = self
+                        .ingame_menus
+                        .construction_drag
+                        .as_ref()
+                        .is_some_and(|drag| {
                             matches!(
                                 drag,
                                 ConstructionMenuDrag::Active { owner, .. }
@@ -6343,7 +6367,8 @@ impl GameApp {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
             let players = self
-                .ingame_menu
+                .ingame_menus
+                .players
                 .iter()
                 .map(|(player, _)| player)
                 .filter(|&player| self.ingame_menu_has_visible_surface(player))
@@ -6390,7 +6415,7 @@ impl GameApp {
                         let surface = self.rendering.graphics.surface();
                         Rect::new(0, 0, surface.width(), surface.height())
                     });
-                if let Some(gfx) = self.ingame_menu_gfx.as_mut() {
+                if let Some(gfx) = self.ingame_menus.graphics.as_mut() {
                     // C4MainMenu::Init calls DoInit while Player is NO_OWNER,
                     // so SetTitle creates the close button before Init assigns
                     // the real player. Later SetTitle(false) calls do not
@@ -6399,9 +6424,10 @@ impl GameApp {
                     // src/C4GuiDialogs.cpp:400-422).
                     gfx.show_close_button = true;
                 }
-                if let (Some(menu), Some(gfx)) =
-                    (self.ingame_menu.get(player), self.ingame_menu_gfx.as_ref())
-                {
+                if let (Some(menu), Some(gfx)) = (
+                    self.ingame_menus.players.get(player),
+                    self.ingame_menus.graphics.as_ref(),
+                ) {
                     // FontRegular for items, FontTiny for command-key labels
                     // (C4Menu.cpp:170; C4ObjectCom.cpp:940).
                     let font =
@@ -6517,7 +6543,8 @@ impl GameApp {
             && self.live_input.pointer_inside_window;
         let construction_cursor = running_world_cursor_drawable
             .then(|| {
-                self.construction_menu_drag
+                self.ingame_menus
+                    .construction_drag
                     .as_ref()
                     .and_then(|drag| match drag {
                         ConstructionMenuDrag::Active {

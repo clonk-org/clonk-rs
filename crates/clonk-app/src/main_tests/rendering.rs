@@ -2481,7 +2481,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
     check(&input, before, error, "game-option input constructor");
 
     let mut message = new_running_sandbox_app();
-    message.ingame_menu.replace(
+    message.ingame_menus.players.replace(
         message.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
@@ -2501,7 +2501,7 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
     check(&message, before, error, "message-dialog constructor");
 
     let mut game_over = new_running_sandbox_app();
-    game_over.ingame_menu.replace(
+    game_over.ingame_menus.players.replace(
         game_over.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
@@ -3939,7 +3939,7 @@ fn construction_edge_scroll_preserves_ordered_scoreboard_lifecycle_requests() {
     // Script0 runs in this frame and queues show then hide. The retained tick
     // snapshot must deliver both requests in order while Execute scrolls the
     // active construction viewport.
-    main_assert!(app.construction_menu_drag.is_some());
+    main_assert!(app.ingame_menus.construction_drag.is_some());
     main_assert!(app.dialogs.scoreboard.is_none());
     main_assert_eq!(app.snapshot.hud.scoreboard.show_count() => 0);
     main_assert!(app.snapshot.hud.scoreboard_presentations.is_empty());
@@ -4462,7 +4462,7 @@ fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
     main_assert!(app.engine.construction_site_valid("BLD1", world), "terrain behind the HUD is otherwise a valid construction site");
 
     begin_construction_drag(&mut app, menu_point, hud_point);
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {pointer: Some(_), site_valid: false,..})));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {pointer: Some(_), site_valid: false,..})));
 }
 
 #[test]
@@ -4533,7 +4533,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
         geometry.bounds.y.saturating_add(17),
     );
     main_assert_eq!(
-        app.script_menu_presentations
+        app.ingame_menus.script_presentations
             .get(&owner)
             .and_then(|state| state.location) =>
         Some(expected),
@@ -4542,14 +4542,14 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.menu_title_drag.is_none());
     let retained = app
-        .script_menu_presentations
+        .ingame_menus.script_presentations
         .get(&owner)
         .and_then(|state| state.location);
     app.test_cursor(PhysicalPosition::new(10.0, 10.0));
-    main_assert_eq!(app.script_menu_presentations.get(&owner).and_then(|state| state.location) => retained);
+    main_assert_eq!(app.ingame_menus.script_presentations.get(&owner).and_then(|state| state.location) => retained);
     app.resize(360, 220).test_value();
     main_assert!(app.dialogs.menu_title_drag.is_none());
-    main_assert_eq!(app.script_menu_presentations.get(&owner).and_then(|state| state.location) => None, "viewport ResetLocation restores anchored placement");
+    main_assert_eq!(app.ingame_menus.script_presentations.get(&owner).and_then(|state| state.location) => None, "viewport ResetLocation restores anchored placement");
 
     let mut player_app = new_classic_running_sandbox_app();
     let player = player_app.players.local_owner;
@@ -4559,7 +4559,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             name: format!("Player {index}"),
         })
         .collect::<Vec<_>>();
-    player_app.ingame_menu.replace(
+    player_app.ingame_menus.players.replace(
         player,
         Some(IngameMenuState::new_player_menu(
             &players,
@@ -4580,7 +4580,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             ..IngameMenuGraphics::default()
         };
         player_app
-            .ingame_menu
+            .ingame_menus.players
             .get(player)
             .test_value()
             .bounds(area, &font, &gfx)
@@ -4608,7 +4608,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             ..IngameMenuGraphics::default()
         };
         player_app
-            .ingame_menu
+            .ingame_menus.players
             .get(player)
             .test_value()
             .bounds(area, &font, &gfx)
@@ -4924,7 +4924,7 @@ fn ownerless_escape_opens_fullscreen_abort_confirmation() {
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
     main_assert!(!app.ingame_menu_belongs_to(app.players.local_owner));
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(!app.take_exit_request());

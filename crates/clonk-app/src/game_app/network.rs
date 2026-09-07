@@ -9167,7 +9167,7 @@ impl GameApp {
         // interactive. The synchronized object/cursor menu survives
         // C4Player::CloseMenu. The scoreboard refcount is untouched.
         self.close_scoreboard_dialog();
-        let fullscreen_menu_open = self.ingame_menu.is_some();
+        let fullscreen_menu_open = self.ingame_menus.players.is_some();
         self.close_ingame_menu();
         if fullscreen_menu_open {
             // C4MainMenu::OnClosed synchronizes exactly one

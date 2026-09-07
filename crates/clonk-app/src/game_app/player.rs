@@ -536,7 +536,7 @@ impl GameApp {
         event: ControlEvent,
     ) -> Result<(), EngineError> {
         let mut event = event;
-        let cursor_menu_text_progressing = (self.object_menu.is_none()
+        let cursor_menu_text_progressing = (self.ingame_menus.object.is_none()
             && !self.ingame_menu_belongs_to(owner))
         .then(|| {
             self.engine
@@ -575,7 +575,7 @@ impl GameApp {
                 return Ok(());
             }
             if self.ingame_menu_belongs_to(owner)
-                || (owner == self.players.local_owner && self.object_menu.is_some())
+                || (owner == self.players.local_owner && self.ingame_menus.object.is_some())
             {
                 return Ok(());
             }
@@ -747,7 +747,8 @@ impl GameApp {
         }
         let entries = self.team_selection_entries();
         let existing = self
-            .ingame_menu
+            .ingame_menus
+            .players
             .get(owner)
             .filter(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection);
         let unchanged = existing.is_some_and(|menu| {
@@ -769,7 +770,7 @@ impl GameApp {
         // `AdjustSelection` clamps an out-of-range row (C4Menu.cpp:947-973).
         if already_open {
             let labels = self.ingame_menu_labels();
-            if let Some(menu) = self.ingame_menu.get_mut(owner) {
+            if let Some(menu) = self.ingame_menus.players.get_mut(owner) {
                 menu.refill_team(&entries, false, &labels);
             }
             return;
@@ -777,7 +778,7 @@ impl GameApp {
         if owner == self.players.local_owner {
             self.close_object_menu();
         }
-        self.ingame_menu.replace(
+        self.ingame_menus.players.replace(
             owner,
             Some(IngameMenuState::team_selection_menu(
                 &entries,
@@ -803,7 +804,8 @@ impl GameApp {
             return Ok(());
         };
         if self
-            .ingame_menu
+            .ingame_menus
+            .players
             .get(owner)
             .is_some_and(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection)
         {

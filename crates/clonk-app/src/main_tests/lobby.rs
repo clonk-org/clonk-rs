@@ -9910,7 +9910,7 @@ fn team_selection_execute_queues_the_only_non_full_team() {
     });
     app.engine.set_local_players([occupant, chooser]);
     app.open_initial_team_selection(chooser);
-    main_assert!(app.ingame_menu.is_some(), "selection menu starts open");
+    main_assert!(app.ingame_menus.players.is_some(), "selection menu starts open");
     let (events, mut commands) = install_network_commands(&mut app);
     let tick = app.local_control_submission_tick();
     send_ready_tick(&events, tick, Vec::new());
@@ -9919,7 +9919,7 @@ fn team_selection_execute_queues_the_only_non_full_team() {
 
     main_assert_eq!(app.engine.player(chooser).map(clonk_engine::Player::status) => Some(PlayerStatus::TeamSelectionPending));
     main_assert!(
-        app.ingame_menu.is_none(),
+        app.ingame_menus.players.is_none(),
         "forced selection closes the menu"
     );
     main_assert_eq!(
@@ -10004,19 +10004,19 @@ fn team_switch_menu_refills_membership_and_preserves_selection_like_tick35() {
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
         .test_value();
     {
-        let menu = app.ingame_menu.get(owner).test_value();
+        let menu = app.ingame_menus.players.get(owner).test_value();
         main_assert_eq!(menu.page() => ingame_menu::MenuPage::TeamSelection);
         main_assert!(menu.is_team_switch());
         main_assert_eq!(menu.items().iter().map(|item| item.caption.clone()).collect::<Vec<_>>() => ["Alpha", "Beta"]);
     }
-    app.ingame_menu.get_mut(owner).test_value().set_selection(1);
+    app.ingame_menus.players.get_mut(owner).test_value().set_selection(1);
 
     // Membership changes without any menu control executing.
     app.engine.player_mut(owner).test_value().set_team(Some(2));
 
-    main_assert_eq!(app.ingame_menu.get(owner).expect("team switch page").items()[1].caption => "Beta", "native waits for the periodic refill");
+    main_assert_eq!(app.ingame_menus.players.get(owner).expect("team switch page").items()[1].caption => "Beta", "native waits for the periodic refill");
     app.refresh_team_menus();
-    let menu = app.ingame_menu.get(owner).test_value();
+    let menu = app.ingame_menus.players.get(owner).test_value();
     main_assert_eq!(menu.items().iter().map(|item| item.caption.clone()).collect::<Vec<_>>() => ["Alpha", "Beta (Chooser)"]);
     main_assert!(
         menu.is_team_switch(),
@@ -10031,14 +10031,14 @@ fn team_switch_menu_refills_membership_and_preserves_selection_like_tick35() {
     configuration.auto_generate_teams = true;
     app.engine.set_team_configuration(configuration);
     app.refresh_team_menus();
-    main_assert_eq!(app.ingame_menu.get(owner).expect("refilled page").items().len() => 2, "team Alpha is still empty, so no New Team row is offered");
+    main_assert_eq!(app.ingame_menus.players.get(owner).expect("refilled page").items().len() => 2, "team Alpha is still empty, so no New Team row is offered");
 
     app.engine.set_teams(vec![
         clonk_engine::TeamInfo::new(1, "Alpha", 0x0011_2233).with_player_ids(vec![41]),
         clonk_engine::TeamInfo::new(2, "Beta", 0x0044_5566).with_player_ids(vec![42]),
     ]);
     app.refresh_team_menus();
-    let menu = app.ingame_menu.get(owner).test_value();
+    let menu = app.ingame_menus.players.get(owner).test_value();
     main_assert_eq!(
         menu.items()
             .iter()
@@ -10054,11 +10054,11 @@ fn team_switch_menu_refills_membership_and_preserves_selection_like_tick35() {
 
     // A shrinking refill clamps an out-of-range selection exactly like
     // AdjustSelection.
-    app.ingame_menu.get_mut(owner).test_value().set_selection(2);
+    app.ingame_menus.players.get_mut(owner).test_value().set_selection(2);
     app.engine
         .set_teams(vec![clonk_engine::TeamInfo::new(1, "Alpha", 0x0011_2233)]);
     app.refresh_team_menus();
-    let menu = app.ingame_menu.get(owner).test_value();
+    let menu = app.ingame_menus.players.get(owner).test_value();
     main_assert_eq!(menu.items().len() => 1);
     main_assert_eq!(menu.selection() => 0);
 }
@@ -10104,7 +10104,7 @@ fn team_selection_entries_cache_icon_specs_and_player_info_occupancy() {
         .set_player_status(owner, PlayerStatus::TeamSelection)
         .test_value();
     app.open_initial_team_selection(owner);
-    let team_icons = &some(&app.ingame_menu_gfx).team_icons;
+    let team_icons = &some(&app.ingame_menus.graphics).team_icons;
     main_assert_eq!(team_icons.get(&1).map(ImageData::pixels) => Some([0x11, 0x22, 0x33, 0xff].as_slice()));
     main_assert!(
         !team_icons.contains_key(&2),
@@ -10133,7 +10133,7 @@ fn team_selection_participant_names_decode_native_bytes_for_presentation() {
 
     app.open_initial_team_selection(chooser);
     let item = app
-        .ingame_menu
+        .ingame_menus.players
         .get(chooser)
         .and_then(|menu| menu.items().first())
         .test_value();
@@ -10164,7 +10164,7 @@ fn team_selection_execute_keeps_an_ambiguous_local_choice_open() {
         disable_mouse: false,
     });
     app.open_initial_team_selection(chooser);
-    app.ingame_menu
+    app.ingame_menus.players
         .get_mut(chooser)
         .test_value()
         .set_selection(1);
@@ -10175,7 +10175,7 @@ fn team_selection_execute_keeps_an_ambiguous_local_choice_open() {
     app.test_update();
 
     main_assert_eq!(app.engine.player(chooser).map(clonk_engine::Player::status) => Some(PlayerStatus::TeamSelection));
-    let menu = app.ingame_menu.get(chooser).test_value();
+    let menu = app.ingame_menus.players.get(chooser).test_value();
     main_assert_eq!(menu.selection() => 1, "the local choice is not reset");
     main_assert!(commands.take_submitted_init_scenario_players().is_empty());
 
@@ -10195,7 +10195,7 @@ fn team_selection_execute_keeps_an_ambiguous_local_choice_open() {
     app.test_update();
 
     main_assert_eq!(
-        app.ingame_menu
+        app.ingame_menus.players
             .as_ref()
             .expect("generated alternative keeps menu open")
             .items()

@@ -1894,7 +1894,7 @@ fn visible_ingame_menu_without_exact_resources_fails_before_rendering() {
         assets.startup_dialog_images.remove(name);
     }
     Arc::make_mut(&mut assets.hud_graphics).captain = None;
-    app.ingame_menu.replace(
+    app.ingame_menus.players.replace(
         app.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
@@ -3562,7 +3562,7 @@ fn valid_construction_menu_drop_submits_exact_shift_append_packet() {
     let tick = app.local_control_submission_tick();
 
     begin_construction_drag(&mut app, menu_point, valid_point);
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_left_button(ElementState::Released);
 
@@ -3586,7 +3586,7 @@ fn valid_construction_menu_drop_submits_exact_shift_append_packet() {
         )]
     );
     main_assert!(selections.is_empty());
-    main_assert!(app.construction_menu_drag.is_none());
+    main_assert!(app.ingame_menus.construction_drag.is_none());
 }
 
 // `CStdFont::DrawText` and `GetTextExtent` both consume an unknown `{{...}}`
@@ -3841,7 +3841,7 @@ fn runtime_f3_and_ingame_music_action_install_the_localized_flash() {
         .sound.context
         .as_ref()
         .map(|audio| audio.borrow().options.music_enabled);
-    menu.ingame_menu.replace(
+    menu.ingame_menus.players.replace(
         menu.players.local_owner,
         Some(IngameMenuState::options_menu(
             &menu.option_flags(menu.players.local_owner),
@@ -3852,7 +3852,7 @@ fn runtime_f3_and_ingame_music_action_install_the_localized_flash() {
     menu.apply_ingame_menu_action(MenuAction::ToggleMusic)
         .test_value();
     main_assert!(menu.runtime_flash_message.is_some());
-    main_assert_eq!(menu.ingame_menu.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
+    main_assert_eq!(menu.ingame_menus.players.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
     if let (Some(before), Some(audio)) = (configured_before, menu.sound.context.as_ref()) {
         let audio = audio.borrow();
         main_assert_eq!(audio.options.music_enabled => !before);

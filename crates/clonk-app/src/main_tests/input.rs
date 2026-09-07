@@ -5340,14 +5340,14 @@ fn unconfigured_gamepad_button_emits_no_gameplay_control() {
     app.local_controls = LocalControlRegistry::default();
     app.local_controls
         .initialize(test_local_control_init(app.players.local_owner, 5, false, false));
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
 
     app.test_gamepad_events([pressed_gamepad_button(
         GamepadSlot::new(1),
         LegacyGamepadButton::new(0),
     )]);
 
-    main_assert!(app.ingame_menu.is_none(), "an absent Button10 mapping must not retain Start => PlayerMenu");
+    main_assert!(app.ingame_menus.players.is_none(), "an absent Button10 mapping must not retain Start => PlayerMenu");
 }
 
 #[test]
@@ -5589,7 +5589,7 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
 }
 
 fn mouse_option_phase(app: &GameApp, player: i32) -> Option<u8> {
-    app.ingame_menu
+    app.ingame_menus.players
         .get(player)?
         .items()
         .iter()
@@ -6024,7 +6024,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
 
-    app.ingame_menu.replace(
+    app.ingame_menus.players.replace(
         app.players.local_owner,
         IngameMenuState::main_menu(
             &MainMenuConditions {
@@ -6037,7 +6037,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     );
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
-    app.ingame_menu.clear();
+    app.ingame_menus.players.clear();
 
     app.start_running_chat(RunningChatMode::All);
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
@@ -6341,7 +6341,7 @@ fn constructable_raw_item_id_drags_even_when_row_is_not_selectable() {
 
     move_cursor(&mut app, menu_point, "hover disabled constructable row");
     app.test_left_button(ElementState::Pressed);
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Candidate {definition_id,..}) if definition_id == "BLD1"));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Candidate {definition_id,..}) if definition_id == "BLD1"));
 }
 
 #[test]
@@ -6366,7 +6366,7 @@ fn construction_drop_requires_the_original_live_mouse_assignment() {
         main_assert!(controls.is_empty());
         main_assert!(commands.is_empty());
         main_assert!(selections.is_empty());
-        main_assert!(app.construction_menu_drag.is_none());
+        main_assert!(app.ingame_menus.construction_drag.is_none());
     }
 }
 

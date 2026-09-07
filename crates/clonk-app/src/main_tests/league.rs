@@ -647,7 +647,7 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
         .apply_ingame_menu_action(MenuAction::ActivateHostDisconnect)
         .test_value();
     let owner = direct.players.local_owner;
-    let menu = direct.ingame_menu.get(owner).test_value();
+    let menu = direct.ingame_menus.players.get(owner).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::HostDisconnect);
     main_assert_eq!(menu.caption() => "Disconnect client");
     main_assert!(menu.is_permanent());
@@ -685,12 +685,12 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
     direct
         .handle_menu_command_failsafe(owner, ControlCommand::MenuEnter, CommandKind::Press)
         .test_value();
-    main_assert!(direct.ingame_menu.get(owner).is_some());
+    main_assert!(direct.ingame_menus.players.get(owner).is_some());
     main_assert!(direct_commands.take_submitted_votes().is_empty());
     main_assert!(direct_commands.take_submitted_client_removes().is_empty());
 
     direct
-        .ingame_menu
+        .ingame_menus.players
         .get_mut(owner)
         .test_value()
         .set_selection(1);
@@ -707,7 +707,7 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
         }]
     );
     main_assert!(direct_commands.take_submitted_votes().is_empty());
-    main_assert!(direct.ingame_menu.get(owner).is_none());
+    main_assert!(direct.ingame_menus.players.get(owner).is_none());
 
     let mut league = new_running_sandbox_app();
     let (_events, mut league_commands) = install_running_network_stub(&mut league, 0, 40, 4);
@@ -728,7 +728,7 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
         .test_value();
     let owner = league.players.local_owner;
     league
-        .ingame_menu
+        .ingame_menus.players
         .get_mut(owner)
         .test_value()
         .set_selection(1);
@@ -737,7 +737,7 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
         .test_value();
     main_assert_eq!(league_commands.take_submitted_votes() => vec![league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, 7, 0)]);
     main_assert!(league_commands.take_submitted_client_removes().is_empty());
-    main_assert_eq!(league.ingame_menu.get(owner).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::HostDisconnect));
+    main_assert_eq!(league.ingame_menus.players.get(owner).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::HostDisconnect));
 }
 
 #[test]
@@ -1887,7 +1887,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     let mut invalid_hidden_menu = two_item_script_menu(cursor);
     invalid_hidden_menu.style = 99;
     install_test_cursor_menu(&mut app, cursor, invalid_hidden_menu);
-    app.ingame_menu.replace(
+    app.ingame_menus.players.replace(
         owner,
         IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
     );
@@ -1895,7 +1895,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     app.test_render(&mut with_player_menu);
     main_assert_ne!(with_player_menu => notice_only, "the app-owned PlayerMenu remains visible over the eliminated viewport");
 
-    app.ingame_menu.clear();
+    app.ingame_menus.players.clear();
 
     let mut retargeted = new_classic_running_sandbox_app();
     let local_owner = retargeted.players.local_owner;
@@ -1916,7 +1916,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     main_assert!(retargeted.set_physical_film_view(eliminated_target));
     let mut retargeted_notice = vec![0_u8; retargeted.rendering.graphics.surface().pixels().len()];
     retargeted.test_render(&mut retargeted_notice);
-    retargeted.ingame_menu.replace(
+    retargeted.ingame_menus.players.replace(
         local_owner,
         IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
     );
@@ -1964,7 +1964,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     main_assert!(app.set_physical_film_view(owner));
     let mut ownerless_notice_only = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
     app.test_render(&mut ownerless_notice_only);
-    app.ingame_menu.replace(
+    app.ingame_menus.players.replace(
         OWNER_NONE,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
@@ -4367,7 +4367,7 @@ fn non_league_network_part_continues_the_running_round_locally() {
     main_assert_eq!(app.engine.sync_check(local_client).control_tick => control_tick_before);
     main_assert_eq!(app.engine.control_rate => 1);
     main_assert_eq!(app.active_scenario.as_ref().map(|scenario| scenario.identifier.clone()) => scenario_before);
-    main_assert_eq!(app.ingame_menu.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
+    main_assert_eq!(app.ingame_menus.players.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_control_clock.is_none());
