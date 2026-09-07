@@ -5076,6 +5076,13 @@ pub(crate) struct MenuState {
     /// The richer product search is isolated from the C++ submit matcher.
     enhanced_search_active: bool,
     enhanced_search_total: usize,
+    /// Every leaf of the discovered catalog prepared for the enhanced
+    /// search. Built on the first keystroke after discovery and reused until
+    /// `replace_discovered_entries` swaps the catalog.
+    enhanced_search_index: Option<ScenarioSearchIndex>,
+    /// How many times the search index was built, so a test can pin that
+    /// typing reuses it.
+    enhanced_search_index_builds: usize,
     search_restore_selection: Option<String>,
     search_restore_scroll: Option<i32>,
     /// Inline `CallbackRenameEdit` projected over the selected row label.
@@ -6984,6 +6991,8 @@ impl MenuState {
             applied_search_text: String::new(),
             enhanced_search_active: false,
             enhanced_search_total: 0,
+            enhanced_search_index: None,
+            enhanced_search_index_builds: 0,
             search_restore_selection: None,
             search_restore_scroll: None,
             rename_edit: None,
@@ -7133,6 +7142,7 @@ impl MenuState {
         self.scenario_list_scroll = 0;
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
+        self.enhanced_search_index = None;
         if self.enhanced_search_active {
             let _ = self.apply_enhanced_search();
         } else {
@@ -7244,6 +7254,10 @@ impl MenuState {
                 &[self.applied_search_text.trim()],
             )
         })
+    }
+
+    pub(crate) fn enhanced_search_index_builds(&self) -> usize {
+        self.enhanced_search_index_builds
     }
 
     pub(crate) fn set_search_text(&mut self, text: impl Into<String>) {
@@ -7641,14 +7655,21 @@ impl MenuState {
         let old_selection = self
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
-        let index = ScenarioSearchIndex::build(
-            self.stack
-                .first()
-                .map(|layer| layer.entries.as_slice())
-                .unwrap_or_default(),
-        );
-        self.enhanced_search_total = index.len();
-        let hits = index.search(&normalized_query);
+        if self.enhanced_search_index.is_none() {
+            self.enhanced_search_index_builds += 1;
+            self.enhanced_search_index = Some(ScenarioSearchIndex::build(
+                self.stack
+                    .first()
+                    .map(|layer| layer.entries.as_slice())
+                    .unwrap_or_default(),
+            ));
+        }
+        let (total, hits) = self
+            .enhanced_search_index
+            .as_ref()
+            .map(|index| (index.len(), index.search(&normalized_query)))
+            .unwrap_or_default();
+        self.enhanced_search_total = total;
         self.visible_entry_contexts = hits
             .iter()
             .map(|document| {

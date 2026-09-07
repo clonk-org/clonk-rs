@@ -817,6 +817,36 @@ fn scensel_search_index_lists_leaves_in_catalog_order_with_folder_context() {
     main_assert_eq!(listed => vec![("loose", ""), ("pack/inner/nested", "Pack / Inner")]);
 }
 
+// Every keystroke rebuilds the visible list, and folding the catalog's
+// searchable fields is the expensive part of that. The index therefore
+// survives across keystrokes, and only discovery replacing the catalog
+// (F5, rename, delete) builds it again.
+#[test]
+fn scensel_enhanced_search_builds_its_index_once_per_catalog() {
+    let build_scenarios = || {
+        scensel_fixture!(frontend_scenario: crystal, "pack/crystal".to_string(), "Crystal Cavern".to_string());
+        scensel_fixture!(frontend_scenario: folder, "pack".to_string(), "Adventure Pack".to_string());
+        folder.kind = ScenarioKind::Folder;
+        folder.is_playable = false;
+        folder.children = vec![crystal];
+        vec![folder]
+    };
+    let scenarios = build_scenarios();
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
+    let mut state = MenuState::new(menu, scenarios);
+    state.set_include_back(false);
+
+    for query in ["c", "cr", "cry"] {
+        state.set_search_text(query);
+        state.apply_enhanced_search();
+    }
+    main_assert_eq!(state.enhanced_search_index_builds() => 1);
+
+    state.replace_discovered_entries(build_scenarios(), None, true, true);
+    main_assert_eq!(state.enhanced_search_index_builds() => 2);
+}
+
 // C++ lowercases only the markup-stripped display title
 // (src/C4StartupScenSelDlg.cpp:1513-1523). The enhanced product matcher
 // normalizes user-visible metadata and lets terms span safe fields.
