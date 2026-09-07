@@ -3853,3 +3853,99 @@ fn scensel_enhanced_search_translation_reaches_the_rendered_frame() {
         "the translated clear hint is drawn, not the English one"
     );
 }
+
+/// A catalog shaped like a large installed library: nested packs, prose
+/// descriptions, markup in some titles and accented author names.
+fn synthetic_search_catalog(packs: usize, scenarios_per_pack: usize) -> Vec<FrontendScenario> {
+    const WORDS: [&str; 16] = [
+        "Crystal", "Cavern", "Gold", "Rush", "Lake", "Fortress", "Desert", "Storm", "Island",
+        "Mine", "Tower", "Valley", "Frozen", "Volcano", "Ruins", "Harbor",
+    ];
+    let description = "Deep beneath the surface the miners uncovered a network of glittering \
+        tunnels. Bring your crew, gather enough gold to buy the elevator and hold the flag \
+        against the rival team while the weather turns. Café owners along the coast pay well \
+        for crystal. "
+        .repeat(4);
+    let scenario = |pack: usize, index: usize, prefix: &str| {
+        let first = WORDS[(pack * 7 + index) % WORDS.len()];
+        let second = WORDS[(pack * 3 + index * 5) % WORDS.len()];
+        let title = if index % 5 == 0 {
+            format!("<c ff0000>{first}</c> {second}")
+        } else {
+            format!("{first} {second}")
+        };
+        scensel_fixture!(frontend_scenario: entry, format!("{prefix}Scenario{index:03}.c4s"), title);
+        entry.description = Some(description.clone());
+        entry.author = Some(format!("Zoë Müller {pack}"));
+        entry
+    };
+    (0..packs)
+        .map(|pack| {
+            let prefix = format!("Pack{pack:02}.c4f/");
+            let mut children = (0..scenarios_per_pack)
+                .map(|index| scenario(pack, index, &prefix))
+                .collect::<Vec<_>>();
+            scensel_fixture!(frontend_scenario: extras, format!("{prefix}Extras.c4f"), "Extras".to_string());
+            extras.kind = ScenarioKind::Folder;
+            extras.is_playable = false;
+            extras.children = (0..5)
+                .map(|index| {
+                    scenario(
+                        pack,
+                        index + scenarios_per_pack,
+                        &format!("{prefix}Extras.c4f/"),
+                    )
+                })
+                .collect();
+            children.push(extras);
+            scensel_fixture!(frontend_scenario: folder, format!("Pack{pack:02}.c4f"), format!("Adventure Pack {pack}"));
+            folder.kind = ScenarioKind::Folder;
+            folder.is_playable = false;
+            folder.children = children;
+            folder
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "manual scenario-search timing probe; reports per-keystroke search and list-rebuild timings"]
+fn scensel_enhanced_search_timing_report() {
+    let scenarios = synthetic_search_catalog(30, 50);
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
+    let mut state = MenuState::new(menu, scenarios);
+    state.set_include_back(false);
+    let typed = "crystal cavern";
+    let mut queries = (1..=typed.len())
+        .map(|len| typed[..len].to_string())
+        .collect::<Vec<_>>();
+    queries.extend(
+        [
+            "crytal caver",
+            "zoë müller 7",
+            "pack07 scenario",
+            "zzzz qqqq",
+        ]
+        .map(str::to_string),
+    );
+    let mut total = Duration::ZERO;
+    for query in &queries {
+        state.set_search_text(query.clone());
+        let started = Instant::now();
+        state.apply_enhanced_search();
+        let search = started.elapsed();
+        let hits = state.visible_entries().len();
+        let started = Instant::now();
+        let entries = build_menu_entries(state.visible_entries(), false);
+        state.menu().set_entries(entries).test_value();
+        let rebuild = started.elapsed();
+        total += search;
+        println!(
+            "{query:>18?}: {hits:5} hits  search {search:>10.3?}  of which list rebuild {rebuild:>10.3?}"
+        );
+    }
+    println!(
+        "total search time over {} keystrokes: {total:.3?}",
+        queries.len()
+    );
+}
