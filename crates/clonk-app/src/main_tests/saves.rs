@@ -2067,7 +2067,7 @@ fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
     let save_path = directory.path().join("round.c4s");
     let thumbnail_path = save_path.with_extension("png");
     let mut app = new_running_sandbox_app();
-    app.retained_gpu_presentation_active = true;
+    app.presentation.retained_gpu_presentation_active = true;
 
     app.write_save_thumbnail(&save_path).test_value();
 

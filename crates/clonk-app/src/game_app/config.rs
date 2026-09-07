@@ -1409,9 +1409,9 @@ impl GameApp {
         let presentation_features =
             CompatPresentationFeatures::resolve(&native_config, self.config.compat_profile);
         self.allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
-        self.max_refresh_delay_ms = configured_max_refresh_delay_ms(&native_config);
-        self.startup_refresh_delay_ms = presentation_features
-            .startup_refresh_delay_ms(&native_config, self.display_refresh_period_ms);
+        self.presentation.max_refresh_delay_ms = configured_max_refresh_delay_ms(&native_config);
+        self.presentation.startup_refresh_delay_ms = presentation_features
+            .startup_refresh_delay_ms(&native_config, self.presentation.display_refresh_period_ms);
         let record = load_recording_flag(paths);
         self.startup.view_flags.record = record;
         self.records.enabled = record && self.records.directory.is_some();

@@ -1023,7 +1023,8 @@ impl GameApp {
                 // control tick, never to the frame that just executed them.
                 self.flush_pending_remove_player_controls(false)?;
                 self.handle_script_player_info_updates()?;
-                self.frames_since_second = self.frames_since_second.wrapping_add(1);
+                self.presentation.frames_since_second =
+                    self.presentation.frames_since_second.wrapping_add(1);
                 self.apply_scoreboard_presentation_requests();
                 self.handle_menu_requests()?;
                 if self.snapshot.game_over && !self.game_over_handled {

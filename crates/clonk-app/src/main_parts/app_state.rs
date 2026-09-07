@@ -433,6 +433,48 @@ pub(crate) struct RecordingState {
     pub(crate) playback: Option<ControlRecordPlayback>,
 }
 
+/// The presentation half of the app: frame counters and refresh ceilings
+/// the event loop paces by, the plan that carries scale-native text over
+/// the upscaled base, and the retained-GPU capture flags. `GameApp`
+/// composes it as `presentation`; nothing here is simulation state.
+pub(crate) struct PresentationState {
+    pub(crate) retained_gpu_presentation_active: bool,
+    /// While scale-native text is captured, split the retained command stream
+    /// at the same painter-order boundaries as `NativePresentationPlan`.
+    pub(crate) retained_gpu_ordered_capture_active: bool,
+    /// Reused command-only target for scale-native physical text layers.
+    pub(crate) retained_native_capture_surface: Option<Surface>,
+    /// Ordered logical chrome/native-text batches prepared during the current
+    /// logical render and consumed immediately after FramePresenter upscales
+    /// the base. Keeping later chrome in separate batches preserves C4GUI
+    /// z-order instead of replaying every glyph over the finished frame.
+    pub(crate) pending_native_presentation: Option<NativePresentationPlan>,
+    /// Simulation frames executed since anything was last drawn, so a long
+    /// catch-up cannot leave the screen frozen. See `NETWORK_RENDER_FLOOR_FRAMES`.
+    pub(crate) frames_since_redraw: u32,
+    /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
+    pub(crate) frames_per_second: i32,
+    pub(crate) frames_since_second: i32,
+    /// Port-only presentation counters, sampled by the same one-second timer.
+    /// C++ presents once per game tick, so `frames_per_second` is its render
+    /// rate too; this port decouples the two and needs both numbers to say
+    /// which half of a slow session is actually slow.
+    pub(crate) presentation_stats: PresentationStats,
+    /// Presentation detail the event loop's [`PresentationDetailGovernor`]
+    /// currently allows. Presentation only — never consulted by simulation.
+    pub(crate) presentation_detail: PresentationDetail,
+    /// Process-local Config.Graphics.MaxRefreshDelay used by the application
+    /// timer divisor. It is read once, then refreshed only after Options saves.
+    pub(crate) max_refresh_delay_ms: u64,
+    /// Ceiling for the startup timer alone. Equal to `max_refresh_delay_ms`
+    /// unless `Graphics.SmoothPresentation` substituted the panel period, which
+    /// deliberately leaves the game timer on the oracle value.
+    pub(crate) startup_refresh_delay_ms: u64,
+    /// Active monitor refresh period in whole milliseconds, once a window
+    /// exists. Retained so an Options save can re-resolve the startup ceiling.
+    pub(crate) display_refresh_period_ms: Option<u64>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -500,13 +542,12 @@ pub(crate) struct GameApp {
     /// held key can cross into or out of a PRIO_PlrControl binding.
     pub(crate) scoreboard_tab_raw_pressed: bool,
     pub(crate) pending_screenshots: VecDeque<ScreenshotRequest>,
-    pub(crate) retained_gpu_presentation_active: bool,
-    /// While scale-native text is captured, split the retained command stream
-    /// at the same painter-order boundaries as `NativePresentationPlan`.
-    pub(crate) retained_gpu_ordered_capture_active: bool,
-    /// Reused command-only target for scale-native physical text layers.
-    pub(crate) retained_native_capture_surface: Option<Surface>,
     pub(crate) pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
+    /// Presentation pacing and capture state: the port-only frame counters
+    /// and refresh ceilings, the pending scale-native presentation plan,
+    /// and the retained-GPU capture flags. Presentation only, never
+    /// consulted by simulation (clonk-org/clonk-rs#1232).
+    pub(crate) presentation: PresentationState,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
@@ -643,11 +684,6 @@ pub(crate) struct GameApp {
     /// fonts with Application.GetScale()
     /// (C4Fonts.cpp:158-173).
     pub(crate) native_startup_fonts: Option<Arc<clonk_frontend::clonk_fonts::NativeClonkFontSet>>,
-    /// Ordered logical chrome/native-text batches prepared during the current
-    /// logical render and consumed immediately after FramePresenter upscales
-    /// the base. Keeping later chrome in separate batches preserves C4GUI
-    /// z-order instead of replaying every glyph over the finished frame.
-    pub(crate) pending_native_presentation: Option<NativePresentationPlan>,
     /// Exact C4LoaderScreen selected for the currently active startup or
     /// scenario load. A missing screen is paired with `loader_error` and is
     /// always a logged typed boundary, never a generic pane.
@@ -968,9 +1004,6 @@ pub(crate) struct GameApp {
     /// Lockstep pacing figures since the last `netplay pacing` log line; see
     /// `log_netplay_pacing_summary`.
     pub(crate) netplay_pacing: NetplayPacingWindow,
-    /// Simulation frames executed since anything was last drawn, so a long
-    /// catch-up cannot leave the screen frozen. See `NETWORK_RENDER_FLOOR_FRAMES`.
-    pub(crate) frames_since_redraw: u32,
     pub(crate) network_control_retry_pending: bool,
     pub(crate) network_sync: NetworkSyncGate,
     /// `C4GameControl::Input` packets produced outside the simulation in a
@@ -1013,14 +1046,6 @@ pub(crate) struct GameApp {
     /// Process-local `Game.Parameters.StreamAddress`; this value is assigned
     /// by league Start but is intentionally absent from JoinData.
     pub(crate) network_stream_address: LegacyCString,
-    /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
-    pub(crate) frames_per_second: i32,
-    pub(crate) frames_since_second: i32,
-    /// Port-only presentation counters, sampled by the same one-second timer.
-    /// C++ presents once per game tick, so `frames_per_second` is its render
-    /// rate too; this port decouples the two and needs both numbers to say
-    /// which half of a slow session is actually slow.
-    pub(crate) presentation_stats: PresentationStats,
     pub(crate) input_latency_benchmark: Option<InputLatencyBenchmark>,
     /// C4Game::FullSpeed and FrameSkip are transient per-game scheduler
     /// controls. They are deliberately excluded from save capture/restore.
@@ -1029,19 +1054,6 @@ pub(crate) struct GameApp {
     /// Frozen `C4GameParameters::AutoFrameSkip` for the active round. Unlike
     /// the startup option, this must not change while a game is running.
     pub(crate) auto_frame_skip: bool,
-    /// Presentation detail the event loop's [`PresentationDetailGovernor`]
-    /// currently allows. Presentation only — never consulted by simulation.
-    pub(crate) presentation_detail: PresentationDetail,
-    /// Process-local Config.Graphics.MaxRefreshDelay used by the application
-    /// timer divisor. It is read once, then refreshed only after Options saves.
-    pub(crate) max_refresh_delay_ms: u64,
-    /// Ceiling for the startup timer alone. Equal to `max_refresh_delay_ms`
-    /// unless `Graphics.SmoothPresentation` substituted the panel period, which
-    /// deliberately leaves the game timer on the oracle value.
-    pub(crate) startup_refresh_delay_ms: u64,
-    /// Active monitor refresh period in whole milliseconds, once a window
-    /// exists. Retained so an Options save can re-resolve the startup ceiling.
-    pub(crate) display_refresh_period_ms: Option<u64>,
     /// C4Game::pNetworkStatistics exists for every running game. Only the
     /// Pings presentation tab is conditional on an enabled network session.
     pub(crate) network_stats: Option<NetworkStats>,
@@ -5051,14 +5063,15 @@ pub(crate) fn advance_simulation_pass_within(
 /// Applied after the pass has decided, so it overrides the skip without
 /// perturbing the per-frame accounting that mirrors C++.
 pub(crate) fn apply_render_floor(app: &mut GameApp, outcome: &mut SimulationPassOutcome) {
-    app.frames_since_redraw = app
+    app.presentation.frames_since_redraw = app
+        .presentation
         .frames_since_redraw
         .saturating_add(outcome.executed_frames);
-    if outcome.skip_redraw && app.frames_since_redraw >= NETWORK_RENDER_FLOOR_FRAMES {
+    if outcome.skip_redraw && app.presentation.frames_since_redraw >= NETWORK_RENDER_FLOOR_FRAMES {
         outcome.skip_redraw = false;
     }
     if !outcome.skip_redraw {
-        app.frames_since_redraw = 0;
+        app.presentation.frames_since_redraw = 0;
     }
 }
 

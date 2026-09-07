@@ -3450,7 +3450,7 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
         let mut app = new_real_classic_menu_app(640, 480);
         app.graphics.set_runtime_sprite_filtering(3.0, false);
         app.configure_native_startup_fonts(3.0, false);
-        app.retained_gpu_ordered_capture_active = retained_gpu;
+        app.presentation.retained_gpu_ordered_capture_active = retained_gpu;
         open_portrait_selector(
             &mut app,
             "new-player properties dialog",

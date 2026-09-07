@@ -1127,10 +1127,10 @@ fn run() -> Result<()> {
         // `GameApp::new` resolves the refresh ceiling before any window exists, so
         // the panel period can only be substituted here (opt-in; see
         // `configured_smooth_presentation`).
-        app.display_refresh_period_ms = display_refresh_period_ms(&window);
-        app.startup_refresh_delay_ms = presentation_features.startup_refresh_delay_ms(
+        app.presentation.display_refresh_period_ms = display_refresh_period_ms(&window);
+        app.presentation.startup_refresh_delay_ms = presentation_features.startup_refresh_delay_ms(
             &load_native_config_bytes(app.app_paths.as_ref()),
-            app.display_refresh_period_ms,
+            app.presentation.display_refresh_period_ms,
         );
         app.set_display_mode(display_options.mode);
         app.graphics
@@ -1792,7 +1792,7 @@ fn run() -> Result<()> {
                                 // on the wall-clock floor instead would otherwise
                                 // leave its counter climbing against a screen that
                                 // did update, firing it a second time for nothing.
-                                app.frames_since_redraw = 0;
+                                app.presentation.frames_since_redraw = 0;
                             }
                             window.request_redraw();
                             viewport_redraw_pending = true;
@@ -1846,7 +1846,9 @@ fn run() -> Result<()> {
                     ) =>
                 {
                     tracing::trace!("automatic frame skip consumed one graphics pass");
-                    app.presentation_stats.record_automatic_graphics_skip();
+                    app.presentation
+                        .presentation_stats
+                        .record_automatic_graphics_skip();
                     if let Some(benchmark) = presentation_benchmark.as_mut() {
                         benchmark.record_automatic_graphics_skip();
                     }
@@ -1865,7 +1867,7 @@ fn run() -> Result<()> {
                             renderer.requires_cpu_presentation(),
                         )
                     }) {
-                        app.retained_gpu_presentation_active = true;
+                        app.presentation.retained_gpu_presentation_active = true;
                         let Some(pixels) = pixels_slot.as_mut() else {
                             return;
                         };
@@ -1912,14 +1914,15 @@ fn run() -> Result<()> {
                                 );
                                 render_floor
                                     .record_presentation(graphics_started, graphics_duration);
-                                app.presentation_stats
+                                app.presentation
+                                    .presentation_stats
                                     .record_presentation(graphics_duration);
                                 presentation_detail.record_graphics_pass(
                                     app.mode == AppMode::Running && app.auto_frame_skip,
                                     graphics_duration,
                                     frame_schedule.simulation_interval,
                                 );
-                                app.presentation_detail = presentation_detail.detail();
+                                app.presentation.presentation_detail = presentation_detail.detail();
                                 if let Some(benchmark) = presentation_benchmark.as_mut() {
                                     let completed_at = Instant::now();
                                     benchmark.record_successful_retained_gpu_presentation(
@@ -2008,7 +2011,7 @@ fn run() -> Result<()> {
                         return;
                     };
                     let pixels = &mut pixels;
-                    app.retained_gpu_presentation_active = false;
+                    app.presentation.retained_gpu_presentation_active = false;
                     let (physical_width, physical_height) = presenter.physical_size();
                     // Only a GPU target has a texture limit to exceed; the
                     // software presenter's frame is an ordinary allocation.
@@ -2183,14 +2186,15 @@ fn run() -> Result<()> {
                                 frame_schedule.simulation_interval,
                             );
                             render_floor.record_presentation(graphics_started, graphics_duration);
-                            app.presentation_stats
+                            app.presentation
+                                .presentation_stats
                                 .record_presentation(graphics_duration);
                             presentation_detail.record_graphics_pass(
                                 app.mode == AppMode::Running && app.auto_frame_skip,
                                 graphics_duration,
                                 frame_schedule.simulation_interval,
                             );
-                            app.presentation_detail = presentation_detail.detail();
+                            app.presentation.presentation_detail = presentation_detail.detail();
                             if let Some(benchmark) = presentation_benchmark.as_mut() {
                                 let completed_at = Instant::now();
                                 benchmark.record_successful_presentation(
@@ -2952,10 +2956,21 @@ impl GameApp {
             key_event_suppresses_text: false,
             scoreboard_tab_raw_pressed: false,
             pending_screenshots: VecDeque::new(),
-            retained_gpu_presentation_active: false,
-            retained_gpu_ordered_capture_active: false,
-            retained_native_capture_surface: None,
             pending_options_display_requests: VecDeque::new(),
+            presentation: PresentationState {
+                retained_gpu_presentation_active: false,
+                retained_gpu_ordered_capture_active: false,
+                retained_native_capture_surface: None,
+                pending_native_presentation: None,
+                frames_since_redraw: 0,
+                frames_per_second: 0,
+                frames_since_second: 0,
+                presentation_stats: PresentationStats::default(),
+                presentation_detail: PresentationDetail::default(),
+                max_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
+                startup_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
+                display_refresh_period_ms: None,
+            },
             #[cfg(test)]
             gamepad_poll_count: 0,
             #[cfg(test)]
@@ -3050,7 +3065,6 @@ impl GameApp {
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,
-            pending_native_presentation: None,
             loader_screen,
             loader_error,
             loader_render_config: Some(LoaderRenderConfig::scale_one(
@@ -3142,7 +3156,6 @@ impl GameApp {
             waiting_network_control: None,
             network_stall_since: None,
             netplay_pacing: NetplayPacingWindow::default(),
-            frames_since_redraw: 0,
             network_control_retry_pending: false,
             network_sync: NetworkSyncGate::default(),
             offline_control_input: Vec::new(),
@@ -3160,17 +3173,10 @@ impl GameApp {
             network_is_league,
             network_league_name,
             network_stream_address,
-            frames_per_second: 0,
-            frames_since_second: 0,
-            presentation_stats: PresentationStats::default(),
             input_latency_benchmark: input_latency_benchmark_from_env(),
             full_speed: false,
             frame_skip: 1,
             auto_frame_skip: configured_auto_frame_skip(&native_config),
-            presentation_detail: PresentationDetail::default(),
-            max_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
-            startup_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
-            display_refresh_period_ms: None,
             network_stats: None,
             network_stats_clients: HashSet::new(),
             network_stats_players: HashSet::new(),
@@ -3466,11 +3472,11 @@ impl GameApp {
     fn begin_native_text_capture(&mut self, clear_to_transparent: bool) {
         let surface = self.graphics.surface_mut();
         surface.clear_clip();
-        if clear_to_transparent && !self.retained_gpu_ordered_capture_active {
+        if clear_to_transparent && !self.presentation.retained_gpu_ordered_capture_active {
             surface.fill(Color::transparent());
         }
         surface.begin_clonk_text_capture();
-        if self.retained_gpu_ordered_capture_active {
+        if self.presentation.retained_gpu_ordered_capture_active {
             debug_assert!(!surface.is_gpu_scene_capture_active());
             surface.begin_gpu_scene_capture();
         }
@@ -3532,15 +3538,23 @@ impl GameApp {
     }
 
     fn commit_pending_native_base(&mut self, frame: &mut [u8]) {
-        let mut plan = self.pending_native_presentation.take().unwrap_or_default();
+        let mut plan = self
+            .presentation
+            .pending_native_presentation
+            .take()
+            .unwrap_or_default();
         self.finish_native_base_batch(frame, &mut plan);
-        self.pending_native_presentation = Some(plan);
+        self.presentation.pending_native_presentation = Some(plan);
     }
 
     fn commit_pending_native_overlay(&mut self) {
-        let mut plan = self.pending_native_presentation.take().unwrap_or_default();
+        let mut plan = self
+            .presentation
+            .pending_native_presentation
+            .take()
+            .unwrap_or_default();
         self.finish_native_overlay_batch(&mut plan);
-        self.pending_native_presentation = Some(plan);
+        self.presentation.pending_native_presentation = Some(plan);
     }
 
     fn next_native_overlay_parts(
@@ -3583,17 +3597,17 @@ impl GameApp {
     fn next_pending_native_overlay(&mut self) {
         Self::next_native_overlay_parts(
             &mut self.graphics,
-            &mut self.pending_native_presentation,
-            self.retained_gpu_ordered_capture_active,
+            &mut self.presentation.pending_native_presentation,
+            self.presentation.retained_gpu_ordered_capture_active,
         );
     }
 
     fn next_pending_native_overlay_with_clip(&mut self, isolated_clip: Rect) {
         Self::next_native_overlay_parts_with_clip(
             &mut self.graphics,
-            &mut self.pending_native_presentation,
+            &mut self.presentation.pending_native_presentation,
             Some(isolated_clip),
-            self.retained_gpu_ordered_capture_active,
+            self.presentation.retained_gpu_ordered_capture_active,
         );
     }
 
@@ -4685,8 +4699,8 @@ impl GameApp {
     /// ever subdivided below the oracle default; see `RefreshCeilings`.
     pub(crate) fn refresh_ceilings(&self) -> RefreshCeilings {
         RefreshCeilings {
-            running_ms: self.max_refresh_delay_ms,
-            startup_ms: self.startup_refresh_delay_ms,
+            running_ms: self.presentation.max_refresh_delay_ms,
+            startup_ms: self.presentation.startup_refresh_delay_ms,
         }
     }
 
@@ -7879,8 +7893,9 @@ impl GameApp {
         let before = self.engine.game_time();
         self.engine.sec1_timer();
         let after = self.engine.game_time();
-        self.frames_per_second = std::mem::take(&mut self.frames_since_second);
-        self.presentation_stats.sample_second();
+        self.presentation.frames_per_second =
+            std::mem::take(&mut self.presentation.frames_since_second);
+        self.presentation.presentation_stats.sample_second();
         self.record_network_stats_second();
         self.log_netplay_pacing_summary();
         let client_list_changed = self.refresh_runtime_client_list_on_sec1();
@@ -9328,9 +9343,9 @@ impl GameApp {
         self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
-        self.frames_per_second = 0;
-        self.frames_since_second = 0;
-        self.presentation_stats = PresentationStats::default();
+        self.presentation.frames_per_second = 0;
+        self.presentation.frames_since_second = 0;
+        self.presentation.presentation_stats = PresentationStats::default();
         self.full_speed = false;
         self.frame_skip = 1;
         self.network_stats = Some(NetworkStats::new());

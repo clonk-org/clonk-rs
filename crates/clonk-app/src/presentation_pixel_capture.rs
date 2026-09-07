@@ -953,6 +953,7 @@ fn render_runtime_layout_frame(
         anyhow::ensure!(refreshed, "{} ordinal {ordinal} did not refresh", case.id());
         if ordinal == render_ordinal {
             commands = app
+                .presentation
                 .pending_native_presentation
                 .as_ref()
                 .ok_or_else(|| {
@@ -1410,6 +1411,7 @@ fn render_layout_capture(
         .map_err(|error| anyhow::anyhow!("render {} ordinal 2: {error}", case.id()))?;
     anyhow::ensure!(refreshed, "{} ordinal 2 did not refresh", case.id());
     let commands = app
+        .presentation
         .pending_native_presentation
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("{} semantic render produced no native plan", case.id()))?

@@ -802,7 +802,7 @@ fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.presentation.max_refresh_delay_ms,
     );
     let mut accumulator = schedule.simulation_interval;
 
@@ -1413,13 +1413,13 @@ fn assert_one_pixel_native_edge(
 #[test]
 fn ordered_overlay_retains_additive_rgb_with_zero_alpha() {
     let mut app = new_running_sandbox_app();
-    app.pending_native_presentation = Some(NativePresentationPlan::default());
+    app.presentation.pending_native_presentation = Some(NativePresentationPlan::default());
     app.begin_native_text_capture(true);
     app.graphics.surface_mut().pixels_mut()[..4].copy_from_slice(&[37, 11, 5, 0]);
 
     app.commit_pending_native_overlay();
 
-    let plan = app.pending_native_presentation.test_ref();
+    let plan = app.presentation.pending_native_presentation.test_ref();
     let layer = plan
         .batches
         .first()
@@ -1433,7 +1433,7 @@ fn ordered_overlay_does_not_infer_clipper_from_shared_text_clip() {
     let mut app = new_running_sandbox_app();
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let clip = Rect::new(7, 11, 101, 79);
-    app.pending_native_presentation = Some(NativePresentationPlan::default());
+    app.presentation.pending_native_presentation = Some(NativePresentationPlan::default());
     app.begin_native_text_capture(true);
     {
         let surface = app.graphics.surface_mut();
@@ -1453,7 +1453,7 @@ fn ordered_overlay_does_not_infer_clipper_from_shared_text_clip() {
     app.commit_pending_native_overlay();
 
     let batch = app
-        .pending_native_presentation
+        .presentation.pending_native_presentation
         .as_ref()
         .and_then(|plan| plan.batches.first())
         .test_value();
@@ -5746,7 +5746,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         .render_ordered_native_base(&mut failed_frame)
         .expect_err("missing loader must still fail closed");
     main_assert!(error.to_string().contains("no selected classic loader"));
-    main_assert!(app.pending_native_presentation.is_none());
+    main_assert!(app.presentation.pending_native_presentation.is_none());
     main_assert!(!app.graphics.surface().is_clonk_text_capture_active());
 }
 

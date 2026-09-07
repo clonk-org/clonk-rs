@@ -5055,9 +5055,9 @@ impl GameApp {
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
-        self.frames_per_second = 0;
-        self.frames_since_second = 0;
-        self.presentation_stats = PresentationStats::default();
+        self.presentation.frames_per_second = 0;
+        self.presentation.frames_since_second = 0;
+        self.presentation.presentation_stats = PresentationStats::default();
         self.script_created_objects = false;
         self.full_speed = false;
         self.frame_skip = 1;

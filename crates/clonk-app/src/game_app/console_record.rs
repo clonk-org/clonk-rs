@@ -210,7 +210,7 @@ impl GameApp {
             frame: self.engine.frame(),
             script_counter: self.engine.scenario_script_counter(),
             time_seconds: self.engine.game_time(),
-            frames_per_second: self.frames_per_second,
+            frames_per_second: self.presentation.frames_per_second,
         }
     }
 
@@ -504,7 +504,7 @@ impl GameApp {
         &mut self,
         composer: &mut clonk_scaling::OrderedFrameComposer<'_>,
     ) -> Result<()> {
-        let Some(plan) = self.pending_native_presentation.take() else {
+        let Some(plan) = self.presentation.pending_native_presentation.take() else {
             return Ok(());
         };
         let _renderer_config = clonk_frontend::activate_advanced_renderer_config(
@@ -648,7 +648,7 @@ impl GameApp {
                 (ProtocolRateSample::new(0, 0), ProtocolRateSample::new(0, 0)),
                 NetworkManager::protocol_rate_samples,
             );
-            stats.record_second(self.frames_per_second, input, output, pings);
+            stats.record_second(self.presentation.frames_per_second, input, output, pings);
         }
     }
 

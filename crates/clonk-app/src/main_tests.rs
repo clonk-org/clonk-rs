@@ -994,7 +994,7 @@ fn network_catch_up_fixture(
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.presentation.max_refresh_delay_ms,
     );
     let accumulator = schedule.simulation_interval;
     (app, schedule, accumulator)
@@ -1562,7 +1562,11 @@ fn render_ordered_test_frame(
             .render_ordered_native_base(logical))
         .expect("render ordered logical base"));
     let base = output.clone();
-    let plan = app.pending_native_presentation.test_ref().clone();
+    let plan = app
+        .presentation
+        .pending_native_presentation
+        .test_ref()
+        .clone();
 
     let mut chrome_only = base.clone();
     {

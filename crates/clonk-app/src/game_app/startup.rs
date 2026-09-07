@@ -132,7 +132,8 @@ impl GameApp {
 
     pub(crate) fn commit_pending_native_loader_base(&mut self, frame: &mut [u8]) {
         self.commit_pending_native_base(frame);
-        self.pending_native_presentation
+        self.presentation
+            .pending_native_presentation
             .as_mut()
             .and_then(|plan| plan.batches.last_mut())
             .expect("loader base batch was just committed")
@@ -4952,17 +4953,17 @@ impl GameApp {
         );
         let underlay_gpu_recorder = self.graphics.surface_mut().take_gpu_scene_capture();
 
-        self.pending_native_presentation = None;
+        self.presentation.pending_native_presentation = None;
         let mut ignored_outgoing_pixel = [0_u8; 4];
         let outgoing_gpu_plan = if self.native_startup_fonts.is_some() {
-            self.retained_gpu_ordered_capture_active = true;
+            self.presentation.retained_gpu_ordered_capture_active = true;
             let retained_result = self.render_ordered_native_base(&mut ignored_outgoing_pixel);
-            self.retained_gpu_ordered_capture_active = false;
+            self.presentation.retained_gpu_ordered_capture_active = false;
             if let Err(error) = retained_result {
-                self.pending_native_presentation = None;
+                self.presentation.pending_native_presentation = None;
                 return Err(error);
             }
-            self.pending_native_presentation.take()
+            self.presentation.pending_native_presentation.take()
         } else {
             None
         };
