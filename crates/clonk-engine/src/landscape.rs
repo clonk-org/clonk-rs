@@ -498,6 +498,8 @@ pub struct PixelGrid {
     /// resolution and updated incrementally on every pixel write.
     #[serde(skip)]
     material_counts: Vec<u32>,
+    #[serde(skip)]
+    pix_cnt: RuntimePixCnt,
     /// Content-derived identity of [`Self::material_names`] and
     /// [`Self::texture_names`], recomputed only where those tables are
     /// assigned. `render_dirty_rects_since` runs on every presented frame and
@@ -543,6 +545,23 @@ impl PartialEq for RuntimeRenderLineage {
 }
 
 impl Eq for RuntimeRenderLineage {}
+
+/// C4Landscape::PixCnt (C4Landscape.cpp:716-719): per 17×15 cell, how many
+/// pixels carry nonzero density, so `_PathFree` reads one byte per cell it
+/// visits (C4Landscape.cpp:890-896). Built on first use from the plane and
+/// then kept current by every write, exactly as `_SetPix` and
+/// `UpdatePixCnt` keep C++'s table. Runtime-only and derived, so equality
+/// and serialization ignore it like [`RuntimeRenderLineage`].
+#[derive(Debug, Clone, Default)]
+struct RuntimePixCnt(std::sync::OnceLock<Vec<u8>>);
+
+impl PartialEq for RuntimePixCnt {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RuntimePixCnt {}
 
 /// Lightweight checkpoint for a frontend's persistent Surface32 cache.
 ///
@@ -620,6 +639,7 @@ impl PixelGrid {
             surface32_dirty_generations: VecDeque::new(),
             pending_surface32_relights: Vec::new(),
             mask_background: RuntimeMaskBackground::default(),
+            pix_cnt: RuntimePixCnt::default(),
         }
     }
 
@@ -765,12 +785,14 @@ impl PixelGrid {
             densities,
             materials,
             material_counts,
+            pix_cnt,
             revision,
             render_token,
             dirty_generations,
             mask_background,
             ..
         } = self;
+        let pix_cnt_pitch = (*height as usize).div_ceil(15);
         let bytes = Arc::make_mut(bytes);
         let mask_background = Arc::make_mut(&mut mask_background.0);
         let mut first_actual_change = true;
@@ -820,6 +842,13 @@ impl PixelGrid {
 
                 let base_revision = *revision;
                 let base_token = *render_token;
+                Self::note_pix_cnt_byte_change(
+                    pix_cnt,
+                    densities,
+                    (x as usize / 17) * pix_cnt_pitch + y as usize / 15,
+                    old,
+                    byte,
+                );
                 bytes[slot] = byte;
                 *revision = revision.wrapping_add(1);
                 *render_token =
@@ -1249,6 +1278,117 @@ impl PixelGrid {
     /// rectangle in PrepareChange and adds the new contents in FinishChange.
     /// Keep the same bounded work for bulk Surface8 writers instead of
     /// recounting the complete landscape after every small polygon/chunk.
+    /// `PixCnt` layout (C4Landscape.cpp:716-718): `(Width + 16) / 17` cell
+    /// columns by `PixCntPitch = (Height + 14) / 15` rows, indexed
+    /// `cell_x * pitch + cell_y`.
+    fn pix_cnt_dimensions(&self) -> (usize, usize) {
+        (
+            (self.width as usize).div_ceil(17),
+            (self.height as usize).div_ceil(15),
+        )
+    }
+
+    fn pix_cnt_slot(&self, x: i32, y: i32) -> usize {
+        let (_, pitch) = self.pix_cnt_dimensions();
+        (x as usize / 17) * pitch + y as usize / 15
+    }
+
+    /// C4Landscape::UpdatePixCnt for one cell (C4Landscape.cpp:2887-2894):
+    /// the pixels inside it whose density is nonzero.
+    fn recount_pix_cnt_cell(&self, cell_x: usize, cell_y: usize) -> u8 {
+        #[cfg(test)]
+        crate::PIX_CNT_CELL_RECOUNTS.with(|count| count.set(count.get() + 1));
+        let width = self.width as usize;
+        let right = (cell_x * 17 + 17).min(width);
+        let bottom = (cell_y * 15 + 15).min(self.height as usize);
+        (cell_y * 15..bottom)
+            .flat_map(|y| self.bytes[y * width + cell_x * 17..y * width + right].iter())
+            .filter(|&&byte| self.density_of(byte) != 0)
+            .fold(0u8, |count, _| count.wrapping_add(1))
+    }
+
+    /// C4Landscape::UpdatePixCnt over the whole plane (C4Landscape.cpp:719).
+    fn recount_pix_cnt_cells(&self) -> Vec<u8> {
+        let (cells_x, cells_y) = self.pix_cnt_dimensions();
+        (0..cells_x)
+            .flat_map(|cell_x| (0..cells_y).map(move |cell_y| (cell_x, cell_y)))
+            .map(|(cell_x, cell_y)| self.recount_pix_cnt_cell(cell_x, cell_y))
+            .collect()
+    }
+
+    /// The maintained `PixCnt` table, built from the plane on first use.
+    fn pix_cnt_cells(&self) -> &[u8] {
+        self.pix_cnt.0.get_or_init(|| self.recount_pix_cnt_cells())
+    }
+
+    /// `_SetPix`'s count maintenance (C4Landscape.cpp:788-798): a pixel joins
+    /// or leaves the counted population only when its density crosses zero.
+    /// A table that has not been built yet needs nothing: the first query
+    /// counts the plane as it is then.
+    fn note_pix_cnt_byte_change(
+        pix_cnt: &mut RuntimePixCnt,
+        densities: &[i32],
+        slot: usize,
+        old: u8,
+        new: u8,
+    ) {
+        let Some(cells) = pix_cnt.0.get_mut() else {
+            return;
+        };
+        let dense = |byte: u8| {
+            densities
+                .get((byte & 0x7f) as usize)
+                .is_some_and(|density| *density != 0)
+        };
+        match (dense(old), dense(new)) {
+            (false, true) => cells[slot] = cells[slot].wrapping_add(1),
+            (true, false) => cells[slot] = cells[slot].wrapping_sub(1),
+            _ => {}
+        }
+    }
+
+    /// C4Landscape::UpdatePixCnt for a changed rectangle
+    /// (C4Landscape.cpp:2881-2896, from FinishChange at :2877).
+    fn update_pix_cnt_in_rect(&mut self, rect: PixelGridDirtyRect) {
+        if self.pix_cnt.0.get().is_none() {
+            return;
+        }
+        let (cells_x, cells_y) = self.pix_cnt_dimensions();
+        let first_x = rect.x as usize / 17;
+        let last_x = ((rect.x + rect.width) as usize).div_ceil(17);
+        let first_y = rect.y as usize / 15;
+        let last_y = ((rect.y + rect.height) as usize).div_ceil(15);
+        let counts = (first_x..last_x.min(cells_x))
+            .flat_map(|cell_x| (first_y..last_y.min(cells_y)).map(move |cell_y| (cell_x, cell_y)))
+            .map(|(cell_x, cell_y)| {
+                (
+                    cell_x * cells_y + cell_y,
+                    self.recount_pix_cnt_cell(cell_x, cell_y),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(cells) = self.pix_cnt.0.get_mut() {
+            for (slot, count) in counts {
+                cells[slot] = count;
+            }
+        }
+    }
+
+    fn reset_pix_cnt(&mut self) {
+        self.pix_cnt = RuntimePixCnt::default();
+    }
+
+    /// `_PathFree`'s per-cell probe (C4Landscape.cpp:890-896). Cells outside
+    /// the plane hold no pixels.
+    pub fn pix_cnt_cell_occupied(&self, cell_x: i32, cell_y: i32) -> bool {
+        let (cells_x, pitch) = self.pix_cnt_dimensions();
+        usize::try_from(cell_x)
+            .ok()
+            .zip(usize::try_from(cell_y).ok())
+            .filter(|(cell_x, cell_y)| *cell_x < cells_x && *cell_y < pitch)
+            .is_some_and(|(cell_x, cell_y)| self.pix_cnt_cells()[cell_x * pitch + cell_y] != 0)
+    }
+
     fn adjust_material_counts_in_rect(&mut self, rect: PixelGridDirtyRect, add: bool) {
         if self.material_counts.is_empty() && self.materials.iter().any(Option::is_some) {
             self.rebuild_material_counts();
@@ -1303,6 +1443,7 @@ impl PixelGrid {
         let material_mapping_changed = self.materials != materials;
         self.materials = materials;
         self.densities.clone_from(&texmap.densities);
+        self.reset_pix_cnt();
         self.material_names.clone_from(&texmap.material_names);
         self.texture_names.clone_from(&texmap.texture_names);
         // The only site that moves either name table after construction.
@@ -1716,6 +1857,7 @@ impl PixelGrid {
         crate::chunky::polygon(&mut surface, vertices, byte);
         self.bytes = Arc::new(surface.into_bytes());
         self.adjust_material_counts_in_rect(rect, true);
+        self.update_pix_cnt_in_rect(rect);
         self.revision = self.revision.wrapping_add(1);
         self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
         self.record_render_change(base_revision, base_token, rect, false, storage_was_shared);
@@ -1785,6 +1927,7 @@ impl PixelGrid {
 
         self.bytes = Arc::new(surface.into_bytes());
         self.adjust_material_counts_in_rect(rect, true);
+        self.update_pix_cnt_in_rect(rect);
         self.revision = self.revision.wrapping_add(1);
         self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
         self.record_render_change(base_revision, base_token, rect, false, storage_was_shared);
@@ -1913,6 +2056,14 @@ impl PixelGrid {
             let storage_was_shared = self.begin_surface8_change();
             let base_revision = self.revision;
             let base_token = self.render_token;
+            let pix_cnt_slot = self.pix_cnt_slot(x, y);
+            Self::note_pix_cnt_byte_change(
+                &mut self.pix_cnt,
+                &self.densities,
+                pix_cnt_slot,
+                old,
+                byte,
+            );
             Arc::make_mut(&mut self.bytes)[slot] = byte;
             self.revision = self.revision.wrapping_add(1);
             self.render_token =
@@ -3995,6 +4146,7 @@ impl Landscape {
             bytes[destination..destination + copy_width]
                 .copy_from_slice(&synthesized[source..source + copy_width]);
         }
+        grid.reset_pix_cnt();
         self.refresh_all_raster_columns();
         if self.save_initial().is_err() {
             return false;
@@ -6479,11 +6631,7 @@ impl Landscape {
         let left = (cell_x * 17).max(0);
         let right = (cell_x * 17 + 17).min(self.width as i32);
         if let Some(grid) = self.pixels.as_ref() {
-            let top = top.max(0);
-            let bottom = bottom.min(grid.height() as i32);
-            return (left..right).any(|x| {
-                (top..bottom).any(|y| grid.density_at(x, y).is_some_and(|density| density != 0))
-            });
+            return grid.pix_cnt_cell_occupied(cell_x, cell_y);
         }
         for x in left..right {
             // solid part of the column inside the cell rows
@@ -11344,6 +11492,104 @@ func TransactionThenRaw()
         // counts any nonzero density, liquids included).
         landscape.set_liquid_column(40, vec![LiquidSegment::with_material(5, 8, Some(water))]);
         assert!(!landscape.path_free(5, 5, 60, 10, &materials));
+    }
+
+    fn pix_cnt_fixture_grid() -> PixelGrid {
+        // 40×40 pixels = 3×3 PixCnt cells (17×15 each, the last column and
+        // row clipped by the plane edge); byte 1 is dense, byte 0 is sky.
+        PixelGrid::new(
+            40,
+            40,
+            vec![0; 40 * 40],
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        )
+    }
+
+    #[test]
+    fn pix_cnt_tracks_pixel_and_polygon_writes_like_cpp_set_pix() {
+        // C4Landscape::_SetPix moves a pixel between the counted and
+        // uncounted population by density alone (C4Landscape.cpp:788-798);
+        // bulk draws recount the touched cells (UpdatePixCnt,
+        // C4Landscape.cpp:2881-2896). Either way the maintained table must
+        // equal a fresh count over the plane.
+        let mut grid = pix_cnt_fixture_grid();
+        assert_eq!(grid.pix_cnt_cells(), &[0; 9][..]);
+
+        grid.set_byte(20, 20, 1);
+        grid.set_byte(21, 20, 1 | 0x80);
+        grid.set_byte(0, 39, 1);
+        assert_eq!(grid.pix_cnt_cells().to_vec(), grid.recount_pix_cnt_cells());
+        // cell (1, 1) holds (20, 20) and (21, 20); cell (0, 2) holds (0, 39).
+        assert_eq!(grid.pix_cnt_cells()[3 + 1], 2);
+        assert_eq!(grid.pix_cnt_cells()[2], 1);
+
+        grid.set_byte(20, 20, 0);
+        assert_eq!(grid.pix_cnt_cells()[3 + 1], 1);
+        // Same density on both sides of the write: no count moves.
+        grid.set_byte(21, 20, 1);
+        assert_eq!(grid.pix_cnt_cells()[3 + 1], 1);
+
+        grid.draw_polygon(&[(5, 5), (30, 5), (30, 30), (5, 30)], 1);
+        assert_eq!(grid.pix_cnt_cells().to_vec(), grid.recount_pix_cnt_cells());
+        // The rasterizer leaves its far edges unpainted, so over-cover the
+        // plane to clear every pixel (it clips the draw to the plane).
+        grid.draw_polygon(&[(-1, -1), (41, -1), (41, 41), (-1, 41)], 0);
+        assert_eq!(grid.pix_cnt_cells().to_vec(), grid.recount_pix_cnt_cells());
+        assert_eq!(grid.pix_cnt_cells(), &[0; 9][..]);
+    }
+
+    #[test]
+    fn path_free_reads_the_maintained_pix_cnt_instead_of_scanning_cells() {
+        // `_PathFree` reads one PixCnt byte per visited cell
+        // (C4Landscape.cpp:890-896). Scanning the 255 pixels of every cell
+        // instead cost Seven Keys, with 3,000 raindrops in flight, 8% of
+        // every simulation frame.
+        use std::cell::Cell;
+        let mut landscape = Landscape::new(40, vec![40; 40]).expect("landscape builds");
+        landscape.set_pixel_grid(pix_cnt_fixture_grid());
+        let materials = MaterialSet::new();
+        landscape
+            .pixels
+            .as_mut()
+            .expect("pixel grid")
+            .set_byte(20, 20, 1);
+
+        crate::PIX_CNT_CELL_RECOUNTS.with(|count| count.set(0));
+        assert!(!landscape.path_free(0, 0, 39, 39, &materials));
+        assert_eq!(
+            crate::PIX_CNT_CELL_RECOUNTS.with(Cell::get),
+            9,
+            "the first query builds the whole table once"
+        );
+
+        crate::PIX_CNT_CELL_RECOUNTS.with(|count| count.set(0));
+        assert!(!landscape.path_free(0, 0, 39, 39, &materials));
+        assert!(landscape.path_free(0, 0, 39, 5, &materials));
+        landscape
+            .pixels
+            .as_mut()
+            .expect("pixel grid")
+            .set_byte(20, 20, 0);
+        assert!(landscape.path_free(0, 0, 39, 39, &materials));
+        assert_eq!(
+            crate::PIX_CNT_CELL_RECOUNTS.with(Cell::get),
+            0,
+            "queries and single-pixel writes never rescan a cell"
+        );
+
+        landscape
+            .pixels
+            .as_mut()
+            .expect("pixel grid")
+            .draw_polygon(&[(18, 18), (22, 18), (22, 22), (18, 22)], 1);
+        assert!(!landscape.path_free(0, 0, 39, 39, &materials));
+        assert_eq!(
+            crate::PIX_CNT_CELL_RECOUNTS.with(Cell::get),
+            1,
+            "a bulk draw recounts only the cells it touched"
+        );
     }
 
     #[test]

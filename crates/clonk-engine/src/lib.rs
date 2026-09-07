@@ -395,6 +395,7 @@ std::thread_local! {
     static CONTENTS_SCOPE_GROWTH_VISITS: Cell<usize> = const { Cell::new(0) };
     static CONTACT_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static DEFINITION_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static PIX_CNT_CELL_RECOUNTS: Cell<usize> = const { Cell::new(0) };
     static NO_ATTACH_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static CONTAINED_CALL_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static PARTICLE_DEF_NAME_REBUILDS: Cell<usize> = const { Cell::new(0) };
