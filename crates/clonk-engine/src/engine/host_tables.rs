@@ -411,20 +411,37 @@ impl Engine {
         id: ObjectId,
     ) -> Option<(usize, HostWorldObject)> {
         let engine = source.cast::<Self>();
-        // SAFETY: guaranteed by the provider contract above. Accessing the
-        // index-cache field does not touch any exclusively borrowed object.
-        let cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
-        let index = cache.1.get(&id).copied()?;
-        drop(cache);
-        // SAFETY: object-vector shape is frozen for the synchronous call and
-        // the requested entry is not an outstanding exclusive seed.
+        // SAFETY: object-vector shape is frozen for the synchronous call, the
+        // requested entry is not an outstanding exclusive seed, and the index
+        // cache and generation counter are interior-mutable fields no
+        // callback borrows. The lookup itself is the one `find_object_index`
+        // performs: a cached index is only trusted after the generation and
+        // identity checks, and never dereferenced past the vector's length
+        // (clonk-org/clonk-rs#1524).
         let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
-        let object = unsafe { &*objects.as_ptr().add(index) };
-        if object.id != id {
-            return None;
-        }
+        let index = unsafe { Self::lazy_object_index(engine, objects, id) }?;
+        let object = objects.get(index)?;
         let definitions = unsafe { &*std::ptr::addr_of!((*engine).definitions) };
         Some((index, Self::host_world_object(definitions, object)))
+    }
+
+    /// The generation- and identity-checked storage index of `id`, resolved
+    /// through the paused engine's raw fields.
+    ///
+    /// # Safety
+    ///
+    /// Same source-lifetime contract as [`Self::lazy_host_world_object`], and
+    /// `objects` must be the vector read from the same `engine`.
+    unsafe fn lazy_object_index(
+        engine: *const Self,
+        objects: &[Object],
+        id: ObjectId,
+    ) -> Option<usize> {
+        // SAFETY: field-only accesses to interior-mutable bookkeeping that
+        // no host callback borrows exclusively.
+        let generation = unsafe { &*std::ptr::addr_of!((*engine).objects_generation) };
+        let cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) };
+        crate::engine_exec_order::object_index_in_storage(generation, cache, objects, id)
     }
 
     /// Resolve one callback-visible object allocation token without cloning
@@ -484,15 +501,12 @@ impl Engine {
         params: &compat::FindObjectParams,
     ) -> Option<bool> {
         let engine = source.cast::<Self>();
-        // SAFETY: guaranteed by the provider contract above.
-        let cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
-        let index = cache.1.get(&id).copied()?;
-        drop(cache);
         // SAFETY: object storage is frozen and callback-local seeds prevent
         // this path from reading an outstanding exclusive object borrow.
         let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
-        let object = unsafe { &*objects.as_ptr().add(index) };
-        (object.id == id).then(|| params.matches_engine_object(object))
+        let index = unsafe { Self::lazy_object_index(engine, objects, id) }?;
+        let object = objects.get(index)?;
+        Some(params.matches_engine_object(object))
     }
 
     /// Test a scalar C4FindObject criterion tree against the paused engine
@@ -508,17 +522,11 @@ impl Engine {
         condition: &compat::FindCondition,
     ) -> Option<bool> {
         let engine = source.cast::<Self>();
-        // SAFETY: guaranteed by the provider contract above.
-        let cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
-        let index = cache.1.get(&id).copied()?;
-        drop(cache);
         // SAFETY: object storage is frozen and callback-local seeds prevent
         // this path from reading an outstanding exclusive object borrow.
         let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
-        let object = unsafe { &*objects.as_ptr().add(index) };
-        if object.id != id {
-            return None;
-        }
+        let index = unsafe { Self::lazy_object_index(engine, objects, id) }?;
+        let object = objects.get(index)?;
         let matches = condition.matches_engine_object(object)?;
         Some(object.state.status.is_active() && matches)
     }
@@ -1626,6 +1634,61 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    /// clonk-org/clonk-rs#1524: the lazy host-world provider resolved an
+    /// object through `object_index_cache` without the generation and
+    /// identity checks `find_object_index` performs, and dereferenced the
+    /// cached index with raw pointer arithmetic. After a section switch
+    /// shrank the object vector inside a suspended `LoadScenarioSection`
+    /// continuation, `Object(77)` read freed storage and the process died
+    /// with a silent SIGTRAP whenever that memory still looked like the old
+    /// object.
+    #[test]
+    fn lazy_object_lookup_recovers_from_a_stale_index_cache() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("OBSV", "Observer", "#strict 3\n")
+                    .expect("observer definition compiles"),
+            )
+            .expect("observer definition registers");
+        for id in [5, 77] {
+            engine
+                .spawn_object(SpawnConfig::new("OBSV").with_id(ObjectId::new(id)))
+                .expect("observer spawns");
+        }
+        assert_eq!(engine.find_object_index(ObjectId::new(77)), Some(1));
+
+        // Remove the first object: 77 moves to index 0 and the vector shrinks
+        // to one entry, exactly what a section switch does to a departing
+        // observer, while the cache still says 77 lives at index 1.
+        engine
+            .objects
+            .retain(|object| object.id != ObjectId::new(5));
+        engine.note_objects_changed();
+
+        let source = std::ptr::addr_of!(engine).cast::<()>();
+        // SAFETY: the engine is paused and no object borrow is outstanding,
+        // which is the provider contract these calls run under.
+        let found = unsafe { Engine::lazy_host_world_object(source, ObjectId::new(77)) };
+        assert_eq!(
+            found.map(|(index, _)| index),
+            Some(0),
+            "a stale cache entry must be rebuilt, not dereferenced"
+        );
+        let gone = unsafe { Engine::lazy_host_world_object(source, ObjectId::new(5)) };
+        assert!(gone.is_none(), "a removed object must not resolve");
+        assert_eq!(
+            unsafe {
+                Engine::lazy_host_world_find_condition_matches(
+                    source,
+                    ObjectId::new(77),
+                    &compat::FindCondition::And(Vec::new()),
+                )
+            },
+            Some(true)
+        );
+    }
+
     use super::*;
 
     #[test]
