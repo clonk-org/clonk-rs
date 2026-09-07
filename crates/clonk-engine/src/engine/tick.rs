@@ -3151,7 +3151,7 @@ impl Engine {
                 .cloned()
                 .unwrap_or_else(|| object_definition.clone());
             let live_callback_definition = callback_definition.clone();
-            let live_action_library = live_object_definition.action_library().clone();
+            let live_action_library = live_object_definition.shared_action_library_handle();
             let world = if receiver_available
                 && self
                     .objects

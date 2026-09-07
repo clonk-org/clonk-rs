@@ -345,7 +345,7 @@ impl Engine {
         if !definition.has_function("CalcValue") && !definition.has_function("CalcDefValue") {
             return Ok(definition.value().wrapping_mul(construction) / FULL_CON);
         }
-        let action_library = definition.action_library().clone();
+        let action_library = definition.shared_action_library_handle();
         let world =
             self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let call = definition.player_asset_object_value(
