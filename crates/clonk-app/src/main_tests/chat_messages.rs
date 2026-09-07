@@ -778,8 +778,8 @@ fn secondary_local_viewport_draws_its_player_global_message_only_there() {
     app.snapshot.players.push(secondary.clone());
     app.snapshot.hud.local_players.push(secondary.id);
     let secondary_viewport = app.owned_physical_viewport_state(secondary.id, true);
-    app.physical_viewports.push(secondary_viewport);
-    app.physical_viewports_authoritative = true;
+    app.viewports.physical_viewports.push(secondary_viewport);
+    app.viewports.physical_viewports_authoritative = true;
     app.update_film_viewport_availability();
     app.snapshot.hud.messages = vec![clonk_engine::MessageSnapshot {
         id: 1,

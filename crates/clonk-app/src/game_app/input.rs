@@ -3430,7 +3430,7 @@ impl GameApp {
         // needs a physical viewport to advance.
         if self.engine.film_replay()
             && self.viewport_cycle_scope_available()
-            && !self.physical_viewports.is_empty()
+            && !self.viewports.physical_viewports.is_empty()
             && matches("FilmNextPlayer")
         {
             return Some(RuntimeCustomGamepadAction::FilmNextPlayer);
@@ -7950,7 +7950,8 @@ impl GameApp {
         // `active_viewport_projections` — which a detached draw restores after
         // itself — cannot see it. `physical_viewports` is this port's
         // `Viewports`, in the same order.
-        self.physical_viewports
+        self.viewports
+            .physical_viewports
             .iter()
             .map(|viewport| viewport.physical_identity)
             .find_map(|identity| self.console_viewport_projections.get(&identity).copied())

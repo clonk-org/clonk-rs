@@ -676,7 +676,7 @@ impl GameApp {
             )
             || state != ElementState::Pressed
             || !self.viewport_cycle_scope_available()
-            || self.physical_viewports.is_empty()
+            || self.viewports.physical_viewports.is_empty()
         {
             return false;
         }
@@ -991,12 +991,13 @@ impl GameApp {
 
     pub(crate) fn update_film_viewport_availability(&mut self) {
         self.engine.set_physical_viewport_players(
-            self.physical_viewports
+            self.viewports
+                .physical_viewports
                 .iter()
                 .map(|viewport| viewport.displayed_player),
         );
         self.engine
-            .set_film_viewport_available(!self.physical_viewports.is_empty());
+            .set_film_viewport_available(!self.viewports.physical_viewports.is_empty());
     }
 
     /// `FnSetFilmView`: mutate the first physical viewport in place and keep
@@ -1008,7 +1009,7 @@ impl GameApp {
     /// Compatibility for focused tests that set the former scalar projection
     /// directly. Production requests always flow through the ordered sink.
     pub(crate) fn apply_direct_film_view_projection(&mut self) {
-        if self.physical_viewports_authoritative {
+        if self.viewports.physical_viewports_authoritative {
             return;
         }
         let Some(player) = self.film_view_player else {
@@ -1019,6 +1020,7 @@ impl GameApp {
             return;
         }
         if self
+            .viewports
             .physical_viewports
             .first()
             .is_some_and(|viewport| viewport.displayed_player != player)

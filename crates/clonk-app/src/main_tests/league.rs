@@ -1959,8 +1959,8 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
 
     app.clear_physical_viewport_states();
     let observer = app.ownerless_physical_viewport_state();
-    app.physical_viewports.push(observer);
-    app.physical_viewports_authoritative = true;
+    app.viewports.physical_viewports.push(observer);
+    app.viewports.physical_viewports_authoritative = true;
     main_assert!(app.set_physical_film_view(owner));
     let mut ownerless_notice_only = vec![0_u8; app.graphics.surface().pixels().len()];
     app.test_render(&mut ownerless_notice_only);

@@ -3766,8 +3766,8 @@ fn viewport_player_cycle_matches_film_and_observer_end_states() {
     }
     app.clear_physical_viewport_states();
     let observer = app.ownerless_physical_viewport_state();
-    app.physical_viewports.push(observer);
-    app.physical_viewports_authoritative = true;
+    app.viewports.physical_viewports.push(observer);
+    app.viewports.physical_viewports_authoritative = true;
 
     let observer_flash = RuntimeFlashMessage {
         text: "Observer controls".to_string(),
@@ -4011,7 +4011,7 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
     main_assert_eq!(app.film_view_player => Some(film_player));
     main_assert_eq!(app.graphics.active_viewport_projections()[0].owner => film_player);
     let inputs =
-        collect_viewport_inputs_from_physical_state(&app.snapshot, &app.physical_viewports)
+        collect_viewport_inputs_from_physical_state(&app.snapshot, &app.viewports.physical_viewports)
             .test_value();
     main_assert_eq!(inputs[0].offset => Vector2::new(17, 19));
 }
@@ -4044,8 +4044,8 @@ fn every_physical_owned_viewport_requires_a_player_and_slot_before_any_pixels() 
     let local_owner = app.players.local_owner;
     let missing_owner = local_owner + 99;
     let missing_viewport = app.owned_physical_viewport_state(missing_owner, true);
-    app.physical_viewports.push(missing_viewport);
-    app.physical_viewports_authoritative = true;
+    app.viewports.physical_viewports.push(missing_viewport);
+    app.viewports.physical_viewports_authoritative = true;
     app.update_film_viewport_availability();
 
     // A valid first physical viewport must not make a mixed valid/invalid
@@ -4057,7 +4057,7 @@ fn every_physical_owned_viewport_requires_a_player_and_slot_before_any_pixels() 
         },
     );
 
-    app.physical_viewports
+    app.viewports.physical_viewports
         .retain(|viewport| viewport.displayed_player != missing_owner);
     app.snapshot
         .players
@@ -4171,8 +4171,8 @@ fn view_offset_and_film_view_share_one_physical_request_order() {
             .test_value();
         let _ = app.apply_pending_viewport_presentation_requests();
 
-        main_assert_eq!(app.physical_viewports[0].displayed_player => target);
-        main_assert_eq!(app.physical_viewports[0].preserved_offset => expected_offset);
+        main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => target);
+        main_assert_eq!(app.viewports.physical_viewports[0].preserved_offset => expected_offset);
         main_assert!(app.runtime_flash_message.is_none(), "valid temporary C4Viewport::Init clears the flash");
     }
 }
@@ -4184,7 +4184,7 @@ fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
     app.local_controls = LocalControlRegistry::default();
     app.engine.set_local_players([]);
     app.refresh_non_authoritative_physical_viewports();
-    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert!(app.viewports.physical_viewports[0].is_no_owner_viewport);
     app.engine.clear_scenario_script();
     app.engine
         .install_scenario_script_with_convention(
@@ -4200,13 +4200,13 @@ fn film_assigned_ownerless_offset_is_consumed_after_one_draw() {
         .call_scenario_script_function("Probe", Vec::new())
         .test_value();
     let _ = app.apply_pending_viewport_presentation_requests();
-    main_assert_eq!(app.physical_viewports[0].preserved_offset => Vector2::new(13, 17));
+    main_assert_eq!(app.viewports.physical_viewports[0].preserved_offset => Vector2::new(13, 17));
 
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    main_assert_eq!(app.physical_viewports[0].preserved_offset => Vector2::ZERO);
-    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert_eq!(app.viewports.physical_viewports[0].preserved_offset => Vector2::ZERO);
+    main_assert!(app.viewports.physical_viewports[0].is_no_owner_viewport);
 }
 
 #[test]
@@ -4232,12 +4232,12 @@ fn recalculation_does_not_reapply_a_stale_scalar_film_target() {
     }
     main_assert!(app.create_physical_viewport(lower_layout, true, true, false));
     main_assert!(app.set_physical_film_view(high_layout_target));
-    main_assert_eq!(app.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => vec![high_layout_target, lower_layout]);
+    main_assert_eq!(app.viewports.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => vec![high_layout_target, lower_layout]);
 
     main_assert!(app.create_physical_viewport(temporary, true, true, false));
     main_assert!(app.close_physical_viewports(temporary, true, true));
     main_assert_eq!(
-        app.physical_viewports
+        app.viewports.physical_viewports
             .iter()
             .map(|viewport| viewport.displayed_player)
             .collect::<Vec<_>>() =>
@@ -4247,7 +4247,7 @@ fn recalculation_does_not_reapply_a_stale_scalar_film_target() {
 
     app.sync_film_view_presentation();
     main_assert_eq!(
-        app.physical_viewports
+        app.viewports.physical_viewports
             .iter()
             .map(|viewport| viewport.displayed_player)
             .collect::<Vec<_>>() =>
@@ -4283,7 +4283,7 @@ fn remote_film_close_does_not_resurrect_the_original_primary() {
         .test_value();
 
     main_assert_eq!(
-        app.physical_viewports
+        app.viewports.physical_viewports
             .iter()
             .map(|viewport| viewport.displayed_player)
             .collect::<Vec<_>>() =>
@@ -4329,9 +4329,9 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     app.sound.ui_log.clear();
 
     app.initialize_physical_viewports(false);
-    main_assert_eq!(app.physical_viewports.len() => 1);
-    main_assert_eq!(app.physical_viewports[0].displayed_player => first);
-    main_assert!(!app.physical_viewports[0].is_no_owner_viewport);
+    main_assert_eq!(app.viewports.physical_viewports.len() => 1);
+    main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => first);
+    main_assert!(!app.viewports.physical_viewports[0].is_no_owner_viewport);
     main_assert_eq!(
         app.sound.ui_log
             .iter()
@@ -4345,13 +4345,13 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     app.snapshot = app.engine.snapshot();
     app.sound.ui_log.clear();
     app.initialize_physical_viewports(false);
-    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert!(app.viewports.physical_viewports[0].is_no_owner_viewport);
     main_assert!(app.sound.ui_log.is_empty());
 
     app.film_view_player = Some(first);
     app.sync_film_view_presentation();
     main_assert_eq!(app.film_view_player => None, "stale scalar target is ignored");
-    main_assert_eq!(app.physical_viewports[0].displayed_player => OWNER_NONE);
+    main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => OWNER_NONE);
 
     app.engine
         .register_player(PlayerConfig::new(first, "Late replay player"))
@@ -4363,8 +4363,8 @@ fn replay_film_startup_and_late_player_follow_viewport_check() {
     )
     .test_value();
     app.check_fullscreen_physical_viewports(false);
-    main_assert_eq!(app.physical_viewports[0].displayed_player => first);
-    main_assert!(app.physical_viewports[0].is_no_owner_viewport, "late film retarget preserves the ownerless classification");
+    main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => first);
+    main_assert!(app.viewports.physical_viewports[0].is_no_owner_viewport, "late film retarget preserves the ownerless classification");
     main_assert!(app.runtime_flash_message.is_none());
     main_assert!(app.sound.ui_log.is_empty(), "ownerless retarget is silent");
 }

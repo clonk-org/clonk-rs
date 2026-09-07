@@ -5869,8 +5869,8 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     let mut observer_menu = configured("Left");
     observer_menu.clear_physical_viewport_states();
     let observer = observer_menu.ownerless_physical_viewport_state();
-    observer_menu.physical_viewports.push(observer);
-    observer_menu.physical_viewports_authoritative = true;
+    observer_menu.viewports.physical_viewports.push(observer);
+    observer_menu.viewports.physical_viewports_authoritative = true;
     observer_menu.ingame_menu.replace(
         observer_menu.players.local_owner,
         IngameMenuState::main_menu(
@@ -6767,7 +6767,7 @@ fn offline_runtime_join_player_local_no_network() {
     main_assert_eq!(app.engine.player(joined.id).expect("joined player remains live").at_client() => clonk_engine::PlayerAtClient::HOST);
     main_assert!(snapshot.hud.local_players.contains(&joined.id));
     main_assert!(app.local_controls.assignment(joined.id).is_some());
-    main_assert!(app.physical_viewports.iter().any(|viewport| viewport.displayed_player == joined.id));
+    main_assert!(app.viewports.physical_viewports.iter().any(|viewport| viewport.displayed_player == joined.id));
     main_assert_eq!(app.status_text => "offline join sentinel");
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
@@ -12872,7 +12872,7 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     main_assert_eq!(local_player.at_client().get() => 7);
     main_assert!(app.local_controls.assignment(local_player.id()).is_some());
     main_assert!(app
-        .physical_viewports
+        .viewports.physical_viewports
         .iter()
         .any(|viewport| viewport.displayed_player == local_player.id()));
 

@@ -973,8 +973,8 @@ fn observer_menu_lists_players_and_live_previews_selection() {
     app.clear_physical_viewport_states();
     let observer = app.ownerless_physical_viewport_state();
     let physical_identity = observer.physical_identity;
-    app.physical_viewports.push(observer);
-    app.physical_viewports_authoritative = true;
+    app.viewports.physical_viewports.push(observer);
+    app.viewports.physical_viewports_authoritative = true;
     main_assert!(app.set_physical_film_view(first));
 
     let open_observer_menu = |app: &mut GameApp| {
@@ -1013,23 +1013,23 @@ fn observer_menu_lists_players_and_live_previews_selection() {
     main_assert!(menu.items().iter().all(|item| item.caption != "Hidden target"));
 
     main_assert!(app.handle_menu_command(OWNER_NONE, ControlCommand::MenuDown, CommandKind::Press,).expect("moving selection previews the next player"));
-    main_assert_eq!(app.physical_viewports[0].displayed_player => second);
+    main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => second);
     main_assert_eq!(app.film_view_player => Some(second));
     main_assert!(app.set_physical_film_view(first));
     main_assert_eq!(app.ingame_menu.get(OWNER_NONE).map(IngameMenuState::selection) => Some(2), "camera perturbation does not change the highlighted row");
     main_assert!(app.handle_menu_command(OWNER_NONE, ControlCommand::MenuEnter, CommandKind::Press,).expect("Enter dispatches the highlighted player target"));
     main_assert!(!app.ingame_menu.contains(OWNER_NONE));
-    main_assert_eq!(app.physical_viewports[0].displayed_player => second);
+    main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => second);
 
     open_observer_menu(&mut app);
     main_assert!(app.handle_menu_command(OWNER_NONE, ControlCommand::MenuDown, CommandKind::Press,).expect("last player wraps to free view"));
-    main_assert_eq!(app.physical_viewports[0].displayed_player => OWNER_NONE);
+    main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => OWNER_NONE);
     main_assert!(app.set_physical_film_view(first));
     main_assert!(app.handle_menu_command(OWNER_NONE, ControlCommand::MenuEnter, CommandKind::Press,).expect("Enter dispatches free view through the same path"));
-    main_assert_eq!(app.physical_viewports[0].displayed_player => OWNER_NONE);
+    main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => OWNER_NONE);
     main_assert_eq!(app.film_view_player => Some(OWNER_NONE));
-    main_assert_eq!(app.physical_viewports[0].physical_identity => physical_identity);
-    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert_eq!(app.viewports.physical_viewports[0].physical_identity => physical_identity);
+    main_assert!(app.viewports.physical_viewports[0].is_no_owner_viewport);
 }
 
 #[test]

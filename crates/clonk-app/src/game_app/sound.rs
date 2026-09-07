@@ -961,7 +961,8 @@ impl GameApp {
                     .copied()
                     .find(|owner| self.engine.player(*owner).is_none())
                     .or_else(|| {
-                        self.physical_viewports
+                        self.viewports
+                            .physical_viewports
                             .iter()
                             .map(|viewport| viewport.displayed_player)
                             .find(|owner| {

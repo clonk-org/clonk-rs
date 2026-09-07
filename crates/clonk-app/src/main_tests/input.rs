@@ -5987,8 +5987,8 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
         .test_value();
     app.clear_physical_viewport_states();
     let observer = app.ownerless_physical_viewport_state();
-    app.physical_viewports.push(observer);
-    app.physical_viewports_authoritative = true;
+    app.viewports.physical_viewports.push(observer);
+    app.viewports.physical_viewports_authoritative = true;
     main_assert!(app.set_physical_film_view(OWNER_NONE));
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache
@@ -6046,7 +6046,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
 
     app.test_key(VirtualKeyCode::KeyN, ElementState::Pressed);
     main_assert_eq!(app.film_view_player => Some(first));
-    main_assert!(app.physical_viewports[0].is_no_owner_viewport);
+    main_assert!(app.viewports.physical_viewports[0].is_no_owner_viewport);
     main_assert!(app.create_physical_viewport(first, true, true, true));
     app.check_fullscreen_physical_viewports(true);
     main_assert_eq!(app.film_view_player => None, "replacing the physical observer viewport drops its temporary target");
@@ -6068,7 +6068,7 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
     app.engine
         .register_player(PlayerConfig::new(film_target, "Film target"))
         .test_value();
-    let original_identity = app.physical_viewports[0].physical_identity;
+    let original_identity = app.viewports.physical_viewports[0].physical_identity;
     main_assert!(app.set_physical_film_view(film_target));
 
     app.remove_runtime_player_with_viewport_feedback(original)
@@ -6078,7 +6078,7 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
         .test_value();
     main_assert!(app.create_physical_viewport(original, true, true, false));
     let new_identity = app
-        .physical_viewports
+        .viewports.physical_viewports
         .iter()
         .find(|viewport| viewport.uses_live_player_presentation)
         .test_value()
@@ -6087,12 +6087,12 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
 
     main_assert!(app.set_physical_film_view(original));
     let old = app
-        .physical_viewports
+        .viewports.physical_viewports
         .iter()
         .find(|viewport| viewport.physical_identity == original_identity)
         .test_value();
     let new = app
-        .physical_viewports
+        .viewports.physical_viewports
         .iter()
         .find(|viewport| viewport.physical_identity == new_identity)
         .test_value();
