@@ -223,6 +223,8 @@ mod game_app_scensel;
 mod game_app_sound;
 #[path = "game_app/startup.rs"]
 mod game_app_startup;
+#[path = "game_app/tick.rs"]
+mod game_app_tick;
 #[path = "game_app/update.rs"]
 mod game_app_update;
 #[path = "game_app/voice.rs"]
