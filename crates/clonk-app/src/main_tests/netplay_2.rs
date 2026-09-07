@@ -9690,7 +9690,7 @@ fn host_activation_request_submits_cpp_eligible_synchronized_update() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.control_clients.register(3, false, false);
-    app.frames_per_second = 60;
+    app.presentation.frames_per_second = 60;
     let frame = i32::try_from(app.engine.frame()).test_value();
     n2_send_event(
         &event_tx,
@@ -14390,7 +14390,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
         "QuickSave must not retarget the running scenario"
     );
 
-    app.retained_gpu_presentation_active = true;
+    app.presentation.retained_gpu_presentation_active = true;
     let gpu_slot = save_root.join("Missions.c4f").join("Missions9.c4s");
     app.save_to_slot(9);
     main_assert!(app.saves.pending_native_thumbnails.is_empty());
@@ -14717,7 +14717,7 @@ fn a_long_catch_up_still_draws_at_the_render_floor() {
 
     // A pass that skipped everything, just under the floor, stays skipped: the
     // floor must not steal frames from the simulation while it is catching up.
-    app.frames_since_redraw = NETWORK_RENDER_FLOOR_FRAMES - 1;
+    app.presentation.frames_since_redraw = NETWORK_RENDER_FLOOR_FRAMES - 1;
     let mut outcome = SimulationPassOutcome {
         did_update: true,
         executed_frames: 0,
@@ -14738,7 +14738,7 @@ fn a_long_catch_up_still_draws_at_the_render_floor() {
         "a client that has gone {NETWORK_RENDER_FLOOR_FRAMES} frames without \
          drawing must draw regardless of how far behind it is"
     );
-    main_assert_eq!(app.frames_since_redraw => 0, "drawing resets the counter, so the floor is a rate and not a one-shot");
+    main_assert_eq!(app.presentation.frames_since_redraw => 0, "drawing resets the counter, so the floor is a rate and not a one-shot");
 }
 
 /// No native window backend clears player controls on focus loss: Win32

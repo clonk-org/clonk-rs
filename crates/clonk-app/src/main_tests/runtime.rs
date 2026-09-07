@@ -839,13 +839,13 @@ fn second_timer_captures_and_resets_cpp_game_fps() {
     }
 
     app.sec1_timer().test_value();
-    assert_eq!(app.frames_per_second, 3);
-    assert_eq!(app.frames_since_second, 0);
+    assert_eq!(app.presentation.frames_per_second, 3);
+    assert_eq!(app.presentation.frames_since_second, 0);
 
     app.test_update();
     app.sec1_timer().test_value();
-    assert_eq!(app.frames_per_second, 1);
-    assert_eq!(app.frames_since_second, 0);
+    assert_eq!(app.presentation.frames_per_second, 1);
+    assert_eq!(app.presentation.frames_since_second, 0);
 }
 
 #[test]

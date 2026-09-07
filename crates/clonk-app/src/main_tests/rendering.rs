@@ -514,7 +514,7 @@ fn full_speed_runs_unpaced_skips_requested_renders_and_slow_restores_timer() {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.presentation.max_refresh_delay_ms,
     );
     let mut accumulator = Duration::ZERO;
     let first_frame = app.engine.frame();
@@ -723,7 +723,7 @@ fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.presentation.max_refresh_delay_ms,
     );
 
     // FREEZE the unbudgeted behaviour first: a full backlog drains at once.
@@ -762,7 +762,7 @@ fn swallowed_script_error_keeps_a_presentable_landscape_snapshot() {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.presentation.max_refresh_delay_ms,
     );
     let mut accumulator = schedule.simulation_interval;
 
@@ -931,13 +931,13 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
     // frames. Naming both numbers is the entire point, so the panel labels the
     // C++ one `Sim` rather than leaving `FPS` to mean two different things.
     let mut app = new_running_sandbox_app();
-    app.frames_per_second = 36;
+    app.presentation.frames_per_second = 36;
     for _ in 0..9 {
-        app.presentation_stats
+        app.presentation.presentation_stats
             .record_presentation(Duration::from_millis(32));
     }
-    app.presentation_stats.record_automatic_graphics_skip();
-    app.presentation_stats.sample_second();
+    app.presentation.presentation_stats.record_automatic_graphics_skip();
+    app.presentation.presentation_stats.sample_second();
 
     app.update_diagnostics_overlay();
     main_assert_eq!(app.graphics.diagnostics_overlay_text() => None, "Graphics.ShowStats is opt-in: unset means no overlay at all");
@@ -5270,7 +5270,7 @@ fn the_presentation_path_never_reaches_the_simulation() {
 
     let advance = |retained: bool| {
         let mut app = new_running_sandbox_app();
-        app.retained_gpu_presentation_active = retained;
+        app.presentation.retained_gpu_presentation_active = retained;
         for _ in 0..FRAMES {
             app.engine.tick().test_value();
         }

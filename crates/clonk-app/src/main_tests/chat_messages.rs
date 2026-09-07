@@ -1952,7 +1952,7 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
-        app.max_refresh_delay_ms,
+        app.presentation.max_refresh_delay_ms,
     );
     let mut accumulator = schedule.simulation_interval;
     let halted_pass =
@@ -1965,7 +1965,7 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
     app.render_ordered_native_base(&mut frame).test_value();
     let hold_messages = app
-        .pending_native_presentation
+        .presentation.pending_native_presentation
         .test_ref()
         .batches
         .iter()

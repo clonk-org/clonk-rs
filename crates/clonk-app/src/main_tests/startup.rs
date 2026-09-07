@@ -4242,7 +4242,7 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     app.render_ordered_native_base(&mut logical_frame)
         .test_value();
     let commands = app
-        .pending_native_presentation
+        .presentation.pending_native_presentation
         .test_ref()
         .batches
         .iter()

@@ -1068,7 +1068,7 @@ impl GameApp {
         // headless `GameApp` still defaults it to `true`, so C++ would decline
         // the screenshot where the port would take one.
         let capture_title = self.engine.frame() != 0 && !self.console_mode && self.window_active;
-        let title_png = if capture_title && !self.retained_gpu_presentation_active {
+        let title_png = if capture_title && !self.presentation.retained_gpu_presentation_active {
             let surface = self.graphics.surface();
             // C++ saves the back buffer with gamma resolved either way: with
             // shaders it is already baked in, without them `SavePNG` applies it
@@ -1095,7 +1095,7 @@ impl GameApp {
         self.save_to_slot_with_title_png(
             slot,
             title_png.as_deref(),
-            capture_title && self.retained_gpu_presentation_active,
+            capture_title && self.presentation.retained_gpu_presentation_active,
         );
     }
 
@@ -1487,7 +1487,7 @@ impl GameApp {
 
     pub(crate) fn write_save_thumbnail(&mut self, path: &Path) -> Result<()> {
         let target = path.with_extension("png");
-        if self.retained_gpu_presentation_active {
+        if self.presentation.retained_gpu_presentation_active {
             self.saves.pending_gpu_thumbnail_paths.push_back(target);
             return Ok(());
         }

@@ -4541,7 +4541,7 @@ impl GameApp {
                             running,
                             waited_for,
                             ping_ms,
-                            self.frames_per_second,
+                            self.presentation.frames_per_second,
                         ) {
                             if let Some(Err(error)) = self
                                 .network

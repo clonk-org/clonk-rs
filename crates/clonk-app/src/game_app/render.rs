@@ -44,11 +44,11 @@ impl GameApp {
             return;
         }
         let format_ms = |duration: Duration| format!("{:.1} ms", duration.as_secs_f64() * 1_000.0);
-        let stats = &self.presentation_stats;
+        let stats = &self.presentation.presentation_stats;
         let mut lines = vec![
             format!(
                 "Sim {} FPS, Render {} FPS",
-                self.frames_per_second,
+                self.presentation.frames_per_second,
                 stats.presentations_per_second(),
             ),
             format!(
@@ -1334,18 +1334,19 @@ impl GameApp {
     }
 
     pub(crate) fn render_ordered_native_base(&mut self, frame: &mut [u8]) -> Result<bool> {
-        self.pending_native_presentation = Some(NativePresentationPlan::default());
+        self.presentation.pending_native_presentation = Some(NativePresentationPlan::default());
         self.begin_native_text_capture(false);
         if let Err(error) = self.render_for_presentation(frame, false, false, false) {
             let surface = self.graphics.surface_mut();
             let _ = surface.take_clonk_text_capture();
             let _ = surface.take_gpu_scene_capture();
             surface.clear_clip();
-            self.pending_native_presentation = None;
+            self.presentation.pending_native_presentation = None;
             return Err(error);
         }
         if self.graphics.surface().is_clonk_text_capture_active() {
             let has_base = self
+                .presentation
                 .pending_native_presentation
                 .as_ref()
                 .is_some_and(|plan| !plan.batches.is_empty());
@@ -1409,7 +1410,8 @@ impl GameApp {
                 let monitor_gamma = self.startup_monitor_gamma();
                 let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
                 if ordered_native {
-                    self.pending_native_presentation
+                    self.presentation
+                        .pending_native_presentation
                         .as_mut()
                         .expect("ordered presentation plan is active")
                         .monitor_gamma = monitor_gamma.clone();
@@ -1761,7 +1763,7 @@ impl GameApp {
                                 });
                             }
                         }
-                        self.pending_native_presentation = Some(plan);
+                        self.presentation.pending_native_presentation = Some(plan);
                         if ordered_native {
                             self.begin_native_text_capture(true);
                         } else {
@@ -2048,7 +2050,8 @@ impl GameApp {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         let retained_gpu = self.graphics.surface().is_gpu_scene_capture_active();
         if ordered_native {
-            self.pending_native_presentation
+            self.presentation
+                .pending_native_presentation
                 .as_mut()
                 .expect("ordered presentation plan is active")
                 .monitor_gamma = monitor_gamma.clone();
@@ -2490,7 +2493,12 @@ impl GameApp {
         // The monitor resolve is a second full-screen pass; the detail
         // governor drops it before it drops anything the player controls.
         let gamma_mode = match retained_gpu_gamma_mode(renderer_config) {
-            GpuGammaMode::Monitor if !self.presentation_detail.resolves_monitor_gamma() => {
+            GpuGammaMode::Monitor
+                if !self
+                    .presentation
+                    .presentation_detail
+                    .resolves_monitor_gamma() =>
+            {
                 GpuGammaMode::Disabled
             }
             mode => mode,
@@ -2500,12 +2508,13 @@ impl GameApp {
                 || self.can_defer_native_loader_text(presentation.scale));
 
         if ordered_native {
-            self.retained_gpu_ordered_capture_active = true;
+            self.presentation.retained_gpu_ordered_capture_active = true;
             let mut ignored_cpu_pixel = [0_u8; 4];
             let render = self.render_ordered_native_base(&mut ignored_cpu_pixel);
-            self.retained_gpu_ordered_capture_active = false;
+            self.presentation.retained_gpu_ordered_capture_active = false;
             render?;
             let plan = self
+                .presentation
                 .pending_native_presentation
                 .take()
                 .ok_or_else(|| anyhow!("ordered GPU presentation ended without a layer plan"))?;
@@ -2534,7 +2543,7 @@ impl GameApp {
             .finish_gpu_scene_capture_with_stats(&gamma)
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
         scene.gamma_mode = gamma_mode;
-        if let Some(plan) = self.pending_native_presentation.take() {
+        if let Some(plan) = self.presentation.pending_native_presentation.take() {
             let mut frame =
                 self.retained_gpu_frame_from_native_plan(plan, presentation, &gamma, gamma_mode)?;
             if !scene.commands.is_empty() {
@@ -2570,6 +2579,7 @@ impl GameApp {
         let default_fonts = self.native_startup_fonts.clone();
         let mut capture_stats = clonk_graphics::GpuSceneCaptureStats::default();
         let mut physical_surface = self
+            .presentation
             .retained_native_capture_surface
             .take()
             .filter(|surface| {
@@ -2660,7 +2670,7 @@ impl GameApp {
         if physical_surface.is_gpu_scene_capture_active() {
             let _ = physical_surface.take_gpu_scene_capture();
         }
-        self.retained_native_capture_surface = Some(physical_surface);
+        self.presentation.retained_native_capture_surface = Some(physical_surface);
         result?;
         Ok(RetainedGpuFrame {
             layers,
@@ -5537,7 +5547,7 @@ impl GameApp {
         // script-created Fire/Fire2 particles, which a renderer gate on the
         // same flag would.
         self.graphics
-            .set_fire_particle_detail(self.presentation_detail.draws_fire_particles());
+            .set_fire_particle_detail(self.presentation.presentation_detail.draws_fire_particles());
         // C4Viewport suppresses only its gameplay overlays for a film replay;
         // game messages and C4GraphicsSystem-owned chrome remain independent.
         let viewport_overlays_visible = !self.engine.film_replay();
@@ -5666,7 +5676,8 @@ impl GameApp {
             clonk_graphics::GammaRamp::identity()
         };
         if ordered_native {
-            self.pending_native_presentation
+            self.presentation
+                .pending_native_presentation
                 .as_mut()
                 .expect("ordered presentation plan is active")
                 .monitor_gamma = monitor_gamma.clone();
@@ -5785,7 +5796,10 @@ impl GameApp {
                 .display_flags
                 .clock
                 .then(|| clonk_core::chrono_util::current_timestamp(false)),
-            frames_per_second: self.display_flags.fps.then_some(self.frames_per_second),
+            frames_per_second: self
+                .display_flags
+                .fps
+                .then_some(self.presentation.frames_per_second),
             upper_board_mode: frontend_upper_board_mode(self.display_flags.upper_board),
             // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
             // from the Display menu (src/C4Config.cpp:448-450).
@@ -5803,7 +5817,8 @@ impl GameApp {
             } else {
                 copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
             }
-            self.pending_native_presentation
+            self.presentation
+                .pending_native_presentation
                 .as_mut()
                 .expect("ordered presentation plan is active")
                 .batches
@@ -5816,32 +5831,32 @@ impl GameApp {
                     gpu_recorder: surface.take_gpu_scene_capture(),
                 });
             surface.clear_clip();
-            if !self.retained_gpu_ordered_capture_active {
+            if !self.presentation.retained_gpu_ordered_capture_active {
                 surface.fill(Color::transparent());
             }
             surface.begin_clonk_text_capture();
-            if self.retained_gpu_ordered_capture_active {
+            if self.presentation.retained_gpu_ordered_capture_active {
                 debug_assert!(!surface.is_gpu_scene_capture_active());
                 surface.begin_gpu_scene_capture();
             }
             self.graphics.render_frame_foreground(&pending_hud);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
-                &mut self.pending_native_presentation,
-                self.retained_gpu_ordered_capture_active,
+                &mut self.presentation.pending_native_presentation,
+                self.presentation.retained_gpu_ordered_capture_active,
             );
             let pending_chrome = self.graphics.render_frame_hud_players(pending_hud);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
-                &mut self.pending_native_presentation,
-                self.retained_gpu_ordered_capture_active,
+                &mut self.presentation.pending_native_presentation,
+                self.presentation.retained_gpu_ordered_capture_active,
             );
             self.graphics
                 .render_frame_hud_chrome_without_atlas_deferred_monitor_gamma(pending_chrome);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
-                &mut self.pending_native_presentation,
-                self.retained_gpu_ordered_capture_active,
+                &mut self.presentation.pending_native_presentation,
+                self.presentation.retained_gpu_ordered_capture_active,
             );
         } else {
             self.graphics
