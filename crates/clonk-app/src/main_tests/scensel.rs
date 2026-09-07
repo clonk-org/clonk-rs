@@ -3926,7 +3926,7 @@ fn synthetic_search_catalog(packs: usize, scenarios_per_pack: usize) -> Vec<Fron
     let scenario = |pack: usize, index: usize, prefix: &str| {
         let first = WORDS[(pack * 7 + index) % WORDS.len()];
         let second = WORDS[(pack * 3 + index * 5) % WORDS.len()];
-        let title = if index % 5 == 0 {
+        let title = if index.is_multiple_of(5) {
             format!("<c ff0000>{first}</c> {second}")
         } else {
             format!("{first} {second}")
