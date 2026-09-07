@@ -620,10 +620,48 @@ pub(crate) struct PreparedDirectoryStandalone {
     pub(crate) packed: Option<Vec<u8>>,
 }
 
+/// A standalone this host published for a source directory in an earlier
+/// round.
+///
+/// `C4Network2ResList::AddByFile` hands back the resource already in the list
+/// for the same file, so native never packs a directory twice per session
+/// (src/C4Network2Res.cpp:1443-1449). The port republishes every resource when
+/// a round restarts on a preserved session, and the level-9 deflate of each
+/// unchanged directory is what every client then waits on
+/// (clonk-org/clonk-rs#1472). A recorded image is served again only while the
+/// directory still has the contents it was packed from and the file still
+/// holds the bytes the earlier core described.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReusableStandalone {
+    pub source_path: PathBuf,
+    pub contents_crc: u32,
+    pub source_size: u64,
+    pub standalone_path: PathBuf,
+    pub file_size: u64,
+    pub file_crc: u32,
+}
+
+impl ReusableStandalone {
+    fn describes_snapshot(&self, source_path: &Path, contents_crc: u32, source_size: u64) -> bool {
+        self.source_path == source_path
+            && self.contents_crc == contents_crc
+            && self.source_size == source_size
+    }
+
+    /// The recorded image, while the file still holds exactly it.
+    fn image(&self) -> Option<Vec<u8>> {
+        fs::read(&self.standalone_path).ok().filter(|image| {
+            image.len() as u64 == self.file_size
+                && clonk_resources::c4group_file_crc(image) == self.file_crc
+        })
+    }
+}
+
 pub(crate) fn prepare_directory_standalone(
     path: &Path,
     group_maker: &[u8],
     max_source_size: Option<u64>,
+    reusable_standalones: &[ReusableStandalone],
 ) -> Result<PreparedDirectoryStandalone, HostResourceCoreError> {
     let filename = path
         .file_name()
@@ -635,7 +673,12 @@ pub(crate) fn prepare_directory_standalone(
     let packed = if max_source_size.is_some_and(|limit| source_size > limit) {
         None
     } else {
-        Some(snapshot.group.pack()?)
+        reusable_standalones
+            .iter()
+            .find(|previous| previous.describes_snapshot(path, contents_crc, source_size))
+            .and_then(ReusableStandalone::image)
+            .map_or_else(|| snapshot.group.pack(), Ok)
+            .map(Some)?
     };
     Ok(PreparedDirectoryStandalone {
         contents_crc,
@@ -954,12 +997,12 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use clonk_engine::LegacyCString;
-    use clonk_resources::Group;
+    use clonk_resources::{c4group_file_crc, Group};
 
     use super::{
         build_host_resource_core_with_prepared_directory, network_temp_basename,
         network_temp_candidate, pack_directory_standalone, prepare_directory_standalone,
-        HostResourceCoreSpec, HostResourceType, NEXT_STAGED_PATH,
+        HostResourceCoreSpec, HostResourceType, ReusableStandalone, NEXT_STAGED_PATH,
     };
 
     struct TempDirectory(PathBuf);
@@ -1011,7 +1054,7 @@ mod tests {
         let expected_contents_crc = Group::open(directory.path())
             .expect("open fixture directory")
             .contents_crc_or_zero();
-        let prepared = prepare_directory_standalone(directory.path(), b"Host", None)
+        let prepared = prepare_directory_standalone(directory.path(), b"Host", None, &[])
             .expect("prepare directory snapshot");
         let expected_packed = pack_directory_standalone(directory.path(), b"Host")
             .expect("pack fixture through the existing path");
@@ -1030,7 +1073,7 @@ mod tests {
         fs::create_dir(&source).expect("create definition directory");
         fs::write(source.join("DefCore.txt"), b"[DefCore]\nid=TEST")
             .expect("write definition snapshot entry");
-        let prepared = prepare_directory_standalone(&source, b"Host", None)
+        let prepared = prepare_directory_standalone(&source, b"Host", None, &[])
             .expect("prepare definition snapshot");
         let expected_contents_crc = prepared.contents_crc;
         let expected_packed = prepared
@@ -1065,5 +1108,93 @@ mod tests {
 
         assert_eq!(publication.core.contents_crc, expected_contents_crc);
         assert_eq!(standalone, expected_packed);
+    }
+
+    #[test]
+    fn prepared_directory_reuses_the_previous_standalone_of_an_unchanged_source() {
+        // AddByFile hands back the resource already published for the same
+        // file instead of packing it again (src/C4Network2Res.cpp:1443-1449),
+        // so a restart on a preserved session must not deflate an unchanged
+        // directory a second time (clonk-org/clonk-rs#1472). A different maker
+        // makes a fresh pack visibly distinct from the previous image.
+        let directory = TempDirectory::new();
+        let source = directory.path().join("Definitions.c4d");
+        fs::create_dir(&source).expect("create definition directory");
+        fs::write(source.join("DefCore.txt"), b"[DefCore]\nid=TEST")
+            .expect("write definition snapshot entry");
+        let previous = prepare_directory_standalone(&source, b"Previous", None, &[])
+            .expect("prepare the previous round's snapshot");
+        let previous_image = previous.packed.expect("the definition stays loadable");
+        let previous_standalone = directory.path().join("Definitions-1.c4d");
+        fs::write(&previous_standalone, &previous_image).expect("publish the previous standalone");
+        let reusable = ReusableStandalone {
+            source_path: source.clone(),
+            contents_crc: previous.contents_crc,
+            source_size: previous.source_size,
+            standalone_path: previous_standalone,
+            file_size: previous_image.len() as u64,
+            file_crc: c4group_file_crc(&previous_image),
+        };
+
+        let prepared =
+            prepare_directory_standalone(&source, b"Host", None, std::slice::from_ref(&reusable))
+                .expect("prepare the next round's snapshot");
+
+        assert_eq!(prepared.contents_crc, previous.contents_crc);
+        assert_eq!(prepared.source_size, previous.source_size);
+        assert_eq!(
+            prepared.packed.as_deref(),
+            Some(previous_image.as_slice()),
+            "the previous image is served verbatim instead of being packed again"
+        );
+    }
+
+    #[test]
+    fn prepared_directory_packs_afresh_when_the_previous_standalone_no_longer_describes_it() {
+        // The earlier image is only ever served for the contents it was packed
+        // from and while the file still holds exactly those bytes; anything
+        // else is a fresh SetByFile + GetStandalone pass.
+        let directory = TempDirectory::new();
+        let source = directory.path().join("Definitions.c4d");
+        fs::create_dir(&source).expect("create definition directory");
+        fs::write(source.join("DefCore.txt"), b"[DefCore]\nid=TEST")
+            .expect("write definition snapshot entry");
+        let previous = prepare_directory_standalone(&source, b"Previous", None, &[])
+            .expect("prepare the previous round's snapshot");
+        let previous_image = previous.packed.expect("the definition stays loadable");
+        let previous_standalone = directory.path().join("Definitions-1.c4d");
+        fs::write(&previous_standalone, &previous_image).expect("publish the previous standalone");
+        let recorded = ReusableStandalone {
+            source_path: source.clone(),
+            contents_crc: previous.contents_crc,
+            source_size: previous.source_size,
+            standalone_path: previous_standalone.clone(),
+            file_size: previous_image.len() as u64,
+            file_crc: c4group_file_crc(&previous_image),
+        };
+        let fresh = |reusable: &[ReusableStandalone]| {
+            prepare_directory_standalone(&source, b"Host", None, reusable)
+                .expect("prepare the next round's snapshot")
+                .packed
+                .expect("the definition stays loadable")
+        };
+
+        fs::write(&previous_standalone, b"not the image the core described")
+            .expect("tamper with the previous standalone");
+        let repacked_after_tampering = fresh(std::slice::from_ref(&recorded));
+        assert_ne!(
+            repacked_after_tampering, previous_image,
+            "a file that lost the recorded bytes is packed afresh"
+        );
+        assert_eq!(repacked_after_tampering, fresh(&[]));
+
+        fs::write(&previous_standalone, &previous_image).expect("restore the previous standalone");
+        fs::write(source.join("Script.c"), b"#strict 2\n").expect("change the source directory");
+        let repacked_after_change = fresh(std::slice::from_ref(&recorded));
+        assert_ne!(
+            repacked_after_change, previous_image,
+            "a directory whose contents changed is packed afresh"
+        );
+        assert_eq!(repacked_after_change, fresh(&[]));
     }
 }

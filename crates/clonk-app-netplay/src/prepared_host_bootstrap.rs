@@ -35,9 +35,9 @@ use clonk_network::{
     InitialNetworkScenarioDefaults, JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry,
     JoinGameParametersEnvelope, JoinTeamListSnapshot, LeagueHttpTransportConfig,
     LeagueStartResponse, NetworkAddress, NetworkGameReference, NetworkProtocol, NetworkStatus,
-    PlayerInfoListSnapshot, ResourceFileOwnership, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
-    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
-    NETWORK_STATE_PAUSE,
+    PlayerInfoListSnapshot, ResourceFileOwnership, ReusableStandalone, CURRENT_GAME_BUILD,
+    CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
+    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 use clonk_resources::{decode_legacy_script_text, localize_script_source_with_components};
 use clonk_resources::{Group, GroupError, LanguagePacks};
@@ -138,6 +138,11 @@ pub struct PreparedHostBootstrapSpec<'a> {
     /// Logical `Config.Network.WorkPath` carried by resource core filenames.
     /// This must not be inferred from the host's physical cache directory.
     pub network_work_path: &'a str,
+    /// What an earlier round of the same session packed. A restart on a
+    /// preserved session hands over the previous round's records so an
+    /// unchanged directory is served its earlier image instead of being
+    /// deflated again (clonk-org/clonk-rs#1472).
+    pub reusable_standalones: &'a [ReusableStandalone],
     pub network_directory: &'a Path,
     /// The earlier `time(nullptr)` read that identifies the game on this host.
     pub start_unix_seconds: i64,
@@ -309,6 +314,7 @@ pub struct PreparedHostBootstrap {
     local_player_alternate_colors_by_resource: HashMap<i32, u32>,
     pending_initial_league_players: Option<PendingInitialLeaguePlayers>,
     league_generated_landscape_loader: Option<PreparedLeagueGeneratedLandscapeLoader>,
+    reusable_standalones: Vec<ReusableStandalone>,
     lifetime: Arc<PreparedHostLifetime>,
 }
 
@@ -463,6 +469,12 @@ impl PreparedLocalPlayerIdentity {
 impl PreparedHostBootstrap {
     pub fn host_config(&self) -> &HostConfig {
         &self.host_config
+    }
+
+    /// The directories this round packed, for a round restarted on the same
+    /// session to serve again while they are unchanged.
+    pub fn reusable_standalones(&self) -> &[ReusableStandalone] {
+        &self.reusable_standalones
     }
 
     /// Replaces the lobby-owned portions of the prepared JoinData before this
@@ -1025,6 +1037,7 @@ impl PreparedHostBootstrap {
             local_player_alternate_colors_by_resource: HashMap::new(),
             pending_initial_league_players: None,
             league_generated_landscape_loader: None,
+            reusable_standalones: Vec::new(),
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),
                 scenario: Mutex::new(None),
@@ -1825,7 +1838,9 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         dynamic_wire_name: dynamic_wire_name.clone(),
         parameters,
         dynamic_tick,
+        reusable_standalones: spec.reusable_standalones.to_vec(),
     })?;
+    let reusable_standalones = std::mem::take(&mut publication.reusable_standalones);
     // Publication has transferred ownership of generated standalones. Arm
     // their cleanup before any post-publication reopen/reload can fail.
     let temporary_files = publication
@@ -2040,6 +2055,7 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         local_player_alternate_colors_by_resource: alternate_colors_by_resource,
         pending_initial_league_players,
         league_generated_landscape_loader,
+        reusable_standalones,
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
             scenario: Mutex::new(Some(scenario)),
@@ -2910,6 +2926,7 @@ mod definition_root_graphics_tests {
             local_player_alternate_colors_by_resource: HashMap::new(),
             pending_initial_league_players: None,
             league_generated_landscape_loader: None,
+            reusable_standalones: Vec::new(),
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),
                 scenario: Mutex::new(None),

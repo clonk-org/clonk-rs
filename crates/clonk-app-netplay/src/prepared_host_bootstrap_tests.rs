@@ -152,6 +152,7 @@ fn prepare_harpoonrace_host_from_paths(
             network_udp_port: 0,
         },
         league,
+        reusable_standalones: &[],
     })
     .expect("prepare HarpoonRace host");
 
@@ -472,6 +473,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
             network_udp_port: 11_113,
         },
         league: None,
+        reusable_standalones: &[],
     })
     .unwrap();
 
@@ -1744,6 +1746,7 @@ fn native_host_metadata_and_player_filename_prepare_as_c4_bytes() {
             network_udp_port: 11_113,
         },
         league: None,
+        reusable_standalones: &[],
     })
     .expect("native host metadata prepares");
 
@@ -2201,6 +2204,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
                 network_udp_port: 11_113,
             },
             league: None,
+            reusable_standalones: &[],
         },
         &mut oracle,
     )
@@ -2671,7 +2675,128 @@ fn prepare_typed_with_names_and_league_impl(
             network_udp_port: 11_113,
         },
         league,
+        reusable_standalones: &[],
     })
+}
+
+/// One round of `fixture` with its own maker and the records of an earlier
+/// round, the way a preserved-session restart prepares the next lobby.
+fn prepare_minimal_round(
+    fixture: &MinimalInstall,
+    group_maker: &str,
+    reusable_standalones: &[clonk_network::ReusableStandalone],
+) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
+    let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let language_packs = LanguagePacks::default();
+    let effective_definition_modules = fixture.definition_modules.clone();
+    let definition_resource_paths = effective_definition_modules
+        .iter()
+        .map(|module| fixture.install_roots[0].join(module))
+        .collect::<Vec<_>>();
+    let definition_resources = freeze_host_definition_resource_sources(
+        &definition_resource_paths,
+        &fixture.scenario_path,
+        &effective_definition_modules,
+        false,
+        &fixture.install_roots[0],
+        "",
+    )
+    .unwrap();
+    let definition_executable_path = format!(
+        "{}{}",
+        fixture.install_roots[0].display(),
+        std::path::MAIN_SEPARATOR
+    );
+    prepare_host_bootstrap(PreparedHostBootstrapSpec {
+        scenario_path: &fixture.scenario_path,
+        install_roots: &fixture.install_roots,
+        definition_resources: &definition_resources,
+        effective_definition_modules: &effective_definition_modules,
+        initial_definition_modules: &[],
+        fixed_definition_modules: None,
+        selector_definition_root: None,
+        definition_executable_path: &definition_executable_path,
+        definition_path: "",
+        languages: &languages,
+        language_packs: &language_packs,
+        network_directory: fixture.network.path(),
+        network_work_path: "Network",
+        start_unix_seconds: 1_699_999_999,
+        random_seed_unix_seconds: 1_700_000_000,
+        group_maker,
+        host_name: "Host",
+        host_nick: "Host",
+        network_password: "",
+        network_comment: "",
+        netpuncher_address: "puncher.invalid:11115",
+        player_sources: &[],
+        config: PreparedHostBootstrapConfig {
+            control_mode: 0,
+            control_rate: 1,
+            async_max_wait: 2,
+            fair_crew: false,
+            fair_crew_strength: 0,
+            auto_frame_skip: false,
+            max_load_file_size: 100 * 1024 * 1024,
+            no_runtime_join: true,
+            enable_upnp: true,
+            network_tcp_port: 11_112,
+            network_udp_port: 11_113,
+        },
+        league: None,
+        reusable_standalones,
+    })
+}
+
+/// `C4Network2ResList::AddByFile` hands back the resource already published
+/// for the same file (src/C4Network2Res.cpp:1443-1449), so a round restarted
+/// on a preserved session never packs an unchanged directory again. The
+/// bootstrap records every directory it packed, and a round prepared with
+/// those records serves the earlier image verbatim
+/// (clonk-org/clonk-rs#1472). The maker changes per round only so a fresh
+/// pack is visibly different from a reused image.
+#[test]
+fn a_restarted_round_serves_the_previous_rounds_standalone_of_an_unchanged_directory() {
+    let fixture = minimal_install(None);
+    let definition = fixture.install_roots[0].join("Defs.c4d");
+
+    let first = prepare_minimal_round(&fixture, "First round", &[]).unwrap();
+    let recorded = first
+        .reusable_standalones()
+        .iter()
+        .find(|record| record.source_path == definition)
+        .expect("the packed definition directory is recorded for the next round")
+        .clone();
+    let first_image = fs::read(&recorded.standalone_path).unwrap();
+    assert_eq!(recorded.file_size, first_image.len() as u64);
+    assert_eq!(
+        recorded.file_crc,
+        clonk_resources::c4group_file_crc(&first_image)
+    );
+
+    let published_definition = |round: &prepared_host_bootstrap::PreparedHostBootstrap| {
+        let file = round
+            .host_config()
+            .resource_files
+            .iter()
+            .find(|file| file.core.contents_crc == recorded.contents_crc)
+            .expect("the definition directory is published again");
+        fs::read(&file.path).unwrap()
+    };
+    let second =
+        prepare_minimal_round(&fixture, "Second round", first.reusable_standalones()).unwrap();
+    assert_eq!(
+        published_definition(&second),
+        first_image,
+        "the unchanged directory is served the first round's image"
+    );
+
+    let third = prepare_minimal_round(&fixture, "Third round", &[]).unwrap();
+    assert_ne!(
+        published_definition(&third),
+        first_image,
+        "without a record the directory is packed afresh under the new maker"
+    );
 }
 
 fn player_source(path: PathBuf, wire_name: &[u8]) -> HostInitialResourceSource {

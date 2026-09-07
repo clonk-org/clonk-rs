@@ -47,9 +47,21 @@ pub struct NetworkHostPreparation {
     /// The ordinary app path supplies it so InitNetworkHost does not reopen
     /// every definition before the lobby can be shown.
     pub staged_scenario: Option<clonk_engine::Scenario>,
+    /// What the previous round of a preserved session packed, served again
+    /// for directories that have not changed (clonk-org/clonk-rs#1472).
+    pub reusable_standalones: Vec<clonk_network::ReusableStandalone>,
 }
 
 impl NetworkHostPreparation {
+    /// Hands over the previous round's packed standalones.
+    pub fn with_reusable_standalones(
+        mut self,
+        reusable_standalones: Vec<clonk_network::ReusableStandalone>,
+    ) -> Self {
+        self.reusable_standalones = reusable_standalones;
+        self
+    }
+
     pub fn with_staged_scenario(mut self, scenario: clonk_engine::Scenario) -> Self {
         self.staged_scenario = Some(scenario);
         self
@@ -135,6 +147,7 @@ impl NetworkHostPreparation {
                 language_packs: &self.language_packs,
                 network_work_path: &self.network_work_path,
                 network_directory: &self.network_directory,
+                reusable_standalones: &self.reusable_standalones,
                 start_unix_seconds,
                 random_seed_unix_seconds,
                 group_maker: &self.group_maker,
@@ -228,6 +241,7 @@ mod host_parameter_seed_tests {
             },
             league: None,
             staged_scenario: None,
+            reusable_standalones: Vec::new(),
         };
 
         let config = preparation.preparing_host_config();

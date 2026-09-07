@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::host_resource_core::{
     build_host_resource_core_with_prepared_directory, prepare_directory_standalone,
-    PreparedDirectoryStandalone,
+    PreparedDirectoryStandalone, ReusableStandalone,
 };
 use crate::{
     HostConfig, HostJoinSnapshot, HostResourceCoreError, HostResourceCoreSpec,
@@ -49,6 +49,9 @@ pub struct HostInitialResourcePublicationSpec {
     pub dynamic_wire_name: LegacyCString,
     pub parameters: JoinGameParametersEnvelope,
     pub dynamic_tick: i32,
+    /// Standalones an earlier round of this session published, served again
+    /// for a directory that has not changed (clonk-org/clonk-rs#1472).
+    pub reusable_standalones: Vec<ReusableStandalone>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +62,9 @@ pub struct HostInitialResourcePublication {
     pub resource_registrations: Vec<ResourceRegistration>,
     pub resource_directory: PathBuf,
     pub resource_files: Vec<HostedResourceFile>,
+    /// Every directory this publication packed, for the next round of the
+    /// same session to serve again while it is unchanged.
+    pub reusable_standalones: Vec<ReusableStandalone>,
 }
 
 impl HostInitialResourcePublication {
@@ -126,8 +132,12 @@ pub fn publish_host_initial_resources(
 
     let mut publications = SourcePublications::with_capacity(expected_count);
 
-    let scenario_prepared =
-        prepare_source_directory(&spec.scenario, spec.group_maker.as_bytes(), None);
+    let scenario_prepared = prepare_source_directory(
+        &spec.scenario,
+        spec.group_maker.as_bytes(),
+        None,
+        &spec.reusable_standalones,
+    );
     let scenario_core = publications.publish_or_reuse(
         &spec.scenario,
         HostResourceType::Scenario,
@@ -145,6 +155,7 @@ pub fn publish_host_initial_resources(
                 definition,
                 spec.group_maker.as_bytes(),
                 Some(u64::from(spec.max_load_file_size)),
+                &spec.reusable_standalones,
             )
         },
         |definition, prepared| {
@@ -164,7 +175,12 @@ pub fn publish_host_initial_resources(
     game_resources.push(system_core);
 
     for material in &spec.materials {
-        let prepared = prepare_source_directory(material, spec.group_maker.as_bytes(), None);
+        let prepared = prepare_source_directory(
+            material,
+            spec.group_maker.as_bytes(),
+            None,
+            &spec.reusable_standalones,
+        );
         let core =
             publications.publish_or_reuse(material, HostResourceType::Material, &spec, prepared)?;
         game_resources.push(core);
@@ -241,6 +257,7 @@ pub fn publish_host_initial_resources(
         resource_registrations: publications.registrations,
         resource_directory: spec.network_directory,
         resource_files: publications.resource_files,
+        reusable_standalones: publications.reusable_standalones,
     })
 }
 
@@ -265,10 +282,18 @@ fn prepare_source_directory(
     source: &HostInitialResourceSource,
     group_maker: &[u8],
     max_source_size: Option<u64>,
+    reusable_standalones: &[ReusableStandalone],
 ) -> Option<PreparedDirectoryStandalone> {
     (source.virtual_group_bytes.is_none()
         && fs::metadata(&source.path).is_ok_and(|metadata| metadata.is_dir()))
-    .then(|| prepare_directory_standalone(&source.path, group_maker, max_source_size))
+    .then(|| {
+        prepare_directory_standalone(
+            &source.path,
+            group_maker,
+            max_source_size,
+            reusable_standalones,
+        )
+    })
     .and_then(Result::ok)
 }
 
@@ -348,6 +373,7 @@ struct SourcePublications {
     published_sources: HashMap<LegacyCString, NetworkResourceCore>,
     registrations: Vec<ResourceRegistration>,
     resource_files: Vec<HostedResourceFile>,
+    reusable_standalones: Vec<ReusableStandalone>,
 }
 
 impl SourcePublications {
@@ -358,6 +384,7 @@ impl SourcePublications {
             published_sources: HashMap::with_capacity(capacity),
             registrations: Vec::with_capacity(capacity),
             resource_files: Vec::with_capacity(capacity),
+            reusable_standalones: Vec::new(),
         }
     }
 
@@ -381,6 +408,10 @@ impl SourcePublications {
         // though its row is skipped and later modules continue.
         let resource_id = self.next_id;
         self.next_id += 1;
+        let packed_snapshot = prepared_directory
+            .as_ref()
+            .filter(|prepared| prepared.packed.is_some())
+            .map(|prepared| (prepared.contents_crc, prepared.source_size));
         let publication = publish_source(
             source,
             resource_type,
@@ -389,6 +420,23 @@ impl SourcePublications {
             &mut self.temporary_files,
             prepared_directory,
         )?;
+        // The next round of this session serves this image again for the
+        // same directory while its contents are unchanged
+        // (src/C4Network2Res.cpp:1443-1449; clonk-org/clonk-rs#1472).
+        self.reusable_standalones.extend(
+            packed_snapshot
+                .zip(publication.standalone_path.clone())
+                .map(
+                    |((contents_crc, source_size), standalone_path)| ReusableStandalone {
+                        source_path: publication.source_path.clone(),
+                        contents_crc,
+                        source_size,
+                        standalone_path,
+                        file_size: u64::from(publication.core.file_size),
+                        file_crc: publication.core.file_crc,
+                    },
+                ),
+        );
         let retained_name = retained_file_name(source, &publication, &spec.dynamic_wire_name);
         let core = publication.core.clone();
         self.published_sources.insert(retained_name, core.clone());
