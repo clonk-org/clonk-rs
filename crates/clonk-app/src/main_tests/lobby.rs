@@ -8747,6 +8747,87 @@ fn lobby_teardown_dismisses_a_live_ready_check_notification() {
     app.close_lobby_ready_check_continuation();
     main_assert!(app.take_dismissed_desktop_notification().is_none());
 }
+/// A desktop that can answer from the toast shows it through the actionable
+/// sink and its watcher rather than through the plain queue, and the app keeps
+/// that same sink so the in-window dialog hides the toast it showed
+/// (`src/C4Network2.cpp:176-178`). The app suite observes the queue on every
+/// platform; this is the one test that opts into the actionable branch, with
+/// a sink of its own instead of the developer's notification daemon.
+#[test]
+fn an_actionable_desktop_shows_the_ready_check_toast_through_its_watcher() {
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use crate::ready_check_backend::{ActionableSink, ReadyCheckToastBackend};
+    use crate::ready_check_notification::{
+        NotificationActions, NotificationId, NotificationSink, ReadyCheckContinuation,
+    };
+
+    struct RecordingSink {
+        shown: mpsc::Sender<NotificationActions>,
+        hidden: Mutex<Vec<NotificationId>>,
+    }
+
+    impl NotificationSink for RecordingSink {
+        fn show(&self, _actions: &NotificationActions) -> anyhow::Result<NotificationId> {
+            Ok(NotificationId(7))
+        }
+
+        fn hide(&self, id: NotificationId) -> anyhow::Result<()> {
+            self.hidden.lock().expect("recording sink").push(id);
+            Ok(())
+        }
+    }
+
+    impl ActionableSink for RecordingSink {
+        fn show_and_watch(
+            &self,
+            actions: &NotificationActions,
+            continuation: &ReadyCheckContinuation,
+        ) -> anyhow::Result<()> {
+            continuation.show(self, actions);
+            self.shown
+                .send(actions.clone())
+                .expect("the test waits for the watcher");
+            Ok(())
+        }
+    }
+
+    let (shown, watcher_showed) = mpsc::channel();
+    let sink = Arc::new(RecordingSink {
+        shown,
+        hidden: Mutex::new(Vec::new()),
+    });
+    let mut app = new_menu_app(320, 200);
+    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        SocketAddr::from(([127, 0, 0, 1], 11_112)),
+        "Client",
+    )));
+    app.network_lobby = Some(client_lobby_state());
+    app.window_active = false;
+    app.ready_check_toasts_enabled = true;
+    let actionable: Arc<dyn ActionableSink> = sink.clone();
+    app.ready_check_toast_backend = ReadyCheckToastBackend::with_sink(actionable);
+
+    let packet = clonk_network::ReadyCheckPacket::new(0, clonk_network::ReadyCheckData::Request);
+    app.handle_lobby_ready_check_request(packet).test_value();
+
+    let actions = watcher_showed
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the watcher shows the toast through the injected sink");
+    main_assert_eq!(actions.yes => "Yes");
+    main_assert_eq!(actions.no => "No");
+    main_assert!(
+        app.take_desktop_notification().is_none(),
+        "an actionable toast is not queued as a second, plain one"
+    );
+
+    app.complete_lobby_ready_check_response(true).test_value();
+
+    main_assert_eq!(
+        sink.hidden.lock().expect("recording sink").clone() => vec![NotificationId(7)],
+        "the dialog's answer hides the toast through the sink the watcher showed on",
+    );
+}
 
 #[test]
 fn client_ready_check_request_replies_not_ready_while_resources_load() {

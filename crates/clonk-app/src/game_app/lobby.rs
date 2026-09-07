@@ -3330,19 +3330,41 @@ impl GameApp {
         // `NotifyUserIfInactive` request the same handler makes
         // (`src/C4Network2.cpp:1670`), which the lobby already models.
         if self.ready_check_toasts_enabled {
-            continuation.show(
-                self.lobby_ready_check_sink.as_ref(),
-                &self.lobby_ready_check_actions(),
+            let notification = DesktopNotification::new(
+                "Are you ready?",
+                lobby_ready_check_message(remaining_seconds).replace('|', "\n"),
+                Duration::from_secs(u64::from(remaining_seconds)),
             );
             // A check that somehow starts over an unresolved one takes the
             // older toast down first, so only the live prompt is ever shown.
             self.dismiss_ready_check_notification();
-            self.live_ready_check_notification =
-                Some(self.queue_desktop_notification(DesktopNotification::new(
-                    "Are you ready?",
-                    lobby_ready_check_message(remaining_seconds).replace('|', "\n"),
-                    Duration::from_secs(u64::from(remaining_seconds)),
-                )));
+            match self.ready_check_toast_backend.sink_for(&notification) {
+                Some(sink) => {
+                    // The watcher shows the toast and routes its buttons into
+                    // this continuation; the app keeps the same sink so an
+                    // answer from the dialog hides that toast
+                    // (`src/C4Network2.cpp:176-178`).
+                    self.lobby_ready_check_sink = sink.clone();
+                    if let Err(error) = crate::ready_check_backend::watch_on_thread(
+                        sink,
+                        self.lobby_ready_check_actions(),
+                        continuation.clone(),
+                    ) {
+                        tracing::warn!(
+                            %error,
+                            "ready-check toast listener could not start; the in-window dialog answers"
+                        );
+                    }
+                }
+                None => {
+                    // No actionable backend: keep the silent sink and the
+                    // plain toast, whose only job is to draw attention.
+                    self.lobby_ready_check_sink =
+                        std::sync::Arc::new(crate::ready_check_notification::SilentSink);
+                    self.live_ready_check_notification =
+                        Some(self.queue_desktop_notification(notification));
+                }
+            }
         }
         self.lobby_ready_check_continuation = Some(continuation);
         Ok(())

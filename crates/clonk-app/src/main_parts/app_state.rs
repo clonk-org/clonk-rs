@@ -939,6 +939,8 @@ pub(crate) struct GameApp {
     /// what a platform without a toast service leaves in place.
     pub(crate) lobby_ready_check_sink:
         std::sync::Arc<dyn crate::ready_check_notification::NotificationSink + Send + Sync>,
+    /// Where a ready-check toast with answer buttons comes from.
+    pub(crate) ready_check_toast_backend: crate::ready_check_backend::ReadyCheckToastBackend,
     pub(crate) control_messages: ControlMessageState,
     pub(crate) league_votes: LeagueVoteState,
     pub(crate) startup_network_connection: Option<StartupNetworkConnection>,
