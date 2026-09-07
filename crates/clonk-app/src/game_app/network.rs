@@ -1284,6 +1284,71 @@ impl GameApp {
     /// advancing, and a dialog would be a worse lie than silence. The per-client
     /// detail — who is behind and by how much — is already in the F4 client list
     /// as "(wait N ms, behind M)".
+    /// How often a network round writes its pacing summary to the log.
+    const NETPLAY_PACING_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+    /// Once per [`Self::NETPLAY_PACING_LOG_INTERVAL`] of running network play,
+    /// log what the lockstep cost this peer: the lookahead in force, how late
+    /// control arrived against its cadence, how long the world stood still
+    /// waiting for it, the host's attribution of those waits, and every peer's
+    /// message-route ping. C++ shows all of this only live in the network
+    /// chart (`/chart`), so a laggy round used to leave nothing behind; one
+    /// line every half minute lets the next report be read from `Clonk.log`.
+    /// Diagnostics only: nothing here is synchronized or feeds PreSend.
+    pub(crate) fn log_netplay_pacing_summary(&mut self) {
+        if self.network.is_none()
+            || !matches!(self.mode, AppMode::Running)
+            || !self.network_control_running
+        {
+            self.netplay_pacing.reset();
+            return;
+        }
+        let Some(summary) = self
+            .netplay_pacing
+            .take_due(Instant::now(), Self::NETPLAY_PACING_LOG_INTERVAL)
+        else {
+            return;
+        };
+        let (presend, control_rate) = self.network_control_clock.map_or((0, 0), |clock| {
+            (clock.control_presend(), clock.control_rate())
+        });
+        // C4Network2Stats samples getMsgConn()->getLag() per client
+        // (src/C4Network2Stats.cpp:336-343); the same route lag names the
+        // peer whose link is the problem.
+        let pings = self
+            .network
+            .as_ref()
+            .map(NetworkManager::runtime_connections_snapshot)
+            .map(|snapshot| {
+                snapshot
+                    .connections
+                    .iter()
+                    .filter(|connection| matches!(connection.usage.as_str(), "Msg" | "Data/Msg"))
+                    .map(|connection| format!("{}:{}", connection.client_id, connection.lag_ms))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        tracing::info!(
+            target: "clonk_app::netplay",
+            window_s = Self::NETPLAY_PACING_LOG_INTERVAL.as_secs(),
+            presend,
+            control_rate,
+            ticks = summary.control_ticks,
+            measured = summary.measured_ticks,
+            late = summary.late_ticks,
+            lateness_mean_ms = summary.lateness_mean_ms,
+            lateness_max_ms = summary.lateness_max_ms,
+            waited_for_us = summary.waited_for_us,
+            waited_for_others = summary.waited_for_others,
+            discarded = summary.discarded_ticks,
+            stalls = summary.stalls,
+            stall_ms = summary.stall_ms,
+            ping_ms_by_client = %pings,
+            "netplay pacing"
+        );
+    }
+
     pub(crate) fn announce_network_stall(&mut self, now: Instant) -> Result<(), EngineError> {
         let (since, announced) = *self.network_stall_since.get_or_insert((now, false));
         if announced || now.saturating_duration_since(since) < Self::NETWORK_STALL_NOTICE_AFTER {

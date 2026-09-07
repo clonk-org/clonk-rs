@@ -3671,6 +3671,138 @@ pub struct ControlTickCost {
     pub wait_attribution: Option<clonk_network::ControlWaitAttribution>,
 }
 
+/// Rolling summary of lockstep pacing over one reporting window.
+///
+/// C++ shows pacing only live, in the network chart, so a laggy round leaves
+/// no evidence once it is over. The port keeps this window per peer and logs
+/// it once per interval: how late the aggregate control arrived against its
+/// cadence, how long the world stood still waiting for it, and whether the
+/// host classified those waits as this client's fault or someone else's.
+/// Bookkeeping only; nothing here feeds PreSend or the simulation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetplayPacingWindow {
+    /// When the current window opened; `None` until the first `take_due`
+    /// call of a session, and again after `reset`.
+    opened_at: Option<Instant>,
+    control_ticks: u32,
+    measured_ticks: u32,
+    late_ticks: u32,
+    lateness_sum_ms: u64,
+    lateness_max_ms: i32,
+    waited_for_us: u32,
+    waited_for_others: u32,
+    discarded_ticks: u32,
+    stalls: u32,
+    stall_time: Duration,
+}
+
+/// One window's figures, ready for a structured log line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetplayPacingSummary {
+    /// Control ticks consumed in the window.
+    pub control_ticks: u32,
+    /// Ticks whose lateness probe was still current when they were consumed.
+    pub measured_ticks: u32,
+    /// Measured ticks that arrived after their cadence slot.
+    pub late_ticks: u32,
+    /// Mean lateness over every measured tick, on-time ones included.
+    pub lateness_mean_ms: u32,
+    pub lateness_max_ms: i32,
+    /// Ticks the host reported waiting on this client for.
+    pub waited_for_us: u32,
+    /// Ticks the host reported waiting on another participant for.
+    pub waited_for_others: u32,
+    /// Ticks whose local control the host dropped at the async deadline.
+    pub discarded_ticks: u32,
+    /// Frames that could not execute because their control had not arrived.
+    pub stalls: u32,
+    /// Wall-clock time the world stood still in those stalls.
+    pub stall_ms: u64,
+}
+
+impl NetplayPacingWindow {
+    pub fn record_control_tick(
+        &mut self,
+        lateness_ms: Option<i32>,
+        attribution: Option<clonk_network::ControlWaitAttribution>,
+    ) {
+        self.control_ticks = self.control_ticks.saturating_add(1);
+        if let Some(lateness_ms) = lateness_ms {
+            self.measured_ticks = self.measured_ticks.saturating_add(1);
+            if lateness_ms > 0 {
+                self.late_ticks = self.late_ticks.saturating_add(1);
+                self.lateness_sum_ms = self
+                    .lateness_sum_ms
+                    .saturating_add(u64::try_from(lateness_ms).unwrap_or(0));
+                self.lateness_max_ms = self.lateness_max_ms.max(lateness_ms);
+            }
+        }
+        if let Some(attribution) = attribution {
+            self.waited_for_us = self
+                .waited_for_us
+                .saturating_add(u32::from(attribution.waited_for_recipient));
+            self.waited_for_others = self
+                .waited_for_others
+                .saturating_add(u32::from(attribution.waited_for_other));
+            self.discarded_ticks = self
+                .discarded_ticks
+                .saturating_add(u32::from(attribution.discarded_recipient_control));
+        }
+    }
+
+    /// A frame found its control tick not ready and waited `duration` for it.
+    pub fn record_stall(&mut self, duration: Duration) {
+        self.stalls = self.stalls.saturating_add(1);
+        self.stall_time = self.stall_time.saturating_add(duration);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.control_ticks == 0 && self.stalls == 0
+    }
+
+    /// Reports the window once `interval` has passed since it opened and
+    /// starts the next one at `now`. The first call after construction or
+    /// [`reset`](Self::reset) only opens the window, so stale time never
+    /// pads a report.
+    pub fn take_due(&mut self, now: Instant, interval: Duration) -> Option<NetplayPacingSummary> {
+        let opened_at = *self.opened_at.get_or_insert(now);
+        if now.saturating_duration_since(opened_at) < interval {
+            return None;
+        }
+        let summary = self.summary();
+        *self = Self {
+            opened_at: Some(now),
+            ..Self::default()
+        };
+        Some(summary)
+    }
+
+    /// Forget the current window, for the end of network play.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn summary(&self) -> NetplayPacingSummary {
+        let lateness_mean_ms = self
+            .lateness_sum_ms
+            .checked_div(u64::from(self.measured_ticks))
+            .and_then(|mean| u32::try_from(mean).ok())
+            .unwrap_or(0);
+        NetplayPacingSummary {
+            control_ticks: self.control_ticks,
+            measured_ticks: self.measured_ticks,
+            late_ticks: self.late_ticks,
+            lateness_mean_ms,
+            lateness_max_ms: self.lateness_max_ms,
+            waited_for_us: self.waited_for_us,
+            waited_for_others: self.waited_for_others,
+            discarded_ticks: self.discarded_ticks,
+            stalls: self.stalls,
+            stall_ms: u64::try_from(self.stall_time.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
 impl NetworkManager {
     pub fn for_mode(
         mode: NetworkMode,
@@ -9994,6 +10126,81 @@ mod tests {
 
     fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[test]
+    fn pacing_window_summarizes_lateness_attribution_and_stalls() {
+        let attribution = |tick, waited_for_recipient, waited_for_other, discarded| {
+            clonk_network::ControlWaitAttribution {
+                tick,
+                waited_for_recipient,
+                waited_for_other,
+                discarded_recipient_control: discarded,
+            }
+        };
+        let mut window = NetplayPacingWindow::default();
+        assert!(window.is_empty());
+        window.record_control_tick(Some(0), None);
+        window.record_control_tick(Some(40), Some(attribution(1, true, false, false)));
+        window.record_control_tick(Some(20), Some(attribution(2, false, true, true)));
+        window.record_control_tick(None, None);
+        window.record_stall(Duration::from_millis(150));
+        window.record_stall(Duration::from_millis(50));
+        assert!(!window.is_empty());
+
+        let summary = window.summary();
+        assert_eq!(summary.control_ticks, 4);
+        assert_eq!(summary.measured_ticks, 3);
+        assert_eq!(summary.late_ticks, 2);
+        assert_eq!(
+            summary.lateness_mean_ms, 20,
+            "mean over measured ticks, on-time ones included"
+        );
+        assert_eq!(summary.lateness_max_ms, 40);
+        assert_eq!(summary.waited_for_us, 1);
+        assert_eq!(summary.waited_for_others, 1);
+        assert_eq!(summary.discarded_ticks, 1);
+        assert_eq!(summary.stalls, 2);
+        assert_eq!(summary.stall_ms, 200);
+
+        let quiet = NetplayPacingWindow::default().summary();
+        assert_eq!(
+            quiet.lateness_mean_ms, 0,
+            "no measurement is not a division by zero"
+        );
+    }
+
+    #[test]
+    fn pacing_window_reports_once_per_interval_and_restarts() {
+        let interval = Duration::from_secs(30);
+        let opened = Instant::now();
+        let mut window = NetplayPacingWindow::default();
+        assert!(
+            window.take_due(opened, interval).is_none(),
+            "the first call only opens the window"
+        );
+        window.record_stall(Duration::from_millis(10));
+        assert!(window
+            .take_due(opened + Duration::from_secs(29), interval)
+            .is_none());
+        let summary = window
+            .take_due(opened + interval, interval)
+            .expect("a full interval is due");
+        assert_eq!(summary.stalls, 1);
+        assert!(window.is_empty(), "reporting restarts the counts");
+        assert!(
+            window
+                .take_due(opened + Duration::from_secs(59), interval)
+                .is_none(),
+            "the next window opens at the report, not at the next call"
+        );
+        window.reset();
+        assert!(
+            window
+                .take_due(opened + Duration::from_secs(200), interval)
+                .is_none(),
+            "a reset window reopens on its next call instead of reporting stale time"
+        );
     }
 
     #[track_caller]
