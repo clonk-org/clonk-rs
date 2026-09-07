@@ -475,6 +475,28 @@ pub(crate) struct PresentationState {
     pub(crate) display_refresh_period_ms: Option<u64>,
 }
 
+/// The viewport half of the app: the ordered concrete viewport objects
+/// with their identity and authority latches, and the last output
+/// rectangle per owning viewport. `GameApp` composes it as `viewports`.
+pub(crate) struct ViewportState {
+    /// Ordered `C4GraphicsSystem::Viewports` membership. Unlike the local
+    /// control registry, this survives when `SetFilmView` retargets a
+    /// viewport and the player that originally caused its creation leaves.
+    pub(crate) physical_viewports: Vec<PhysicalViewportState>,
+    /// Monotonic identity of the next concrete native-style viewport object.
+    /// Player numbers may be reused while a film-retargeted older viewport
+    /// remains alive, so player ownership cannot identify camera smoothing.
+    pub(crate) next_physical_viewport_identity: u64,
+    /// Ordinary owned/ownerless layouts may still be reconciled from the app's
+    /// local-control registry. Once a film retarget makes physical lifetime
+    /// observable, never reconstruct the concrete list until the game resets.
+    pub(crate) physical_viewports_authoritative: bool,
+    /// Last output rectangle for each owning viewport. C4Viewport raises
+    /// `ResetMenuPositions` on split-screen relayouts as well as window
+    /// resizes, so menu placement cannot key only off the OS resize event.
+    pub(crate) menu_viewport_rects: BTreeMap<i32, Rect>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     pub(crate) graphics: GraphicsSystem,
@@ -548,6 +570,11 @@ pub(crate) struct GameApp {
     /// and the retained-GPU capture flags. Presentation only, never
     /// consulted by simulation (clonk-org/clonk-rs#1232).
     pub(crate) presentation: PresentationState,
+    /// The native-style viewport list and the per-viewport menu output
+    /// rectangles; `C4GraphicsSystem::Viewports` and what C4Viewport relayouts
+    /// key off. Presentation state, never consulted by simulation
+    /// (clonk-org/clonk-rs#1232).
+    pub(crate) viewports: ViewportState,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
@@ -627,10 +654,6 @@ pub(crate) struct GameApp {
     /// This is deliberately outside the deterministic engine menu state
     /// (C4Menu.cpp:804-821).
     pub(crate) script_menu_presentations: BTreeMap<i32, ScriptMenuPresentationState>,
-    /// Last output rectangle for each owning viewport. C4Viewport raises
-    /// `ResetMenuPositions` on split-screen relayouts as well as window
-    /// resizes, so menu placement cannot key only off the OS resize event.
-    pub(crate) menu_viewport_rects: BTreeMap<i32, Rect>,
     /// `Config.Graphics` display toggles loaded at process startup and driven
     /// by the Display submenu (C4MainMenu.cpp:855-884).
     pub(crate) display_flags: DisplayFlags,
@@ -1222,18 +1245,6 @@ pub(crate) struct GameApp {
     /// Temporary player assigned to the existing primary viewport by replay
     /// `SetFilmView` or viewport cycling. The physical identity is unchanged.
     pub(crate) film_view_player: Option<i32>,
-    /// Ordered `C4GraphicsSystem::Viewports` membership. Unlike the local
-    /// control registry, this survives when `SetFilmView` retargets a
-    /// viewport and the player that originally caused its creation leaves.
-    pub(crate) physical_viewports: Vec<PhysicalViewportState>,
-    /// Monotonic identity of the next concrete native-style viewport object.
-    /// Player numbers may be reused while a film-retargeted older viewport
-    /// remains alive, so player ownership cannot identify camera smoothing.
-    pub(crate) next_physical_viewport_identity: u64,
-    /// Ordinary owned/ownerless layouts may still be reconciled from the app's
-    /// local-control registry. Once a film retarget makes physical lifetime
-    /// observable, never reconstruct the concrete list until the game resets.
-    pub(crate) physical_viewports_authoritative: bool,
     /// The runtime dialogs and the stack that orders them.
     pub(crate) dialogs: RuntimeDialogState,
     pub(crate) running_active_dialog: Option<RunningDialogStackEntry>,

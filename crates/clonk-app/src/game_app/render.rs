@@ -139,7 +139,8 @@ impl GameApp {
     /// absence of local player viewports. A temporary film target changes
     /// only its displayed owner, not this classification.
     pub(crate) fn primary_physical_viewport_is_no_owner(&self) -> bool {
-        self.physical_viewports
+        self.viewports
+            .physical_viewports
             .iter()
             .any(|viewport| viewport.matches_close(OWNER_NONE))
     }
@@ -158,7 +159,8 @@ impl GameApp {
     }
 
     fn primary_viewport_player(&self) -> Option<i32> {
-        self.physical_viewports
+        self.viewports
+            .physical_viewports
             .first()
             .map(|viewport| viewport.displayed_player)
     }
@@ -326,6 +328,7 @@ impl GameApp {
             current.entry(viewport.owner).or_insert(viewport.rect);
         }
         let mut changed = self
+            .viewports
             .menu_viewport_rects
             .iter()
             .filter_map(|(&owner, &previous)| {
@@ -333,12 +336,12 @@ impl GameApp {
             })
             .collect::<Vec<_>>();
         changed.extend(current.keys().copied().filter(|owner| {
-            !self.menu_viewport_rects.contains_key(owner)
+            !self.viewports.menu_viewport_rects.contains_key(owner)
                 && (self.ingame_menu.contains(*owner)
                     || self.script_menu_presentations.contains_key(owner))
         }));
         if changed.is_empty() {
-            self.menu_viewport_rects = current;
+            self.viewports.menu_viewport_rects = current;
             return;
         }
         for &owner in &changed {
@@ -349,7 +352,7 @@ impl GameApp {
                 if state.free_aligned {
                     if let (Some((x, y)), Some(previous), Some(next)) = (
                         state.location,
-                        self.menu_viewport_rects.get(&owner),
+                        self.viewports.menu_viewport_rects.get(&owner),
                         current.get(&owner),
                     ) {
                         state.location = Some((
@@ -382,7 +385,7 @@ impl GameApp {
         {
             self.script_menu_close_pointer_capture = None;
         }
-        self.menu_viewport_rects = current;
+        self.viewports.menu_viewport_rects = current;
     }
 
     /// C4FullScreen::Close intercepts the native window close while a round
@@ -403,7 +406,7 @@ impl GameApp {
     }
 
     pub(crate) fn clear_physical_viewport_states(&mut self) {
-        for viewport in std::mem::take(&mut self.physical_viewports) {
+        for viewport in std::mem::take(&mut self.viewports.physical_viewports) {
             self.graphics
                 .drop_physical_camera(viewport.physical_identity);
         }
@@ -423,7 +426,7 @@ impl GameApp {
             return;
         }
         let engine = &self.engine;
-        self.physical_viewports.sort_by_key(|viewport| {
+        self.viewports.physical_viewports.sort_by_key(|viewport| {
             engine
                 .player(viewport.displayed_player)
                 .map_or(i32::MAX, |player| {
@@ -433,8 +436,11 @@ impl GameApp {
     }
 
     fn allocate_physical_viewport_identity(&mut self) -> u64 {
-        let identity = self.next_physical_viewport_identity;
-        self.next_physical_viewport_identity = self.next_physical_viewport_identity.wrapping_add(1);
+        let identity = self.viewports.next_physical_viewport_identity;
+        self.viewports.next_physical_viewport_identity = self
+            .viewports
+            .next_physical_viewport_identity
+            .wrapping_add(1);
         identity
     }
 
@@ -463,7 +469,7 @@ impl GameApp {
     /// setup code that directly changes the local-control registry. This is
     /// never used after physical identity becomes observable.
     pub(crate) fn refresh_non_authoritative_physical_viewports(&mut self) {
-        if self.physical_viewports_authoritative {
+        if self.viewports.physical_viewports_authoritative {
             return;
         }
         let mut owners = self
@@ -477,27 +483,26 @@ impl GameApp {
                 classic_viewport_layout_order(player.control_set())
             })
         });
-        let already_current = if owners.is_empty() {
-            matches!(
-                self.physical_viewports.as_slice(),
-                [viewport]
-                    if viewport.displayed_player == OWNER_NONE
-                        && viewport.is_no_owner_viewport
-            )
-        } else {
-            self.physical_viewports.len() == owners.len()
-                && self
-                    .physical_viewports
-                    .iter()
-                    .zip(&owners)
-                    .all(|(viewport, owner)| {
-                        viewport.displayed_player == *owner
-                            && viewport.camera_identity_owner == *owner
-                            && !viewport.is_no_owner_viewport
-                            && viewport.expand_player_slots
-                            && viewport.uses_live_player_presentation
-                    })
-        };
+        let already_current =
+            if owners.is_empty() {
+                matches!(
+                    self.viewports.physical_viewports.as_slice(),
+                    [viewport]
+                        if viewport.displayed_player == OWNER_NONE
+                            && viewport.is_no_owner_viewport
+                )
+            } else {
+                self.viewports.physical_viewports.len() == owners.len()
+                    && self.viewports.physical_viewports.iter().zip(&owners).all(
+                        |(viewport, owner)| {
+                            viewport.displayed_player == *owner
+                                && viewport.camera_identity_owner == *owner
+                                && !viewport.is_no_owner_viewport
+                                && viewport.expand_player_slots
+                                && viewport.uses_live_player_presentation
+                        },
+                    )
+            };
         if already_current {
             self.update_film_viewport_availability();
             return;
@@ -505,12 +510,12 @@ impl GameApp {
         self.clear_physical_viewport_states();
         for owner in owners {
             let viewport = self.owned_physical_viewport_state(owner, true);
-            self.physical_viewports.push(viewport);
+            self.viewports.physical_viewports.push(viewport);
         }
         self.sort_physical_viewports_by_player_control();
-        if self.physical_viewports.is_empty() {
+        if self.viewports.physical_viewports.is_empty() {
             let viewport = self.ownerless_physical_viewport_state();
-            self.physical_viewports.push(viewport);
+            self.viewports.physical_viewports.push(viewport);
         }
         self.update_film_viewport_availability();
     }
@@ -530,7 +535,7 @@ impl GameApp {
         } else {
             self.owned_physical_viewport_state(player, expand_player_slots)
         };
-        self.physical_viewports.push(viewport);
+        self.viewports.physical_viewports.push(viewport);
         self.sort_physical_viewports_by_player_control();
         self.update_film_viewport_availability();
         if player != OWNER_NONE {
@@ -552,13 +557,15 @@ impl GameApp {
     /// `fSilent` parameter at all, so it always plays.
     pub(crate) fn close_physical_viewport_identity(&mut self, identity: u64) -> bool {
         let primary_removed = self
+            .viewports
             .physical_viewports
             .first()
             .is_some_and(|viewport| viewport.physical_identity == identity);
-        let previous_count = self.physical_viewports.len();
-        self.physical_viewports
+        let previous_count = self.viewports.physical_viewports.len();
+        self.viewports
+            .physical_viewports
             .retain(|viewport| viewport.physical_identity != identity);
-        if self.physical_viewports.len() == previous_count {
+        if self.viewports.physical_viewports.len() == previous_count {
             return false;
         }
         self.graphics.drop_physical_camera(identity);
@@ -578,19 +585,20 @@ impl GameApp {
         game_running: bool,
     ) -> bool {
         let primary_removed = self
+            .viewports
             .physical_viewports
             .first()
             .is_some_and(|viewport| viewport.matches_close(player));
-        let previous_count = self.physical_viewports.len();
+        let previous_count = self.viewports.physical_viewports.len();
         let mut removed_identities = Vec::new();
-        self.physical_viewports.retain(|viewport| {
+        self.viewports.physical_viewports.retain(|viewport| {
             let removed = viewport.matches_close(player);
             if removed {
                 removed_identities.push(viewport.physical_identity);
             }
             !removed
         });
-        let closed = self.physical_viewports.len() != previous_count;
+        let closed = self.viewports.physical_viewports.len() != previous_count;
         if !closed {
             return false;
         }
@@ -609,14 +617,15 @@ impl GameApp {
     }
 
     pub(crate) fn observer_viewport_index(&self) -> Option<usize> {
-        self.physical_viewports
+        self.viewports
+            .physical_viewports
             .iter()
             .position(|viewport| viewport.is_no_owner_viewport)
     }
 
     pub(crate) fn observer_viewport_player(&self) -> Option<i32> {
         self.observer_viewport_index()
-            .map(|index| self.physical_viewports[index].displayed_player)
+            .map(|index| self.viewports.physical_viewports[index].displayed_player)
     }
 
     /// Fold process-local replay requests at the same app seam as viewport
@@ -636,6 +645,7 @@ impl GameApp {
                 }
                 clonk_engine::ViewportPresentationRequest::SetViewOffset { player, offset } => {
                     if let Some(viewport) = self
+                        .viewports
                         .physical_viewports
                         .iter_mut()
                         .find(|viewport| viewport.displayed_player == player)
@@ -652,7 +662,7 @@ impl GameApp {
     /// Creation of an ownerless observer and its later film retarget are
     /// silent; creation directly for the first replay-film player is not.
     pub(crate) fn check_fullscreen_physical_viewports(&mut self, game_running: bool) {
-        match self.physical_viewports.len() {
+        match self.viewports.physical_viewports.len() {
             0 => {
                 let film_player = self
                     .engine
@@ -668,7 +678,7 @@ impl GameApp {
                 );
                 if film_player.is_some() {
                     self.film_view_player = film_player;
-                    self.physical_viewports_authoritative = true;
+                    self.viewports.physical_viewports_authoritative = true;
                 }
                 // Outside film mode ViewportCheck tells the user how to reach
                 // the observer menu the ownerless viewport just handed them
@@ -698,14 +708,15 @@ impl GameApp {
         if self.engine.is_replay_film() {
             if let Some(first_player) = self.engine.first_player_id() {
                 if let Some(index) = self
+                    .viewports
                     .physical_viewports
                     .iter()
                     .position(|viewport| viewport.matches_close(OWNER_NONE))
                 {
-                    self.physical_viewports[index].displayed_player = first_player;
-                    self.physical_viewports[index].uses_live_player_presentation = false;
+                    self.viewports.physical_viewports[index].displayed_player = first_player;
+                    self.viewports.physical_viewports[index].uses_live_player_presentation = false;
                     self.film_view_player = Some(first_player);
-                    self.physical_viewports_authoritative = true;
+                    self.viewports.physical_viewports_authoritative = true;
                     self.runtime_flash_message = None;
                 }
             }
@@ -717,7 +728,7 @@ impl GameApp {
     /// list/control order, then run the fullscreen fallback exactly once.
     pub(crate) fn initialize_physical_viewports(&mut self, game_running: bool) {
         self.clear_physical_viewport_states();
-        self.physical_viewports_authoritative = false;
+        self.viewports.physical_viewports_authoritative = false;
         self.film_view_player = None;
         let local_players = self
             .engine
@@ -2437,14 +2448,18 @@ impl GameApp {
             .players
             .iter()
             .any(|player| player.id == menu_owner);
-        self.physical_viewports.iter().copied().any(|viewport| {
-            let hosts_menu = if menu_owner == OWNER_NONE {
-                viewport.is_no_owner_viewport
-            } else {
-                owner_exists && viewport.displayed_player == menu_owner
-            };
-            hosts_menu && self.physical_viewport_is_unsuppressed(viewport)
-        })
+        self.viewports
+            .physical_viewports
+            .iter()
+            .copied()
+            .any(|viewport| {
+                let hosts_menu = if menu_owner == OWNER_NONE {
+                    viewport.is_no_owner_viewport
+                } else {
+                    owner_exists && viewport.displayed_player == menu_owner
+                };
+                hosts_menu && self.physical_viewport_is_unsuppressed(viewport)
+            })
     }
 
     fn viewport_elimination_notice_text(&self, owner: i32) -> Option<String> {
@@ -4677,7 +4692,8 @@ impl GameApp {
 
     /// `C4Viewport::PlayerLock` for one console viewport window.
     pub(crate) fn console_viewport_player_lock(&self, identity: u64) -> bool {
-        self.physical_viewports
+        self.viewports
+            .physical_viewports
             .iter()
             .find(|viewport| viewport.physical_identity == identity)
             .is_some_and(|viewport| viewport.player_lock)
@@ -4694,6 +4710,7 @@ impl GameApp {
 
         let players = &self.snapshot.players;
         let Some(viewport) = self
+            .viewports
             .physical_viewports
             .iter_mut()
             .find(|viewport| viewport.physical_identity == identity)
@@ -5340,11 +5357,12 @@ impl GameApp {
         let Self {
             snapshot,
             graphics,
-            physical_viewports,
+            viewports,
             ..
         } = self;
         let inputs =
-            collect_viewport_inputs_from_physical_state(snapshot, physical_viewports).ok()?;
+            collect_viewport_inputs_from_physical_state(snapshot, &viewports.physical_viewports)
+                .ok()?;
         let mut frame =
             graphics.render_detached_viewport(snapshot, &inputs, identity, width, height)?;
         // `C4Viewport::Draw` calls `Console.EditCursor.Draw(cgo)` after the
@@ -5581,7 +5599,7 @@ impl GameApp {
         if viewport_overlays_visible {
             let script_menu_viewports = collect_viewport_inputs_from_physical_state(
                 &self.snapshot,
-                &self.physical_viewports,
+                &self.viewports.physical_viewports,
             )
             .map_err(|reason| {
                 report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
@@ -5654,11 +5672,13 @@ impl GameApp {
         let message_board = self.advance_message_board_overlay();
         self.update_network_status_overlay();
         self.update_diagnostics_overlay();
-        let viewports =
-            collect_viewport_inputs_from_physical_state(&self.snapshot, &self.physical_viewports)
-                .map_err(|reason| {
-                report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
-            })?;
+        let viewports = collect_viewport_inputs_from_physical_state(
+            &self.snapshot,
+            &self.viewports.physical_viewports,
+        )
+        .map_err(|reason| {
+            report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
+        })?;
         // Capture CStdDDraw's installed ramp before render_frame latches any
         // runtime SetGamma controls for the next pass. C++ draws every GUI
         // overlay below with this same pre-latch ramp
@@ -5865,7 +5885,7 @@ impl GameApp {
         // C4Viewport::AdjustPosition consumes ViewOffs for an ownerless
         // physical viewport after each successful draw, even when film mode
         // has temporarily assigned it a valid player.
-        for viewport in &mut self.physical_viewports {
+        for viewport in &mut self.viewports.physical_viewports {
             if viewport.is_no_owner_viewport {
                 viewport.preserved_offset = Vector2::ZERO;
             }

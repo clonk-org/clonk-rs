@@ -2971,6 +2971,12 @@ impl GameApp {
                 startup_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
                 display_refresh_period_ms: None,
             },
+            viewports: ViewportState {
+                physical_viewports: Vec::new(),
+                next_physical_viewport_identity: 1,
+                physical_viewports_authoritative: false,
+                menu_viewport_rects: BTreeMap::new(),
+            },
             #[cfg(test)]
             gamepad_poll_count: 0,
             #[cfg(test)]
@@ -3034,7 +3040,6 @@ impl GameApp {
             runtime_player_big_icons: HashMap::new(),
             runtime_player_big_icon_misses: HashSet::new(),
             script_menu_presentations: BTreeMap::new(),
-            menu_viewport_rects: BTreeMap::new(),
             display_flags,
             white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
@@ -3279,9 +3284,6 @@ impl GameApp {
             runtime_flash_resources_cache,
             runtime_flash_message: None,
             film_view_player: None,
-            physical_viewports: Vec::new(),
-            next_physical_viewport_identity: 1,
-            physical_viewports_authoritative: false,
             running_active_dialog: None,
             next_running_message_stack_id: 1,
             league_signup_dialog: None,
@@ -6957,19 +6959,23 @@ impl GameApp {
     /// Temporary `C4Viewport::Init`: mutate one physical viewport in place
     /// while retaining its stable camera identity and ownerless bit.
     fn set_physical_view_target(&mut self, index: usize, player: i32) -> bool {
-        let preserved_zoom = self.physical_viewports.get(index).and_then(|viewport| {
-            viewport
-                .uses_live_player_presentation
-                .then(|| self.engine.player(viewport.camera_identity_owner))
-                .flatten()
-                .map(|source| {
-                    source
-                        .viewports()
-                        .first()
-                        .map_or(viewport.preserved_zoom, |viewport| viewport.zoom)
-                })
-        });
-        let Some(viewport) = self.physical_viewports.get_mut(index) else {
+        let preserved_zoom = self
+            .viewports
+            .physical_viewports
+            .get(index)
+            .and_then(|viewport| {
+                viewport
+                    .uses_live_player_presentation
+                    .then(|| self.engine.player(viewport.camera_identity_owner))
+                    .flatten()
+                    .map(|source| {
+                        source
+                            .viewports()
+                            .first()
+                            .map_or(viewport.preserved_zoom, |viewport| viewport.zoom)
+                    })
+            });
+        let Some(viewport) = self.viewports.physical_viewports.get_mut(index) else {
             return false;
         };
         if let Some(zoom) = preserved_zoom {
@@ -6980,7 +6986,7 @@ impl GameApp {
         if index == 0 {
             self.film_view_player = Some(player);
         }
-        self.physical_viewports_authoritative = true;
+        self.viewports.physical_viewports_authoritative = true;
         if player != OWNER_NONE {
             self.runtime_flash_message = None;
         }
@@ -8817,7 +8823,7 @@ impl GameApp {
         reconnect_audio_context(&mut self.engine, self.sound.context.as_ref());
         self.film_view_player = None;
         self.clear_physical_viewport_states();
-        self.physical_viewports_authoritative = false;
+        self.viewports.physical_viewports_authoritative = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);

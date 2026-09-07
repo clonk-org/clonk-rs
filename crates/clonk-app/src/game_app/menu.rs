@@ -4852,6 +4852,7 @@ impl GameApp {
                 .iter()
                 .any(|player| player.id == menu_owner)
             && self
+                .viewports
                 .physical_viewports
                 .iter()
                 .any(|viewport| viewport.displayed_player == menu_owner)
@@ -4871,6 +4872,7 @@ impl GameApp {
                 .iter()
                 .any(|player| player.id == menu_owner)
             && self
+                .viewports
                 .physical_viewports
                 .iter()
                 .copied()
@@ -4997,7 +4999,7 @@ impl GameApp {
         self.runtime_flash_message = None;
         self.film_view_player = None;
         self.clear_physical_viewport_states();
-        self.physical_viewports_authoritative = false;
+        self.viewports.physical_viewports_authoritative = false;
         self.dialogs.client_list = None;
         self.dialogs.stack.clear();
         self.running_active_dialog = None;

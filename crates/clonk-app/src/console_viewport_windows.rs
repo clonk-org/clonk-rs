@@ -84,6 +84,7 @@ pub(crate) fn reconcile_console_viewport_windows(
         })
         .collect::<Vec<_>>();
     let physical = app
+        .viewports
         .physical_viewports
         .iter()
         .map(|viewport| (viewport.physical_identity, viewport.displayed_player))

@@ -2282,7 +2282,7 @@ impl GameApp {
         self.advance_scenario_loader(96, "Game runtime installed");
         self.film_view_player = None;
         self.clear_physical_viewport_states();
-        self.physical_viewports_authoritative = false;
+        self.viewports.physical_viewports_authoritative = false;
         self.input = InputDispatcher::new();
         if offline_savegame.is_none() {
             self.install_local_controls(LocalControlRegistry::default());
@@ -2704,7 +2704,7 @@ impl GameApp {
         reconnect_audio_context(&mut self.engine, self.sound.context.as_ref());
         self.film_view_player = None;
         self.clear_physical_viewport_states();
-        self.physical_viewports_authoritative = false;
+        self.viewports.physical_viewports_authoritative = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
             .set_fire_particles(self.display_flags.fire_particles);

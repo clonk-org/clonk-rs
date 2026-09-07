@@ -118,7 +118,7 @@ fn install_runtime_key_config(
 fn open_test_console_viewport(app: &mut GameApp, player: Option<i32>) -> u64 {
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::NewViewport(player)])
         .test_value();
-    app.physical_viewports.last().test_value().physical_identity
+    app.viewports.physical_viewports.last().test_value().physical_identity
 }
 
 fn open_local_test_console_viewport(app: &mut GameApp) -> u64 {
@@ -4803,24 +4803,24 @@ fn retargeted_primary_survives_its_original_local_player() {
         .test_value();
     let _ = app.apply_pending_viewport_presentation_requests();
     runtime_assert_eq!(
-        app.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => vec![target, target];
-        app.physical_viewports[0].preserved_zoom => 1.75;
-        app.physical_viewports[0].preserved_offset => Vector2::new(17, 19);
+        app.viewports.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => vec![target, target];
+        app.viewports.physical_viewports[0].preserved_zoom => 1.75;
+        app.viewports.physical_viewports[0].preserved_offset => Vector2::new(17, 19);
     );
 
     app.sound.ui_log.clear();
     app.remove_runtime_player_with_viewport_feedback(original)
         .test_value();
-    assert_eq!(app.physical_viewports.len(), 2);
+    assert_eq!(app.viewports.physical_viewports.len(), 2);
     runtime_assert!(app
-        .physical_viewports
+        .viewports.physical_viewports
         .iter()
         .all(|viewport| viewport.displayed_player == target));
     assert!(app.sound.ui_log.is_empty(), "CloseViewport(A) matches none");
 
     app.snapshot = app.engine.snapshot();
     let rendered =
-        collect_viewport_inputs_from_physical_state(&app.snapshot, &app.physical_viewports)
+        collect_viewport_inputs_from_physical_state(&app.snapshot, &app.viewports.physical_viewports)
             .test_value();
     assert_eq!(rendered.len(), 2);
     assert!(rendered.iter().all(|viewport| viewport.owner == target));
@@ -4830,8 +4830,8 @@ fn retargeted_primary_survives_its_original_local_player() {
     app.remove_runtime_player_with_viewport_feedback(target)
         .test_value();
     runtime_assert_eq!(app.sound.ui_log.iter().filter(|sound| sound.as_str() == "CloseViewport").count() => 1, "closing both matching physical viewports requests one sound");
-    assert_eq!(app.physical_viewports.len(), 1);
-    assert!(app.physical_viewports[0].is_no_owner_viewport);
+    assert_eq!(app.viewports.physical_viewports.len(), 1);
+    assert!(app.viewports.physical_viewports[0].is_no_owner_viewport);
 }
 
 // Two console/fullscreen asymmetries that a port loses by sharing one
@@ -4878,7 +4878,7 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
     runtime_assert_eq!(app.sound.ui_log => ["CloseViewport"], "the console's ownerless viewport is not silent");
 
     let before = app
-        .physical_viewports
+        .viewports.physical_viewports
         .iter()
         .map(|viewport| viewport.displayed_player)
         .collect::<Vec<_>>();
@@ -4891,7 +4891,7 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
     }
     let mut expected = before;
     expected.extend([late_layout, early_layout]);
-    runtime_assert_eq!(app.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => expected, "console mode never runs SortViewportsByPlayerControl");
+    runtime_assert_eq!(app.viewports.physical_viewports.iter().map(|viewport| viewport.displayed_player).collect::<Vec<_>>() => expected, "console mode never runs SortViewportsByPlayerControl");
 }
 
 // C4Viewport.cpp:1126-1155 — a windowed viewport draws the one viewport
@@ -4912,7 +4912,7 @@ fn console_viewport_render_uses_the_windows_own_extent_and_identity() {
         .test_value();
 
     let identities = app
-        .physical_viewports
+        .viewports.physical_viewports
         .iter()
         .map(|viewport| viewport.physical_identity)
         .collect::<Vec<_>>();
@@ -4933,7 +4933,7 @@ fn console_viewport_render_uses_the_windows_own_extent_and_identity() {
     // A closed viewport's window goes blank rather than adopting the
     // remaining viewport's view.
     let closed = identities[0];
-    app.physical_viewports
+    app.viewports.physical_viewports
         .retain(|viewport| viewport.physical_identity != closed);
     assert!(app.render_console_viewport(closed, 320, 200).is_none());
     assert!(app.render_console_viewport(u64::MAX, 320, 200).is_none());
@@ -10534,8 +10534,8 @@ fn observer_next_player_gamepad_override_keeps_its_free_view_scope() {
     let mut observing = bound();
     observing.clear_physical_viewport_states();
     let observer = observing.ownerless_physical_viewport_state();
-    observing.physical_viewports.push(observer);
-    observing.physical_viewports_authoritative = true;
+    observing.viewports.physical_viewports.push(observer);
+    observing.viewports.physical_viewports_authoritative = true;
     runtime_assert!(observing.primary_physical_viewport_is_no_owner());
     runtime_assert_eq!(
         observing.runtime_custom_gamepad_button_action(0, 0) =>
