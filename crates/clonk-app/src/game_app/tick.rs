@@ -471,7 +471,7 @@ impl GameApp {
                 // copies its BigIcon then (src/C4RoundResults.cpp:338-344).
                 self.freeze_evaluated_player_big_icons();
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
-                for menu in self.ingame_menu.values_mut() {
+                for menu in self.ingame_menus.players.values_mut() {
                     menu.tick();
                 }
                 self.refresh_focus();

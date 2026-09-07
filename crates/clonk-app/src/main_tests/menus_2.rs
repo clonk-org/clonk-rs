@@ -813,7 +813,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
             ElementState::Pressed,
         ),
     ]);
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
     main_assert_eq!(app.running_chat_text() => Some("alpha beta"));
     let caret_before_alt_navigation = app.running_chat_controller().test_value().caret();
     for modifiers in [
@@ -978,7 +978,7 @@ fn observer_menu_lists_players_and_live_previews_selection() {
     main_assert!(app.set_physical_film_view(first));
 
     let open_observer_menu = |app: &mut GameApp| {
-        app.ingame_menu.replace(
+        app.ingame_menus.players.replace(
             OWNER_NONE,
             IngameMenuState::main_menu(
                 &MainMenuConditions {
@@ -993,7 +993,7 @@ fn observer_menu_lists_players_and_live_previews_selection() {
     };
     open_observer_menu(&mut app);
 
-    let menu = app.ingame_menu.get(OWNER_NONE).test_value();
+    let menu = app.ingame_menus.players.get(OWNER_NONE).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::Observer);
     main_assert_eq!(
         menu.items()
@@ -1016,9 +1016,9 @@ fn observer_menu_lists_players_and_live_previews_selection() {
     main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => second);
     main_assert_eq!(app.film_view_player => Some(second));
     main_assert!(app.set_physical_film_view(first));
-    main_assert_eq!(app.ingame_menu.get(OWNER_NONE).map(IngameMenuState::selection) => Some(2), "camera perturbation does not change the highlighted row");
+    main_assert_eq!(app.ingame_menus.players.get(OWNER_NONE).map(IngameMenuState::selection) => Some(2), "camera perturbation does not change the highlighted row");
     main_assert!(app.handle_menu_command(OWNER_NONE, ControlCommand::MenuEnter, CommandKind::Press,).expect("Enter dispatches the highlighted player target"));
-    main_assert!(!app.ingame_menu.contains(OWNER_NONE));
+    main_assert!(!app.ingame_menus.players.contains(OWNER_NONE));
     main_assert_eq!(app.viewports.physical_viewports[0].displayed_player => second);
 
     open_observer_menu(&mut app);
@@ -1043,13 +1043,13 @@ fn real_regicide_opens_initial_team_menu_and_hides_disabled_switch() {
 
     main_assert!(!app.engine.team_configuration().allow_team_switch, "Regicide's parsed Teams.txt keeps mid-round switching disabled");
     main_assert_eq!(app.engine.player(app.players.local_owner).map(clonk_engine::Player::status) => Some(PlayerStatus::TeamSelection));
-    let menu = app.ingame_menu.get(app.players.local_owner).test_value();
+    let menu = app.ingame_menus.players.get(app.players.local_owner).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::TeamSelection);
     main_assert_eq!(menu.items().iter().map(|item| item.action.clone()).collect::<Vec<_>>() => [MenuAction::SelectTeam(1), MenuAction::SelectTeam(2)]);
 
     let local_owner = app.players.local_owner;
     let outcome = app
-        .ingame_menu
+        .ingame_menus.players
         .get_mut(local_owner)
         .expect("team selection menu opens")
         .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
@@ -1060,11 +1060,11 @@ fn real_regicide_opens_initial_team_menu_and_hides_disabled_switch() {
     main_assert_eq!(player.status() => PlayerStatus::Active);
     main_assert_eq!(player.team() => Some(1));
     main_assert!(app.engine.crew_cursor(app.players.local_owner).is_some(), "Regicide selection must leave the player with usable crew");
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
 
     let owner = app.players.local_owner;
     app.activate_ingame_main_menu_for_player(owner).test_value();
-    main_assert!(!app.ingame_menu.as_ref().expect("main menu").items().iter().any(|item| item.action == MenuAction::ActivateTeamSelection));
+    main_assert!(!app.ingame_menus.players.as_ref().expect("main menu").items().iter().any(|item| item.action == MenuAction::ActivateTeamSelection));
 }
 
 #[test]
@@ -1114,7 +1114,7 @@ fn secondary_local_player_controls_own_initial_team_menu() {
     app.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
 
     app.open_initial_team_selection(secondary);
-    main_assert_eq!(app.ingame_menu.as_ref().and_then(IngameMenuState::player) => Some(secondary));
+    main_assert_eq!(app.ingame_menus.players.as_ref().and_then(IngameMenuState::player) => Some(secondary));
 
     // Keyboard set 2 Key4 is Throw; an active C4MainMenu converts it to
     // MenuEnter and selects the first team.
@@ -1144,7 +1144,7 @@ fn secondary_local_player_controls_own_initial_team_menu() {
         0,
         "closing the secondary menu must clear only secondary controls"
     );
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
 }
 
 #[test]
@@ -1161,7 +1161,7 @@ fn rules_menu_uses_engine_definition_description_as_tooltip() {
 
     app.apply_ingame_menu_action_for_player(player, MenuAction::ActivateRules)
         .test_value();
-    let menu = app.ingame_menu.get(player).test_value();
+    let menu = app.ingame_menus.players.get(player).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::Rules);
     main_assert_eq!(menu.items()[0].info_caption.as_deref() => Some("Keep to the rule"));
 }
@@ -1182,14 +1182,14 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    main_assert!(app.ingame_menu_gfx.as_ref().is_some_and(|gfx| gfx.show_close_button), "the controlling mouse player's title renders its close button");
+    main_assert!(app.ingame_menus.graphics.as_ref().is_some_and(|gfx| gfx.show_close_button), "the controlling mouse player's title renders its close button");
 
     let close_rect = |app: &GameApp| {
         let player = app.players.local_owner;
         let area = app.rendering.graphics.viewport_rect(player).test_value();
         menus2_fixture!(hud_font: app, fallback, font);
         let gfx = menus2_fixture!(ingame_graphics: app.rendering.display_flags.show_commands);
-        app.ingame_menu
+        app.ingame_menus.players
             .get(player)
             .test_value()
             .close_button_rect(area, &font, &gfx)
@@ -1206,7 +1206,7 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     app.test_right_button(ElementState::Pressed);
     app.test_right_button(ElementState::Released);
     main_assert_eq!(
-        app.ingame_menu
+        app.ingame_menus.players
             .get(app.players.local_owner)
             .map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Options),
@@ -1223,7 +1223,7 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     app.test_cursor(close_point(&app));
     app.test_left_button(ElementState::Released);
     main_assert_eq!(
-        app.ingame_menu
+        app.ingame_menus.players
             .get(app.players.local_owner)
             .map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Options),
@@ -1234,7 +1234,7 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     app.test_cursor(close_point(&app));
     app.test_left_button(ElementState::Pressed);
     main_assert_eq!(
-        app.ingame_menu
+        app.ingame_menus.players
             .get(app.players.local_owner)
             .map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Options),
@@ -1242,15 +1242,15 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     );
     main_assert!(commands.take_submitted_local().is_empty());
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ingame_menu.get(app.players.local_owner).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Main), "Options close command reactivates Main");
+    main_assert_eq!(app.ingame_menus.players.get(app.players.local_owner).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Main), "Options close command reactivates Main");
     main_assert_eq!(commands.take_submitted_local() => vec![(app.players.local_owner, ControlEvent::ClearPressed, tick)]);
 
     app.test_cursor(close_point(&app));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.ingame_menu.contains(app.players.local_owner));
+    main_assert!(app.ingame_menus.players.contains(app.players.local_owner));
     main_assert!(commands.take_submitted_local().is_empty());
     app.test_left_button(ElementState::Released);
-    main_assert!(!app.ingame_menu.contains(app.players.local_owner), "Main has no close action and remains closed");
+    main_assert!(!app.ingame_menus.players.contains(app.players.local_owner), "Main has no close action and remains closed");
     main_assert_eq!(commands.take_submitted_local() => vec![(app.players.local_owner, ControlEvent::ClearPressed, tick)]);
 }
 
@@ -1275,16 +1275,16 @@ fn player_menu_title_close_survives_disable_mouse_player_assignment() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     main_assert!(app
-        .ingame_menu_gfx
+        .ingame_menus.graphics
         .as_ref()
         .is_some_and(|gfx| gfx.show_close_button));
 
     let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
-    let presentation = app.ingame_menu.get(owner).test_value().presentation_layout(
+    let presentation = app.ingame_menus.players.get(owner).test_value().presentation_layout(
         area,
         &font,
-        app.ingame_menu_gfx.as_ref().test_value(),
+        app.ingame_menus.graphics.as_ref().test_value(),
     );
     let close = presentation.close_button.test_value();
     main_assert_eq!((close.width, close.height) => (16, 16));
@@ -1309,7 +1309,7 @@ fn construction_menu_drag_uses_five_pixel_gate_and_focus_loss_clears_capture() {
         f64::from(menu_point.x + 4.0),
         f64::from(menu_point.y),
     ));
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Candidate { .. })));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Candidate { .. })));
     app.test_cursor(PhysicalPosition::new(
         f64::from(menu_point.x + MENU_DRAG_THRESHOLD),
         f64::from(menu_point.y),
@@ -1320,7 +1320,7 @@ fn construction_menu_drag_uses_five_pixel_gate_and_focus_loss_clears_capture() {
     main_assert!(app.ingame_custom_cursor_active());
 
     app.handle_focus_lost().test_value();
-    main_assert!(app.construction_menu_drag.is_none());
+    main_assert!(app.ingame_menus.construction_drag.is_none());
     main_assert!(!app.ingame_custom_cursor_active());
 }
 
@@ -1343,7 +1343,7 @@ fn subthreshold_constructable_menu_click_still_enters_item() {
     main_assert_eq!(controls => vec![(owner, ControlEvent::RawPlayerControl {command: clonk_engine::COM_MENU_ENTER, data: 0,}, tick,)]);
     main_assert!(commands.is_empty());
     main_assert!(selections.is_empty());
-    main_assert!(app.construction_menu_drag.is_none());
+    main_assert!(app.ingame_menus.construction_drag.is_none());
 }
 
 #[test]
@@ -1355,19 +1355,19 @@ fn invalid_construction_menu_drop_sends_nothing_and_clears_drag() {
     app.network = Some(manager);
 
     begin_construction_drag(&mut app, menu_point, valid_point);
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
     app.test_cursor(PhysicalPosition::new(
         f64::from(invalid_point.x),
         f64::from(invalid_point.y),
     ));
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: false,..})));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: false,..})));
 
     app.test_left_button(ElementState::Released);
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     main_assert!(controls.is_empty());
     main_assert!(commands.is_empty());
     main_assert!(selections.is_empty());
-    main_assert!(app.construction_menu_drag.is_none());
+    main_assert!(app.ingame_menus.construction_drag.is_none());
 }
 
 #[test]
@@ -1375,13 +1375,13 @@ fn construction_menu_drag_refreshes_site_check_without_pointer_motion() {
     let (mut app, _owner, menu_point, valid_point, _invalid, _world, _c4id) =
         construction_drag_fixture();
     begin_construction_drag(&mut app, menu_point, valid_point);
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
 
     let mut filled = Landscape::flat(480, 0);
     filled.set_world_height(220);
     app.engine.set_landscape(filled);
     app.test_update();
-    main_assert!(matches!(app.construction_menu_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: false,..})));
+    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: false,..})));
 }
 
 #[test]
@@ -1389,7 +1389,7 @@ fn construction_menu_drag_reprojects_stationary_pointer_after_camera_motion() {
     let (mut app, owner, menu_point, valid_point, _invalid, _world, raw_c4id) =
         construction_drag_fixture();
     begin_construction_drag(&mut app, menu_point, valid_point);
-    let before = match app.construction_menu_drag.as_ref() {
+    let before = match app.ingame_menus.construction_drag.as_ref() {
         Some(ConstructionMenuDrag::Active {
             pointer: Some(pointer),
             ..
@@ -1398,7 +1398,7 @@ fn construction_menu_drag_reprojects_stationary_pointer_after_camera_motion() {
     };
     let retained = app.live_input.ingame_viewport_mouse.test_value();
     main_assert!(matches!(
-        app.construction_menu_drag.as_ref(),
+        app.ingame_menus.construction_drag.as_ref(),
         Some(ConstructionMenuDrag::Active {
             viewport_index: Some(index),
             ..
@@ -1435,7 +1435,7 @@ fn construction_menu_drag_reprojects_stationary_pointer_after_camera_motion() {
 
     app.refresh_construction_menu_drag();
     main_assert!(matches!(
-        app.construction_menu_drag.as_ref(),
+        app.ingame_menus.construction_drag.as_ref(),
         Some(ConstructionMenuDrag::Active {
             pointer: Some(pointer),
             site_valid: true,
@@ -1782,7 +1782,7 @@ fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
     app.test_render(&mut with_menu);
     main_assert_ne!(with_menu => baseline);
     let initial_location = app
-        .script_menu_presentations
+        .ingame_menus.script_presentations
         .get(&owner)
         .and_then(|state| state.location)
         .test_value();
@@ -1797,7 +1797,7 @@ fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
     app.refresh_focus();
     app.test_render(&mut with_menu);
     main_assert_eq!(
-        app.script_menu_presentations
+        app.ingame_menus.script_presentations
             .get(&owner)
             .and_then(|state| state.location) =>
         Some(initial_location),
@@ -2030,7 +2030,7 @@ fn script_menu_pre_first_draw_discards_explicit_rows() {
     main_assert_eq!(layout.client.height => derived_layout.client.height);
     main_assert_eq!(layout.scrollbar => derived_layout.scrollbar);
     main_assert!(layout.item_rect(3).is_some());
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => None);
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => None);
 }
 
 #[test]
@@ -2067,7 +2067,7 @@ fn script_menu_explicit_rows_survive_stable_live_draws() {
     main_assert!(stable_layout.scrollbar.is_some());
     main_assert!(stable_layout.item_rect(0).is_none());
     main_assert!(stable_layout.item_rect(2).is_some());
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => Some(2));
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => Some(2));
 
     // Normal-menu shrink does not clear LocationSet, so the live explicit
     // row count remains even when the derived one-row item set would fit in a
@@ -2084,7 +2084,7 @@ fn script_menu_explicit_rows_survive_stable_live_draws() {
     main_assert_eq!(stable_shrink_layout.visible => 2);
     main_assert!(stable_shrink_layout.scrollbar.is_none());
     main_assert!(stable_shrink_layout.item_rect(0).is_some());
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => Some(2));
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => Some(2));
 }
 
 #[test]
@@ -2136,7 +2136,7 @@ fn script_menu_growth_refill_recomputes_explicit_rows_and_visible_grid() {
     main_assert_eq!(grown_layout.client.height => derived_layout.client.height);
     main_assert_eq!(grown_layout.scrollbar.is_some() => derived_layout.scrollbar.is_some());
     main_assert!(grown_layout.item_rect(3).is_some(), "selection remains visible");
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => None, "growth must invalidate the live explicit row count");
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => None, "growth must invalidate the live explicit row count");
 }
 
 #[test]
@@ -2181,7 +2181,7 @@ fn script_menu_pointer_hit_test_invalidates_growth_before_redraw() {
         3,
         "pointer hit-testing must observe refill invalidation before redraw"
     );
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => None, "pointer input must not retain the stale explicit row count");
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => None, "pointer input must not retain the stale explicit row count");
 }
 
 #[test]
@@ -2195,13 +2195,13 @@ fn script_menu_live_add_item_preserves_explicit_rows() {
     explicit_menu.lines = 1;
     install_test_cursor_menu(&mut app, cursor, explicit_menu.clone());
     app.test_render(&mut frame);
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => Some(1));
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => Some(1));
 
     explicit_menu.items.push(explicit_menu.items[0].clone());
     explicit_menu.selection = 0;
     install_test_cursor_menu(&mut app, cursor, explicit_menu);
     app.test_render(&mut frame);
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => Some(1), "ordinary AddMenuItem growth must not mimic native refill invalidation");
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => Some(1), "ordinary AddMenuItem growth must not mimic native refill invalidation");
 }
 
 #[test]
@@ -2215,14 +2215,14 @@ fn script_menu_viewport_reset_does_not_restore_same_frame_set_size() {
     explicit_menu.lines = 1;
     install_test_cursor_menu(&mut app, cursor, explicit_menu.clone());
     app.test_render(&mut frame);
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => Some(1));
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => Some(1));
 
     app.resize(320, 200).test_value();
     explicit_menu.lines = 2;
     install_test_cursor_menu(&mut app, cursor, explicit_menu);
     let mut resized_frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut resized_frame);
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => None, "viewport reset must dominate a same-frame SetMenuSize");
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => None, "viewport reset must dominate a same-frame SetMenuSize");
 }
 
 #[test]
@@ -2276,7 +2276,7 @@ fn context_menu_shrink_refill_recomputes_explicit_rows_and_scrollbar() {
     main_assert_eq!(shrunk_layout.client.height => derived_layout.client.height);
     main_assert_eq!(shrunk_layout.scrollbar => derived_layout.scrollbar);
     main_assert!(shrunk_layout.item_rect(1).is_some());
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => None, "a Context shrink must invalidate the live explicit row count");
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => None, "a Context shrink must invalidate the live explicit row count");
 }
 
 #[test]
@@ -2318,7 +2318,7 @@ fn script_menu_viewport_resize_recomputes_explicit_rows_and_hit_regions() {
     main_assert_eq!(resized_layout.client.height => derived_layout.client.height);
     main_assert_eq!(resized_layout.scrollbar => derived_layout.scrollbar);
     main_assert!(resized_layout.item_rect(0).is_some());
-    main_assert_eq!(app.script_menu_presentations[&owner].explicit_lines => None, "viewport reset must discard the old live row count");
+    main_assert_eq!(app.ingame_menus.script_presentations[&owner].explicit_lines => None, "viewport reset must discard the old live row count");
 }
 
 #[test]
@@ -2349,7 +2349,7 @@ fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
         .1
         .selection;
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(app.script_menu_presentations.get(&owner).expect("script presentation").scroll_y => 60);
+    main_assert_eq!(app.ingame_menus.script_presentations.get(&owner).expect("script presentation").scroll_y => 60);
     main_assert_eq!(
         app.engine
             .cursor_object_menu(owner)
@@ -2362,7 +2362,7 @@ fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
     main_assert!(commands.take_submitted_local().is_empty());
     app.test_render(&mut frame);
     main_assert_eq!(
-        app.script_menu_presentations
+        app.ingame_menus.script_presentations
             .get(&owner)
             .expect("script presentation")
             .scroll_y =>
@@ -2381,20 +2381,20 @@ fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
         f64::from(title_point.y),
     ));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(app.script_menu_presentations.get(&owner).expect("script presentation").scroll_y => 60, "only the ScrollWindow client scrolls");
+    main_assert_eq!(app.ingame_menus.script_presentations.get(&owner).expect("script presentation").scroll_y => 60, "only the ScrollWindow client scrolls");
     main_assert!(commands.take_submitted_local().is_empty());
 
     app.engine
         .apply_object_update(cursor, menus2_fixture!(object_update: Some(None)))
         .test_value();
-    app.script_menu_presentations.remove(&owner);
+    app.ingame_menus.script_presentations.remove(&owner);
     let players = (0..12)
         .map(|index| NewPlayerEntry {
             file: format!("Player{index}.c4p"),
             name: format!("Player {index}"),
         })
         .collect::<Vec<_>>();
-    app.ingame_menu.replace(
+    app.ingame_menus.players.replace(
         owner,
         Some(IngameMenuState::new_player_menu(
             &players,
@@ -2406,24 +2406,24 @@ fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
     menus2_fixture!(hud_font: app, fallback, font);
     let gfx = menus2_fixture!(ingame_graphics: app.rendering.display_flags.show_commands);
     let bounds = app
-        .ingame_menu
+        .ingame_menus.players
         .get(owner)
         .test_value()
         .bounds(area, &font, &gfx);
     let player_client = GuiPoint::new((bounds.x + 6) as f32, (bounds.y + 30) as f32);
-    main_assert!(app.ingame_menu.get(owner).expect("player menu").client_contains(area, &font, &gfx, player_client));
+    main_assert!(app.ingame_menus.players.get(owner).expect("player menu").client_contains(area, &font, &gfx, player_client));
     app.test_cursor(PhysicalPosition::new(
         f64::from(player_client.x),
         f64::from(player_client.y),
     ));
-    let selection = app.ingame_menu.get(owner).test_value().selection();
+    let selection = app.ingame_menus.players.get(owner).test_value().selection();
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    let player_menu = app.ingame_menu.get(owner).test_value();
+    let player_menu = app.ingame_menus.players.get(owner).test_value();
     main_assert_eq!(player_menu.scroll_y() => 60);
     main_assert_eq!(player_menu.selection() => selection);
     main_assert!(commands.take_submitted_local().is_empty());
     app.test_render(&mut frame);
-    main_assert_eq!(app.ingame_menu.get(owner).unwrap().scroll_y() => 60);
+    main_assert_eq!(app.ingame_menus.players.get(owner).unwrap().scroll_y() => 60);
 }
 
 #[test]
@@ -2485,8 +2485,8 @@ fn script_menu_scroll_and_drag_state_is_per_viewport_owner() {
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    main_assert!(app.script_menu_presentations.contains_key(&primary));
-    main_assert!(app.script_menu_presentations.contains_key(&secondary));
+    main_assert!(app.ingame_menus.script_presentations.contains_key(&primary));
+    main_assert!(app.ingame_menus.script_presentations.contains_key(&secondary));
 
     let (_, secondary_layout) = app
         .script_menu_layout_for_owner(secondary, false)
@@ -2499,11 +2499,11 @@ fn script_menu_scroll_and_drag_state_is_per_viewport_owner() {
     );
     app.test_cursor(client);
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(app.script_menu_presentations[&primary].scroll_y => 0);
-    main_assert_eq!(app.script_menu_presentations[&secondary].scroll_y => 60);
+    main_assert_eq!(app.ingame_menus.script_presentations[&primary].scroll_y => 0);
+    main_assert_eq!(app.ingame_menus.script_presentations[&secondary].scroll_y => 60);
     app.test_render(&mut frame);
-    main_assert_eq!(app.script_menu_presentations[&primary].scroll_y => 0);
-    main_assert_eq!(app.script_menu_presentations[&secondary].scroll_y => 60);
+    main_assert_eq!(app.ingame_menus.script_presentations[&primary].scroll_y => 0);
+    main_assert_eq!(app.ingame_menus.script_presentations[&secondary].scroll_y => 60);
 
     let (_, geometry) = app
         .script_menu_geometry_for_owner(secondary)
@@ -2516,8 +2516,8 @@ fn script_menu_scroll_and_drag_state_is_per_viewport_owner() {
     let destination = PhysicalPosition::new(start.x + 11.0, start.y + 7.0);
     app.test_cursor(destination);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.script_menu_presentations[&primary].location => None);
-    main_assert_eq!(app.script_menu_presentations[&secondary].location => Some((geometry.bounds.x + 11, geometry.bounds.y + 7)),);
+    main_assert_eq!(app.ingame_menus.script_presentations[&primary].location => None);
+    main_assert_eq!(app.ingame_menus.script_presentations[&secondary].location => Some((geometry.bounds.x + 11, geometry.bounds.y + 7)),);
 }
 
 #[test]
@@ -2639,7 +2639,7 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
         main_assert_eq!(sound_menu.page() => page);
 
         default_app
-            .ingame_menu
+            .ingame_menus.players
             .replace(default_app.players.local_owner, Some(default_menu));
         prime_music_toggle_off(&mut default_app, &default_music);
         default_app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
@@ -2649,28 +2649,28 @@ fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
             .render(&mut frame)
             .unwrap_or_else(|error| panic!("render flash over {page:?}: {error:#}"));
         main_assert_eq!(default_app.runtime_flash_message.as_ref().expect("music text lasts more than one draw").remaining_draws => draws_before - 1, "page {page:?}");
-        main_assert_eq!(default_app.ingame_menu.as_ref().map(IngameMenuState::page) => Some(page));
+        main_assert_eq!(default_app.ingame_menus.players.as_ref().map(IngameMenuState::page) => Some(page));
         default_app.test_key(VirtualKeyCode::F3, ElementState::Released);
 
         rebound_app
-            .ingame_menu
+            .ingame_menus.players
             .replace(rebound_app.players.local_owner, Some(rebound_menu));
         rebound_app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
         main_assert!(rebound_app.runtime_flash_message.is_none(), "page {page:?}");
-        main_assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
+        main_assert!(rebound_app.ingame_menus.players.is_some(), "page {page:?}");
         rebound_app.test_key(VirtualKeyCode::F3, ElementState::Released);
         main_assert!(!rebound_app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F3));
         main_assert_eq!(rebound_app.engine.player(rebound_app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
 
         sound_app
-            .ingame_menu
+            .ingame_menus.players
             .replace(sound_app.players.local_owner, Some(sound_menu));
         let sound_before = sound_app.test_audio_ref().options.sound_enabled;
         sound_app.test_modifiers(ModifiersState::CONTROL);
         sound_app.test_key(VirtualKeyCode::F3, ElementState::Pressed);
         main_assert_eq!(sound_app.test_audio_ref().options.sound_enabled => !sound_before, "page {page:?}");
         main_assert!(sound_app.runtime_flash_message.is_none(), "page {page:?}");
-        main_assert!(sound_app.ingame_menu.is_some(), "page {page:?}");
+        main_assert!(sound_app.ingame_menus.players.is_some(), "page {page:?}");
         sound_app.test_key(VirtualKeyCode::F3, ElementState::Released);
         sound_app.test_modifiers(ModifiersState::empty());
     }
@@ -2900,22 +2900,22 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         main_assert_eq!(rebound_menu.page() => page);
 
         default_app
-            .ingame_menu
+            .ingame_menus.players
             .replace(default_app.players.local_owner, Some(default_menu));
         default_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
         main_assert!(default_app.dialogs.help_visible, "page {page:?}");
-        main_assert_eq!(default_app.ingame_menu.as_ref().map(IngameMenuState::page) => Some(page));
+        main_assert_eq!(default_app.ingame_menus.players.as_ref().map(IngameMenuState::page) => Some(page));
         default_app.test_key(VirtualKeyCode::F1, ElementState::Released);
         default_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
         default_app.test_key(VirtualKeyCode::F1, ElementState::Released);
         main_assert!(!default_app.dialogs.help_visible, "page {page:?}");
 
         rebound_app
-            .ingame_menu
+            .ingame_menus.players
             .replace(rebound_app.players.local_owner, Some(rebound_menu));
         rebound_app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
         main_assert!(!rebound_app.dialogs.help_visible, "page {page:?}");
-        main_assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
+        main_assert!(rebound_app.ingame_menus.players.is_some(), "page {page:?}");
         rebound_app.test_key(VirtualKeyCode::F1, ElementState::Released);
         main_assert!(!rebound_app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::F1));
         main_assert_eq!(rebound_app.engine.player(rebound_app.players.local_owner).expect("local player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
@@ -2928,7 +2928,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .remove_player(observer.players.local_owner)
         .test_value();
     observer.snapshot = observer.engine.snapshot();
-    observer.ingame_menu.replace(
+    observer.ingame_menus.players.replace(
         observer.players.local_owner,
         IngameMenuState::main_menu(
             &MainMenuConditions {
@@ -2944,7 +2944,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     observer.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     main_assert!(observer.dialogs.help_visible);
-    main_assert!(observer.ingame_menu.is_some());
+    main_assert!(observer.ingame_menus.players.is_some());
 
     let mut object = new_running_sandbox_app();
     main_assert!(object.open_object_menu().expect("open object menu"));
@@ -2958,7 +2958,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .control_style = true;
     object.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     main_assert!(!object.dialogs.help_visible);
-    main_assert!(object.object_menu.is_some());
+    main_assert!(object.ingame_menus.object.is_some());
 
     let mut message = new_running_sandbox_app();
     message
@@ -3164,7 +3164,7 @@ fn runtime_f4_gamepad_high_requires_active_dialog_and_other_input_reaches_gamepl
         ),
     ]);
     main_assert!(active.dialogs.client_list.is_none());
-    main_assert!(active.ingame_menu.is_none());
+    main_assert!(active.ingame_menus.players.is_none());
     main_assert!(commands.take_submitted_local().is_empty());
 
     let mut inactive = new_running_sandbox_app();
@@ -3255,7 +3255,7 @@ fn window_close_confirms_running_round_and_nonrunning_close_exits() {
     loading.mode = AppMode::Loading;
     loading.handle_window_close_requested();
     main_assert!(loading.take_exit_request());
-    main_assert!(loading.ingame_menu.is_none());
+    main_assert!(loading.ingame_menus.players.is_none());
     main_assert!(loading.dialogs.messages.is_empty());
 }
 
@@ -3272,7 +3272,7 @@ fn window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
 
     observer.handle_window_close_requested();
     observer.handle_window_close_requested();
-    main_assert!(observer.ingame_menu.is_none());
+    main_assert!(observer.ingame_menus.players.is_none());
     main_assert_eq!(observer.dialogs.messages.len() => 1);
     main_assert!(matches!(observer.dialogs.messages[0].continuation, MessageDialogContinuation::AbortGame { .. }));
     main_assert!(!observer.take_exit_request());
@@ -3280,7 +3280,7 @@ fn window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
     let mut game_over = new_game_over_keyboard_app();
     game_over.handle_window_close_requested();
     main_assert!(game_over.game_over_dialog.is_some());
-    main_assert!(game_over.ingame_menu.is_none());
+    main_assert!(game_over.ingame_menus.players.is_none());
     main_assert!(game_over.dialogs.messages.is_empty());
     main_assert!(!game_over.take_exit_request());
 }
@@ -3293,7 +3293,7 @@ fn bare_escape_opens_abort_confirmation_without_exiting() {
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
-    main_assert!(app.object_menu.is_none());
+    main_assert!(app.ingame_menus.object.is_none());
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(!app.take_exit_request());
     main_assert!(app.status_text.is_empty());

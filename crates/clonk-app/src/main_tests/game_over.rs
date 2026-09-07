@@ -2202,7 +2202,7 @@ fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
     check(message, "running message");
 
     let mut menu = new_running_sandbox_app();
-    menu.ingame_menu.replace(
+    menu.ingame_menus.players.replace(
         menu.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
@@ -2574,7 +2574,7 @@ fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
     main_assert_ne!(app.engine.player(app.players.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     main_assert!(app.game_over_dialog.is_some());
     main_assert!(app.chat.running.is_some());
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
 }
 
 #[test]
@@ -2626,7 +2626,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         .expect("second keyboard callback")]
     );
 
-    app.ingame_menu.replace(
+    app.ingame_menus.players.replace(
         OWNER_NONE,
         IngameMenuState::main_menu(
             &MainMenuConditions {
@@ -2637,10 +2637,10 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
             &IngameMenuLabels::default(),
         ),
     );
-    let before = app.ingame_menu.get(OWNER_NONE).test_value().selection();
+    let before = app.ingame_menus.players.get(OWNER_NONE).test_value().selection();
     main_assert!(app.handle_runtime_fullscreen_menu_key(VirtualKeyCode::KeyJ, ElementState::Pressed,).expect("custom ownerless menu callback"));
-    main_assert_ne!(app.ingame_menu.get(OWNER_NONE).expect("ownerless menu remains").selection() => before);
-    app.ingame_menu.clear();
+    main_assert_ne!(app.ingame_menus.players.get(OWNER_NONE).expect("ownerless menu remains").selection() => before);
+    app.ingame_menus.players.clear();
 
     app.test_key(VirtualKeyCode::KeyB, ElementState::Pressed);
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
@@ -4499,7 +4499,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-        main_assert!(app.ingame_menu.is_none());
+        main_assert!(app.ingame_menus.players.is_none());
         main_assert!(app.dialogs.messages.is_empty());
         main_assert!(!app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
         main_assert!(app.dialogs.scoreboard.is_none());
@@ -4676,7 +4676,7 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
     rebound_context.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     rebound_context.test_key(VirtualKeyCode::Tab, ElementState::Released);
     main_assert!(rebound_context.context_menus.open.is_some());
-    main_assert!(rebound_context.ingame_menu.is_some());
+    main_assert!(rebound_context.ingame_menus.players.is_some());
 
     let mut game_over_context = new_classic_scoreboard_test_app(BOARD);
     game_over_context.handle_game_over().test_value();
@@ -4699,13 +4699,13 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
     let mut object = new_scoreboard_test_app(BOARD);
     main_assert!(object.open_object_menu().expect("open object menu"));
     toggle_scoreboard(&mut object, ModifiersState::empty());
-    main_assert!(object.object_menu.is_some());
+    main_assert!(object.ingame_menus.object.is_some());
     main_assert!(object.dialogs.scoreboard.is_some());
 
     let mut player = new_scoreboard_test_app(BOARD);
     player.open_ingame_menu().test_value();
     toggle_scoreboard(&mut player, ModifiersState::empty());
-    main_assert!(player.ingame_menu.is_some());
+    main_assert!(player.ingame_menus.players.is_some());
     main_assert!(player.dialogs.scoreboard.is_some());
 }
 
@@ -5075,7 +5075,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     call_scoreboard_function_and_update(&mut app, "ShowAndEnd");
     main_assert!(app.game_over_dialog.is_some());
     main_assert!(app.dialogs.scoreboard.is_none());
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
     main_assert_eq!(
         app.engine
             .player(app.players.local_owner)
@@ -5106,7 +5106,7 @@ fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
     main_assert!(object_menu.open_object_menu().expect("open object menu"));
     call_scoreboard_function_and_update(&mut object_menu, "ShowAndEnd");
     main_assert!(object_menu.game_over_dialog.is_some());
-    main_assert!(object_menu.object_menu.is_some(), "C4Player::CloseMenu does not discard synchronized object menus",);
+    main_assert!(object_menu.ingame_menus.object.is_some(), "C4Player::CloseMenu does not discard synchronized object menus",);
 }
 
 #[test]
@@ -5652,7 +5652,7 @@ fn game_over_raw_high_ends_and_consumes_aliases_after_dialog_close() {
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.game_over_dialog.is_none());
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
     main_assert!(app.status_text.is_empty());
     main_assert!(!app.exit_requested, "the paired MenuToggle alias must not reach the exposed main menu");
     assert_game_over_fixture_has_no_sound_activity(&app);
@@ -6163,7 +6163,7 @@ fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
     ingame.open_ingame_menu().test_value();
     ingame.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     main_assert!(ingame.dialogs.client_list.is_some());
-    main_assert!(ingame.ingame_menu.is_some());
+    main_assert!(ingame.ingame_menus.players.is_some());
 }
 
 #[test]
@@ -6209,7 +6209,7 @@ fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
     ingame.open_ingame_menu().test_value();
     ingame.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     main_assert_ne!(ingame.offline_halt_count => 0);
-    main_assert!(ingame.ingame_menu.is_some());
+    main_assert!(ingame.ingame_menus.players.is_some());
 }
 
 #[test]
@@ -6258,7 +6258,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
         &mut declined,
         clonk_frontend::message_dialog::MessageDialogResult::No,
     );
-    main_assert!(declined.ingame_menu.is_none());
+    main_assert!(declined.ingame_menus.players.is_none());
     main_assert!(declined.dialogs.messages.is_empty());
     main_assert!(matches!(declined.mode, AppMode::Running));
     main_assert_eq!(declined.active_scenario.as_ref().map(|active| active.identifier.as_str()) => Some(declined_scenario.as_str()));
@@ -6272,7 +6272,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
     );
     main_assert!(matches!(confirmed.mode, AppMode::Menu));
     main_assert!(confirmed.active_scenario.is_none());
-    main_assert!(confirmed.ingame_menu.is_none());
+    main_assert!(confirmed.ingame_menus.players.is_none());
 
     let mut restarted = new_running_sandbox_app();
     restarted.test_update();
@@ -6286,7 +6286,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
     wait_for_running(&mut restarted);
     main_assert_eq!(restarted.active_scenario.as_ref().map(|active| active.identifier.as_str()) => Some(scenario.as_str()));
     main_assert_eq!(restarted.engine.frame() => 0);
-    main_assert!(restarted.ingame_menu.is_none());
+    main_assert!(restarted.ingame_menus.players.is_none());
     main_assert!(restarted.dialogs.messages.is_empty());
 }
 
@@ -6337,8 +6337,8 @@ fn modified_escape_does_not_match_the_abort_binding() {
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-        main_assert!(app.ingame_menu.is_none());
-        main_assert!(app.object_menu.is_none());
+        main_assert!(app.ingame_menus.players.is_none());
+        main_assert!(app.ingame_menus.object.is_none());
         main_assert!(app.status_text.is_empty());
     }
     app.test_modifiers(ModifiersState::SUPER);

@@ -2372,7 +2372,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     ]));
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(app.definition_selector.is_none());
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
 
     // Pin the async handoff, rooted precedence, restart, and exact save/load.
     app.return_to_menu();
@@ -5281,7 +5281,7 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
         .test_value();
     let outcome = {
-        let menu = app.ingame_menu.get_mut(owner).test_value();
+        let menu = app.ingame_menus.players.get_mut(owner).test_value();
         menu.set_selection(1);
         menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
             .test_value()
@@ -5292,14 +5292,14 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
         .test_value();
     main_assert!(commands.take_submitted_internal_player_scripts().is_empty());
     main_assert_eq!(app.engine.player(owner).and_then(clonk_engine::Player::team) => Some(1));
-    main_assert!(app.ingame_menu.get(owner).is_none());
+    main_assert!(app.ingame_menus.players.get(owner).is_none());
 
     teams.allow_team_switch = true;
     app.engine.set_team_configuration(teams);
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
         .test_value();
     let outcome = {
-        let menu = app.ingame_menu.get_mut(owner).test_value();
+        let menu = app.ingame_menus.players.get_mut(owner).test_value();
         menu.set_selection(1);
         menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
             .test_value()
@@ -5383,7 +5383,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 
     app.apply_ingame_menu_action(MenuAction::ActivateHostility)
         .test_value();
-    let menu = app.ingame_menu.get(owner).test_value();
+    let menu = app.ingame_menus.players.get(owner).test_value();
     main_assert_eq!(menu.page() => ingame_menu::MenuPage::Hostility);
     main_assert_eq!(menu.caption() => "Don't attack Ada");
     main_assert!(menu.is_permanent());
@@ -5397,7 +5397,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 
     let tick = app.local_control_submission_tick();
     let outcome = {
-        let menu = app.ingame_menu.get_mut(owner).test_value();
+        let menu = app.ingame_menus.players.get_mut(owner).test_value();
         menu.set_selection(0);
         menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
             .test_value()
@@ -5418,7 +5418,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
         .player(owner)
         .expect("menu owner")
         .is_hostile_towards(ada));
-    main_assert_eq!(app.ingame_menu.get(owner).expect("permanent page").items()[0].caption => "Don't attack Ada");
+    main_assert_eq!(app.ingame_menus.players.get(owner).expect("permanent page").items()[0].caption => "Don't attack Ada");
 
     app.apply_ready_controls(tick, vec![NetworkControl::ToggleHostility(control)])
         .test_value();
@@ -5428,12 +5428,12 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
         .expect("menu owner")
         .is_hostile_towards(ada));
     main_assert_eq!(
-        app.ingame_menu.get(owner).expect("permanent page").items()[0].caption =>
+        app.ingame_menus.players.get(owner).expect("permanent page").items()[0].caption =>
         "Don't attack Ada",
         "native waits for C4Menu::Execute's Tick35 refill"
     );
     app.refresh_hostility_menus();
-    main_assert_eq!(app.ingame_menu.get(owner).expect("Tick35-refreshed page").items()[0].caption => "Attack Ada");
+    main_assert_eq!(app.ingame_menus.players.get(owner).expect("Tick35-refreshed page").items()[0].caption => "Attack Ada");
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(bot))
         .test_value();
@@ -5460,9 +5460,9 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
         .player(owner)
         .expect("menu owner")
         .is_hostile_towards(ada));
-    main_assert_eq!(app.ingame_menu.get(owner).expect("permanent page").items()[0].caption => "Attack Ada", "local execution also waits for the periodic refill");
+    main_assert_eq!(app.ingame_menus.players.get(owner).expect("permanent page").items()[0].caption => "Attack Ada", "local execution also waits for the periodic refill");
     app.refresh_hostility_menus();
-    main_assert_eq!(app.ingame_menu.get(owner).expect("locally refreshed page").items()[0].caption => "Don't attack Ada");
+    main_assert_eq!(app.ingame_menus.players.get(owner).expect("locally refreshed page").items()[0].caption => "Don't attack Ada");
 }
 
 #[test]

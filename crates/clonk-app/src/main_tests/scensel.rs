@@ -3545,7 +3545,7 @@ fn cache_definition_icons_distinguishes_blank_from_malformed_picture() {
     let blank_entry = scensel_fixture!(goal_rule: "BLNK".to_string(), "Blank rule".to_string());
     app.cache_definition_icons(std::slice::from_ref(&blank_entry))
         .test_value();
-    main_assert!(!app.ingame_menu_gfx.as_ref().expect("blank cache initializes menu graphics").definition_icons.contains_key("BLNK"));
+    main_assert!(!app.ingame_menus.graphics.as_ref().expect("blank cache initializes menu graphics").definition_icons.contains_key("BLNK"));
 
     let temp = tempdir();
     let valid_dir = temp.path().join("Valid.c4d");
@@ -3594,7 +3594,7 @@ fn cache_definition_icons_distinguishes_blank_from_malformed_picture() {
     };
     main_assert_eq!(detail => "classic in-game goal/rule symbol definition `BADG` is unavailable: unknown definition `BADG`; refusing a blank symbol substitute");
     main_assert!(
-        app.ingame_menu_gfx
+        app.ingame_menus.graphics
             .as_ref()
             .expect("menu graphics remain allocated")
             .definition_icons

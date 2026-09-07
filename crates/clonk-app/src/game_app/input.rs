@@ -3011,7 +3011,7 @@ impl GameApp {
         let fullscreen_menu_binding = self.game_over_dialog.is_none()
             && self.running_chat_controller().is_none()
             && if self.ingame_menu_belongs_to(OWNER_NONE)
-                || (ownerless_fullscreen && self.ingame_menu.is_some())
+                || (ownerless_fullscreen && self.ingame_menus.players.is_some())
             {
                 [
                     ("FullscreenMenuLeft", VirtualKeyCode::ArrowLeft),
@@ -3312,7 +3312,7 @@ impl GameApp {
             return Ok(false);
         }
         if state == ElementState::Pressed {
-            self.ingame_menu.replace(
+            self.ingame_menus.players.replace(
                 OWNER_NONE,
                 IngameMenuState::main_menu(
                     &self.main_menu_conditions_for(OWNER_NONE),
@@ -3780,7 +3780,7 @@ impl GameApp {
                 self.handle_menu_command_failsafe(OWNER_NONE, command, CommandKind::Press)?;
             }
             RuntimeCustomGamepadAction::MenuOpen => {
-                self.ingame_menu.replace(
+                self.ingame_menus.players.replace(
                     OWNER_NONE,
                     IngameMenuState::main_menu(
                         &self.main_menu_conditions_for(OWNER_NONE),
@@ -4964,7 +4964,7 @@ impl GameApp {
                     if state == ElementState::Released {
                         return Ok(());
                     }
-                    if self.object_menu.is_some() {
+                    if self.ingame_menus.object.is_some() {
                         self.close_object_menu();
                     } else if self.ingame_menu_belongs_to(self.players.local_owner) {
                         // Route through TryClose so submenus run their close
@@ -7319,7 +7319,7 @@ impl GameApp {
                 return Ok(());
             }
             if matches!(
-                self.construction_menu_drag,
+                self.ingame_menus.construction_drag,
                 Some(ConstructionMenuDrag::Candidate { .. })
             ) {
                 // CMouse retains the originating menu element as its drag
@@ -8414,7 +8414,7 @@ impl GameApp {
         } else {
             self.rendering.graphics.viewport_rect(player)?
         };
-        let menu = self.ingame_menu.get(player)?;
+        let menu = self.ingame_menus.players.get(player)?;
         let fallback = self.assets.font_arc();
         let font = clonk_frontend::hud::HudFont::from_set(
             self.assets.clonk_fonts.as_deref(),
@@ -8449,7 +8449,7 @@ impl GameApp {
             show_close_button: true,
             ..IngameMenuGraphics::default()
         };
-        let _ = self.ingame_menu.get(player).is_some_and(|menu| {
+        let _ = self.ingame_menus.players.get(player).is_some_and(|menu| {
             menu.client_contains(area, &font, &gfx, point)
                 && menu.scroll_by(amount, area, &font, &gfx)
         });
@@ -8462,7 +8462,7 @@ impl GameApp {
         };
         let mut preview_target = None;
         if let IngameMenuPointerTarget::Item(index) = target {
-            if let Some(menu) = self.ingame_menu.get_mut(player) {
+            if let Some(menu) = self.ingame_menus.players.get_mut(player) {
                 // C4MenuItem::MouseEnter directly selects the hovered item
                 // (C4Menu.cpp:239-244; C4MainMenu.cpp:299-303).
                 if menu.selection() != index {
@@ -8483,10 +8483,10 @@ impl GameApp {
         enter_all: bool,
     ) -> Result<bool, EngineError> {
         if !enter_all && button_state == ElementState::Pressed {
-            self.ingame_menu_close_pointer_capture = None;
+            self.ingame_menus.close_pointer_capture = None;
         }
         let close_capture = (!enter_all && button_state == ElementState::Released)
-            .then(|| self.ingame_menu_close_pointer_capture.take())
+            .then(|| self.ingame_menus.close_pointer_capture.take())
             .flatten();
         let Some(point) = self.live_input.ingame_gui_pointer else {
             return Ok(false);
@@ -8499,7 +8499,7 @@ impl GameApp {
             && button_state == ElementState::Pressed
             && target == IngameMenuPointerTarget::Close
         {
-            self.ingame_menu_close_pointer_capture = Some(player);
+            self.ingame_menus.close_pointer_capture = Some(player);
         }
         if !enter_all
             && button_state == ElementState::Pressed
@@ -8511,7 +8511,7 @@ impl GameApp {
             let outcome = match target {
                 IngameMenuPointerTarget::Item(_) if close_capture.is_some() => None,
                 IngameMenuPointerTarget::Item(index) => {
-                    self.ingame_menu.get_mut(player).and_then(|menu| {
+                    self.ingame_menus.players.get_mut(player).and_then(|menu| {
                         menu.set_selection(index);
                         menu.handle_command(
                             if enter_all {
@@ -8527,7 +8527,7 @@ impl GameApp {
                 // button-up; right-button input is consumed without closing
                 // (C4GuiDialogs.cpp:386-425; C4Gui.cpp:2029-2037).
                 IngameMenuPointerTarget::Close if !enter_all && close_capture == Some(player) => {
-                    self.ingame_menu.get_mut(player).and_then(|menu| {
+                    self.ingame_menus.players.get_mut(player).and_then(|menu| {
                         menu.handle_command(ControlCommand::MenuClose, CommandKind::Press)
                     })
                 }
@@ -9019,7 +9019,7 @@ impl GameApp {
         }
         let candidate_release = button_state == ElementState::Released
             && matches!(
-                self.construction_menu_drag.as_ref(),
+                self.ingame_menus.construction_drag.as_ref(),
                 Some(ConstructionMenuDrag::Candidate { .. })
             );
         // C4GraphicsSystem bypasses GUI mouse handling only for an active
@@ -9030,10 +9030,10 @@ impl GameApp {
             return self.on_ingame_mouse_up();
         }
         if button_state == ElementState::Pressed {
-            self.script_menu_close_pointer_capture = None;
+            self.ingame_menus.script_close_pointer_capture = None;
         }
         let script_close_capture = (button_state == ElementState::Released)
-            .then(|| self.script_menu_close_pointer_capture.take())
+            .then(|| self.ingame_menus.script_close_pointer_capture.take())
             .flatten();
         let script_menu_owner = self.local_controls.mouse_owner();
         let script_menu_target = if moving_drag || self.live_input.ingame_mouse_help {
@@ -9076,7 +9076,8 @@ impl GameApp {
                     EngineScriptMenuPointerTarget::Close => {
                         if let Some(owner) = script_menu_owner {
                             if let Some((target, _)) = self.engine.cursor_object_menu(owner) {
-                                self.script_menu_close_pointer_capture = Some((owner, target));
+                                self.ingame_menus.script_close_pointer_capture =
+                                    Some((owner, target));
                             }
                         }
                     }
@@ -10277,7 +10278,8 @@ impl GameApp {
             Default::default()
         };
         let presentation = self
-            .script_menu_presentations
+            .ingame_menus
+            .script_presentations
             .get(&owner)
             .filter(|state| same_script_menu_presentation(state, target, menu));
         let location = presentation
@@ -10339,7 +10341,8 @@ impl GameApp {
             return Ok(false);
         }
         let adjust_selection = self
-            .script_menu_presentations
+            .ingame_menus
+            .script_presentations
             .get(&owner)
             .is_none_or(|state| state.selection_needs_adjustment);
         let Some((target, layout)) = self.script_menu_layout_for_owner(owner, adjust_selection)?
@@ -10358,7 +10361,8 @@ impl GameApp {
             && point.x < (layout.client.x + layout.client.width as i32) as f32
             && point.y < (layout.client.y + layout.client.height as i32) as f32;
         if let Some(state) = self
-            .script_menu_presentations
+            .ingame_menus
+            .script_presentations
             .get_mut(&owner)
             .filter(|state| state.key.target == target)
         {
@@ -10419,7 +10423,7 @@ impl GameApp {
 
     pub(crate) fn cancel_ingame_mouse_gestures(&mut self) {
         self.clear_ingame_world_mouse_gestures();
-        self.construction_menu_drag = None;
+        self.ingame_menus.construction_drag = None;
     }
 
     fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
@@ -12775,7 +12779,7 @@ impl GameApp {
                 }
             },
             AppMode::Running => {
-                self.construction_menu_drag = None;
+                self.ingame_menus.construction_drag = None;
                 if let Some(dialog) = self.dialogs.client_list.as_mut() {
                     dialog.pointer_left();
                 }

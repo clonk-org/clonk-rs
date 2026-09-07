@@ -3049,12 +3049,8 @@ impl GameApp {
             },
             last_startup_dialog: StartupDialog::MainMenu,
             scenario_game_options,
-            object_menu: None,
-            ingame_menu: PlayerIngameMenus::default(),
-            ingame_menu_gfx: None,
             runtime_player_big_icons: HashMap::new(),
             runtime_player_big_icon_misses: HashSet::new(),
-            script_menu_presentations: BTreeMap::new(),
             white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
             mouse_control: true,
@@ -3255,8 +3251,6 @@ impl GameApp {
             free_view_scroll_momentum: FreeViewScrollMomentum::default(),
             // C4MouseControl::Default starts with fMouseOwned set even while
             // the control itself is inactive outside a running game.
-            ingame_menu_close_pointer_capture: None,
-            script_menu_close_pointer_capture: None,
             dialogs: RuntimeDialogState {
                 menu_title_drag: None,
                 help_visible: false,
@@ -3279,7 +3273,6 @@ impl GameApp {
             ingame_mouse_help_caption: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
-            construction_menu_drag: None,
             ingame_dragged_objects: Vec::new(),
             ingame_last_left_down: None,
             ingame_ignore_left_up: false,
@@ -3314,6 +3307,15 @@ impl GameApp {
                 pointer_dismissed_lobby_team_player: None,
                 pointer_dismissed_lobby_option: None,
                 pointer_capture: None,
+            },
+            ingame_menus: IngameMenus {
+                object: None,
+                players: PlayerIngameMenus::default(),
+                graphics: None,
+                script_presentations: BTreeMap::new(),
+                close_pointer_capture: None,
+                script_close_pointer_capture: None,
+                construction_drag: None,
             },
             message_dialog_consumed_keys: HashSet::new(),
             league_signup_consumed_keys: HashSet::new(),
@@ -3732,15 +3734,15 @@ impl GameApp {
         self.game_option_input_last_click = None;
         self.game_option_pointer_capture = false;
         self.live_input.running_pointer = None;
-        self.ingame_menu_close_pointer_capture = None;
-        self.script_menu_close_pointer_capture = None;
+        self.ingame_menus.close_pointer_capture = None;
+        self.ingame_menus.script_close_pointer_capture = None;
         self.scoreboard_pointer_left();
         self.cancel_network_chart_pointer_capture();
         self.dialogs.menu_title_drag = None;
-        for menu in self.ingame_menu.by_player.values_mut() {
+        for menu in self.ingame_menus.players.by_player.values_mut() {
             menu.reset_location();
         }
-        for state in self.script_menu_presentations.values_mut() {
+        for state in self.ingame_menus.script_presentations.values_mut() {
             reset_script_menu_presentation_location(state);
         }
         let cursor_atlas = self.current_cursor_atlas();
@@ -4658,8 +4660,8 @@ impl GameApp {
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
         self.live_input.primary_left_down = false;
-        self.ingame_menu_close_pointer_capture = None;
-        self.script_menu_close_pointer_capture = None;
+        self.ingame_menus.close_pointer_capture = None;
+        self.ingame_menus.script_close_pointer_capture = None;
         self.dialogs.menu_title_drag = None;
         // No native backend clears player controls on focus loss: Win32
         // deactivation only minimizes a fullscreen window
@@ -4719,7 +4721,7 @@ impl GameApp {
         self.pointer_left_unchecked();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
-        self.construction_menu_drag = None;
+        self.ingame_menus.construction_drag = None;
         self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
@@ -4765,7 +4767,7 @@ impl GameApp {
                 }
             }
             if self.ingame_menu_belongs_to(owner)
-                || (owner == self.players.local_owner && self.object_menu.is_some())
+                || (owner == self.players.local_owner && self.ingame_menus.object.is_some())
             {
                 return Ok(());
             }
@@ -4893,7 +4895,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let Some(crew) = self.snapshot.object(selection.crew_id).cloned() else {
             self.status_text = "Crew no longer available".to_string();
-            self.object_menu = None;
+            self.ingame_menus.object = None;
             return Ok(());
         };
 
@@ -4945,13 +4947,13 @@ impl GameApp {
 
         let Some(_) = self.snapshot.object(selection.crew_id) else {
             self.status_text = "Crew no longer available".to_string();
-            self.object_menu = None;
+            self.ingame_menus.object = None;
             return Ok(());
         };
 
         if self.snapshot.object(container_id).is_none() {
             self.status_text = "Container no longer available".to_string();
-            self.object_menu = None;
+            self.ingame_menus.object = None;
             return Ok(());
         }
 
@@ -5867,7 +5869,8 @@ impl GameApp {
     }
 
     fn ingame_construction_drag_active(&self) -> bool {
-        self.construction_menu_drag
+        self.ingame_menus
+            .construction_drag
             .as_ref()
             .is_some_and(ConstructionMenuDrag::is_active)
     }
@@ -5895,7 +5898,7 @@ impl GameApp {
                 .network_start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
-            || self.object_menu.is_some()
+            || self.ingame_menus.object.is_some()
     }
 
     /// Refresh the camera fields after a player edge scroll without rebuilding
@@ -6221,7 +6224,7 @@ impl GameApp {
 
     fn ingame_command_region_hit(&self, owner: i32, point: GuiPoint) -> Option<(u8, String, Rect)> {
         if !self.rendering.display_flags.show_commands
-            || self.object_menu.is_some()
+            || self.ingame_menus.object.is_some()
             || self.engine.cursor_object_menu(owner).is_some()
         {
             return None;
@@ -8640,7 +8643,7 @@ impl GameApp {
             return;
         }
         if Arc::make_mut(&mut self.assets).apply_active_gui_sheet_overrides(overrides) {
-            self.ingame_menu_gfx = None;
+            self.ingame_menus.graphics = None;
         }
     }
 
@@ -8890,7 +8893,7 @@ impl GameApp {
         self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
-        self.construction_menu_drag = None;
+        self.ingame_menus.construction_drag = None;
         self.ingame_dragged_objects.clear();
         self.mouse_control_allowed = true;
         self.mouse_control = true;
@@ -9299,7 +9302,7 @@ impl GameApp {
             .is_none()
             .then(|| std::mem::take(&mut self.control_player_infos));
         self.rendering.active_game_graphics = loaded_game_graphics;
-        self.ingame_menu_gfx = None;
+        self.ingame_menus.graphics = None;
         self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
         if let Some(player_infos) = offline_player_infos {
             self.control_player_infos = player_infos;
@@ -9379,7 +9382,7 @@ impl GameApp {
         self.live_input.ingame_mouse_target = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
-        self.construction_menu_drag = None;
+        self.ingame_menus.construction_drag = None;
         self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
@@ -9467,9 +9470,9 @@ impl GameApp {
             self.players.host_local_info_ids.clear();
         }
         self.menu_state.set_pointer_position(None);
-        self.object_menu = None;
-        self.ingame_menu.clear();
-        self.script_menu_presentations.clear();
+        self.ingame_menus.object = None;
+        self.ingame_menus.players.clear();
+        self.ingame_menus.script_presentations.clear();
         self.game_over_handled = false;
         self.pending_league_end = None;
         self.clear_pending_league_player_auth();

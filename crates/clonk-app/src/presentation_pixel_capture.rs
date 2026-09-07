@@ -832,7 +832,7 @@ fn stage_tutorial_checkpoint(
             app.activate_ingame_main_menu_for_player(app.players.local_owner)
                 .map_err(|error| anyhow::anyhow!("activate real in-game main menu: {error}"))?;
             anyhow::ensure!(
-                app.ingame_menu.contains(app.players.local_owner),
+                app.ingame_menus.players.contains(app.players.local_owner),
                 "real in-game main menu did not remain active"
             );
         }
@@ -1042,10 +1042,14 @@ fn render_runtime_layout_capture(
             let viewport = snapshot.active_viewports.first().ok_or_else(|| {
                 anyhow::anyhow!("ingame-menu semantic capture has no active viewport")
             })?;
-            let menu = app.ingame_menu.get(viewport.owner).ok_or_else(|| {
-                anyhow::anyhow!("ingame-menu semantic capture has no live player menu")
-            })?;
-            let gfx = app.ingame_menu_gfx.as_ref().ok_or_else(|| {
+            let menu = app
+                .ingame_menus
+                .players
+                .get(viewport.owner)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("ingame-menu semantic capture has no live player menu")
+                })?;
+            let gfx = app.ingame_menus.graphics.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("ingame-menu semantic capture has no live menu graphics")
             })?;
             let fallback = app.assets.font_arc();
@@ -1090,13 +1094,14 @@ fn render_runtime_layout_capture(
             let (_, menu) = app.engine.cursor_object_menu(owner).ok_or_else(|| {
                 anyhow::anyhow!("object-menu semantic capture has no live cursor menu")
             })?;
-            let gfx = app.ingame_menu_gfx.as_ref().ok_or_else(|| {
+            let gfx = app.ingame_menus.graphics.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("object-menu semantic capture has no live menu graphics")
             })?;
             let fallback = app.assets.font_arc();
             let font = clonk_frontend::hud::HudFont::from_set(Some(fonts), fallback.as_ref());
             let explicit_lines = app
-                .script_menu_presentations
+                .ingame_menus
+                .script_presentations
                 .get(&owner)
                 .and_then(|state| state.explicit_lines);
             let layout = clonk_app_menus::object_menu::engine_script_menu_layout_with_presentation(

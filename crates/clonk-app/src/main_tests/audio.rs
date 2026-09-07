@@ -4281,7 +4281,7 @@ fn ingame_options_sound_and_music_toggles_persist_to_config_file() {
     main_assert!(!reloaded.sound_enabled, "next launch reloads RXSound off");
     main_assert!(!reloaded.music_enabled, "next launch reloads RXMusic off");
     main_assert_eq!(
-        app.ingame_menu.as_ref().map(IngameMenuState::page) =>
+        app.ingame_menus.players.as_ref().map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Options),
         "each native toggle reopens Options at the existing page"
     );
@@ -4403,7 +4403,7 @@ fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
     ] {
         let mut object = new_running_sandbox_app();
         main_assert!(object.open_object_menu().expect("open defensive object state"));
-        object.object_menu.test_mut().set_mode_for_parity_test(mode);
+        object.ingame_menus.object.test_mut().set_mode_for_parity_test(mode);
         object.test_key(VirtualKeyCode::F3, ElementState::Pressed);
         let flash_before = object.runtime_flash_message.clone();
         let mut frame = vec![0x4c; 320 * 200 * 4];
@@ -4413,7 +4413,7 @@ fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
         main_assert_eq!(error.downcast_ref::<ClassicParityBoundary>() => Some(&ClassicParityBoundary::AppObjectMenu(mode)));
         main_assert!(frame.iter().all(|byte| *byte == 0x4c));
         main_assert_eq!(object.runtime_flash_message => flash_before);
-        main_assert!(object.object_menu.is_some());
+        main_assert!(object.ingame_menus.object.is_some());
     }
 
     let mut observer = new_running_sandbox_app();

@@ -2284,20 +2284,20 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
         .test_value();
     app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
         .test_value();
-    let initial = app.ingame_menu.get(owner).test_value();
+    let initial = app.ingame_menus.players.get(owner).test_value();
     main_assert_eq!(initial.close_action() => Some(&MenuAction::ActivateMain));
     main_assert!(initial
         .items()
         .iter()
         .all(|item| matches!(&item.action, MenuAction::SelectTeam(_))));
-    app.ingame_menu.clear();
+    app.ingame_menus.players.clear();
     app.engine
         .set_player_status(owner, PlayerStatus::Active)
         .test_value();
 
     app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
         .test_value();
-    let menu = app.ingame_menu.get_mut(owner).test_value();
+    let menu = app.ingame_menus.players.get_mut(owner).test_value();
     main_assert_eq!(menu.close_action() => Some(&MenuAction::ActivateMain));
     main_assert_eq!(menu.items().iter().map(|item| item.action.clone()).collect::<Vec<_>>() => [MenuAction::SwitchTeam(1), MenuAction::SwitchTeam(2)]);
     menu.set_selection(1);
@@ -2311,7 +2311,7 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
     let player = app.engine.test_player(owner);
     main_assert_eq!(player.status() => PlayerStatus::Active);
     main_assert_eq!(player.team() => Some(2));
-    main_assert!(app.ingame_menu.get(owner).is_none());
+    main_assert!(app.ingame_menus.players.get(owner).is_none());
 }
 
 #[test]
@@ -4368,7 +4368,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     app.test_render(&mut frame);
 
     let item_point = |app: &GameApp, owner: i32, caption: &str| {
-        let menu = app.ingame_menu.get(owner).test_value();
+        let menu = app.ingame_menus.players.get(owner).test_value();
         let index = menu
             .items()
             .iter()
@@ -4426,12 +4426,12 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(
-        app.ingame_menu.get(primary).map(IngameMenuState::page) =>
+        app.ingame_menus.players.get(primary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Main),
         "the unassigned viewport point must not clamp into the primary menu"
     );
     main_assert_eq!(
-        app.ingame_menu.get(secondary).map(IngameMenuState::page) =>
+        app.ingame_menus.players.get(secondary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Main),
         "the unassigned viewport must not receive the click"
     );
@@ -4439,9 +4439,9 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     app.test_cursor(primary_item);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ingame_menu.get(primary).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Goals));
+    main_assert_eq!(app.ingame_menus.players.get(primary).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Goals));
     main_assert_eq!(
-        app.ingame_menu.get(secondary).map(IngameMenuState::page) =>
+        app.ingame_menus.players.get(secondary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Main),
         "the primary action must not cross-route to the secondary menu"
     );
@@ -4464,7 +4464,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
             fallback.as_ref(),
         );
         let close = app
-            .ingame_menu
+            .ingame_menus.players
             .get(secondary)
             .test_value()
             .close_button_rect(
@@ -4495,9 +4495,9 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     app.test_cursor(secondary_item);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ingame_menu.get(secondary).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Goals));
+    main_assert_eq!(app.ingame_menus.players.get(secondary).map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Goals));
     main_assert_eq!(
-        app.ingame_menu.get(primary).map(IngameMenuState::page) =>
+        app.ingame_menus.players.get(primary).map(IngameMenuState::page) =>
         Some(ingame_menu::MenuPage::Goals),
         "the secondary action must not cross-route to the primary menu"
     );
@@ -4536,7 +4536,7 @@ fn activate_new_player_reoffers_an_eliminated_startup_file() {
         .test_value();
 
     main_assert_eq!(
-        app.ingame_menu
+        app.ingame_menus.players
             .as_ref()
             .expect("new-player menu opens")
             .items()
@@ -4604,7 +4604,7 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
 
-    let menu = app.ingame_menu.get(app.players.local_owner).test_value();
+    let menu = app.ingame_menus.players.get(app.players.local_owner).test_value();
     main_assert_eq!(
         menu.items()
             .iter()
@@ -4634,11 +4634,11 @@ fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_
             ..Default::default()
         })
         .collect();
-    app.ingame_menu.clear();
+    app.ingame_menus.players.clear();
     app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
         .test_value();
     main_assert!(
-        app.ingame_menu.is_none(),
+        app.ingame_menus.players.is_none(),
         "a full game keeps the submenu closed"
     );
 }
@@ -4886,11 +4886,11 @@ fn escape_in_submenu_returns_to_main_menu() {
     app.open_ingame_menu().test_value();
     app.apply_ingame_menu_action(MenuAction::ActivateOptions)
         .test_value();
-    main_assert_eq!(app.ingame_menu.as_ref().map(|menu| menu.page()) => Some(ingame_menu::MenuPage::Options));
+    main_assert_eq!(app.ingame_menus.players.as_ref().map(|menu| menu.page()) => Some(ingame_menu::MenuPage::Options));
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert_eq!(app.ingame_menu.as_ref().map(|menu| menu.page()) => Some(ingame_menu::MenuPage::Main));
+    main_assert_eq!(app.ingame_menus.players.as_ref().map(|menu| menu.page()) => Some(ingame_menu::MenuPage::Main));
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.ingame_menu.is_none());
+    main_assert!(app.ingame_menus.players.is_none());
 }
 
 #[test]
