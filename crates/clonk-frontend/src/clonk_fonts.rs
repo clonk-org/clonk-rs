@@ -1944,8 +1944,16 @@ fn build_native_font(
     } else {
         scaled_height as u32
     };
-    anyhow::ensure!(raster_height > 0, "scaled font height truncates to zero");
-    let effective_scale = raster_height as f32 / logical_height as f32;
+    // `(uint32_t)(dwHeight * scale)` may truncate to zero and C++ passes it on
+    // (StdFont.cpp:325); FT_Set_Pixel_Sizes clamps it to one pixel, so the
+    // font builds with dwDefFontHeight 0 and one-pixel glyphs. The
+    // effective scale then falls back to the application scale so logical
+    // measurements stay finite for such a font (clonk-org/clonk-rs#1214).
+    let effective_scale = if raster_height == 0 || logical_height == 0 {
+        application_scale
+    } else {
+        raster_height as f32 / logical_height as f32
+    };
     let shadow_size = if shadow {
         application_scale.round() as u32
     } else {
@@ -2303,19 +2311,12 @@ pub fn build_native_font_set_recipe(
     );
     let scale = scale as f32;
     anyhow::ensure!(scale.is_finite(), "font scale exceeds f32 geometry");
+    // A zero role height is not refused: C4FontLoader::InitFont hands
+    // `RXFontSize * k / 14` to CStdFont::Init unchecked (C4Fonts.cpp:277-286)
+    // and FreeType clamps a zero pixel size to one, so FontSize=0 gives
+    // native one-pixel fonts and a successful InitFonts
+    // (clonk-org/clonk-rs#1214).
     let sizes = recipe.sizes;
-    anyhow::ensure!(
-        [
-            sizes.title,
-            sizes.caption,
-            sizes.text,
-            sizes.main_small,
-            sizes.mini
-        ]
-        .iter()
-        .all(|size| *size > 0),
-        "native font recipe requests a zero FreeType height"
-    );
     let library = Library::init().context("FreeType init failed")?;
     let face_index =
         isize::try_from(recipe.face_index).context("font face index exceeds FreeType")?;
@@ -3426,6 +3427,47 @@ mod tests {
             native.text.measure("A A", false),
             logical.text.measure("A A", false)
         );
+    }
+
+    #[test]
+    fn a_zero_font_size_builds_the_one_pixel_fonts_freetype_clamps_to() {
+        // C4FontLoader::InitFont derives every role from
+        // Config.General.RXFontSize by integer scaling and hands the result
+        // to CStdFont::Init, which truncates `height * scale` to a uint32
+        // with no zero check (C4Fonts.cpp:277-286, StdFont.cpp:325).
+        // FT_Set_Pixel_Sizes then clamps a zero pixel size to one
+        // (freetype ftobjs.c, FT_Set_Pixel_Sizes), so FontSize=0 gives native
+        // one-pixel fonts and a successful InitFonts. AddRenderedChar never
+        // fails on geometry either: a glyph FreeType cannot load counts as
+        // absent (StdFont.cpp:203-207). The port refused both the zero role
+        // heights and a scaled height that truncates to zero as typed loader
+        // errors (clonk-org/clonk-rs#1214).
+        let bytes = endeavour_bytes();
+        let zero = build_native_font_set_recipe(
+            &bytes,
+            NativeFontRecipe::new(NativeFontSizes::for_base_size(0)),
+            3.0,
+        )
+        .expect("FontSize=0 builds the fonts native builds");
+        assert_eq!(
+            zero.text.raster_height(),
+            0,
+            "dwDefFontHeight keeps the truncated zero"
+        );
+        assert!(
+            zero.text.glyph('A').is_some(),
+            "FreeType renders the clamped one-pixel glyph"
+        );
+
+        let tiny = build_native_font_set(&bytes, 0.01_f32)
+            .expect("a scale that truncates every height to zero builds like native");
+        assert_eq!(tiny.title.raster_height(), 0);
+        assert!(tiny.title.glyph('A').is_some());
+        assert!(
+            tiny.title.effective_scale().is_finite() && tiny.title.effective_scale() > 0.0,
+            "measurements stay finite for the degenerate font"
+        );
+        let _ = tiny.title.measure("A A", false);
     }
 
     #[test]
