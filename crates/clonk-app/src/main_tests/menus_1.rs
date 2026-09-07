@@ -1383,8 +1383,8 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
-    main_assert!(GameApp::startup_base_context_menu(app.context_menu.as_ref(), true,).is_none(), "modal owns the one context-menu render pass");
+    main_assert!(app.context_menus.open.is_some());
+    main_assert!(GameApp::startup_base_context_menu(app.context_menus.open.as_ref(), true,).is_none(), "modal owns the one context-menu render pass");
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     app.close_context_menu_silently();
 
@@ -1583,10 +1583,10 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
         menus1_fixture!(roster_context: LobbyRosterId::Player(50)),
     ])
     .test_value();
-    let root = app.context_menu.as_ref().test_value().layout().panels[0].rows[0].rect;
+    let root = app.context_menus.open.as_ref().test_value().layout().panels[0].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((root.x + 1) as f32, (root.y + 1) as f32))
         .test_value();
-    let layout = app.context_menu.as_ref().test_value().layout();
+    let layout = app.context_menus.open.as_ref().test_value().layout();
     main_assert_eq!(layout.panels.len() => 2);
     main_assert_eq!(layout.panels[1].rows.len() => 2);
 
@@ -1607,7 +1607,7 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
         .controller
         .set_rows(rows);
     app.close_stale_classic_lobby_team_combo();
-    main_assert!(app.context_menu.is_none(), "regrouping the target as a replay player closes a stale takeover menu");
+    main_assert!(app.context_menus.open.is_none(), "regrouping the target as a replay player closes a stale takeover menu");
     app.take_over_classic_lobby_savegame_player(50, 11);
     main_assert!(commands.take_player_info_updates().is_empty(), "the activation guard rejects a replay target even when invoked directly");
 }
@@ -1919,7 +1919,7 @@ fn takeover_submenu_fills_live_at_open() {
         menus1_fixture!(roster_context: LobbyRosterId::Player(50)),
     ])
     .test_value();
-    main_assert_eq!(app.context_menu.as_ref().unwrap().layout().panels.len() => 1, "the Take Over child panel does not exist at root-menu open");
+    main_assert_eq!(app.context_menus.open.as_ref().unwrap().layout().panels.len() => 1, "the Take Over child panel does not exist at root-menu open");
 
     // A player-info update arrives while the root menu is open. C++
     // fills the children in OnContextTakeOver only at submenu-open
@@ -1928,10 +1928,10 @@ fn takeover_submenu_fills_live_at_open() {
     app.control_player_infos
         .replace_snapshot(100, [local_packet(vec![first.clone(), second.clone()])]);
 
-    let root = app.context_menu.as_ref().test_value().layout().panels[0].rows[0].rect;
+    let root = app.context_menus.open.as_ref().test_value().layout().panels[0].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((root.x + 1) as f32, (root.y + 1) as f32))
         .test_value();
-    let layout = app.context_menu.as_ref().test_value().layout();
+    let layout = app.context_menus.open.as_ref().test_value().layout();
     main_assert_eq!(layout.panels.len() => 2);
     main_assert_eq!(layout.panels[1].rows.len() => 2, "children are computed from the live packet at submenu-open");
 
@@ -1939,20 +1939,20 @@ fn takeover_submenu_fills_live_at_open() {
     // callback, so a candidate that issued its join meanwhile drops out.
     app.handle_context_menu_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed)
         .test_value();
-    main_assert_eq!(app.context_menu.as_ref().unwrap().layout().panels.len() => 1);
+    main_assert_eq!(app.context_menus.open.as_ref().unwrap().layout().panels.len() => 1);
     let mut issued_first = first.clone();
     issued_first.flags |= clonk_engine::PLAYER_INFO_FLAG_JOIN_ISSUED;
     app.control_player_infos
         .replace_snapshot(101, [local_packet(vec![issued_first, second.clone()])]);
     app.handle_context_menu_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
         .test_value();
-    let layout = app.context_menu.as_ref().test_value().layout();
+    let layout = app.context_menus.open.as_ref().test_value().layout();
     main_assert_eq!(layout.panels.len() => 2);
     main_assert_eq!(layout.panels[1].rows.len() => 1, "a re-open refills from the live packet like C++");
 
     // The surviving child is the live-eligible player and activates the
     // exact live association.
-    let child = app.context_menu.as_ref().test_value().layout().panels[1].rows[0].rect;
+    let child = app.context_menus.open.as_ref().test_value().layout().panels[1].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((child.x + 1) as f32, (child.y + 1) as f32))
         .test_value();
     main_assert!(app.handle_context_menu_pointer_button(ElementState::Pressed, ContextMenuPointerButton::Left,).expect("activate live takeover child"));
@@ -2117,14 +2117,14 @@ fn player_context_root_matches_cpp_entry_gates() {
     ])
     .test_value();
     app.close_stale_classic_lobby_team_combo();
-    main_assert!(app.context_menu.is_some(), "an unchanged replay group keeps its ordinary context menu");
-    main_assert_eq!(app.context_menu_lobby_player => Some((-1, 51, false)));
+    main_assert!(app.context_menus.open.is_some(), "an unchanged replay group keeps its ordinary context menu");
+    main_assert_eq!(app.context_menus.lobby_player => Some((-1, 51, false)));
     app.close_context_menu_silently();
     app.process_classic_lobby_actions(vec![
         menus1_fixture!(roster_context: LobbyRosterId::Player(50)),
     ])
     .test_value();
-    main_assert_eq!(app.context_menu.as_ref().unwrap().layout().panels[0].rows.len() => 1);
+    main_assert_eq!(app.context_menus.open.as_ref().unwrap().layout().panels[0].rows.len() => 1);
     app.close_context_menu_silently();
 
     let (_, ordinary) = app.classic_lobby_player_context_entries(7).test_value();
@@ -2167,8 +2167,8 @@ fn player_context_root_matches_cpp_entry_gates() {
         menus1_fixture!(roster_context: LobbyRosterId::Player(7)),
     ])
     .test_value();
-    main_assert!(app.context_menu.is_some());
-    main_assert_eq!(app.context_menu_lobby_player => Some((0, 7, false)));
+    main_assert!(app.context_menus.open.is_some());
+    main_assert_eq!(app.context_menus.lobby_player => Some((0, 7, false)));
 }
 
 #[test]
@@ -2234,7 +2234,7 @@ fn classic_context_menu_dispatches_to_the_live_edit() {
         anchor: GuiPoint::new(20.0, 20.0),
     })
     .test_value();
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.process_context_menu_outcome(ContextMenuOutcome {
         captured: true,
         pass_through: false,
@@ -2746,7 +2746,7 @@ fn player_typeahead_stays_behind_rename_and_modal_dialogs() {
     app.test_text_input('T');
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").selected_index() => Some(0));
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 }
 
 #[test]
@@ -2831,7 +2831,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     }));
     app.test_right_button(ElementState::Pressed);
     main_assert!(app.startup.crew_rename.is_some());
-    main_assert!(matches!(app.context_menu.as_ref().expect("inline edit context").layout().panels[0].rows.len(), 3 | 4));
+    main_assert!(matches!(app.context_menus.open.as_ref().expect("inline edit context").layout().panels[0].rows.len(), 3 | 4));
     app.close_context_menu_silently();
 
     let layout = app.startup.player_dialog.test_ref().layout();
@@ -2857,7 +2857,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
         .set_pointer_position(Some(same_row_point));
     app.test_right_button(ElementState::Pressed);
     main_assert!(app.startup.crew_rename.is_some());
-    main_assert_eq!(app.context_menu.as_ref().expect("crew row context").layout().panels[0].rows.len() => 3);
+    main_assert_eq!(app.context_menus.open.as_ref().expect("crew row context").layout().panels[0].rows.len() => 3);
     app.close_context_menu_silently();
 
     app.startup.player_dialog
@@ -2897,7 +2897,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     main_assert!(player_path.join("Alpha.c4i").exists());
     main_assert!(!player_path.join("Discarded.c4i").exists());
     main_assert_eq!(app.startup.player_dialog.as_ref().expect("player dialog").selected_index() => Some(taken_index));
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.close_context_menu_silently();
     app.startup.player_dialog
         .test_mut()
@@ -3026,7 +3026,7 @@ fn player_properties_context_closes_and_opens_the_editor() {
             (layout.list_client.y + layout.item_height / 2) as f32,
         )));
     main_assert!(app.open_startup_player_context_menu(false).expect("open exact player context"));
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     let before_models = app.startup.player_models.len();
     let before_files = app.startup.player_files.len();
 
@@ -3043,7 +3043,7 @@ fn player_properties_context_closes_and_opens_the_editor() {
         ],
     })
     .test_value();
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert!(matches!(
         app.startup.player_properties_dialog
             .as_ref()
@@ -3576,7 +3576,7 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
     main_assert_eq!(app.engine.game_time() => engine_game_time);
     main_assert_eq!(app.snapshot.game_time => snapshot_game_time);
     main_assert_eq!(second_accumulator => Duration::from_millis(125));
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert!(app.dialogs.messages.is_empty());
 }
 
@@ -4103,25 +4103,25 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
         f64::from(participant_rect.y),
     ));
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     let open = |app: &mut GameApp| {
         app.test_cursor(label_point);
         app.test_right_button(ElementState::Pressed);
-        let layout = app.context_menu.test_ref().layout();
+        let layout = app.context_menus.open.test_ref().layout();
         main_assert_eq!(layout.panels.len() => 1);
         main_assert_eq!(layout.panels[0].rows.len() => 2);
         main_assert_eq!(layout.panels[0].selected => None);
     };
     let hover_root = |app: &mut GameApp, index: usize| {
-        let row = app.context_menu.test_ref().layout().panels[0].rows[index].rect;
+        let row = app.context_menus.open.test_ref().layout().panels[0].rows[index].rect;
         app.test_cursor(PhysicalPosition::new(
             f64::from(row.x + 1),
             f64::from(row.y + 1),
         ));
     };
     let activate_child = |app: &mut GameApp, index: usize| {
-        let layout = app.context_menu.test_ref().layout();
+        let layout = app.context_menus.open.test_ref().layout();
         let row = layout.panels[1].rows[index].rect;
         app.test_cursor(PhysicalPosition::new(
             f64::from(row.x + 1),
@@ -4145,11 +4145,11 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
     )
     .test_value();
     hover_root(&mut app, 0);
-    let add_layout = app.context_menu.test_ref().layout();
+    let add_layout = app.context_menus.open.test_ref().layout();
     main_assert_eq!(add_layout.panels.len() => 2);
     main_assert_eq!(add_layout.panels[1].rows.len() => 1);
     activate_child(&mut app, 0);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(
         startup_participant_references(&paths).expect("read after Add") =>
         vec![
@@ -4161,7 +4161,7 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
 
     open(&mut app);
     hover_root(&mut app, 0);
-    let empty = app.context_menu.test_ref().layout();
+    let empty = app.context_menus.open.test_ref().layout();
     main_assert_eq!(empty.panels.len() => 2);
     main_assert!(empty.panels[1].rows.is_empty());
     main_assert_eq!((empty.panels[1].bounds.w, empty.panels[1].bounds.h) => (40, 7));
@@ -4169,7 +4169,7 @@ fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_chil
 
     open(&mut app);
     hover_root(&mut app, 1);
-    let remove_layout = app.context_menu.test_ref().layout();
+    let remove_layout = app.context_menus.open.test_ref().layout();
     main_assert_eq!(remove_layout.panels.len() => 2);
     main_assert_eq!(remove_layout.panels[1].rows.len() => 2);
     activate_child(&mut app, 1);
@@ -4232,7 +4232,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
 
     let focus_before = app.startup.player_dialog.test_ref().focused_control();
     open_on_row(&mut app, 1);
-    let popup = app.context_menu.test_ref();
+    let popup = app.context_menus.open.test_ref();
     main_assert_eq!(popup.layout().panels.len() => 1);
     main_assert_eq!(popup.layout().panels[0].rows.len() => 2);
     main_assert_eq!(popup.layout().panels[0].selected => None);
@@ -4252,7 +4252,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         f64::from(properties.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert!(matches!(
         app.startup.player_properties_dialog
             .as_ref()
@@ -4261,26 +4261,26 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     ));
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
-    main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left));
+    main_assert_eq!(app.context_menus.pointer_capture => Some(ContextMenuPointerButton::Left));
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.context_menu_pointer_capture => None);
+    main_assert_eq!(app.context_menus.pointer_capture => None);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
 
     open_on_row(&mut app, 1);
-    let delete = app.context_menu.test_ref().layout().panels[0].rows[1].rect;
+    let delete = app.context_menus.open.test_ref().layout().panels[0].rows[1].rect;
     app.test_cursor(PhysicalPosition::new(
         f64::from(delete.x + 1),
         f64::from(delete.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.dialogs.messages[0].state.caption() => "Delete");
     main_assert_eq!(app.dialogs.messages[0].state.message() => "Do you really want to delete player Bob?");
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.dialogs.messages.len() => 1);
-    main_assert_eq!(app.context_menu_pointer_capture => None);
+    main_assert_eq!(app.context_menus.pointer_capture => None);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
 
@@ -4293,7 +4293,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
         gamepad_action_event(slot, GamepadActionType::Select, ElementState::Pressed),
         gamepad_button_event(slot, LegacyGamepadButton::new(0), ElementState::Pressed),
     ]);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
@@ -4307,12 +4307,12 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
     app.test_cursor(row_point(0));
     app.test_right_button(ElementState::Pressed);
     main_assert_eq!(app.startup.player_dialog.as_ref().expect("player controller").selected_index() => Some(0));
-    main_assert!(app.context_menu.is_some(), "same down opens the first row popup");
+    main_assert!(app.context_menus.open.is_some(), "same down opens the first row popup");
 
     let mut with_context = vec![0_u8; 1280 * 720 * 4];
     main_assert!(app.render(&mut with_context).expect("render popup"));
     app.handle_focus_lost().test_value();
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     let mut without_context = vec![0_u8; 1280 * 720 * 4];
     main_assert!(app.render(&mut without_context).expect("render after close"));
     main_assert_ne!(with_context => without_context, "a closed popup must not ghost into the next frame");
@@ -4322,7 +4322,7 @@ fn player_context_menu_routes_recursively_without_generic_panes() {
 
     open_on_row(&mut app, 1);
     app.resize(1024, 640).test_value();
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     reset_cached_app_paths();
 }
 

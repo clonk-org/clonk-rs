@@ -187,7 +187,7 @@ impl GameApp {
         if self.running_chat_controller().is_some() && !self.running_chat_keyboard_active() {
             return Ok(false);
         }
-        if self.context_menu.is_some() {
+        if self.context_menus.open.is_some() {
             return Ok(true);
         }
         let Some(layout) = self.game_option_input_layout() else {
@@ -368,7 +368,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::ScenarioBrowser
             || self.game_option_input_dialog.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -652,7 +652,7 @@ impl GameApp {
             || self.startup.view != StartupView::Options
             || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -680,7 +680,7 @@ impl GameApp {
             || self.startup.view != StartupView::Options
             || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -708,7 +708,7 @@ impl GameApp {
             || self.startup.view != StartupView::Options
             || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -736,7 +736,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::Options
             || !self.dialogs.messages.is_empty()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -765,10 +765,10 @@ impl GameApp {
         anchor: GuiPoint,
         minimum_width: i32,
     ) -> Result<bool, EngineError> {
-        if self.context_menu_pointer_dismissed_lobby_option.take() == Some(option) {
+        if self.context_menus.pointer_dismissed_lobby_option.take() == Some(option) {
             return Ok(false);
         }
-        if self.mode != AppMode::Running || self.context_menu.is_some() {
+        if self.mode != AppMode::Running || self.context_menus.open.is_some() {
             return Ok(false);
         }
         let Some(choices) = self.dialogs.client_list.as_ref().and_then(|dialog| {
@@ -2798,10 +2798,10 @@ impl GameApp {
     }
 
     pub(crate) fn game_option_input_activity(&self) -> (bool, bool) {
-        let keyboard_active = self.context_menu.is_none()
+        let keyboard_active = self.context_menus.open.is_none()
             && !self.dialogs.chart_elevated
             && (self.running_chat_active() || self.dialogs.messages.is_empty());
-        let mouse_active = self.context_menu.is_none()
+        let mouse_active = self.context_menus.open.is_none()
             && (matches!(self.mode, AppMode::Running) || keyboard_active);
         (keyboard_active, mouse_active)
     }
@@ -2838,7 +2838,7 @@ impl GameApp {
         }
         if ordered_native {
             self.render_ordered_context_menu(gamma)?;
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 self.next_pending_native_overlay();
             }
         } else {

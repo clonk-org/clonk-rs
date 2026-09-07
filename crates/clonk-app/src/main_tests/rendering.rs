@@ -4014,14 +4014,14 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
     )
     .test_value();
     main_assert!(app.live_input.ingame_edge_scroll.is_some(), "opening the popup alone does not synthesize a pointer move");
-    let row = app.context_menu.test_ref().layout().panels[0].rows[0].rect;
+    let row = app.context_menus.open.test_ref().layout().panels[0].rows[0].rect;
     let stopped = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(row.x + 1),
         f64::from(row.y + 1),
     ));
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     main_assert!(app.live_input.ingame_pointer.is_none());
     main_assert!(app.live_input.ingame_edge_scroll.is_none());
 

@@ -512,7 +512,7 @@ impl GameApp {
             || self.game_over_dialog.is_some()
             || self.top_message_dialog_is_exclusive()
             || self.chat.external_dialog_visible
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || self
                 .dialogs
                 .client_list
@@ -1305,7 +1305,7 @@ impl GameApp {
             .context("C4ChatDlg controller is unavailable")?;
         let draw_focus = self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             && self.dialogs.messages.is_empty()
-            && self.context_menu.is_none();
+            && self.context_menus.open.is_none();
         clonk_frontend::startup_netdlg::NetDlgScreen::render_standalone_chat_dialog(
             self.rendering.graphics.surface_mut(),
             &assets,
@@ -1324,7 +1324,7 @@ impl GameApp {
         if !self.chat.external_dialog_visible
             || !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             || !self.dialogs.messages.is_empty()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -1372,8 +1372,8 @@ impl GameApp {
         let resources = assets
             .input_dialog_resources()
             .context("classic C4GUI::InputDialog resources are unavailable")?;
-        let keyboard_active = self.context_menu.is_none() && self.running_chat_active();
-        let mouse_active = self.context_menu.is_none();
+        let keyboard_active = self.context_menus.open.is_none() && self.running_chat_active();
+        let mouse_active = self.context_menus.open.is_none();
         controller.render_with_activity(
             self.rendering.graphics.surface_mut(),
             &resources,
@@ -1415,7 +1415,7 @@ impl GameApp {
         let resources = assets
             .input_dialog_resources()
             .context("classic C4GUI::InputDialog resources are unavailable")?;
-        let mouse_active = self.context_menu.is_none();
+        let mouse_active = self.context_menus.open.is_none();
         controller.render_tooltip(
             self.rendering.graphics.surface_mut(),
             &resources,

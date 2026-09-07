@@ -4383,7 +4383,7 @@ fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
         )
         .test_value();
     assert_f3_renders(&mut context, "context menu");
-    main_assert!(context.context_menu.is_some());
+    main_assert!(context.context_menus.open.is_some());
 
     let mut scoreboard = new_scoreboard_test_app(
         r#"global func Initialize()

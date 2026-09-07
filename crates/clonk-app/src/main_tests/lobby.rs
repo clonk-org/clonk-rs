@@ -2659,21 +2659,21 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     app.handle_network_lobby_pointer_move(beta).test_value();
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.handle_network_lobby_secondary_button(ElementState::Released)
         .test_value();
     app.handle_network_lobby_middle_button(ElementState::Released)
         .test_value();
-    app.context_menu = None;
+    app.context_menus.open = None;
     app_lobby_mut(&mut app.network_lobby).pointer = None;
     app.handle_network_lobby_context_key().test_value();
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     process_lobby_chat_request(
         &mut app,
         LobbyChatRequest::ContextCommand(LobbyChatContextCommand::Clear),
     );
     main_assert_eq!(app_lobby(&app).chat_edit.text => "alpha ",);
-    app.context_menu = None;
+    app.context_menus.open = None;
 
     let roster_point = GuiPoint::new(
         (layout.roster_client.x + 2) as f32,
@@ -3124,7 +3124,7 @@ fn joined_lobby_options_tab_click_opens_the_read_only_sheet() {
     );
     click_network_lobby(&mut app, value);
     main_assert!(
-        app.context_menu.is_none(),
+        app.context_menus.open.is_none(),
         "a read-only joined ComboBox opens no selection popup"
     );
 }
@@ -3605,7 +3605,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     app_lobby_mut(&mut app.network_lobby).handle_panel_pointer_move(caption);
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
-    main_assert_eq!(some(&app.context_menu).layout().panels[0].rows.len() => 3, "without teams: Players, Resources and Options");
+    main_assert_eq!(some(&app.context_menus.open).layout().panels[0].rows.len() => 3, "without teams: Players, Resources and Options");
     app.close_context_menu_silently();
 
     app_lobby_mut(&mut app.network_lobby).has_teams = true;
@@ -3614,7 +3614,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
     let resource_point = {
-        let layout = some(&app.context_menu).layout();
+        let layout = some(&app.context_menus.open).layout();
         main_assert_eq!(layout.panels[0].rows.len() => 4, "Players, Teams, Resources and Options match the native popup");
         let row = &layout.panels[0].rows[2];
         GuiPoint::new(
@@ -3629,7 +3629,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
         .handle_context_menu_pointer_button(ElementState::Pressed, ContextMenuPointerButton::Left,)
         .expect("dispatch Resources"));
     main_assert_eq!(app_lobby(&app).active_sheet => LobbySheet::Resources);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     let exit = {
         let rect = app
@@ -3730,7 +3730,7 @@ fn joined_client_roster_context_reaches_mute_and_info_without_host_actions() {
     app_lobby_mut(&mut app.network_lobby).handle_panel_pointer_move(point);
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
-    main_assert_eq!(some(&app.context_menu).layout().panels[0].rows.len() => 2);
+    main_assert_eq!(some(&app.context_menus.open).layout().panels[0].rows.len() => 2);
     main_assert!(app
         .handle_context_menu_key(VirtualKeyCode::KeyM, ElementState::Pressed)
         .expect("select Mute"));
@@ -3990,7 +3990,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     app.joined_lobby_layouts().test_value();
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     let lobby = app_lobby(&app);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(lobby.controller.focus() => LobbyControl::Roster);
     main_assert_eq!(lobby.chat_edit.text => "focus me");
     main_assert_eq!(lobby.chat_edit.caret => 0);
@@ -4066,7 +4066,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert!(app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Pressed)
         .expect("open joined local team selector"));
-    main_assert_eq!(some(&app.context_menu).layout().panels[0].rows.len() => 2);
+    main_assert_eq!(some(&app.context_menus.open).layout().panels[0].rows.len() => 2);
     main_assert!(app
         .handle_context_menu_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
         .expect("select current joined team"));
@@ -4149,11 +4149,11 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         .test_value();
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
-    let root = some(&app.context_menu).layout().panels[0].rows[0].rect;
+    let root = some(&app.context_menus.open).layout().panels[0].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((root.x + 1) as f32, (root.y + 1) as f32))
         .test_value();
-    main_assert_eq!(some(&app.context_menu).layout().panels[1].rows.len() => 1);
-    let child = some(&app.context_menu).layout().panels[1].rows[0].rect;
+    main_assert_eq!(some(&app.context_menus.open).layout().panels[1].rows.len() => 1);
+    let child = some(&app.context_menus.open).layout().panels[1].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((child.x + 1) as f32, (child.y + 1) as f32))
         .test_value();
     main_assert!(app
@@ -4819,7 +4819,7 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.client_list.is_some());
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     tap_test_key(&mut app, VirtualKeyCode::Enter);
     main_assert!(app.dialogs.client_list.is_some());
@@ -4962,13 +4962,13 @@ fn classic_lobby_team_combo_filters_teams_and_submits_the_full_player_packet() {
 
     request_classic_lobby_team(&mut app, 7);
 
-    let menu = some(&app.context_menu);
+    let menu = some(&app.context_menus.open);
     let panel = &menu.layout().panels[0];
     main_assert_eq!(panel.bounds.x => team_rect.x);
     main_assert_eq!(panel.bounds.y => team_rect.y + team_rect.h);
     main_assert!(panel.bounds.w >= team_rect.w);
     main_assert_eq!(panel.rows.len() => 2, "the full current team stays visible; full and negative-limit alternatives are filtered");
-    main_assert_eq!(app.context_menu_lobby_team_player => Some(7));
+    main_assert_eq!(app.context_menus.lobby_team_player => Some(7));
     main_assert_eq!(app_classic_lobby(&app).controller.open_team_combo_player() => Some(7));
 
     main_assert!(app
@@ -4990,8 +4990,8 @@ fn classic_lobby_team_combo_filters_teams_and_submits_the_full_player_packet() {
         lobby_fixture!(player_update: 0, clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL, vec![changed, companion]),
         "OnTeamComboSelChange clones the complete client packet and mutates only Team"
     );
-    main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.context_menu_lobby_team_player => None);
+    main_assert!(app.context_menus.open.is_none());
+    main_assert_eq!(app.context_menus.lobby_team_player => None);
     main_assert_eq!(
         app_classic_lobby(&app)
             .controller
@@ -5389,26 +5389,26 @@ fn clicking_an_open_lobby_team_combo_closes_without_reopening() {
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
 
-    main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.context_menu_lobby_team_player => None);
-    main_assert_eq!(app.context_menu_pointer_dismissed_lobby_team_player => None);
+    main_assert!(app.context_menus.open.is_none());
+    main_assert_eq!(app.context_menus.lobby_team_player => None);
+    main_assert_eq!(app.context_menus.pointer_dismissed_lobby_team_player => None);
     main_assert_eq!(app_classic_lobby(&app).controller.open_team_combo_player() => None);
     main_assert!(commands.take_player_info_updates().is_empty());
     app.test_left_button(ElementState::Released);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
-    app.context_menu_pointer_dismissed_lobby_team_player = Some(7);
+    app.context_menus.pointer_dismissed_lobby_team_player = Some(7);
     app.handle_gamepad_event(GamepadEvent::Clear {
         slot: GamepadSlot::new(0),
     })
     .test_value();
-    main_assert_eq!(app.context_menu_pointer_dismissed_lobby_team_player => None);
+    main_assert_eq!(app.context_menus.pointer_dismissed_lobby_team_player => None);
 
     request_classic_lobby_team(&mut app, 7);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     main_assert!(app.select_classic_lobby_sheet(LobbySheet::Resources));
-    main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.context_menu_lobby_team_player => None);
+    main_assert!(app.context_menus.open.is_none());
+    main_assert_eq!(app.context_menus.lobby_team_player => None);
 }
 
 #[test]
@@ -5418,19 +5418,19 @@ fn classic_lobby_team_combo_rechecks_cpp_team_permissions_before_opening() {
     let metadata = some_mut(&mut app.players.team_assignment).teams_mut();
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     request_classic_lobby_team(&mut app, 7);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     let metadata = some_mut(&mut app.players.team_assignment).teams_mut();
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Free;
     metadata.teams.retain(|team| team.id == 1);
     request_classic_lobby_team(&mut app, 7);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     some_mut(&mut app.players.team_assignment)
         .teams_mut()
         .auto_generate_teams = true;
     request_classic_lobby_team(&mut app, 7);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.close_context_menu_silently();
 
     chooser.savegame_player = 99;
@@ -5439,7 +5439,7 @@ fn classic_lobby_team_combo_rechecks_cpp_team_permissions_before_opening() {
         [lobby_fixture!(player_data: 0, flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL, vec![chooser, companion], by: 0)],
     );
     request_classic_lobby_team(&mut app, 7);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 }
 
 #[test]
@@ -5464,17 +5464,17 @@ fn focused_lobby_team_combo_opens_from_cpp_keyboard_bindings_and_escape_closes()
     main_assert_eq!(app_classic_lobby(&app).controller.focus() => LobbyControl::RosterTeam);
 
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
     app.live_input.modifiers = ModifiersState::ALT;
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.live_input.modifiers = ModifiersState::empty();
 }
 
@@ -5774,9 +5774,9 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
     install_test_classic_host_lobby(&mut app);
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     for (key, modifiers) in [
         (VirtualKeyCode::KeyA, ModifiersState::CONTROL),
@@ -5803,7 +5803,7 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
     }
     main_assert_eq!(app_classic_lobby(&app).controller.focus() => LobbyControl::Roster);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 }
 
 #[test]
@@ -7132,8 +7132,8 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
             minimum_width: 120,
         },
     );
-    main_assert!(app.context_menu.is_some());
-    main_assert_eq!(app.context_menu_lobby_option => Some(LobbyOptionKind::ControlRate));
+    main_assert!(app.context_menus.open.is_some());
+    main_assert_eq!(app.context_menus.lobby_option => Some(LobbyOptionKind::ControlRate));
     let go_observer = thread::spawn(move || {
         let observed = commands.complete_lobby_start(Ok(()));
         (commands, observed)
@@ -7179,8 +7179,8 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     );
     main_assert!(matches!(app.mode, AppMode::Loading));
     main_assert!(app.loading_state.is_some());
-    main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.context_menu_lobby_option => None);
+    main_assert!(app.context_menus.open.is_none());
+    main_assert_eq!(app.context_menus.lobby_option => None);
     // Init returns from InitNetworkHost/DoLobby at 7 before beginning
     // InitGame's script and definition phases
     // (src/C4Game.cpp:438-457,3872-3913).

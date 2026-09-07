@@ -6571,7 +6571,7 @@ fn platform_ime_test_app() -> GameApp {
 fn open_platform_ime_test_context(app: &mut GameApp) {
     app.open_context_menu_at(Vec::new(), GuiPoint::new(10.0, 10.0))
         .test_value();
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
 }
 
 #[test]

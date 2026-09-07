@@ -1974,7 +1974,7 @@ impl GameApp {
         if self.dialogs.client_list.take().is_some() {
             self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
             self.startup_tooltip.pointer_left();
-            if self.context_menu_lobby_option.is_some() {
+            if self.context_menus.lobby_option.is_some() {
                 self.close_context_menu_silently();
             }
             self.dialogs.client_list_consumed_keys.clear();
@@ -9752,7 +9752,7 @@ impl GameApp {
         width: i32,
         height: i32,
     ) -> Option<(GuiPoint, String)> {
-        if !self.dialogs.messages.is_empty() || self.context_menu.is_some() {
+        if !self.dialogs.messages.is_empty() || self.context_menus.open.is_some() {
             return None;
         }
         let pointer = self.startup_tooltip.eligible_pointer()?;

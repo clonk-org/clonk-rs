@@ -985,7 +985,7 @@ fn takeover_selection_submits_full_local_packet_with_savegame_association() {
         position: GuiPoint::new(200.0, 150.0),
     }])
     .test_value();
-    let root = app.context_menu.as_ref().test_value().layout().panels[0].rows[0].rect;
+    let root = app.context_menus.open.as_ref().test_value().layout().panels[0].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((root.x + 1) as f32, (root.y + 1) as f32))
         .test_value();
 
@@ -1000,11 +1000,11 @@ fn takeover_selection_submits_full_local_packet_with_savegame_association() {
             7,
         )],
     );
-    let child = app.context_menu.as_ref().test_value().layout().panels[1].rows[0].rect;
+    let child = app.context_menus.open.as_ref().test_value().layout().panels[1].rows[0].rect;
     app.handle_context_menu_pointer_move(GuiPoint::new((child.x + 1) as f32, (child.y + 1) as f32))
         .test_value();
     main_assert!(app.handle_context_menu_pointer_button(ElementState::Pressed, ContextMenuPointerButton::Left,).expect("activate takeover child"));
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     let mut expected_chosen = chosen.clone();
     expected_chosen.savegame_player = 50;
@@ -2159,7 +2159,7 @@ fn player_context_menu_missing_global_resources_fails_typed_without_selection_mu
         .open_startup_player_context_menu(false)
         .expect_err("missing process-global resource must fail typed");
     main_assert!(matches!(error, EngineError::ClassicMenuParityBoundary { ref detail } if detail.contains("GUISpinBoxArrow")));
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.startup.player_dialog.as_ref().expect("player controller").selected_index() => selected_before);
 }
 

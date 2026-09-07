@@ -2668,7 +2668,7 @@ fn named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         )
         .test_value();
     context_priority.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(context_priority.context_menu.is_none());
+    main_assert!(context_priority.context_menus.open.is_none());
     main_assert!(context_priority.dialogs.scoreboard.is_none());
     context_priority
         .open_context_menu_at(
@@ -4117,7 +4117,7 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
             GuiPoint::new(48.0, 48.0),
         )
         .test_value();
-    let popup_row = overlap.context_menu.test_ref().layout().panels[0].rows[0].rect;
+    let popup_row = overlap.context_menus.open.test_ref().layout().panels[0].rows[0].rect;
     let popup_point = GuiPoint::new(
         (popup_row.x + popup_row.w / 2) as f32,
         (popup_row.y + popup_row.h / 2) as f32,
@@ -4129,7 +4129,7 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
         f64::from(popup_point.y),
     ));
     overlap.test_left_button(ElementState::Pressed);
-    main_assert!(overlap.context_menu.is_some());
+    main_assert!(overlap.context_menus.open.is_some());
     main_assert!(!overlap.dialogs.scoreboard_close_pointer_capture);
     main_assert!(matches!(overlap.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
     overlap.test_left_button(ElementState::Released);
@@ -4147,11 +4147,11 @@ fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
         (scoreboard.client.x + scoreboard.client.w / 2) as f32,
         (scoreboard.client.y + scoreboard.client.h / 2) as f32,
     );
-    main_assert!(!outside.context_menu.as_ref().expect("context menu").captures_point(body));
+    main_assert!(!outside.context_menus.open.as_ref().expect("context menu").captures_point(body));
     outside.test_cursor(PhysicalPosition::new(f64::from(body.x), f64::from(body.y)));
     outside.live_input.ingame_mouse_init_centered = false;
     outside.test_right_button(ElementState::Pressed);
-    main_assert!(outside.context_menu.is_none());
+    main_assert!(outside.context_menus.open.is_none());
     main_assert!(!outside.live_input.ingame_mouse_init_centered);
 }
 
@@ -4535,7 +4535,7 @@ fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control()
         0,
         "exact modifier matching suppresses the bare control release callback",
     );
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
 
     let mut exclusive_release = new_classic_scoreboard_test_app(
         r#"global func Initialize()
@@ -4658,7 +4658,7 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
         )
         .test_value();
     toggle_scoreboard(&mut context, ModifiersState::empty());
-    main_assert!(context.context_menu.is_some());
+    main_assert!(context.context_menus.open.is_some());
     main_assert!(context.dialogs.scoreboard.is_some());
 
     let mut rebound_context = new_scoreboard_test_app(BOARD);
@@ -4675,7 +4675,7 @@ fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
         .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
     rebound_context.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     rebound_context.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert!(rebound_context.context_menu.is_some());
+    main_assert!(rebound_context.context_menus.open.is_some());
     main_assert!(rebound_context.ingame_menu.is_some());
 
     let mut game_over_context = new_classic_scoreboard_test_app(BOARD);
@@ -5484,7 +5484,7 @@ fn context_fences_game_over_until_a_post_close_cluster() {
             true,
         )
         .test_value();
-    main_assert!(axis_transition.context_menu.is_some());
+    main_assert!(axis_transition.context_menus.open.is_some());
     main_assert!(axis_transition.game_over_dialog.is_some());
     main_assert_eq!(axis_transition.game_over_dialog.as_ref().and_then(GameOverState::focused) => None);
 
@@ -5495,7 +5495,7 @@ fn context_fences_game_over_until_a_post_close_cluster() {
         ControlButton::Left,
         ElementState::Pressed,
     )]);
-    main_assert!(pass_through.context_menu.is_some());
+    main_assert!(pass_through.context_menus.open.is_some());
     main_assert_eq!(pass_through.game_over_dialog.as_ref().and_then(GameOverState::focused) => None);
 
     let mut closed = new_game_over_keyboard_app();
@@ -5505,7 +5505,7 @@ fn context_fences_game_over_until_a_post_close_cluster() {
         game_over_fixture!(action: GamepadSlot::new(0), GamepadActionType::Cancel, ElementState::Pressed),
         game_over_fixture!(direction: GamepadSlot::new(0), ControlButton::Right, ElementState::Pressed),
     ]);
-    main_assert!(closed.context_menu.is_none());
+    main_assert!(closed.context_menus.open.is_none());
     main_assert_eq!(closed.game_over_dialog.as_ref().and_then(GameOverState::focused) => Some(GameOverFocus::Close));
 }
 

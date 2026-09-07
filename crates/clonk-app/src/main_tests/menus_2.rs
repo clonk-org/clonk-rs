@@ -699,7 +699,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         app.test_modifiers(modifiers);
         app.test_key(key, ElementState::Pressed);
         main_assert_eq!(app.running_chat_text() => Some(expected));
-        main_assert!(app.context_menu.is_some());
+        main_assert!(app.context_menus.open.is_some());
     }
 }
 
@@ -741,17 +741,17 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         app.test_modifiers(modifiers);
         app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
         app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-        main_assert!(app.context_menu.is_none());
+        main_assert!(app.context_menus.open.is_none());
     }
     app.test_modifiers(ModifiersState::empty());
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.running_chat_text() => Some("/team "));
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
@@ -762,7 +762,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.running_chat_text() => Some("\""));
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
@@ -771,7 +771,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.running_chat_text() => Some(""));
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
@@ -848,7 +848,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         .pressed_coms = 1 << clonk_engine::COM_LEFT;
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
             "Notice",
@@ -858,7 +858,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
         MessageDialogContinuation::None,
     )
     .test_value();
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     main_assert!(app.live_input.pressed_engine_keys.contains(&VirtualKeyCode::KeyA));
     main_assert_ne!(app.engine.player(app.players.local_owner).expect("local sandbox player").control.pressed_coms & (1 << clonk_engine::COM_LEFT) => 0);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
@@ -893,7 +893,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_left_button(ElementState::Released);
     main_assert!(app.running_chat_controller().and_then(InputDialogController::selected_text).is_some_and(|text| !text.is_empty()));
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     app.test_right_button(ElementState::Released);
 
@@ -908,21 +908,21 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
     main_assert_eq!(app.running_chat_controller().expect("chat remains open").caret() => caret_before_ctrl_left);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.test_modifiers(ModifiersState::empty());
 
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     main_assert!(app.chat.external_dialog_visible);
     main_assert!(app.chat.running.is_none());
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     main_assert!(!app.chat.external_dialog_visible);
     app.test_modifiers(ModifiersState::empty());
     main_assert!(app.game_option_input_dialog.is_none());
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.message_board_line() => board_before);
 }
@@ -2786,7 +2786,7 @@ fn runtime_flash_draws_above_f1_help_and_below_recursive_context_gui() {
     context
         .set_runtime_flash_message("AAAAAAAAAAAA", RuntimeHelpCharset::Windows1252)
         .test_value();
-    let menu = context.context_menu.take().test_value();
+    let menu = context.context_menus.open.take().test_value();
     let flash = context.runtime_flash_message.clone().test_value();
     let mut flash_only = vec![0_u8; 320 * 200 * 4];
     context.test_render(&mut flash_only);
@@ -2796,7 +2796,7 @@ fn runtime_flash_draws_above_f1_help_and_below_recursive_context_gui() {
         .rendering.graphics
         .active_gamma_ramp(&context.snapshot.environment.gamma);
     menu.render(&mut expected, Some(&gamma)).test_value();
-    context.context_menu = Some(menu);
+    context.context_menus.open = Some(menu);
     context.runtime_flash_message = Some(flash);
     let mut actual = vec![0_u8; 320 * 200 * 4];
     context.test_render(&mut actual);
@@ -2992,7 +2992,7 @@ fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
         .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
     context.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     main_assert!(!context.dialogs.help_visible);
-    main_assert!(context.context_menu.is_some());
+    main_assert!(context.context_menus.open.is_some());
 
     let board_script = r#"global func Initialize()
         {
@@ -3051,7 +3051,7 @@ fn running_context_menu_renders_above_runtime_f1_help() {
     main_assert_ne!(context_only => baseline, "running context must draw pixels");
 
     app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
-    let context = app.context_menu.take().test_value();
+    let context = app.context_menus.open.take().test_value();
     let mut help_only = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut help_only);
     let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
@@ -3060,7 +3060,7 @@ fn running_context_menu_renders_above_runtime_f1_help() {
         .rendering.graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
     context.render(&mut expected, Some(&gamma)).test_value();
-    app.context_menu = Some(context);
+    app.context_menus.open = Some(context);
     let mut help_and_context = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut help_and_context);
     main_assert_ne!(help_and_context => context_only, "help remains visible outside the panel");

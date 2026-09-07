@@ -1297,12 +1297,12 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         .chat_login()
         .nick;
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.test_text_input('x');
     main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_login().nick => original_nick);
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert!(app.chat.external_dialog_visible);
     app.test_text_input('x');
     main_assert_eq!(app.chat.external_dialog.as_ref().unwrap().chat_login().nick => format!("{original_nick}x"));
@@ -1710,7 +1710,7 @@ fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
         if context_open {
             app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
             app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-            main_assert!(app.context_menu.is_some());
+            main_assert!(app.context_menus.open.is_some());
         }
         app.engine
             .test_player_mut(app.players.local_owner)
@@ -1781,7 +1781,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     app.test_cursor(message_point);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-    let context_row = app.context_menu.test_ref().layout().panels[0].rows[0].rect;
+    let context_row = app.context_menus.open.test_ref().layout().panels[0].rows[0].rect;
     app.test_cursor(PhysicalPosition::new(
         f64::from(context_row.x + 1),
         f64::from(context_row.y + 1),
@@ -1796,7 +1796,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     let caret_before_context_drag = app.running_chat_controller().test_value().caret();
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-    let context_panel = app.context_menu.test_ref().layout().panels[0].bounds;
+    let context_panel = app.context_menus.open.test_ref().layout().panels[0].bounds;
     app.test_cursor(PhysicalPosition::new(
         f64::from(context_panel.x + context_panel.w - 2),
         f64::from(context_panel.y + 1),
@@ -1805,7 +1805,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     main_assert!(app.running_chat_controller().expect("chat drag remains retained until up").has_positional_pointer_drag());
     app.test_left_button(ElementState::Released);
     main_assert!(!app.running_chat_controller().expect("chat remains after context drag release").has_pointer_capture());
-    if app.context_menu.is_some() {
+    if app.context_menus.open.is_some() {
         app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
         app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     }
@@ -1899,7 +1899,7 @@ fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
     main_assert!(menu.game_option_input_dialog.as_ref().expect("regular input dialog").controller.has_positional_pointer_drag());
     menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     menu.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
-    let input_context = menu.context_menu.test_ref().layout().panels[0].bounds;
+    let input_context = menu.context_menus.open.test_ref().layout().panels[0].bounds;
     menu.test_cursor(PhysicalPosition::new(
         f64::from(input_context.x + input_context.w - 2),
         f64::from(input_context.y + 1),

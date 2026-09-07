@@ -582,10 +582,10 @@ fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
             position: GuiPoint::new(200.0, 150.0),
         }])
         .test_value();
-    main_assert_eq!(direct.context_menu.as_ref().unwrap().layout().panels[0].rows.len() => 4);
+    main_assert_eq!(direct.context_menus.open.as_ref().unwrap().layout().panels[0].rows.len() => 4);
     main_assert!(direct.select_classic_lobby_sheet(LobbySheet::Resources));
-    main_assert!(direct.context_menu.is_none());
-    main_assert_eq!(direct.context_menu_lobby_kick_client => None);
+    main_assert!(direct.context_menus.open.is_none());
+    main_assert_eq!(direct.context_menus.lobby_kick_client => None);
     main_assert!(direct.select_classic_lobby_sheet(LobbySheet::Players));
     direct
         .process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
@@ -612,8 +612,8 @@ fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
             by_client: 0,
         });
     direct.sync_classic_lobby_roster();
-    main_assert!(direct.context_menu.is_none());
-    main_assert_eq!(direct.context_menu_lobby_kick_client => None);
+    main_assert!(direct.context_menus.open.is_none());
+    main_assert_eq!(direct.context_menus.lobby_kick_client => None);
 
     let (mut league, mut league_commands) = setup(true);
     league.kick_classic_lobby_client(7);

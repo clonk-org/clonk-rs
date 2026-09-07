@@ -51,7 +51,7 @@ impl GameApp {
         if !self.window_active
             || self.startup_network_transition_blocks_input()
             || (!self.dialogs.messages.is_empty() && !self.running_chat_active())
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return false;
         }
@@ -88,7 +88,7 @@ impl GameApp {
             return Ok(());
         }
         if self.league_signup_dialog.is_some() {
-            if self.context_menu.is_none() {
+            if self.context_menus.open.is_none() {
                 let mut encoded = [0_u8; 4];
                 let text = character.encode_utf8(&mut encoded);
                 let layout = self.league_signup_layout();
@@ -115,7 +115,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.chat.external_dialog_visible && self.context_menu.is_some() {
+        if self.chat.external_dialog_visible && self.context_menus.open.is_some() {
             return Ok(());
         }
         if self.chat.external_dialog_visible
@@ -157,7 +157,7 @@ impl GameApp {
             return Ok(());
         }
         if self.game_option_input_dialog.is_some()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && (self.running_chat_controller().is_none() || self.running_chat_keyboard_active())
         {
             let Some(layout) = self.game_option_input_layout() else {
@@ -182,7 +182,7 @@ impl GameApp {
         if self.definition_selector.is_some() {
             return Ok(());
         }
-        if let Some(menu) = self.context_menu.as_mut() {
+        if let Some(menu) = self.context_menus.open.as_mut() {
             menu.note_non_pointer_input();
             // C4GUI::Screen routes text to pContext before the focused
             // control. ContextMenu::CharIn itself does not dispatch hotkeys;
@@ -306,7 +306,7 @@ impl GameApp {
             return Ok(());
         }
         if self.network_chart_is_elevated_pointer_layer()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self
                 .live_input
                 .running_pointer
@@ -316,10 +316,10 @@ impl GameApp {
         }
         let message_dialog_fallback_blocks_world = self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
-            && self.context_menu.is_some()
+            && self.context_menus.open.is_some()
             && !self.dialogs.stack.is_empty();
         if context_routed_before_running_dialogs {
-            let outcome = self.context_menu.as_mut().map(|menu| {
+            let outcome = self.context_menus.open.as_mut().map(|menu| {
                 let point = menu.pointer_position();
                 menu.handle_pointer_down(point, ContextMenuPointerButton::Other)
             });
@@ -446,7 +446,7 @@ impl GameApp {
             return Ok(());
         }
         if self.chat.external_dialog_visible && !context_routed_before_running_dialogs {
-            if let Some(menu) = self.context_menu.as_mut() {
+            if let Some(menu) = self.context_menus.open.as_mut() {
                 let point = menu.pointer_position();
                 let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
                 let captured = outcome.captured && !outcome.pass_through;
@@ -544,7 +544,7 @@ impl GameApp {
             return Ok(());
         }
         if !context_routed_before_running_dialogs {
-            if let Some(menu) = self.context_menu.as_mut() {
+            if let Some(menu) = self.context_menus.open.as_mut() {
                 let point = menu.pointer_position();
                 let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
                 let captured = outcome.captured && !outcome.pass_through;
@@ -1017,7 +1017,7 @@ impl GameApp {
         if self.league_signup_dialog.is_none() {
             return Ok(false);
         }
-        if self.context_menu.is_some() {
+        if self.context_menus.open.is_some() {
             return Ok(true);
         }
         use clonk_frontend::league_signup::{
@@ -1305,7 +1305,7 @@ impl GameApp {
     }
 
     pub(crate) fn network_chart_is_elevated_pointer_layer(&self) -> bool {
-        self.network_chart_renders_elevated() && self.context_menu.is_none()
+        self.network_chart_renders_elevated() && self.context_menus.open.is_none()
     }
 
     fn gamepad_player_button_in_scope(
@@ -2085,7 +2085,7 @@ impl GameApp {
         if self.game_over_dialog_is_active() || self.definition_selector.is_some() {
             return true;
         }
-        if self.context_menu.is_some() {
+        if self.context_menus.open.is_some() {
             return true;
         }
         if self.running_chat_active() && !modifiers.contains(ModifiersState::ALT) {
@@ -2197,7 +2197,7 @@ impl GameApp {
         state: ElementState,
         higher_priority_checked: bool,
     ) -> Result<bool, EngineError> {
-        if self.context_menu.is_none()
+        if self.context_menus.open.is_none()
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             && self.dialogs.messages.is_empty()
             && self.game_option_input_dialog.is_none()
@@ -2242,7 +2242,7 @@ impl GameApp {
         };
         if !c4_modifiers.is_empty() && !custom_binding {
             if self.game_over_dialog.is_some()
-                || self.context_menu.is_some()
+                || self.context_menus.open.is_some()
                 || (self.dialogs.client_list.is_some() && c4_modifiers == ModifiersState::SHIFT)
             {
                 return Ok(false);
@@ -2252,7 +2252,7 @@ impl GameApp {
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
         if (self.game_over_dialog.is_some() || self.dialogs.client_list.is_some())
-            && self.context_menu.is_some()
+            && self.context_menus.open.is_some()
         {
             // Context rejects Tab and suppresses the game-over DlgKeyCB. The
             // remaining generic callback reaches DoDlgShow, which consumes the
@@ -2318,7 +2318,7 @@ impl GameApp {
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
             && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
             && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
     }
 
     pub(crate) fn game_over_dialog_is_mouse_active(&self) -> bool {
@@ -2367,7 +2367,7 @@ impl GameApp {
             let active = self.running_active_dialog
                 == Some(RunningDialogStackEntry::RuntimeClientList)
                 && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
-                && self.context_menu.is_none();
+                && self.context_menus.open.is_none();
             if !active {
                 return Ok(false);
             }
@@ -2800,7 +2800,7 @@ impl GameApp {
             // registrations. Let an owned navigation key or mnemonic reach
             // the menu before considering a remapped debug action.
             let active_context_key = c4_modifiers.is_empty()
-                && self.context_menu.as_ref().is_some_and(|menu| {
+                && self.context_menus.open.as_ref().is_some_and(|menu| {
                     context_menu_key_code(key).is_some_and(|key| menu.owns_key(key))
                         || context_menu_hotkey(key).is_some_and(|hotkey| menu.owns_hotkey(hotkey))
                 });
@@ -2808,7 +2808,7 @@ impl GameApp {
                 return Ok(RuntimeGlobalKeyOutcome::Unhandled);
             }
             let stronger_dialog_key = (self.running_chat_keyboard_active()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
                 && self.running_chat_key_has_higher_priority_route(key))
                 || self.message_dialog_key_has_higher_priority_route(key)
                 || self.game_over_key_has_higher_priority_route(key);
@@ -2920,9 +2920,9 @@ impl GameApp {
             && matches!(key, VirtualKeyCode::ArrowLeft | VirtualKeyCode::ArrowRight);
         let alt_hotkey_modifiers = c4_modifiers == ModifiersState::ALT
             || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
-        let dialog_callbacks_active = self.context_menu.is_none();
+        let dialog_callbacks_active = self.context_menus.open.is_none();
         let active_context_key = c4_modifiers.is_empty()
-            && self.context_menu.as_ref().is_some_and(|menu| {
+            && self.context_menus.open.as_ref().is_some_and(|menu| {
                 context_menu_key_code(key).is_some_and(|key| menu.owns_key(key))
                     || context_menu_hotkey(key).is_some_and(|hotkey| menu.owns_hotkey(hotkey))
             });
@@ -3818,8 +3818,8 @@ impl GameApp {
         if let Some(dialog) = self.dialogs.client_list.as_mut() {
             dialog.note_non_pointer_input();
         }
-        self.context_menu_pointer_dismissed_lobby_team_player = None;
-        self.context_menu_pointer_dismissed_lobby_option = None;
+        self.context_menus.pointer_dismissed_lobby_team_player = None;
+        self.context_menus.pointer_dismissed_lobby_option = None;
         if state == ElementState::Released && self.chat.paste_consumed_keys.remove(&key) {
             return Ok(());
         }
@@ -3839,7 +3839,7 @@ impl GameApp {
             }
             return Err(error);
         }
-        if self.running_chat_keyboard_active() && self.context_menu.is_none() {
+        if self.running_chat_keyboard_active() && self.context_menus.open.is_none() {
             let modifiers = self.live_input.modifiers
                 & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             let replacement_mode = self
@@ -3951,7 +3951,7 @@ impl GameApp {
         let input_dialog_release_latched =
             state == ElementState::Released && self.game_option_input_consumed_keys.remove(&key);
         if self.running_chat_keyboard_active() {
-            let context_menu_was_open = self.context_menu.is_some();
+            let context_menu_was_open = self.context_menus.open.is_some();
             let modifiers = self.live_input.modifiers
                 & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             let context_menu_handled =
@@ -3997,7 +3997,7 @@ impl GameApp {
         if self.handle_message_dialog_key(key, state)? {
             return Ok(());
         }
-        if self.league_signup_dialog.is_some() && self.context_menu.is_some() {
+        if self.league_signup_dialog.is_some() && self.context_menus.open.is_some() {
             let modifiers = self.live_input.modifiers
                 & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             if modifiers.is_empty() {
@@ -4029,7 +4029,7 @@ impl GameApp {
             if c4_modifiers.is_empty() && self.handle_context_menu_key(key, state)? {
                 return Ok(());
             }
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 if self.handle_runtime_irc_toggle_key(key, state)? {
                     return Ok(());
                 }
@@ -4326,7 +4326,7 @@ impl GameApp {
         if definition_release_latched {
             return Ok(());
         }
-        let context_menu_was_open = self.context_menu.is_some();
+        let context_menu_was_open = self.context_menus.open.is_some();
         let c4_modifiers = self.live_input.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if c4_modifiers.is_empty() && self.handle_context_menu_key(key, state)? {
@@ -4604,7 +4604,7 @@ impl GameApp {
                     {
                         return Ok(());
                     }
-                    if self.context_menu.is_none()
+                    if self.context_menus.open.is_none()
                         && key == VirtualKeyCode::KeyD
                         && self.live_input.modifiers.alt_key()
                     {
@@ -4617,7 +4617,9 @@ impl GameApp {
                         // disabled; ToggleCheck itself rejects the mutation.
                         return Ok(());
                     }
-                    if self.context_menu.is_none() && self.menu_state.definition_checkbox_focused {
+                    if self.context_menus.open.is_none()
+                        && self.menu_state.definition_checkbox_focused
+                    {
                         match (state, key) {
                             (ElementState::Pressed, VirtualKeyCode::Space) => {
                                 if self.menu_state.toggle_definition_checkbox() {
@@ -4643,7 +4645,7 @@ impl GameApp {
                             ) => return Ok(()),
                             _ => {}
                         }
-                    } else if self.context_menu.is_none()
+                    } else if self.context_menus.open.is_none()
                         && state == ElementState::Pressed
                         && key == VirtualKeyCode::Tab
                         && !self.menu_state.search_focused()
@@ -4658,14 +4660,14 @@ impl GameApp {
                     if state == ElementState::Pressed
                         && key == VirtualKeyCode::KeyF
                         && search_shortcut
-                        && self.context_menu.is_none()
+                        && self.context_menus.open.is_none()
                         && self.menu_state.current_map().is_none()
                     {
                         self.menu_state.set_search_focused(true);
                         self.menu_state.search_edit.select_all();
                         return Ok(());
                     }
-                    if self.menu_state.search_focused() && self.context_menu.is_none() {
+                    if self.menu_state.search_focused() && self.context_menus.open.is_none() {
                         let ctrl = self.live_input.modifiers.control_key();
                         let edit_shortcut = search_shortcut;
                         let shift = self.live_input.modifiers.shift_key();
@@ -5522,7 +5524,7 @@ impl GameApp {
             let mut owner = if network_chart_gamepad_open {
                 ClusterOwner::NetworkChart
             } else if self.running_chat_keyboard_active() {
-                if self.context_menu.is_some() {
+                if self.context_menus.open.is_some() {
                     ClusterOwner::ContextPending
                 } else {
                     // The z=+2 chat dialog and its raw KEY_Any callback sit
@@ -5547,7 +5549,7 @@ impl GameApp {
                     // sources so it can consume and reject a wrong pad.
                     ClusterOwner::Suppressed
                 }
-            } else if self.context_menu.is_some() {
+            } else if self.context_menus.open.is_some() {
                 ClusterOwner::ContextPending
             } else if self.message_dialog_owns_gamepad_input() {
                 ClusterOwner::Message
@@ -5674,7 +5676,7 @@ impl GameApp {
                             if self.handle_context_menu_gamepad_event(event)? {
                                 owner = ClusterOwner::Context;
                             } else {
-                                owner = if self.context_menu.is_some() {
+                                owner = if self.context_menus.open.is_some() {
                                     // A root context may decline Left without
                                     // closing. C4GUI still keeps its parent
                                     // dialog inactive until the context is
@@ -6240,8 +6242,8 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.note_classic_lobby_non_pointer_input();
-        self.context_menu_pointer_dismissed_lobby_team_player = None;
-        self.context_menu_pointer_dismissed_lobby_option = None;
+        self.context_menus.pointer_dismissed_lobby_team_player = None;
+        self.context_menus.pointer_dismissed_lobby_option = None;
         if self.runtime_client_list_keyboard_active()
             && self
                 .dialogs
@@ -7330,7 +7332,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if self.context_menu.is_some()
+        if self.context_menus.open.is_some()
             && self
                 .game_option_input_dialog
                 .as_ref()
@@ -7353,7 +7355,7 @@ impl GameApp {
             self.finish_game_option_input_dialog_actions(actions)?;
         }
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
-            && self.context_menu.is_some()
+            && self.context_menus.open.is_some()
             && !self.dialogs.stack.is_empty();
         if context_routed_before_running_dialogs && self.handle_context_menu_pointer_move(point)? {
             self.occlude_running_dialog_pointer_hovers();
@@ -7489,7 +7491,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if self.league_signup_dialog.is_some() && self.context_menu.is_some() {
+        if self.league_signup_dialog.is_some() && self.context_menus.open.is_some() {
             self.league_signup_pointer_position = Some(point);
             if !context_routed_before_running_dialogs
                 && self.handle_context_menu_pointer_move(point)?
@@ -7510,7 +7512,7 @@ impl GameApp {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
             }
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
             }
@@ -7851,7 +7853,7 @@ impl GameApp {
             || !self.dialogs.messages.is_empty()
             || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
             || self.dialogs.scoreboard_close_pointer_capture
@@ -7883,7 +7885,7 @@ impl GameApp {
             && self.dialogs.messages.is_empty()
             && self.startup.player_properties_dialog.is_none()
             && self.definition_selector.is_none()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self.game_option_input_dialog.is_none()
             && self.game_over_dialog.is_none()
             && !self.dialogs.scoreboard_close_pointer_capture
@@ -8016,7 +8018,7 @@ impl GameApp {
             || !self.dialogs.messages.is_empty()
             || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
             || self.dialogs.chart_pointer_capture
@@ -9358,7 +9360,7 @@ impl GameApp {
             // A context action closes on down. If its matching up was lost,
             // the next physical press starts a new gesture and invalidates
             // the old release latch before any underlying control sees it.
-            self.context_menu_pointer_capture = None;
+            self.context_menus.pointer_capture = None;
         }
         if self
             .consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Right)
@@ -9366,7 +9368,7 @@ impl GameApp {
             return Ok(());
         }
         if self.network_chart_is_elevated_pointer_layer()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self
                 .live_input
                 .running_pointer
@@ -9376,7 +9378,7 @@ impl GameApp {
         }
         let message_dialog_fallback_blocks_world = self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
-            && self.context_menu.is_some()
+            && self.context_menus.open.is_some()
             && !self.dialogs.stack.is_empty();
         if context_routed_before_running_dialogs
             && self
@@ -9416,7 +9418,7 @@ impl GameApp {
             {
                 return Ok(());
             }
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 return Ok(());
             }
             if button_state == ElementState::Pressed {
@@ -9649,7 +9651,7 @@ impl GameApp {
             return Ok(());
         }
         if button_state == ElementState::Pressed {
-            self.context_menu_pointer_capture = None;
+            self.context_menus.pointer_capture = None;
             self.game_option_pointer_capture = false;
             let chat_hit = self.running_chat_controller().is_some()
                 && self
@@ -9659,7 +9661,7 @@ impl GameApp {
                         Self::point_in_input_dialog_bounds(point, layout)
                     });
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
                 && if self.running_chat_controller().is_some() {
                     chat_hit
                 } else {
@@ -9678,7 +9680,7 @@ impl GameApp {
             return Ok(());
         }
         if self.network_chart_is_elevated_pointer_layer()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self
                 .live_input
                 .running_pointer
@@ -9688,7 +9690,7 @@ impl GameApp {
         }
         let message_dialog_fallback_blocks_world = self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
-            && self.context_menu.is_some()
+            && self.context_menus.open.is_some()
             && !self.dialogs.stack.is_empty();
         if context_routed_before_running_dialogs
             && self
@@ -9740,7 +9742,7 @@ impl GameApp {
             {
                 return Ok(());
             }
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 return Ok(());
             }
             if button_state == ElementState::Pressed {
@@ -10740,8 +10742,8 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.live_input.primary_left_down = button_state == ElementState::Pressed;
-        self.context_menu_pointer_dismissed_lobby_team_player = None;
-        self.context_menu_pointer_dismissed_lobby_option = None;
+        self.context_menus.pointer_dismissed_lobby_team_player = None;
+        self.context_menus.pointer_dismissed_lobby_option = None;
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
             return Ok(());
@@ -10780,17 +10782,17 @@ impl GameApp {
                     dialog.pointer_left();
                 }
             }
-            self.context_menu_pointer_capture = None;
+            self.context_menus.pointer_capture = None;
             // A fresh gesture supersedes any stale modal capture. Only the
             // topmost selector itself may acquire this latch.
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.dialogs.messages.is_empty();
             self.league_signup_pointer_capture = self.league_signup_dialog.is_some()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty();
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
                 && self.running_chat_controller().is_none()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty())
             .then_some(ContextMenuPointerButton::Left);
         }
@@ -10825,7 +10827,7 @@ impl GameApp {
             return Ok(());
         }
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
-            && self.context_menu.is_some()
+            && self.context_menus.open.is_some()
             && !self.dialogs.stack.is_empty();
         if context_routed_before_running_dialogs
             && self
@@ -10838,7 +10840,7 @@ impl GameApp {
             return Ok(());
         }
         if self.network_chart_is_elevated_pointer_layer()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self.handle_network_chart_pointer_button(button_state)
         {
             if button_state == ElementState::Pressed && self.dialogs.chart.is_some() {
@@ -10936,7 +10938,7 @@ impl GameApp {
             return Ok(());
         }
         if self.league_signup_dialog.is_some() {
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 if self.handle_context_menu_pointer_button(
                     button_state,
                     ContextMenuPointerButton::Left,
@@ -10961,7 +10963,7 @@ impl GameApp {
             {
                 return Ok(());
             }
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 return Ok(());
             }
         }
@@ -11622,8 +11624,8 @@ impl GameApp {
         if phase != TouchPhase::Cancelled {
             self.live_input.running_pointer = Some(position);
         }
-        self.context_menu_pointer_dismissed_lobby_team_player = None;
-        self.context_menu_pointer_dismissed_lobby_option = None;
+        self.context_menus.pointer_dismissed_lobby_team_player = None;
+        self.context_menus.pointer_dismissed_lobby_option = None;
         if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
@@ -11717,7 +11719,7 @@ impl GameApp {
                     self.handle_mouse_button(ElementState::Released)?;
                 }
                 TouchPhase::Cancelled => {
-                    self.context_menu_pointer_capture = None;
+                    self.context_menus.pointer_capture = None;
                     self.release_message_dialog_pointer_elements();
                     self.release_game_option_input_pointer_elements();
                 }
@@ -11728,10 +11730,10 @@ impl GameApp {
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.dialogs.messages.is_empty();
             self.league_signup_pointer_capture = self.league_signup_dialog.is_some()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty();
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
                 && (self.dialogs.messages.is_empty() || self.running_chat_controller().is_some()))
             .then_some(ContextMenuPointerButton::Left);
             self.game_option_pointer_capture = false;
@@ -11751,10 +11753,10 @@ impl GameApp {
             return Ok(());
         }
         if phase == TouchPhase::Cancelled {
-            self.context_menu_pointer_capture = None;
+            self.context_menus.pointer_capture = None;
         }
         let context_before_running_messages = self.mode == AppMode::Running
-            && self.context_menu.is_some()
+            && self.context_menus.open.is_some()
             && self.running_chat_controller().is_none()
             && !self.dialogs.messages.is_empty();
         if context_before_running_messages {
@@ -11784,7 +11786,7 @@ impl GameApp {
             }
         }
         let elevated_chart_hit = self.network_chart_is_elevated_pointer_layer()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self.network_chart_contains_point(position);
         let retained_shared_capture = self.running_shared_pointer_capture_open();
         let running_message_shared_target = if self.mode == AppMode::Running
@@ -11868,7 +11870,7 @@ impl GameApp {
                 self.league_signup_pointer_left(true);
                 return Ok(());
             }
-            if self.context_menu.is_some() {
+            if self.context_menus.open.is_some() {
                 let move_captured = self.handle_context_menu_pointer_move(position)?;
                 let button_captured = match phase {
                     TouchPhase::Started => self.handle_context_menu_pointer_button(
@@ -12068,7 +12070,7 @@ impl GameApp {
         if definition_selector_release_latched {
             return Ok(());
         }
-        if self.context_menu.is_some() {
+        if self.context_menus.open.is_some() {
             if phase == TouchPhase::Cancelled {
                 self.close_context_menu_silently();
             } else {
@@ -12614,8 +12616,8 @@ impl GameApp {
         // CursorLeft may be the only lifecycle event after an activation
         // closed the menu on down. An open popup, however, must retain its
         // capture so a later outside up cannot leak to the underlying screen.
-        if self.context_menu.is_none() {
-            self.context_menu_pointer_capture = None;
+        if self.context_menus.open.is_none() {
+            self.context_menus.pointer_capture = None;
         }
         self.cancel_network_chart_pointer_capture();
         let messages_open = !self.dialogs.messages.is_empty();
@@ -12629,14 +12631,14 @@ impl GameApp {
             return;
         }
         if self.league_signup_dialog.is_some() {
-            if let Some(menu) = self.context_menu.as_mut() {
+            if let Some(menu) = self.context_menus.open.as_mut() {
                 let _ = menu.handle_pointer_left();
             }
             self.league_signup_pointer_left(true);
             return;
         }
         if self.chat.external_dialog_visible {
-            if let Some(menu) = self.context_menu.as_mut() {
+            if let Some(menu) = self.context_menus.open.as_mut() {
                 let _ = menu.handle_pointer_left();
             }
         }
@@ -12682,7 +12684,7 @@ impl GameApp {
             self.play_definition_selector_sound_events(sounds);
             return;
         }
-        if let Some(menu) = self.context_menu.as_mut() {
+        if let Some(menu) = self.context_menus.open.as_mut() {
             let _ = menu.handle_pointer_left();
         }
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
@@ -12819,7 +12821,7 @@ impl GameApp {
         &mut self,
         point: GuiPoint,
     ) -> Result<bool, EngineError> {
-        let Some(menu) = self.context_menu.as_mut() else {
+        let Some(menu) = self.context_menus.open.as_mut() else {
             return Ok(false);
         };
         let outcome = menu.handle_pointer_move(point);
@@ -12834,10 +12836,10 @@ impl GameApp {
         button: ContextMenuPointerButton,
     ) -> bool {
         if state == ElementState::Released
-            && self.context_menu.is_none()
-            && self.context_menu_pointer_capture == Some(button)
+            && self.context_menus.open.is_none()
+            && self.context_menus.pointer_capture == Some(button)
         {
-            self.context_menu_pointer_capture = None;
+            self.context_menus.pointer_capture = None;
             return true;
         }
         false
@@ -12849,11 +12851,11 @@ impl GameApp {
         button: ContextMenuPointerButton,
     ) -> Result<bool, EngineError> {
         let retained_release =
-            state == ElementState::Released && self.context_menu_pointer_capture == Some(button);
+            state == ElementState::Released && self.context_menus.pointer_capture == Some(button);
         if retained_release {
-            self.context_menu_pointer_capture = None;
+            self.context_menus.pointer_capture = None;
         }
-        let Some(menu) = self.context_menu.as_mut() else {
+        let Some(menu) = self.context_menus.open.as_mut() else {
             return Ok(retained_release);
         };
         let point = menu.pointer_position();
@@ -12869,21 +12871,21 @@ impl GameApp {
                 .iter()
                 .any(|event| matches!(event, ContextMenuEvent::Closed));
         let dismissed_lobby_team_player = dismissed_combo
-            .then_some(self.context_menu_lobby_team_player)
+            .then_some(self.context_menus.lobby_team_player)
             .flatten();
         let dismissed_lobby_option = dismissed_combo
-            .then_some(self.context_menu_lobby_option)
+            .then_some(self.context_menus.lobby_option)
             .flatten();
         let captured = outcome.captured && !outcome.pass_through;
         if state == ElementState::Pressed && captured {
-            self.context_menu_pointer_capture = Some(button);
+            self.context_menus.pointer_capture = Some(button);
         }
         self.process_context_menu_outcome(outcome)?;
         if let Some(player_id) = dismissed_lobby_team_player {
-            self.context_menu_pointer_dismissed_lobby_team_player = Some(player_id);
+            self.context_menus.pointer_dismissed_lobby_team_player = Some(player_id);
         }
         if let Some(option) = dismissed_lobby_option {
-            self.context_menu_pointer_dismissed_lobby_option = Some(option);
+            self.context_menus.pointer_dismissed_lobby_option = Some(option);
         }
         Ok(captured || retained_release)
     }
@@ -12893,14 +12895,14 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.context_menu.is_none() {
+        if self.context_menus.open.is_none() {
             return Ok(false);
         }
         if state == ElementState::Released {
             return Ok(false);
         }
         let outcome = {
-            let menu = self.context_menu.as_mut().expect("checked above");
+            let menu = self.context_menus.open.as_mut().expect("checked above");
             menu.note_non_pointer_input();
             if let Some(key) = context_menu_key_code(key) {
                 menu.handle_key(key)
@@ -12926,7 +12928,7 @@ impl GameApp {
         &mut self,
         event: GamepadEvent,
     ) -> Result<bool, EngineError> {
-        let outcome = self.context_menu.as_mut().and_then(|menu| {
+        let outcome = self.context_menus.open.as_mut().and_then(|menu| {
             menu.note_non_pointer_input();
             match event {
                 GamepadEvent::Direction {
@@ -13445,18 +13447,18 @@ impl GameApp {
                 && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
                 && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
                 && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
         } else {
             (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
                 && self.dialogs.messages.is_empty()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
         }
     }
 
     pub(crate) fn runtime_client_list_mouse_active(&self) -> bool {
         if self.mode == AppMode::Running {
             (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
         } else {
             self.runtime_client_list_keyboard_active()
         }
