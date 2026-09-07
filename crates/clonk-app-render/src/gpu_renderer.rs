@@ -5551,96 +5551,175 @@ fn line_color_at_parameter(
         .ok_or(GpuRendererError::NonFiniteCoordinate)
 }
 
+/// The rasterization frame of one aliased line: its clipped, tie-break
+/// perturbed endpoints in GL window space and the major-axis pixel range the
+/// fragment walk visits. Building it is all the set-up
+/// [`walk_aliased_line_fragments`] needs, so a caller that only wants a
+/// fragment *bound* stops here instead of walking every pixel.
+struct AliasedLineRaster {
+    x_major: bool,
+    line_width: i64,
+    raster_start: [f64; 2],
+    raster_end: [f64; 2],
+    attribute_start: [f64; 2],
+    attribute_end: [f64; 2],
+    first_major: i64,
+    end_major: i64,
+    major_delta: f64,
+}
+
+impl AliasedLineRaster {
+    /// `None` when the line leaves no fragment: clipped away, degenerate, or
+    /// outside the scissor along its major axis.
+    fn new(
+        start: GpuSolidVertex,
+        end: GpuSolidVertex,
+        projection: &DrawProjection,
+    ) -> Result<Option<Self>, GpuRendererError> {
+        let [start_x, start_top] = projected_physical_position(start.position, projection)?;
+        let [end_x, end_top] = projected_physical_position(end.position, projection)?;
+        let framebuffer_height = f64::from(projection.physical_extent[1]);
+        let original_start = [start_x, framebuffer_height - start_top];
+        let original_end = [end_x, framebuffer_height - end_top];
+        let physical_clip = projection.clipper.physical_clip();
+        let clip_left = f64::from(physical_clip.x);
+        let clip_right = clip_left + f64::from(physical_clip.width);
+        let clip_top = f64::from(physical_clip.y);
+        let clip_bottom = clip_top + f64::from(physical_clip.height);
+        let Some((clipped_start, clipped_end)) = clip_directed_line(
+            original_start,
+            original_end,
+            [
+                clip_left,
+                clip_right,
+                framebuffer_height - clip_bottom,
+                framebuffer_height - clip_top,
+            ],
+        ) else {
+            return Ok(None);
+        };
+        let delta = [
+            clipped_end[0] - clipped_start[0],
+            clipped_end[1] - clipped_start[1],
+        ];
+        if delta == [0.0, 0.0] {
+            return Ok(None);
+        }
+        let x_major = delta[0].abs() >= delta[1].abs();
+        let line_width = rounded_raster_width(projection);
+        let minor_offset = (line_width - 1) as f64 * 0.5;
+        let mut base_start = clipped_start;
+        let mut base_end = clipped_end;
+        let mut attribute_start = original_start;
+        let mut attribute_end = original_end;
+        let minor_axis = usize::from(x_major);
+        base_start[minor_axis] -= minor_offset;
+        base_end[minor_axis] -= minor_offset;
+        attribute_start[minor_axis] -= minor_offset;
+        attribute_end[minor_axis] -= minor_offset;
+
+        // Section 3.4.1 defines the ideal tie break by translating both endpoints
+        // by (-epsilon, -epsilon^2) in GL window coordinates. Inputs originate as
+        // f32; this bias is below one f32 ulp at unit magnitude, while next_down
+        // keeps the epsilon^2 term observable at large physical coordinates.
+        const EPSILON: f64 = f32::EPSILON as f64 * 0.25;
+        let epsilon_squared = EPSILON * EPSILON;
+        let raster_start = [
+            perturb_down(base_start[0], EPSILON),
+            perturb_down(base_start[1], epsilon_squared),
+        ];
+        let raster_end = [
+            perturb_down(base_end[0], EPSILON),
+            perturb_down(base_end[1], epsilon_squared),
+        ];
+        let major_axis = usize::from(!x_major);
+        let major_delta = raster_end[major_axis] - raster_start[major_axis];
+        let (clip_start, clip_end) = if x_major {
+            (
+                i64::from(projection.scissor.x),
+                i64::from(projection.scissor.x) + i64::from(projection.scissor.width),
+            )
+        } else {
+            let height = i64::from(projection.physical_extent[1]);
+            (
+                height - i64::from(projection.scissor.y) - i64::from(projection.scissor.height),
+                height - i64::from(projection.scissor.y),
+            )
+        };
+        let segment_min = raster_start[major_axis].min(raster_end[major_axis]);
+        let segment_max = raster_start[major_axis].max(raster_end[major_axis]);
+        let first_major = (segment_min.floor() - 1.0)
+            .max(clip_start as f64)
+            .min(clip_end as f64) as i64;
+        let end_major = (segment_max.ceil() + 1.0)
+            .max(clip_start as f64)
+            .min(clip_end as f64) as i64;
+        if first_major >= end_major {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            x_major,
+            line_width,
+            raster_start,
+            raster_end,
+            attribute_start,
+            attribute_end,
+            first_major,
+            end_major,
+            major_delta,
+        }))
+    }
+
+    /// Major-axis pixels the walk visits.
+    fn span(&self) -> Result<u64, GpuRendererError> {
+        u64::try_from(self.end_major - self.first_major)
+            .map_err(|_| GpuRendererError::VertexRangeOverflow)
+    }
+
+    /// An upper bound on the fragments the walk emits: at most one base
+    /// fragment per visited major-axis pixel, replicated across the line
+    /// width. The walk itself drops pixels the diamond-exit rule excludes and
+    /// clips against the scissor, so the exact count is never larger.
+    fn fragment_bound(&self) -> Result<u64, GpuRendererError> {
+        let width = u64::try_from(self.line_width.max(0))
+            .map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+        self.span()?
+            .checked_mul(width)
+            .ok_or(GpuRendererError::VertexRangeOverflow)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static ALIASED_LINE_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn walk_aliased_line_fragments(
     start: GpuSolidVertex,
     end: GpuSolidVertex,
     projection: &DrawProjection,
     mut emit: impl FnMut(i64, i64, f64) -> Result<(), GpuRendererError>,
 ) -> Result<u64, GpuRendererError> {
-    let [start_x, start_top] = projected_physical_position(start.position, projection)?;
-    let [end_x, end_top] = projected_physical_position(end.position, projection)?;
-    let framebuffer_height = f64::from(projection.physical_extent[1]);
-    let original_start = [start_x, framebuffer_height - start_top];
-    let original_end = [end_x, framebuffer_height - end_top];
-    let physical_clip = projection.clipper.physical_clip();
-    let clip_left = f64::from(physical_clip.x);
-    let clip_right = clip_left + f64::from(physical_clip.width);
-    let clip_top = f64::from(physical_clip.y);
-    let clip_bottom = clip_top + f64::from(physical_clip.height);
-    let Some((clipped_start, clipped_end)) = clip_directed_line(
-        original_start,
-        original_end,
-        [
-            clip_left,
-            clip_right,
-            framebuffer_height - clip_bottom,
-            framebuffer_height - clip_top,
-        ],
-    ) else {
+    #[cfg(test)]
+    ALIASED_LINE_WALKS.with(|walks| walks.set(walks.get() + 1));
+    let Some(raster) = AliasedLineRaster::new(start, end, projection)? else {
         return Ok(0);
     };
-    let delta = [
-        clipped_end[0] - clipped_start[0],
-        clipped_end[1] - clipped_start[1],
-    ];
-    if delta == [0.0, 0.0] {
-        return Ok(0);
-    }
-    let x_major = delta[0].abs() >= delta[1].abs();
-    let line_width = rounded_raster_width(projection);
-    let minor_offset = (line_width - 1) as f64 * 0.5;
-    let mut base_start = clipped_start;
-    let mut base_end = clipped_end;
-    let mut attribute_start = original_start;
-    let mut attribute_end = original_end;
-    let minor_axis = usize::from(x_major);
-    base_start[minor_axis] -= minor_offset;
-    base_end[minor_axis] -= minor_offset;
-    attribute_start[minor_axis] -= minor_offset;
-    attribute_end[minor_axis] -= minor_offset;
-
-    // Section 3.4.1 defines the ideal tie break by translating both endpoints
-    // by (-epsilon, -epsilon^2) in GL window coordinates. Inputs originate as
-    // f32; this bias is below one f32 ulp at unit magnitude, while next_down
-    // keeps the epsilon^2 term observable at large physical coordinates.
-    const EPSILON: f64 = f32::EPSILON as f64 * 0.25;
-    let epsilon_squared = EPSILON * EPSILON;
-    let raster_start = [
-        perturb_down(base_start[0], EPSILON),
-        perturb_down(base_start[1], epsilon_squared),
-    ];
-    let raster_end = [
-        perturb_down(base_end[0], EPSILON),
-        perturb_down(base_end[1], epsilon_squared),
-    ];
+    let span = raster.span()?;
+    let AliasedLineRaster {
+        x_major,
+        line_width,
+        raster_start,
+        raster_end,
+        attribute_start,
+        attribute_end,
+        first_major,
+        end_major,
+        major_delta,
+    } = raster;
     let major_axis = usize::from(!x_major);
-    let major_delta = raster_end[major_axis] - raster_start[major_axis];
-    let (clip_start, clip_end) = if x_major {
-        (
-            i64::from(projection.scissor.x),
-            i64::from(projection.scissor.x) + i64::from(projection.scissor.width),
-        )
-    } else {
-        let height = i64::from(projection.physical_extent[1]);
-        (
-            height - i64::from(projection.scissor.y) - i64::from(projection.scissor.height),
-            height - i64::from(projection.scissor.y),
-        )
-    };
-    let segment_min = raster_start[major_axis].min(raster_end[major_axis]);
-    let segment_max = raster_start[major_axis].max(raster_end[major_axis]);
-    let first_major = (segment_min.floor() - 1.0)
-        .max(clip_start as f64)
-        .min(clip_end as f64) as i64;
-    let end_major = (segment_max.ceil() + 1.0)
-        .max(clip_start as f64)
-        .min(clip_end as f64) as i64;
-    if first_major >= end_major {
-        return Ok(0);
-    }
-
-    let span = u64::try_from(end_major - first_major)
-        .map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+    let minor_axis = usize::from(x_major);
     let mut fragment_count = 0_u64;
     for offset in 0..span {
         let offset = i64::try_from(offset).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
@@ -6149,14 +6228,14 @@ fn validate_scene(
                             return Err(GpuRendererError::NonFiniteCoordinate);
                         }
                         if let Some(projection) = projection.as_ref() {
-                            let fragment_count = walk_aliased_line_fragments(
-                                pair[0],
-                                pair[1],
-                                projection,
-                                |_, _, _| Ok(()),
-                            )?;
+                            // Only the u32 range check below reads this
+                            // total, so a bound is enough; the exact count
+                            // costs a full per-pixel walk per line.
+                            let fragment_bound =
+                                AliasedLineRaster::new(pair[0], pair[1], projection)?
+                                    .map_or(Ok(0), |raster| raster.fragment_bound())?;
                             line_fragments = line_fragments
-                                .checked_add(fragment_count)
+                                .checked_add(fragment_bound)
                                 .ok_or(GpuRendererError::VertexRangeOverflow)?;
                         }
                     }
@@ -14750,6 +14829,84 @@ mod tests {
             GpuVertex::new([left, bottom, 1.0], [0.0, 1.0], modulation[2]),
             GpuVertex::new([right, bottom, 1.0], [1.0, 1.0], modulation[3]),
         ]
+    }
+
+    #[test]
+    fn scene_validation_bounds_line_fragments_without_walking_them() {
+        // `validate_scene` needs the fragment total only for the u32 range
+        // check. Walking every pixel of every line to count it exactly, and
+        // then walking again to pack, doubled the line cost of a frame: Sky
+        // Bridges' force bridges are line objects and rasterize to about
+        // 17,000 fragments per frame.
+        let presentation = GpuPresentation::identity(4096, 64);
+        let scene = GpuScene::new(
+            [4096, 64],
+            Color::transparent(),
+            GpuGammaLut::from_ramp(&GammaRamp::identity()),
+            GpuGammaMode::Disabled,
+            Vec::new(),
+            vec![GpuCommand::Solid {
+                vertices: vec![
+                    solid_vertex(0.5, 10.5, [1.0; 4]),
+                    solid_vertex(4095.5, 40.5, [1.0; 4]),
+                ],
+                topology: GpuPrimitiveTopology::LineList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Normal,
+                style: GpuSolidStyle::NONE,
+            }],
+        );
+        ALIASED_LINE_WALKS.with(|walks| walks.set(0));
+        RetainedGpuRenderer::validate_scene(&scene, &presentation).expect("valid line scene");
+        assert_eq!(
+            ALIASED_LINE_WALKS.with(std::cell::Cell::get),
+            0,
+            "validation bounds the fragment count instead of walking it"
+        );
+    }
+
+    #[test]
+    fn line_fragment_bound_covers_every_walked_fragment() {
+        // The bound stands in for the exact count only in an overflow test,
+        // so it must never undercount: one base fragment per major-axis
+        // pixel of the clipped span, replicated across the line width.
+        let presentation = GpuPresentation::identity(64, 48);
+        let projection = draw_projection(None, [64, 48], &presentation)
+            .expect("valid presentation")
+            .expect("clip intersects the framebuffer");
+        let color = [1.0; 4];
+        let lines = [
+            ((0.5, 0.5), (63.5, 47.5)),
+            ((2.0, 40.0), (60.0, 3.0)),
+            ((10.5, 5.5), (10.5, 44.5)),
+            ((5.0, 20.0), (58.0, 21.0)),
+            ((-10.0, 10.0), (80.0, 30.0)),
+            ((3.0, 3.0), (3.0, 3.0)),
+        ];
+        for (start, end) in lines {
+            let start = solid_vertex(start.0, start.1, color);
+            let end = solid_vertex(end.0, end.1, color);
+            let walked = walk_aliased_line_fragments(start, end, &projection, |_, _, _| Ok(()))
+                .expect("walk line");
+            let bound = AliasedLineRaster::new(start, end, &projection)
+                .expect("raster frame")
+                .map_or(Ok(0), |raster| raster.fragment_bound())
+                .expect("fragment bound");
+            assert!(
+                bound >= walked,
+                "{:?} -> {:?}: bound {bound} undercounts {walked} walked fragments",
+                start.position,
+                end.position
+            );
+        }
+        let start = solid_vertex(0.5, 0.5, color);
+        let end = solid_vertex(63.5, 47.5, color);
+        assert!(
+            walk_aliased_line_fragments(start, end, &projection, |_, _, _| Ok(())).expect("walk")
+                > 0,
+            "the diagonal fixture must rasterize fragments or the bound test pins nothing"
+        );
     }
 
     fn solid_vertex(x: f32, y: f32, color: [f32; 4]) -> GpuSolidVertex {
