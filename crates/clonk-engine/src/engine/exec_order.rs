@@ -1572,32 +1572,12 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn find_object_index(&self, id: ObjectId) -> Option<usize> {
-        let generation = self.objects_generation.get();
-        {
-            let cache = self.object_index_cache.borrow();
-            if cache.0 == generation {
-                match cache.1.get(&id).copied() {
-                    // Identity-checked: a stale hit (missed generation bump)
-                    // falls through to the rebuild instead of resolving the
-                    // wrong object.
-                    Some(index) if self.objects.get(index).map(|object| object.id) == Some(id) => {
-                        return Some(index);
-                    }
-                    Some(_) => {}
-                    None => return None,
-                }
-            }
-        }
-        let mut cache = self.object_index_cache.borrow_mut();
-        cache.0 = generation;
-        cache.1.clear();
-        cache.1.extend(
-            self.objects
-                .iter()
-                .enumerate()
-                .map(|(i, object)| (object.id, i)),
-        );
-        cache.1.get(&id).copied()
+        object_index_in_storage(
+            &self.objects_generation,
+            &self.object_index_cache,
+            &self.objects,
+            id,
+        )
     }
 
     /// Return the runtime identity of the currently live object with `id`.
@@ -1750,6 +1730,44 @@ impl Engine {
             None => None,
         }
     }
+}
+
+/// The `ObjectId -> storage index` lookup behind [`Engine::find_object_index`],
+/// over the three fields it reads: generation-checked, identity-checked, and
+/// rebuilt from the vector when either check fails. The lazy host-world
+/// provider (`engine/host_tables.rs`) runs it through raw field pointers while
+/// the engine is paused inside a host callback, so it takes the fields rather
+/// than `&Engine`; every caller must resolve indices this way, because a cache
+/// entry outlives the object vector it described (clonk-org/clonk-rs#1524).
+pub(crate) fn object_index_in_storage(
+    generation: &std::cell::Cell<u64>,
+    cache: &std::cell::RefCell<(u64, rustc_hash::FxHashMap<ObjectId, usize>)>,
+    objects: &[Object],
+    id: ObjectId,
+) -> Option<usize> {
+    let generation = generation.get();
+    {
+        let cache = cache.borrow();
+        if cache.0 == generation {
+            match cache.1.get(&id).copied() {
+                // Identity-checked: a stale hit (missed generation bump)
+                // falls through to the rebuild instead of resolving the
+                // wrong object.
+                Some(index) if objects.get(index).map(|object| object.id) == Some(id) => {
+                    return Some(index);
+                }
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    }
+    let mut cache = cache.borrow_mut();
+    cache.0 = generation;
+    cache.1.clear();
+    cache
+        .1
+        .extend(objects.iter().enumerate().map(|(i, object)| (object.id, i)));
+    cache.1.get(&id).copied()
 }
 
 #[cfg(test)]
