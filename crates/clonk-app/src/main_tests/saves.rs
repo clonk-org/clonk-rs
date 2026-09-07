@@ -1599,7 +1599,7 @@ fn capture_profile_is_resolved_before_profile_sensitive_assets() {
         .as_ref()
         .test_value()
         .snap_to_pixels);
-    main_assert!(!app.graphics.hd_exact_blits());
+    main_assert!(!app.rendering.graphics.hd_exact_blits());
     app.configure_native_startup_fonts(1.0, false);
     main_assert!(!app
         .loader_render_config
@@ -1935,12 +1935,12 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     app.synchronize_advanced_options_runtime();
-    main_assert!(app.graphics.point_filtering());
+    main_assert!(app.rendering.graphics.point_filtering());
     main_assert!(app.loader_render_config.expect("loader render config remains materialized").point_filtering());
 
     fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=false\n").test_value();
     app.synchronize_advanced_options_runtime();
-    main_assert!(!app.graphics.point_filtering());
+    main_assert!(!app.rendering.graphics.point_filtering());
     main_assert!(!app.loader_render_config.expect("loader config follows live advanced save").point_filtering());
 }
 
@@ -1956,8 +1956,8 @@ fn runtime_pxs_graphics_reload_is_live_and_presentation_only() {
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     app.synchronize_advanced_options_runtime();
-    main_assert!(app.display_flags.pxs_gfx);
-    main_assert!(app.graphics.pxs_graphics_enabled());
+    main_assert!(app.rendering.display_flags.pxs_gfx);
+    main_assert!(app.rendering.graphics.pxs_graphics_enabled());
 
     // C4PXSSystem::Create accepts only a material in the loaded map
     // (src/C4PXS.cpp:207-215), so give this running-game fixture one.
@@ -1990,14 +1990,14 @@ fn runtime_pxs_graphics_reload_is_live_and_presentation_only() {
 
     persist_config_value(&paths, "Graphics", "PXSGfx", "0").test_value();
     app.synchronize_advanced_options_runtime();
-    main_assert!(!app.display_flags.pxs_gfx);
-    main_assert!(!app.graphics.pxs_graphics_enabled());
+    main_assert!(!app.rendering.display_flags.pxs_gfx);
+    main_assert!(!app.rendering.graphics.pxs_graphics_enabled());
     assert_simulation_unchanged(&app);
 
     persist_config_value(&paths, "Graphics", "PXSGfx", "1").test_value();
     app.synchronize_advanced_options_runtime();
-    main_assert!(app.display_flags.pxs_gfx);
-    main_assert!(app.graphics.pxs_graphics_enabled());
+    main_assert!(app.rendering.display_flags.pxs_gfx);
+    main_assert!(app.rendering.graphics.pxs_graphics_enabled());
     assert_simulation_unchanged(&app);
 }
 
@@ -2237,7 +2237,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     app.app_paths = Some(paths);
     app.set_display_mode(DisplayMode::Window);
     app.clear_message_board_log();
-    main_assert!(!app.display_flags.is_fullscreen, "C++ isFullScreen means non-console mode, so an OS window remains eligible");
+    main_assert!(!app.rendering.display_flags.is_fullscreen, "C++ isFullScreen means non-console mode, so an OS window remains eligible");
     let presented = vec![
         1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170,
         180, 190, 200, 210, 220, 230, 240, 250, 249, 248, 247,
@@ -2257,7 +2257,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
             .iter()
             .cloned()
             .collect::<Vec<_>>() =>
-        app.graphics
+        app.rendering.graphics
             .prepare_message_board_lines("Saved screenshot Screenshots/Screenshot001.png.")
     );
     main_assert_eq!(first => install.path().join("Screenshots/Screenshot001.png"));
@@ -2282,7 +2282,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     )
     .test_value();
     let installed_gamma = app
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
     app.snapshot
         .environment
@@ -2295,7 +2295,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     main_assert_eq!(app.pending_screenshots.front().map(|request| request.kind) => Some(ScreenshotKind::FullLandscape));
     main_assert_eq!(app.pending_screenshots.front().map(|request| &request.gamma) => Some(&installed_gamma), "queued capture retains the ramp installed at keydown");
     main_assert!(app.chat.running.is_some(), "the global screenshot binding works above an open chat dialog");
-    app.graphics
+    app.rendering.graphics
         .apply_gamma_now(&app.snapshot.environment.gamma);
     app.clear_message_board_log();
     let second_outcome = app
@@ -2310,7 +2310,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
             .iter()
             .cloned()
             .collect::<Vec<_>>() =>
-        app.graphics
+        app.rendering.graphics
             .prepare_message_board_lines("Saved screenshot Screenshots/Screenshot002.png.")
     );
     main_assert_eq!(second => install.path().join("Screenshots/Screenshot002.png"));
@@ -2369,7 +2369,7 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>() =>
-            app.graphics
+            app.rendering.graphics
                 .prepare_message_board_lines("Localized failure: Screenshots/Screenshot001.png")
         );
         main_assert!(!expected_path.exists(), "a failed attempt leaves its numbered slot reusable");
@@ -2639,7 +2639,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
 
     main_assert!(app.startup.options_advanced_dialog.is_none());
     main_assert_eq!(app.startup.view => StartupView::Options);
-    main_assert_eq!(app.graphics_smoke_level => 321);
+    main_assert_eq!(app.rendering.graphics_smoke_level => 321);
     main_assert_eq!(app.config.mission_access.snapshot() => "Secret;Beta");
     main_assert!(!app.config.show_folder_maps);
     main_assert!(app.startup.view_flags.record);
@@ -3578,11 +3578,11 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     app.local_controls = LocalControlRegistry::default();
     app.mouse_control = false;
     app.snapshot = app.engine.snapshot();
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     app.film_view_player = Some(owner);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let before = app.graphics.active_viewport_projections()[0];
+    let before = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(before.owner => owner);
     main_assert!(before.is_no_owner_viewport);
     app.engine
@@ -3602,7 +3602,7 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
 
-    let after_move = app.graphics.active_viewport_projections()[0];
+    let after_move = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(after_move.target_x => before.target_x - 10);
     main_assert!(app.live_input.ingame_edge_scroll.expect("classified observer edge remains live").observer);
     main_assert_eq!(
@@ -3616,13 +3616,13 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
     // its retained VpX/VpY must continue through that owner change.
     main_assert!(app.set_physical_film_view(OWNER_NONE));
     app.test_render(&mut frame);
-    let retargeted = app.graphics.active_viewport_projections()[0];
+    let retargeted = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(retargeted.owner => OWNER_NONE);
     main_assert!(retargeted.is_no_owner_viewport);
 
     app.test_update();
 
-    let after_tick = app.graphics.active_viewport_projections()[0];
+    let after_tick = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(after_tick.target_x => retargeted.target_x - 10);
     let scroll = app.live_input.ingame_edge_scroll.test_value();
     main_assert!(scroll.observer);
@@ -3881,12 +3881,12 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
             &IngameMenuLabels::default(),
         ),
     );
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let pointer = GuiPoint::new(
         viewport.x as f32 + viewport.width as f32 / 2.0,
         viewport.y as f32 + viewport.height as f32 / 2.0,
     );
-    app.live_input.ingame_pointer = app.graphics.viewport_point_at(pointer);
+    app.live_input.ingame_pointer = app.rendering.graphics.viewport_point_at(pointer);
     app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
         text: "Hidden mouse caption".to_string(),
         keep_moves: 1,
@@ -3997,10 +3997,10 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
         .call_scenario_script_function("Probe", Vec::new())
         .test_value();
     app.snapshot = app.engine.snapshot();
-    let mut frame = vec![0; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0; app.rendering.graphics.surface().pixels().len()];
     app.render_running(&mut frame, false).test_value();
     main_assert_eq!(app.film_view_player => None);
-    main_assert_eq!(app.graphics.active_viewport_projections()[0].owner => local_owner);
+    main_assert_eq!(app.rendering.graphics.active_viewport_projections()[0].owner => local_owner);
 
     app.engine.set_replay_control(true);
     app.engine
@@ -4009,7 +4009,7 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
     app.snapshot = app.engine.snapshot();
     app.render_running(&mut frame, false).test_value();
     main_assert_eq!(app.film_view_player => Some(film_player));
-    main_assert_eq!(app.graphics.active_viewport_projections()[0].owner => film_player);
+    main_assert_eq!(app.rendering.graphics.active_viewport_projections()[0].owner => film_player);
     let inputs =
         collect_viewport_inputs_from_physical_state(&app.snapshot, &app.viewports.physical_viewports)
             .test_value();
@@ -4018,10 +4018,10 @@ fn set_film_view_builtin_reaches_the_real_replay_viewport() {
 
 fn assert_running_viewport_boundary(app: &mut GameApp, expected_reason: ClassicViewportBoundary) {
     app.snapshot.hud.messages.clear();
-    app.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
-    let mut frame = vec![0x5a; app.graphics.surface().pixels().len()];
+    app.rendering.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
+    let mut frame = vec![0x5a; app.rendering.graphics.surface().pixels().len()];
     let frame_before = frame.clone();
-    let surface_before = app.graphics.surface().pixels().to_vec();
+    let surface_before = app.rendering.graphics.surface().pixels().to_vec();
     let expected = ClassicParityBoundary::RunningViewport(expected_reason);
 
     let error = app
@@ -4035,7 +4035,7 @@ fn assert_running_viewport_boundary(app: &mut GameApp, expected_reason: ClassicV
         "boundary must name both rejected viewport substitutes: {error:#}"
     );
     main_assert_eq!(frame => frame_before, "caller frame must remain byte-identical");
-    main_assert_eq!(app.graphics.surface().pixels() => surface_before.as_slice(), "graphics surface must remain byte-identical");
+    main_assert_eq!(app.rendering.graphics.surface().pixels() => surface_before.as_slice(), "graphics surface must remain byte-identical");
 }
 
 #[test]
@@ -4117,7 +4117,7 @@ fn focusless_owned_slot_renders_in_normal_cursor_mode() {
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render_running(&mut frame, false).test_value();
-    main_assert_eq!(app.graphics.active_viewport_projections().len() => 2);
+    main_assert_eq!(app.rendering.graphics.active_viewport_projections().len() => 2);
 }
 
 #[test]

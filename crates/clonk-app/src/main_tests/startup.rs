@@ -1255,11 +1255,11 @@ fn the_automatic_check_is_throttled_to_once_a_day_and_records_every_attempt() {
     // C4UpdateDlg.cpp:264-268 records the attempt before the check; this
     // port's immediate config rewrite must also carry the in-memory Display
     // values that C++ would retain in its global Config.
-    app.display_flags.player_names = false;
-    app.display_flags.clonk_names = false;
-    app.display_flags.clock = true;
-    app.display_flags.fps = true;
-    app.display_flags.upper_board = UpperBoardMode::Small;
+    app.rendering.display_flags.player_names = false;
+    app.rendering.display_flags.clonk_names = false;
+    app.rendering.display_flags.clock = true;
+    app.rendering.display_flags.fps = true;
+    app.rendering.display_flags.upper_board = UpperBoardMode::Small;
     app.defer_display_toggle(DisplayToggle::PlayerNames);
     app.defer_display_toggle(DisplayToggle::ClonkNames);
     app.defer_display_toggle(DisplayToggle::Clock);
@@ -2327,7 +2327,7 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
         .iter()
         .any(|item| item.action == MenuAction::Abort));
     let display =
-        IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default());
+        IngameMenuState::display_menu(&app.rendering.display_flags, 0, &IngameMenuLabels::default());
     main_assert_eq!(
         display
             .items()
@@ -2351,7 +2351,7 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
         .items()
         .iter()
         .any(|item| item.action == MenuAction::Abort));
-    main_assert_eq!(IngameMenuState::display_menu(&app.display_flags, 0, &IngameMenuLabels::default()).items().len() => 9);
+    main_assert_eq!(IngameMenuState::display_menu(&app.rendering.display_flags, 0, &IngameMenuLabels::default()).items().len() => 9);
 }
 
 #[test]
@@ -2379,12 +2379,12 @@ fn crew_name_label_respects_display_flags() {
     };
 
     main_assert_eq!(labels(&app).iter().map(|label| label.text.as_str()).collect::<Vec<_>>() => ["Remote Clonk (Remote Player)"]);
-    app.display_flags.player_names = false;
+    app.rendering.display_flags.player_names = false;
     main_assert_eq!(labels(&app)[0].text => "Remote Clonk");
-    app.display_flags.player_names = true;
-    app.display_flags.clonk_names = false;
+    app.rendering.display_flags.player_names = true;
+    app.rendering.display_flags.clonk_names = false;
     main_assert_eq!(labels(&app)[0].text => "Remote Player");
-    app.display_flags.player_names = false;
+    app.rendering.display_flags.player_names = false;
     main_assert!(labels(&app).is_empty());
 }
 
@@ -3850,8 +3850,8 @@ fn startup_loader_render_uses_configured_user_gamma() {
     config.save(paths.config_file()).test_value();
     main_assert_eq!(load_classic_loader_gamma(Some(&paths)) => None);
     app.loader_gamma = None;
-    let current_renderer_config = app.graphics.advanced_renderer_config();
-    app.graphics
+    let current_renderer_config = app.rendering.graphics.advanced_renderer_config();
+    app.rendering.graphics
         .set_advanced_renderer_config(clonk_frontend::AdvancedRendererConfig {
             disable_gamma: true,
             ..current_renderer_config
@@ -3957,7 +3957,7 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
         previous = Some(index);
     }
 
-    let mut frame = vec![0; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0; app.rendering.graphics.surface().pixels().len()];
     app.render(&mut frame).test_value();
     main_assert!(
         app.terminal_loader_frame_pending,
@@ -4236,7 +4236,7 @@ fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
     app.show_main_menu();
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
 
-    app.graphics.set_runtime_sprite_filtering(3.0, false);
+    app.rendering.graphics.set_runtime_sprite_filtering(3.0, false);
     app.configure_native_startup_fonts(3.0, false);
     let mut logical_frame = vec![0_u8; 1152 * 723 * 4];
     app.render_ordered_native_base(&mut logical_frame)
@@ -4374,7 +4374,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
             .iter()
             .position(|item| item.caption == caption)
             .test_value();
-        let area = app.graphics.viewport_rect(owner).test_value();
+        let area = app.rendering.graphics.viewport_rect(owner).test_value();
         let fallback = app.assets.font_arc();
         let font = clonk_frontend::hud::HudFont::from_set(
             app.assets.clonk_fonts.as_deref(),
@@ -4390,7 +4390,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
             .min(((area.height as i32 - 100) / item_height.max(1)).max(1))
             .max(1);
         let title_height = font.line_height().max(23);
-        let extra_height = if app.display_flags.show_commands {
+        let extra_height = if app.rendering.display_flags.show_commands {
             16
         } else {
             0
@@ -4457,7 +4457,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     }
     main_assert_eq!(app.local_controls.mouse_owner() => Some(secondary));
     let secondary_close = {
-        let area = app.graphics.viewport_rect(secondary).test_value();
+        let area = app.rendering.graphics.viewport_rect(secondary).test_value();
         let fallback = app.assets.font_arc();
         let font = clonk_frontend::hud::HudFont::from_set(
             app.assets.clonk_fonts.as_deref(),
@@ -4471,7 +4471,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
                 area,
                 &font,
                 &IngameMenuGraphics {
-                    show_commands: app.display_flags.show_commands,
+                    show_commands: app.rendering.display_flags.show_commands,
                     show_close_button: true,
                     ..IngameMenuGraphics::default()
                 },
@@ -4490,7 +4490,7 @@ fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
     main_assert!(
             matches!(secondary_target, Some((owner, IngameMenuPointerTarget::Item(_))) if owner == secondary),
             "assigned secondary menu item must hit-test: target={secondary_target:?}, viewport={:?}, point={secondary_item:?}",
-            app.graphics.viewport_rect(secondary),
+            app.rendering.graphics.viewport_rect(secondary),
         );
     app.test_cursor(secondary_item);
     app.test_left_button(ElementState::Pressed);

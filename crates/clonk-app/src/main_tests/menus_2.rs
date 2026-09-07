@@ -104,7 +104,7 @@ fn non_left_runtime_dialog_hits_swallow_without_raising() {
 
     app.toggle_network_chart();
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let game_over_only = (0..height)
@@ -711,8 +711,8 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     let board_before = app.message_board_line();
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    let surface_width = app.graphics.surface().width() as i32;
-    let surface_height = app.graphics.surface().height() as i32;
+    let surface_width = app.rendering.graphics.surface().width() as i32;
+    let surface_height = app.rendering.graphics.surface().height() as i32;
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let layout = app.game_option_input_layout().test_value();
     let controller = app.running_chat_controller().test_value();
@@ -1186,9 +1186,9 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
 
     let close_rect = |app: &GameApp| {
         let player = app.players.local_owner;
-        let area = app.graphics.viewport_rect(player).test_value();
+        let area = app.rendering.graphics.viewport_rect(player).test_value();
         menus2_fixture!(hud_font: app, fallback, font);
-        let gfx = menus2_fixture!(ingame_graphics: app.display_flags.show_commands);
+        let gfx = menus2_fixture!(ingame_graphics: app.rendering.display_flags.show_commands);
         app.ingame_menu
             .get(player)
             .test_value()
@@ -1279,7 +1279,7 @@ fn player_menu_title_close_survives_disable_mouse_player_assignment() {
         .as_ref()
         .is_some_and(|gfx| gfx.show_close_button));
 
-    let area = app.graphics.viewport_rect(owner).test_value();
+    let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
     let presentation = app.ingame_menu.get(owner).test_value().presentation_layout(
         area,
@@ -1411,9 +1411,9 @@ fn construction_menu_drag_reprojects_stationary_pointer_after_camera_motion() {
     app.snapshot = app.engine.snapshot();
     let render_snapshot = app.snapshot.clone();
     let viewports = collect_viewport_inputs(&render_snapshot).test_value();
-    app.graphics.render_frame(&render_snapshot, &viewports);
+    app.rendering.graphics.render_frame(&render_snapshot, &viewports);
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.index == retained.viewport_index)
@@ -1423,7 +1423,7 @@ fn construction_menu_drag_reprojects_stationary_pointer_after_camera_motion() {
         viewport.rect.y.saturating_add(retained.position.y) as f32,
     );
     let expected_pointer = app
-        .graphics
+        .rendering.graphics
         .viewport_output_point_for_index(viewport.index, screen)
         .test_value();
     let expected_world = ingame_pointer_world_pixel(expected_pointer);
@@ -1680,7 +1680,7 @@ fn normal_menu_render_draws_no_symbol_for_an_unresolved_item_picture() {
         );
         install_test_cursor_menu(&mut app, cursor, menu);
 
-        let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
+        let mut frame = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
         app.test_render(&mut frame);
         frame
     }
@@ -1831,12 +1831,12 @@ fn context_style_script_menu_reaches_command2_by_right_click_and_special2() {
 
         let second_item = {
             menus2_fixture!(hud_font: app, fallback, font);
-            let area = app.graphics.viewport_rect(app.players.local_owner).test_value();
+            let area = app.rendering.graphics.viewport_rect(app.players.local_owner).test_value();
             object_menu::engine_script_menu_layout(
                 area,
                 &font,
                 &menu,
-                app.display_flags.show_commands,
+                app.rendering.display_flags.show_commands,
             )
             .item_rect(1)
             .test_value()
@@ -1911,10 +1911,10 @@ fn script_menu_close_survives_disable_mouse_object_assignment() {
 
     let mut frame = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut frame);
-    let area = app.graphics.viewport_rect(owner).test_value();
+    let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
     let layout =
-        object_menu::engine_script_menu_layout(area, &font, &menu, app.display_flags.show_commands);
+        object_menu::engine_script_menu_layout(area, &font, &menu, app.rendering.display_flags.show_commands);
     let close = layout.close_button_rect();
     let point = GuiPoint::new(
         (close.x + close.width as i32 / 2) as f32,
@@ -1922,7 +1922,7 @@ fn script_menu_close_survives_disable_mouse_object_assignment() {
     );
     main_assert_eq!(app.script_menu_pointer_target(point).test_value() => None, "DisableMouse still blocks object-menu pointer routing");
     main_assert_eq!(
-        app.graphics
+        app.rendering.graphics
             .surface()
             .get_pixel(point.x as u32, point.y as u32) =>
         Some(close_color),
@@ -1950,12 +1950,12 @@ fn engine_script_menu_pointer_selects_enters_and_closes_like_cpp() {
 
     let (second_item, close_button) = {
         menus2_fixture!(hud_font: app, fallback, font);
-        let area = app.graphics.viewport_rect(app.players.local_owner).test_value();
+        let area = app.rendering.graphics.viewport_rect(app.players.local_owner).test_value();
         let layout = object_menu::engine_script_menu_layout(
             area,
             &font,
             &menu,
-            app.display_flags.show_commands,
+            app.rendering.display_flags.show_commands,
         );
         (layout.item_rect(1).test_value(), layout.close_button_rect())
     };
@@ -2021,10 +2021,10 @@ fn script_menu_pre_first_draw_discards_explicit_rows() {
         .script_menu_layout_for_owner(owner, false)
         .expect("layout resources")
         .test_value();
-    let area = app.graphics.viewport_rect(owner).test_value();
+    let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
     let derived_layout =
-        object_menu::engine_script_menu_layout(area, &font, &menu, app.display_flags.show_commands);
+        object_menu::engine_script_menu_layout(area, &font, &menu, app.rendering.display_flags.show_commands);
     main_assert_eq!(layout.lines => derived_layout.lines);
     main_assert_eq!(layout.visible => derived_layout.visible);
     main_assert_eq!(layout.client.height => derived_layout.client.height);
@@ -2123,13 +2123,13 @@ fn script_menu_growth_refill_recomputes_explicit_rows_and_visible_grid() {
         .script_menu_layout_for_owner(owner, false)
         .expect("grown layout resources")
         .test_value();
-    let area = app.graphics.viewport_rect(owner).test_value();
+    let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
     let derived_layout = object_menu::engine_script_menu_layout(
         area,
         &font,
         &grown_menu,
-        app.display_flags.show_commands,
+        app.rendering.display_flags.show_commands,
     );
     main_assert_eq!(grown_layout.lines => derived_layout.lines);
     main_assert_eq!(grown_layout.visible => derived_layout.visible);
@@ -2157,13 +2157,13 @@ fn script_menu_pointer_hit_test_invalidates_growth_before_redraw() {
     grown_menu.location_reset_generation = grown_menu.location_reset_generation.wrapping_add(1);
     grown_menu.lines = 1;
     grown_menu.selection = 0;
-    let area = app.graphics.viewport_rect(owner).test_value();
+    let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
     let natural_layout = object_menu::engine_script_menu_layout(
         area,
         &font,
         &grown_menu,
-        app.display_flags.show_commands,
+        app.rendering.display_flags.show_commands,
     );
     let fourth_item = natural_layout.item_rect(3).test_value();
     install_test_cursor_menu(&mut app, cursor, grown_menu);
@@ -2263,13 +2263,13 @@ fn context_menu_shrink_refill_recomputes_explicit_rows_and_scrollbar() {
         .script_menu_layout_for_owner(owner, false)
         .expect("shrunk layout resources")
         .test_value();
-    let area = app.graphics.viewport_rect(owner).test_value();
+    let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
     let derived_layout = object_menu::engine_script_menu_layout(
         area,
         &font,
         &shrunk_menu,
-        app.display_flags.show_commands,
+        app.rendering.display_flags.show_commands,
     );
     main_assert_eq!(shrunk_layout.lines => derived_layout.lines);
     main_assert_eq!(shrunk_layout.visible => derived_layout.visible);
@@ -2304,14 +2304,14 @@ fn script_menu_viewport_resize_recomputes_explicit_rows_and_hit_regions() {
         .script_menu_layout_for_owner(owner, false)
         .expect("resized layout resources")
         .test_value();
-    let area = app.graphics.viewport_rect(owner).test_value();
+    let area = app.rendering.graphics.viewport_rect(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
     let resized_menu = menus2_fixture!(cursor_menu: app, cursor);
     let derived_layout = object_menu::engine_script_menu_layout(
         area,
         &font,
         &resized_menu,
-        app.display_flags.show_commands,
+        app.rendering.display_flags.show_commands,
     );
     main_assert_eq!(resized_layout.lines => derived_layout.lines);
     main_assert_eq!(resized_layout.visible => derived_layout.visible);
@@ -2404,7 +2404,7 @@ fn running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
     app.test_render(&mut frame);
     let area = app.ingame_menu_area(owner).test_value();
     menus2_fixture!(hud_font: app, fallback, font);
-    let gfx = menus2_fixture!(ingame_graphics: app.display_flags.show_commands);
+    let gfx = menus2_fixture!(ingame_graphics: app.rendering.display_flags.show_commands);
     let bounds = app
         .ingame_menu
         .get(owner)
@@ -2748,7 +2748,7 @@ fn runtime_flash_draws_above_f1_help_and_below_recursive_context_gui() {
     let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
     expected.pixels_mut().copy_from_slice(&help_only);
     let gamma = help
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&help.snapshot.environment.gamma);
     let fonts = help.assets.clonk_fonts.clone().test_value();
     clonk_frontend::flash_message::render_flash_message(
@@ -2793,7 +2793,7 @@ fn runtime_flash_draws_above_f1_help_and_below_recursive_context_gui() {
     let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
     expected.pixels_mut().copy_from_slice(&flash_only);
     let gamma = context
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&context.snapshot.environment.gamma);
     menu.render(&mut expected, Some(&gamma)).test_value();
     context.context_menu = Some(menu);
@@ -3057,7 +3057,7 @@ fn running_context_menu_renders_above_runtime_f1_help() {
     let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
     expected.pixels_mut().copy_from_slice(&help_only);
     let gamma = app
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
     context.render(&mut expected, Some(&gamma)).test_value();
     app.context_menu = Some(context);

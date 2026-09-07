@@ -110,7 +110,7 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
     let click_point = GuiPoint::new(region_point.x, region_point.y - 14.0);
     main_assert_eq!(app.ingame_viewport_region(owner, click_point) => Some(IngameViewportRegion::Inventory(target)));
     let behind = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(click_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
@@ -142,8 +142,8 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
                 Some(overlap),
                 "fixture must catch a leaked selection; overlap={:?}, projected={:?}, behind={behind:?}, region={click_point:?}, raw_pick={:?}",
                 app.snapshot.object(overlap),
-                app.graphics.world_to_screen(owner, behind),
-                app.graphics.object_at_point(&app.snapshot, owner, click_point),
+                app.rendering.graphics.world_to_screen(owner, behind),
+                app.rendering.graphics.object_at_point(&app.snapshot, owner, click_point),
             );
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -170,7 +170,7 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
 fn hud_inventory_autostop_queues_stored_press_and_release() {
     let (mut app, owner, _crew, _first, target, region_point) = inventory_region_fixture();
     app.engine.test_player_mut(owner).control.control_style = true;
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let down = GuiPoint::new(
         (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + 1) as f32,
         region_point.y,
@@ -245,7 +245,7 @@ fn definition_sprite_carries_the_raw_defcore_picture_rect() {
     app.rebuild_definition_sprites();
 
     let picture_of = |id: &str| {
-        app.graphics
+        app.rendering.graphics
             .object_sprite(&sprite_map_key(id, None))
             .test_value()
             .picture
@@ -271,7 +271,7 @@ fn picture_only_magic_definition_keeps_a_zero_sized_world_face() {
     app.rebuild_definition_sprites();
 
     let sprite = app
-        .graphics
+        .rendering.graphics
         .object_sprite(&sprite_map_key("MAG0", None))
         .test_value();
     main_assert_eq!(sprite.picture => Some(clonk_engine::DefinitionRect::new(0, 0, 64, 64)), "the menu picture remains available",);
@@ -308,15 +308,15 @@ fn running_graphics_recreation_keeps_script_particle_catalog() {
     };
     app.engine.register_particle_resource(&flame).test_value();
     app.rebuild_definition_sprites();
-    main_assert!(app.graphics.particle_sprite("Fire2").is_some(), "precondition: the scenario definition rebuild installs Fire2");
+    main_assert!(app.rendering.graphics.particle_sprite("Fire2").is_some(), "precondition: the scenario definition rebuild installs Fire2");
 
     let label = app.scenario_label.clone();
     let ground = app.fallback_ground;
     app.configure_running_state(label, ground);
-    main_assert!(app.graphics.particle_sprite("Fire2").is_some(), "entering the running presentation must retain script particle graphics");
+    main_assert!(app.rendering.graphics.particle_sprite("Fire2").is_some(), "entering the running presentation must retain script particle graphics");
 
     app.resize(321, 201).test_value();
-    main_assert!(app.graphics.particle_sprite("Fire2").is_some(), "resizing the running presentation must retain script particle graphics");
+    main_assert!(app.rendering.graphics.particle_sprite("Fire2").is_some(), "resizing the running presentation must retain script particle graphics");
 }
 
 #[test]
@@ -336,7 +336,7 @@ fn viewport_buttons_use_only_the_exact_mouse_viewport() {
     render_mouse_test_app(&mut app);
 
     let viewports = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .filter(|viewport| viewport.owner == owner)
@@ -361,15 +361,15 @@ fn viewport_buttons_use_only_the_exact_mouse_viewport() {
 #[test]
 fn viewport_button_stack_is_wired_into_the_late_app_render() {
     let mut app = new_classic_running_sandbox_app();
-    app.display_flags.show_commands = false;
-    app.display_flags.show_command_keys = false;
+    app.rendering.display_flags.show_commands = false;
+    app.rendering.display_flags.show_command_keys = false;
     render_mouse_test_app(&mut app);
 
     let viewport = app.active_ingame_mouse_viewport().test_value();
     let gamma = app
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
-    app.graphics.update_overlay(&GraphicsOverlay {
+    app.rendering.graphics.update_overlay(&GraphicsOverlay {
         frame_text: "",
         status_text: "",
         debug_hud: false,
@@ -386,15 +386,15 @@ fn viewport_button_stack_is_wired_into_the_late_app_render() {
         show_commands: true,
         show_command_keys: false,
     });
-    app.graphics.surface_mut().fill(Color::transparent());
-    app.graphics
+    app.rendering.graphics.surface_mut().fill(Color::transparent());
+    app.rendering.graphics
         .draw_viewport_control_overlays(Some(viewport.index), false, None, Some(&gamma));
-    let isolated = app.graphics.surface().pixels().to_vec();
+    let isolated = app.rendering.graphics.surface().pixels().to_vec();
 
-    app.display_flags.show_commands = true;
+    app.rendering.display_flags.show_commands = true;
     render_mouse_test_app(&mut app);
-    let rendered = app.graphics.surface().pixels();
-    let width = app.graphics.surface().width() as usize;
+    let rendered = app.rendering.graphics.surface().pixels();
+    let width = app.rendering.graphics.surface().width() as usize;
     for button in [
         clonk_frontend::hud::ViewportButton::Help,
         clonk_frontend::hud::ViewportButton::PlayerMenu,
@@ -443,7 +443,7 @@ fn hud_command_bar_left_click_queues_exact_drawn_coms_only() {
 #[test]
 fn selection_drag_entering_hud_region_is_cancelled() {
     let (mut app, owner, _crew, _first, _target, region_point) = inventory_region_fixture();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let (start, crossed) = (viewport.y + 12..viewport.y + viewport.height as i32 - 48)
         .step_by(4)
         .flat_map(|y| {
@@ -458,11 +458,11 @@ fn selection_drag_entering_hud_region_is_cancelled() {
         })
         .find(|(start, crossed)| {
             [*start, *crossed].into_iter().all(|point| {
-                app.graphics
+                app.rendering.graphics
                     .viewport_point_at(point)
                     .is_some_and(|pointer| pointer.owner == owner)
                     && app
-                        .graphics
+                        .rendering.graphics
                         .object_at_point(&app.snapshot, owner, point)
                         .is_none()
                     && app.ingame_viewport_region(owner, point).is_none()
@@ -940,12 +940,12 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
     app.presentation.presentation_stats.sample_second();
 
     app.update_diagnostics_overlay();
-    main_assert_eq!(app.graphics.diagnostics_overlay_text() => None, "Graphics.ShowStats is opt-in: unset means no overlay at all");
+    main_assert_eq!(app.rendering.graphics.diagnostics_overlay_text() => None, "Graphics.ShowStats is opt-in: unset means no overlay at all");
 
-    app.display_flags.show_stats = true;
+    app.rendering.display_flags.show_stats = true;
     app.update_diagnostics_overlay();
     let text = app
-        .graphics
+        .rendering.graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
@@ -956,9 +956,9 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
     main_assert!(!text.contains("PreSend"), "an offline round has no control horizon to report: {text}");
 
     // And turning it back off retires the draw site rather than freezing it.
-    app.display_flags.show_stats = false;
+    app.rendering.display_flags.show_stats = false;
     app.update_diagnostics_overlay();
-    main_assert_eq!(app.graphics.diagnostics_overlay_text() => None);
+    main_assert_eq!(app.rendering.graphics.diagnostics_overlay_text() => None);
 }
 
 #[test]
@@ -968,7 +968,7 @@ fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from()
     // from a slow machine: `ACT` cannot, because it is ping-derived.
     let mut app = new_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 1, 40, 4);
-    app.display_flags.show_stats = true;
+    app.rendering.display_flags.show_stats = true;
     let clock = app.network_control_clock.test_mut();
     clock.observe_control_send_time_ms(40);
     clock.observe_control_lateness_ms(300);
@@ -976,7 +976,7 @@ fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from()
 
     app.update_diagnostics_overlay();
     let text = app
-        .graphics
+        .rendering.graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
@@ -1001,7 +1001,7 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
         .as_mut()
         .test_value()
         .register_client(7, "Client");
-    app.display_flags.show_stats = true;
+    app.rendering.display_flags.show_stats = true;
 
     let (completion_tx, completion_rx) = mpsc::channel();
     let command_reader = thread::spawn(move || {
@@ -1042,7 +1042,7 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
     app.update_diagnostics_overlay();
     app.record_network_stats_second();
     let pending = app
-        .graphics
+        .rendering.graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
@@ -1054,7 +1054,7 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
     app.record_network_stats_second();
     app.update_diagnostics_overlay();
     let fresh = app
-        .graphics
+        .rendering.graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
@@ -1077,25 +1077,25 @@ fn stats_toggle_is_default_unbound_and_a_custom_chord_flips_the_overlay() {
     let mut app = new_running_sandbox_app();
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(!app.display_flags.show_stats);
+    main_assert!(!app.rendering.display_flags.show_stats);
 
     let parsed = parse_runtime_key_config(b"[Keys]\nStatsToggle=F8\n").test_value();
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache.set(Ok(parsed)).test_value();
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(app.display_flags.show_stats);
+    main_assert!(app.rendering.display_flags.show_stats);
     app.update_diagnostics_overlay();
-    main_assert!(app.graphics.diagnostics_overlay_text().is_some());
+    main_assert!(app.rendering.graphics.diagnostics_overlay_text().is_some());
     main_assert!(app.runtime_flash_message.is_none(), "the toggle flashes no message, exactly like ToggleShowNetStatus");
 
     app.test_key(VirtualKeyCode::F8, ElementState::Released);
-    main_assert!(app.display_flags.show_stats);
+    main_assert!(app.rendering.display_flags.show_stats);
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(!app.display_flags.show_stats);
+    main_assert!(!app.rendering.display_flags.show_stats);
     app.update_diagnostics_overlay();
-    main_assert!(app.graphics.diagnostics_overlay_text().is_none());
+    main_assert!(app.rendering.graphics.diagnostics_overlay_text().is_none());
 }
 
 #[test]
@@ -1579,7 +1579,7 @@ fn same_owner_split_checks_target_in_second_exact_viewport() {
     let mut rendered = vec![0; 320 * 200 * 4];
     app.test_render(&mut rendered);
 
-    let projections = app.graphics.active_viewport_projections();
+    let projections = app.rendering.graphics.active_viewport_projections();
     main_assert_eq!(projections.len() => 2);
     main_assert_eq!([projections[0].index, projections[1].index] => [0, 1]);
     main_assert_eq!(projections[0].owner => projections[1].owner);
@@ -2057,13 +2057,13 @@ fn running_render_draws_resolved_world_cursor() {
     let mut app = new_synthetic_running_sandbox_app();
     install_l018_cursor_atlas(&mut app);
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
     app.test_render(&mut frame);
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -2090,7 +2090,7 @@ fn running_render_draws_resolved_world_cursor() {
     app.test_render(&mut frame);
     let origin_x = (pointer.screen.x as i32 - 2) as u32;
     let origin_y = (pointer.screen.y as i32 - 2) as u32;
-    main_assert_eq!(app.graphics.surface().get_pixel(origin_x, origin_y) => Some(Color::opaque(3, 43, 200)));
+    main_assert_eq!(app.rendering.graphics.surface().get_pixel(origin_x, origin_y) => Some(Color::opaque(3, 43, 200)));
 
     app.chat.external_dialog_visible = true;
     app.live_input.world_mouse_owned = true;
@@ -2099,7 +2099,7 @@ fn running_render_draws_resolved_world_cursor() {
     app.chat.external_dialog_visible = false;
     app.test_render(&mut frame);
     main_assert_ne!(
-        app.graphics.surface().get_pixel(origin_x, origin_y) =>
+        app.rendering.graphics.surface().get_pixel(origin_x, origin_y) =>
         Some(Color::opaque(3, 43, 200)),
         "the retained world pointer must not draw outside the client area"
     );
@@ -2114,13 +2114,13 @@ fn passive_observer_renders_region_cursor() {
     app.mouse_control = false;
     app.snapshot = app.engine.snapshot();
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
     app.test_render(&mut frame);
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.is_no_owner_viewport)
@@ -2137,7 +2137,7 @@ fn passive_observer_renders_region_cursor() {
 
     app.test_render(&mut frame);
     main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
-    main_assert!(app.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == [1, 40, 200, 255]), "passive Region cell must reach the composed frame");
+    main_assert!(app.rendering.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == [1, 40, 200, 255]), "passive Region cell must reach the composed frame");
 }
 
 #[test]
@@ -2145,13 +2145,13 @@ fn running_render_draws_throw_point_and_shift_add_marker() {
     let mut app = new_synthetic_running_sandbox_app();
     install_l018_cursor_atlas(&mut app);
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
     app.test_render(&mut frame);
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -2178,7 +2178,7 @@ fn running_render_draws_throw_point_and_shift_add_marker() {
         ("landing Point", [27, 67, 200, 255]),
         ("Shift Add", [31, 71, 200, 255]),
     ] {
-        main_assert!(app.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == color), "{phase} cursor cell must reach the composed frame");
+        main_assert!(app.rendering.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == color), "{phase} cursor cell must reach the composed frame");
     }
 }
 
@@ -2575,7 +2575,7 @@ fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
 
     let mut app = new_real_menu_app(320, 200);
     app.startup.dialog_fade = None;
-    app.graphics.set_runtime_sprite_filtering(1.0, false);
+    app.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
     app.handle_main_menu_activation(MainMenuItem::About)
         .test_value();
@@ -3237,17 +3237,17 @@ fn game_graphics_refreshes_hud_cursor_and_palette_then_reverts_at_preinit() {
     let mut app = new_menu_app(64, 64);
     let startup_hud = app.assets.hud_graphics();
     let startup_palette = app.assets.game_palette();
-    app.active_game_graphics = Some(active.clone());
+    app.rendering.active_game_graphics = Some(active.clone());
     app.configure_running_state("Overridden".to_string(), 64);
-    main_assert_eq!(app.graphics.hud_graphics().rank.as_ref().expect("active rank").pixels() => [4, 8, 12, 255]);
-    main_assert_eq!(app.graphics.game_palette().color(6) => Color::opaque(12, 16, 20));
+    main_assert_eq!(app.rendering.graphics.hud_graphics().rank.as_ref().expect("active rank").pixels() => [4, 8, 12, 255]);
+    main_assert_eq!(app.rendering.graphics.game_palette().color(6) => Color::opaque(12, 16, 20));
     main_assert_eq!(app.ensure_ingame_menu_gfx().options.as_ref().expect("active options sheet").pixels() => [110, 120, 130, 255]);
     app.resize(80, 80).test_value();
-    main_assert_eq!(app.graphics.hud_graphics().control.as_ref().expect("active control after resize").pixels() => [80, 90, 100, 255]);
+    main_assert_eq!(app.rendering.graphics.hud_graphics().control.as_ref().expect("active control after resize").pixels() => [80, 90, 100, 255]);
     app.return_to_menu();
-    main_assert!(app.active_game_graphics.is_none());
-    main_assert_eq!(app.graphics.hud_graphics().as_ref() => startup_hud.as_ref());
-    main_assert_eq!(app.graphics.game_palette().as_ref() => startup_palette.as_ref());
+    main_assert!(app.rendering.active_game_graphics.is_none());
+    main_assert_eq!(app.rendering.graphics.hud_graphics().as_ref() => startup_hud.as_ref());
+    main_assert_eq!(app.rendering.graphics.game_palette().as_ref() => startup_palette.as_ref());
 }
 
 #[test]
@@ -3630,9 +3630,9 @@ fn msgboard_command_reaches_continuous_multiline_render() {
     app.clear_message_board_log();
     app.process_running_chat_text("/msgboard 3");
 
-    let width = app.graphics.surface().width() as usize;
-    let height = app.graphics.surface().height() as usize;
-    let line_height = app.graphics.message_board_line_height() as usize;
+    let width = app.rendering.graphics.surface().width() as usize;
+    let height = app.rendering.graphics.surface().height() as usize;
+    let line_height = app.rendering.graphics.message_board_line_height() as usize;
     let mut without_lines = vec![0_u8; width * height * 4];
     app.test_render(&mut without_lines);
 
@@ -3710,8 +3710,8 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let primary_viewport = app.graphics.viewport_rect(primary).test_value();
-    let secondary_viewport = app.graphics.viewport_rect(secondary).test_value();
+    let primary_viewport = app.rendering.graphics.viewport_rect(primary).test_value();
+    let secondary_viewport = app.rendering.graphics.viewport_rect(secondary).test_value();
     main_assert_ne!(primary_viewport => secondary_viewport);
 
     let (physical_point, _) = (primary_viewport.y
@@ -3721,22 +3721,22 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
         .find_map(|point| {
-            let hovered = app.graphics.viewport_output_point_at(point)?;
+            let hovered = app.rendering.graphics.viewport_output_point_at(point)?;
             let projected = app
-                .graphics
+                .rendering.graphics
                 .viewport_output_point_for_owner(secondary, point)?;
             (hovered.owner == primary
                 && projected.owner == secondary
                 && projected.screen != point
                 && app
-                    .graphics
+                    .rendering.graphics
                     .crew_at_point(&app.snapshot, secondary, projected.screen)
                     .is_none())
             .then_some((point, projected))
         })
         .test_value();
     let expected_pointer = app
-        .graphics
+        .rendering.graphics
         .viewport_output_point_for_owner(
             secondary,
             GuiPoint::new(physical_point.x.ceil(), physical_point.y.ceil()),
@@ -3794,8 +3794,8 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     // C4Player.cpp:926-928,1491-1521,1692-1715).
     let mut app = new_running_sandbox_app();
     let owner = app.players.local_owner;
-    app.display_flags.scroll_smooth = 1;
-    app.graphics.set_scroll_smooth(1);
+    app.rendering.display_flags.scroll_smooth = 1;
+    app.rendering.graphics.set_scroll_smooth(1);
     let focus = app.engine.test_crew_cursor(owner);
     app.engine
         .replace_player_viewports(
@@ -3806,7 +3806,7 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     main_assert!(app.ingame_viewport_region(owner, left).is_none());
     main_assert!(app.script_menu_pointer_target(left).expect("left edge target query").is_none());
@@ -3836,7 +3836,7 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     main_assert_eq!(view_state(&app) => (Vector2::new(before.x - 10, before.y), clonk_engine::PLAYER_VIEW_MODE_SCROLLING,));
     app.test_render(&mut frame);
     let projection = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|projection| projection.owner == owner)
@@ -3903,7 +3903,7 @@ fn construction_edge_scroll_preserves_ordered_scoreboard_lifecycle_requests() {
     }
     begin_construction_drag(&mut app, menu_point, valid_point);
 
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let edge_point = (0..viewport.width as i32)
         .map(|x| (viewport.x + x, viewport.y))
         .chain((0..viewport.width as i32).map(|x| {
@@ -3921,7 +3921,7 @@ fn construction_edge_scroll_preserves_ordered_scoreboard_lifecycle_requests() {
         }))
         .map(|(x, y)| GuiPoint::new(x as f32, y as f32))
         .find(|point| {
-            app.graphics
+            app.rendering.graphics
                 .viewport_output_point_at(*point)
                 .is_some_and(|pointer| {
                     pointer.owner == owner
@@ -3960,12 +3960,12 @@ fn construction_edge_scroll_preserves_ordered_scoreboard_lifecycle_requests() {
 #[test]
 fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
     rendering_fixture!(edge_scroll_app: app, owner, focus);
-    app.display_flags.show_commands = false;
-    app.display_flags.scroll_smooth = 1;
-    app.graphics.set_scroll_smooth(1);
+    app.rendering.display_flags.show_commands = false;
+    app.rendering.display_flags.scroll_smooth = 1;
+    app.rendering.graphics.set_scroll_smooth(1);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let right = GuiPoint::new(
         (rect.x + rect.width as i32 - 1) as f32,
         (rect.y + rect.height as i32 / 2) as f32,
@@ -3981,7 +3981,7 @@ fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
     app.test_render(&mut frame);
     let scroll = app.live_input.ingame_edge_scroll.test_value();
     let expected = app
-        .graphics
+        .rendering.graphics
         .viewport_output_point_for_index(scroll.viewport_index, scroll.screen)
         .test_value();
     main_assert_ne!(expected.world => stale.world, "the rendered camera movement must change the fixed screen point's world coordinate");
@@ -3998,7 +3998,7 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
     rendering_fixture!(edge_scroll_app: app, owner, focus);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let left = PhysicalPosition::new(
         f64::from(rect.x),
         f64::from(rect.y + rect.height as i32 / 2),
@@ -4036,9 +4036,9 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
 fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclamping() {
     rendering_fixture!(edge_scroll_app: app, owner, focus);
     let mut frame = vec![0_u8; 320 * 200 * 4];
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     app.test_render(&mut frame);
-    let original = app.graphics.viewport_rect(owner).test_value();
+    let original = app.rendering.graphics.viewport_rect(owner).test_value();
     let right = PhysicalPosition::new(
         f64::from(original.x + original.width as i32 - 1),
         f64::from(original.y + original.height as i32 / 2),
@@ -4052,7 +4052,7 @@ fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclampi
     app.resize(480, 200).test_value();
     let mut wider_frame = vec![0_u8; 480 * 200 * 4];
     app.test_render(&mut wider_frame);
-    let wider = app.graphics.viewport_rect(owner).test_value();
+    let wider = app.rendering.graphics.viewport_rect(owner).test_value();
     main_assert!(wider.width > original.width);
     main_assert_eq!(app.live_input.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => original.width as i32 - 1);
     main_assert!(original.width as i32 - 1 < wider.width as i32 - 1, "the retained right edge is now an interior viewport coordinate");
@@ -4070,10 +4070,10 @@ fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclampi
 #[test]
 fn height_only_resize_retains_right_edge_continuous_pan() {
     rendering_fixture!(edge_scroll_app: app, owner, focus);
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let original = app.graphics.viewport_rect(owner).test_value();
+    let original = app.rendering.graphics.viewport_rect(owner).test_value();
     let right = GuiPoint::new(
         (original.x + original.width as i32 - 1) as f32,
         (original.y + original.height as i32 / 2) as f32,
@@ -4088,7 +4088,7 @@ fn height_only_resize_retains_right_edge_continuous_pan() {
     app.resize(320, 240).test_value();
     let mut taller_frame = vec![0_u8; 320 * 240 * 4];
     app.test_render(&mut taller_frame);
-    let taller = app.graphics.viewport_rect(owner).test_value();
+    let taller = app.rendering.graphics.viewport_rect(owner).test_value();
     main_assert_eq!(taller.width => original.width);
     main_assert!(taller.height > original.height);
     main_assert_eq!(app.live_input.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => taller.width as i32 - 1);
@@ -4128,7 +4128,7 @@ fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     let corner = GuiPoint::new(
         (rect.x + rect.width as i32 - 1) as f32,
@@ -4151,7 +4151,7 @@ fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
     main_assert!(app.live_input.ingame_edge_scroll.is_none());
     let before_tick5 = app.engine.player(owner).test_value().viewports()[0].center;
 
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     main_assert!(app.ingame_viewport_region(owner, corner).is_none());
     app.test_update();
     main_assert_eq!(app.engine.frame() % 5 => 0);
@@ -4166,7 +4166,7 @@ fn mouse_viewport_corner_pans_both_axes_and_uses_diagonal_cursor() {
     rendering_fixture!(edge_scroll_app: app, owner, focus);
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let corner = GuiPoint::new(rect.x as f32, rect.y as f32);
     main_assert!(app.ingame_viewport_region(owner, corner).is_none());
     main_assert!(app.script_menu_pointer_target(corner).expect("corner target query").is_none());
@@ -4191,7 +4191,7 @@ fn fullscreen_mouse_edge_pan_uses_the_forty_pixel_overflow_bound() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let projection = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == owner)
@@ -4208,7 +4208,7 @@ fn fullscreen_mouse_edge_pan_uses_the_forty_pixel_overflow_bound() {
         .test_value();
     app.snapshot = app.engine.snapshot();
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
@@ -4231,7 +4231,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
     app.local_controls = LocalControlRegistry::default();
     let snapshot = app.snapshot.clone();
     let focus = snapshot.objects.first().test_value();
-    app.graphics.render_frame(
+    app.rendering.graphics.render_frame(
         &snapshot,
         &[ViewportInput::new(
             OWNER_NONE,
@@ -4240,7 +4240,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
             focus,
         )],
     );
-    let before = app.graphics.active_viewport_projections()[0];
+    let before = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(before.owner => OWNER_NONE);
     let left = GuiPoint::new(
         before.rect.x as f32,
@@ -4249,7 +4249,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
 
     app.test_cursor(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)));
 
-    let after_move = app.graphics.active_viewport_projections()[0];
+    let after_move = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(after_move.content_origin_x => before.content_origin_x - 10.0);
     main_assert_eq!(after_move.content_origin_y => before.content_origin_y);
     main_assert_eq!(app.live_input.ingame_edge_scroll.expect("passive edge state remains live").edge.cursor => clonk_frontend::MouseCursorPhase::Left);
@@ -4263,7 +4263,7 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
     );
 
     app.test_update();
-    let after_tick = app.graphics.active_viewport_projections()[0];
+    let after_tick = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(after_tick.content_origin_x => before.content_origin_x - 20.0);
 }
 
@@ -4285,7 +4285,7 @@ fn zero_object_observer_uses_anchor_free_ownerless_viewport() {
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render_running(&mut frame, false).test_value();
-    main_assert!(app.graphics.active_viewport_projections()[0].is_no_owner_viewport);
+    main_assert!(app.rendering.graphics.active_viewport_projections()[0].is_no_owner_viewport);
 }
 
 #[test]
@@ -4314,7 +4314,7 @@ fn focusless_scrolling_player_uses_anchor_free_owned_viewport() {
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render_running(&mut frame, false).test_value();
-    let projection = app.graphics.active_viewport_projections()[0];
+    let projection = app.rendering.graphics.active_viewport_projections()[0];
     main_assert_eq!(projection.owner => owner);
     main_assert!(!projection.is_no_owner_viewport);
 }
@@ -4328,7 +4328,7 @@ fn edge_scroll_preserves_fallback_viewport_without_live_viewports() {
     // fail with LocalViewportUnavailable.
     let mut app = new_running_sandbox_app();
     let owner = app.players.local_owner;
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     app.engine
         .replace_player_viewports(owner, Vec::new())
         .test_value();
@@ -4337,7 +4337,7 @@ fn edge_scroll_preserves_fallback_viewport_without_live_viewports() {
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     main_assert_eq!(
         app.snapshot
@@ -4442,7 +4442,7 @@ fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
 
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let hud_point = GuiPoint::new(
         (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + clonk_frontend::hud::SYMBOL_SIZE / 2)
             as f32,
@@ -4452,7 +4452,7 @@ fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
     );
     main_assert_eq!(app.ingame_viewport_region(owner, hud_point) => Some(IngameViewportRegion::Inventory(carried)));
     let world = app
-        .graphics
+        .rendering.graphics
         .viewport_output_point_at(hud_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
@@ -4575,7 +4575,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             fallback.as_ref(),
         );
         let gfx = IngameMenuGraphics {
-            show_commands: player_app.display_flags.show_commands,
+            show_commands: player_app.rendering.display_flags.show_commands,
             show_close_button: true,
             ..IngameMenuGraphics::default()
         };
@@ -4603,7 +4603,7 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             fallback.as_ref(),
         );
         let gfx = IngameMenuGraphics {
-            show_commands: player_app.display_flags.show_commands,
+            show_commands: player_app.rendering.display_flags.show_commands,
             show_close_button: true,
             ..IngameMenuGraphics::default()
         };
@@ -4748,11 +4748,11 @@ fn debug_keys_toggle_render_flags_and_exact_flashes() {
     );
 
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
-    let flags = app.graphics.debug_draw_flags();
+    let flags = app.rendering.graphics.debug_draw_flags();
     main_assert!(flags.show_vertices && flags.show_entrance);
     main_assert_eq!(runtime_flash_text(&app) => Some("Entrance+Vertices: on"));
     app.test_key(VirtualKeyCode::F6, ElementState::Pressed);
-    let flags = app.graphics.debug_draw_flags();
+    let flags = app.rendering.graphics.debug_draw_flags();
     main_assert!(!flags.show_vertices && !flags.show_entrance);
     main_assert_eq!(runtime_flash_text(&app) => Some("Entrance+Vertices: off"));
 
@@ -4763,24 +4763,24 @@ fn debug_keys_toggle_render_flags_and_exact_flashes() {
         ("Actions/Commands/Pathfinder: off", false, false, false),
     ] {
         app.test_key(VirtualKeyCode::F7, ElementState::Pressed);
-        let flags = app.graphics.debug_draw_flags();
+        let flags = app.rendering.graphics.debug_draw_flags();
         main_assert_eq!((flags.show_action, flags.show_command, flags.show_pathfinder) => (action, command, pathfinder));
         main_assert_eq!(runtime_flash_text(&app) => Some(expected));
     }
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(app.graphics.debug_draw_flags().show_solid_mask);
+    main_assert!(app.rendering.graphics.debug_draw_flags().show_solid_mask);
     main_assert_eq!(runtime_flash_text(&app) => Some("SolidMasks: on"));
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(!app.graphics.debug_draw_flags().show_solid_mask);
+    main_assert!(!app.rendering.graphics.debug_draw_flags().show_solid_mask);
     main_assert_eq!(runtime_flash_text(&app) => Some("SolidMasks: off"));
 
-    let mut flags = app.graphics.debug_draw_flags();
+    let mut flags = app.rendering.graphics.debug_draw_flags();
     flags.show_net_status = true;
-    app.graphics.set_debug_draw_flags(flags);
+    app.rendering.graphics.set_debug_draw_flags(flags);
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     main_assert!(!app.engine.debug_mode());
-    main_assert_eq!(app.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
+    main_assert_eq!(app.rendering.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
     main_assert_eq!(runtime_flash_text(&app) => Some("Debug mode: off"));
     main_assert_eq!(app.mode => AppMode::Running);
     main_assert!(!app.exit_requested);
@@ -5155,16 +5155,16 @@ fn material_render_bytes_keep_the_cpp_uint32_low_byte() {
 #[test]
 fn set_plr_show_command_request_force_enables_display_once() {
     let mut app = new_state_only_menu_app(320, 200);
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     app.config.show_commands_requests.request_enable();
     app.apply_show_commands_enable_request();
-    main_assert!(app.display_flags.show_commands);
+    main_assert!(app.rendering.display_flags.show_commands);
 
     // The native call writes true once; a later user toggle remains off
     // until another SetPlrShowCommand call.
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     app.apply_show_commands_enable_request();
-    main_assert!(!app.display_flags.show_commands);
+    main_assert!(!app.rendering.display_flags.show_commands);
 }
 
 /// `Config.General.ScrollSmooth` defaults to 4 (C4Config.cpp:381-388) and
@@ -5196,12 +5196,12 @@ fn configured_scroll_smooth_drives_runtime_camera_divisor() {
     // The loaded scalar reaches the camera through the render path, and the
     // divisor clamps at use.
     let mut app = new_classic_running_sandbox_app();
-    let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
     for (configured, effective) in [(1, 1), (4, 4), (25, 25), (0, 1), (9_999, 50)] {
-        app.display_flags.scroll_smooth = configured;
+        app.rendering.display_flags.scroll_smooth = configured;
         app.test_render(&mut frame);
-        main_assert_eq!(app.graphics.scroll_smooth() => configured, "the raw configured value reaches the graphics model");
-        main_assert_eq!(app.graphics.scroll_smooth().clamp(1, 50) => effective, "the effective divisor clamps to 1..=50 like AdjustPosition");
+        main_assert_eq!(app.rendering.graphics.scroll_smooth() => configured, "the raw configured value reaches the graphics model");
+        main_assert_eq!(app.rendering.graphics.scroll_smooth().clamp(1, 50) => effective, "the effective divisor clamps to 1..=50 like AdjustPosition");
     }
 }
 
@@ -5312,7 +5312,7 @@ fn the_presentation_path_never_reaches_the_simulation() {
 fn native_menu_text_baseline_is_one_bound_draw_per_glyph() {
     let mut app = new_real_menu_app(640, 480);
     app.startup.dialog_fade = None;
-    app.graphics.set_runtime_sprite_filtering(1.0, false);
+    app.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
     app.handle_main_menu_activation(MainMenuItem::About)
         .test_value();

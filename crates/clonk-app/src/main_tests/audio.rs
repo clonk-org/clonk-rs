@@ -4122,7 +4122,7 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
     let owner = app.players.local_owner;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let (start, end) = (viewport.y + 12..viewport.y + viewport.height as i32 - 32)
         .step_by(4)
         .flat_map(|y| {
@@ -4136,20 +4136,20 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
                 })
         })
         .find(|(start, end)| {
-            let Some(first) = app.graphics.viewport_point_at(*start) else {
+            let Some(first) = app.rendering.graphics.viewport_point_at(*start) else {
                 return false;
             };
-            let Some(second) = app.graphics.viewport_point_at(*end) else {
+            let Some(second) = app.rendering.graphics.viewport_point_at(*end) else {
                 return false;
             };
             first.owner == owner
                 && second.owner == owner
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *start)
                     .is_none()
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *end)
                     .is_none()
                 && app
@@ -4187,17 +4187,17 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
     main_assert!(drag.motion.moved);
     let down_world = ingame_pointer_world_pixel(drag.motion.start);
     app.test_render(&mut frame);
-    let (down_x, _) = app.graphics.world_to_screen(owner, down_world).test_value();
+    let (down_x, _) = app.rendering.graphics.world_to_screen(owner, down_world).test_value();
     let current_x = end.x.round() as i32;
     let sample_x = (current_x + down_x.round() as i32) / 2;
     let sample_y = end.y.round() as i32;
     let expected = clonk_frontend::gamma_encode_fragment(
         clonk_frontend::MOUSE_SELECTION_FRAME_COLOR,
-        &app.graphics
+        &app.rendering.graphics
             .active_gamma_ramp(&app.snapshot.environment.gamma),
     );
     main_assert_eq!(
-        app.graphics
+        app.rendering.graphics
             .surface()
             .get_pixel(sample_x as u32, sample_y as u32) =>
         Some(expected),
@@ -4207,7 +4207,7 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
     app.test_right_button(ElementState::Released);
     main_assert!(app.ingame_right_mouse_state.is_none());
     app.test_render(&mut frame);
-    main_assert_ne!(app.graphics.surface().get_pixel(sample_x as u32, sample_y as u32) => Some(expected), "ButtonUpDragSelecting removes the presentation frame");
+    main_assert_ne!(app.rendering.graphics.surface().get_pixel(sample_x as u32, sample_y as u32) => Some(expected), "ButtonUpDragSelecting removes the presentation frame");
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(start.x),
@@ -4219,12 +4219,12 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
     app.test_render(&mut frame);
     let left_down_world = ingame_pointer_world_pixel(app.mouse_state.test_value().motion.start);
     let (left_down_x, _) = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, left_down_world)
         .test_value();
     let left_sample_x = (current_x + left_down_x.round() as i32) / 2;
     main_assert_eq!(
-        app.graphics
+        app.rendering.graphics
             .surface()
             .get_pixel(left_sample_x as u32, sample_y as u32) =>
         Some(expected),

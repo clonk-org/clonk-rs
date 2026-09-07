@@ -1069,7 +1069,7 @@ impl GameApp {
         // the screenshot where the port would take one.
         let capture_title = self.engine.frame() != 0 && !self.console_mode && self.window_active;
         let title_png = if capture_title && !self.presentation.retained_gpu_presentation_active {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             // C++ saves the back buffer with gamma resolved either way: with
             // shaders it is already baked in, without them `SavePNG` applies it
             // through `fApplyGamma` (C4Game.cpp:2102-2138, C4Surface.h:107).
@@ -1115,8 +1115,9 @@ impl GameApp {
     pub(crate) fn presentation_monitor_gamma(&self) -> Option<clonk_graphics::GammaRamp> {
         match self.mode {
             AppMode::Menu | AppMode::Loading => self.startup_monitor_gamma(),
-            AppMode::Running => self.graphics.monitor_gamma_enabled().then(|| {
-                self.graphics
+            AppMode::Running => self.rendering.graphics.monitor_gamma_enabled().then(|| {
+                self.rendering
+                    .graphics
                     .active_gamma_ramp(&self.snapshot.environment.gamma)
             }),
         }
@@ -1491,7 +1492,7 @@ impl GameApp {
             self.saves.pending_gpu_thumbnail_paths.push_back(target);
             return Ok(());
         }
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let encoded =
             encode_surface_to_png(surface).context("failed to encode save thumbnail image")?;
         let mut file = File::create(&target)
@@ -1526,6 +1527,7 @@ impl GameApp {
                 }
                 ScreenshotKind::FullLandscape => {
                     let surface = self
+                        .rendering
                         .graphics
                         .render_full_landscape_with_gamma(&self.snapshot, &request.gamma)
                         .context("full-landscape screenshot requires an active viewport")?;

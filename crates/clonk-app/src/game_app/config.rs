@@ -32,7 +32,7 @@ impl GameApp {
         let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
             return;
         };
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let bounds = if let Some(lobby) = self.classic_host_lobby.as_ref() {
             lobby
                 .controller
@@ -86,7 +86,8 @@ impl GameApp {
     }
 
     pub(crate) fn current_options_graphic(&self) -> Option<ImageData> {
-        self.active_game_graphics
+        self.rendering
+            .active_game_graphics
             .as_ref()
             .and_then(|resources| resources.options.as_deref().cloned())
             .or_else(|| self.assets.dialog_image("Options.png"))
@@ -967,7 +968,7 @@ impl GameApp {
                     self.open_options_font_size_combo()?;
                 }
                 OptionsDlgAction::WhiteChatIngameChanged(enabled) => {
-                    self.display_flags.white_chat = enabled;
+                    self.rendering.display_flags.white_chat = enabled;
                     self.play_ui_sound("ArrowHit");
                 }
                 OptionsDlgAction::WhiteChatLobbyChanged(enabled) => {
@@ -1039,7 +1040,7 @@ impl GameApp {
                         self.play_ui_sound("ArrowHit");
                     }
                     GraphicsSheetAction::SmokeLevelChanged(value) => {
-                        self.graphics_smoke_level = value;
+                        self.rendering.graphics_smoke_level = value;
                         self.engine.set_smoke_level(value);
                         self.play_ui_sound("ArrowHit");
                     }
@@ -1236,7 +1237,7 @@ impl GameApp {
         if let Some(dialog) = self.startup.player_dialog.as_mut() {
             dialog.set_layout_fonts(fonts.as_ref(), player_selection_fonts.as_ref());
         }
-        self.graphics.set_clonk_fonts(Some(fonts.clone()));
+        self.rendering.graphics.set_clonk_fonts(Some(fonts.clone()));
         self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
         self.native_startup_fonts = native_fonts;
         self.open_options_menu();
@@ -1364,8 +1365,8 @@ impl GameApp {
             },
         );
         controller.resize(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
         );
         self.startup.options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
             controller,
@@ -1398,9 +1399,9 @@ impl GameApp {
         }
         self.clear_deferred_display_toggles();
         let paths = self.app_paths.as_ref();
-        let is_fullscreen = self.display_flags.is_fullscreen;
-        self.display_flags = load_display_flags(paths);
-        self.display_flags.is_fullscreen = is_fullscreen;
+        let is_fullscreen = self.rendering.display_flags.is_fullscreen;
+        self.rendering.display_flags = load_display_flags(paths);
+        self.rendering.display_flags.is_fullscreen = is_fullscreen;
         self.white_lobby_chat = load_white_lobby_chat(paths);
         self.show_log_timestamps = load_show_log_timestamps(paths);
         self.config.show_folder_maps = load_show_folder_maps(paths);
@@ -1416,11 +1417,14 @@ impl GameApp {
         self.startup.view_flags.record = record;
         self.records.enabled = record && self.records.directory.is_some();
         self.startup.view_flags.fair_crew = load_fair_crew_flag(paths);
-        self.graphics_smoke_level = load_graphics_smoke_level(paths);
-        self.engine.set_smoke_level(self.graphics_smoke_level);
+        self.rendering.graphics_smoke_level = load_graphics_smoke_level(paths);
         self.engine
-            .set_fire_particles(self.display_flags.fire_particles);
-        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
+            .set_smoke_level(self.rendering.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.rendering.display_flags.fire_particles);
+        self.rendering
+            .graphics
+            .set_pxs_graphics(self.rendering.display_flags.pxs_gfx);
         self.config.mission_access = paths
             .and_then(|paths| match load_configured_mission_access(paths) {
                 Ok(access) => Some(MissionAccessStore::new(access)),
@@ -1463,12 +1467,13 @@ impl GameApp {
             audio.set_sound_volume_percent(sound_volume);
         }
         let point_filtering = DisplayOptions::load(paths).point_filtering;
-        self.graphics.set_point_filtering(point_filtering);
+        self.rendering.graphics.set_point_filtering(point_filtering);
         let advanced_renderer_config = load_advanced_renderer_config(&native_config);
-        self.graphics
+        self.rendering
+            .graphics
             .set_advanced_renderer_config(advanced_renderer_config);
         self.loader_gamma = load_classic_loader_gamma_from_native(&native_config);
-        let main_menu_gamma = self.graphics.fragment_gamma_enabled().then(|| {
+        let main_menu_gamma = self.rendering.graphics.fragment_gamma_enabled().then(|| {
             Arc::new(
                 self.loader_gamma
                     .clone()
@@ -1901,8 +1906,8 @@ impl GameApp {
             self.assets.options_book_fonts.as_deref(),
         ) {
             dialog.resize(
-                self.graphics.surface().width() as i32,
-                self.graphics.surface().height() as i32,
+                self.rendering.graphics.surface().width() as i32,
+                self.rendering.graphics.surface().height() as i32,
                 fonts,
                 book,
             );
@@ -2325,23 +2330,27 @@ impl GameApp {
             DisplayToggle::PlayerNames => (
                 "Graphics",
                 "ShowCrewNames",
-                self.display_flags.player_names.to_string(),
+                self.rendering.display_flags.player_names.to_string(),
             ),
             DisplayToggle::ClonkNames => (
                 "Graphics",
                 "ShowCrewCNames",
-                self.display_flags.clonk_names.to_string(),
+                self.rendering.display_flags.clonk_names.to_string(),
             ),
             DisplayToggle::Clock => (
                 "Graphics",
                 "ShowClock",
-                self.display_flags.clock.to_string(),
+                self.rendering.display_flags.clock.to_string(),
             ),
-            DisplayToggle::Fps => ("General", "FPS", self.display_flags.fps.to_string()),
+            DisplayToggle::Fps => (
+                "General",
+                "FPS",
+                self.rendering.display_flags.fps.to_string(),
+            ),
             DisplayToggle::UpperBoard => (
                 "Graphics",
                 "UpperBoard",
-                match self.display_flags.upper_board {
+                match self.rendering.display_flags.upper_board {
                     UpperBoardMode::Hide => "Hide",
                     UpperBoardMode::Full => "Full",
                     UpperBoardMode::Small => "Small",
@@ -2361,23 +2370,27 @@ impl GameApp {
         config.set_in(
             Some("Graphics"),
             "ShowCrewNames",
-            self.display_flags.player_names.to_string(),
+            self.rendering.display_flags.player_names.to_string(),
         );
         config.set_in(
             Some("Graphics"),
             "ShowCrewCNames",
-            self.display_flags.clonk_names.to_string(),
+            self.rendering.display_flags.clonk_names.to_string(),
         );
         config.set_in(
             Some("Graphics"),
             "ShowClock",
-            self.display_flags.clock.to_string(),
+            self.rendering.display_flags.clock.to_string(),
         );
-        config.set_in(Some("General"), "FPS", self.display_flags.fps.to_string());
+        config.set_in(
+            Some("General"),
+            "FPS",
+            self.rendering.display_flags.fps.to_string(),
+        );
         config.set_in(
             Some("Graphics"),
             "UpperBoard",
-            match self.display_flags.upper_board {
+            match self.rendering.display_flags.upper_board {
                 UpperBoardMode::Hide => "Hide",
                 UpperBoardMode::Full => "Full",
                 UpperBoardMode::Small => "Small",
@@ -2507,7 +2520,7 @@ impl GameApp {
     ) -> Option<clonk_frontend::input_dialog::InputDialogLayout> {
         let dialog = self.game_option_input_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         Some(
             dialog
                 .controller
@@ -2810,12 +2823,16 @@ impl GameApp {
             .expect("checked above")
             .controller
             .render(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &resources,
                 keyboard_active,
                 gamma,
             )?;
-        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        let ordered_native = self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active();
         if ordered_native {
             self.next_pending_native_overlay();
         }
@@ -2848,15 +2865,15 @@ impl GameApp {
             .tooltip_state_at(
                 now,
                 &dialog.controller.layout(
-                    self.graphics.surface().width() as i32,
-                    self.graphics.surface().height() as i32,
+                    self.rendering.graphics.surface().width() as i32,
+                    self.rendering.graphics.surface().height() as i32,
                     &resources.fonts().text,
                 ),
                 mouse_active,
             )
             .is_some();
         dialog.controller.render_tooltip_at(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             &resources,
             mouse_active,
             gamma,
@@ -2869,7 +2886,7 @@ impl GameApp {
         let dialog = self.startup.options_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let book = self.assets.options_book_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let layout = clonk_frontend::startup_options_dlg::options_dlg_layout(
             surface.width() as i32,
             surface.height() as i32,

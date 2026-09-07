@@ -1051,11 +1051,11 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
     app.app_paths = Some(paths.clone());
     // C4StartupNetDlg.cpp:312-315 updates the in-memory Config and then
     // writes the complete config, including Display values changed earlier.
-    app.display_flags.player_names = false;
-    app.display_flags.clonk_names = false;
-    app.display_flags.clock = true;
-    app.display_flags.fps = true;
-    app.display_flags.upper_board = UpperBoardMode::Small;
+    app.rendering.display_flags.player_names = false;
+    app.rendering.display_flags.clonk_names = false;
+    app.rendering.display_flags.clock = true;
+    app.rendering.display_flags.fps = true;
+    app.rendering.display_flags.upper_board = UpperBoardMode::Small;
     app.defer_display_toggle(DisplayToggle::PlayerNames);
     app.defer_display_toggle(DisplayToggle::ClonkNames);
     app.defer_display_toggle(DisplayToggle::Clock);
@@ -1826,7 +1826,7 @@ fn exclusive_vote_outside_hit_still_reaches_exposed_chart() {
     main_assert!(!app.dialogs.chart_elevated);
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
-        app.graphics
+        app.rendering.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let chart_layout = app
@@ -1871,7 +1871,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     let mut app = new_classic_running_sandbox_app();
     let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     app.engine.test_player_mut(owner).set_name("Ada");
     app.snapshot = app.engine.snapshot();
     app.snapshot
@@ -1881,7 +1881,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
         .test_value()
         .status = PlayerStatus::Eliminated;
 
-    let mut notice_only = vec![0_u8; app.graphics.surface().pixels().len()];
+    let mut notice_only = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
     app.test_render(&mut notice_only);
 
     let mut invalid_hidden_menu = two_item_script_menu(cursor);
@@ -1891,7 +1891,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
         owner,
         IngameMenuState::main_menu(&MainMenuConditions::default(), &IngameMenuLabels::default()),
     );
-    let mut with_player_menu = vec![0_u8; app.graphics.surface().pixels().len()];
+    let mut with_player_menu = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
     app.test_render(&mut with_player_menu);
     main_assert_ne!(with_player_menu => notice_only, "the app-owned PlayerMenu remains visible over the eliminated viewport");
 
@@ -1914,7 +1914,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
         .test_value()
         .status = PlayerStatus::Eliminated;
     main_assert!(retargeted.set_physical_film_view(eliminated_target));
-    let mut retargeted_notice = vec![0_u8; retargeted.graphics.surface().pixels().len()];
+    let mut retargeted_notice = vec![0_u8; retargeted.rendering.graphics.surface().pixels().len()];
     retargeted.test_render(&mut retargeted_notice);
     retargeted.ingame_menu.replace(
         local_owner,
@@ -1927,11 +1927,11 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
         retargeted_cursor,
         retargeted_hidden_script_menu,
     );
-    let mut with_retargeted_menus = vec![0_u8; retargeted.graphics.surface().pixels().len()];
+    let mut with_retargeted_menus = vec![0_u8; retargeted.rendering.graphics.surface().pixels().len()];
     retargeted.test_render(&mut with_retargeted_menus);
     main_assert_eq!(with_retargeted_menus => retargeted_notice, "SetFilmView suppression follows the displayed player, not the physical owner");
     let retargeted_viewport = retargeted
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == eliminated_target)
@@ -1962,18 +1962,18 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     app.viewports.physical_viewports.push(observer);
     app.viewports.physical_viewports_authoritative = true;
     main_assert!(app.set_physical_film_view(owner));
-    let mut ownerless_notice_only = vec![0_u8; app.graphics.surface().pixels().len()];
+    let mut ownerless_notice_only = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
     app.test_render(&mut ownerless_notice_only);
     app.ingame_menu.replace(
         OWNER_NONE,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
-    let mut with_hidden_fullscreen_menu = vec![0_u8; app.graphics.surface().pixels().len()];
+    let mut with_hidden_fullscreen_menu = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
     app.test_render(&mut with_hidden_fullscreen_menu);
     main_assert_eq!(with_hidden_fullscreen_menu => ownerless_notice_only, "the fullscreen menu contributes no eliminated-viewport pixels");
 
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == owner)

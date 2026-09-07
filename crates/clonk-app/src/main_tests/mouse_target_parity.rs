@@ -179,11 +179,11 @@ fn mouse_target_render_app(app: &mut GameApp, row: &MouseTargetEventGolden) {
 }
 
 fn mouse_target_render_pointer(app: &mut GameApp, row: &MouseTargetEventGolden) -> ViewportPointer {
-    app.display_flags.scroll_smooth = 1;
-    app.graphics.set_scroll_smooth(1);
+    app.rendering.display_flags.scroll_smooth = 1;
+    app.rendering.graphics.set_scroll_smooth(1);
     mouse_target_render_app(app, row);
     let current = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == row.player)
@@ -217,7 +217,7 @@ fn mouse_target_render_pointer(app: &mut GameApp, row: &MouseTargetEventGolden) 
     mouse_target_render_app(app, row);
 
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == row.player)
@@ -232,7 +232,7 @@ fn mouse_target_render_pointer(app: &mut GameApp, row: &MouseTargetEventGolden) 
         (viewport.rect.x + viewport_point.x) as f32,
         (viewport.rect.y + viewport_point.y) as f32,
     );
-    let projected = app.graphics.viewport_point_at(screen).test_value();
+    let projected = app.rendering.graphics.viewport_point_at(screen).test_value();
     main_assert_eq!(projected.owner => row.player);
     main_assert_eq!(ingame_pointer_world_pixel(projected) => Vector2::new(row.x, row.y));
     ViewportPointer {
@@ -450,7 +450,7 @@ fn mouse_target_acquire(
             app.update_ingame_pointer(pointer.screen).test_value();
             app.retained_ingame_mouse_target()
         }
-        2 | 3 => app.graphics.object_at_point_with_ocf(
+        2 | 3 => app.rendering.graphics.object_at_point_with_ocf(
             &app.snapshot,
             owner,
             pointer.screen,

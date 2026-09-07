@@ -2959,7 +2959,7 @@ fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
     app.handle_game_over().test_value();
 
     let goal_rects = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         let dialog = app.game_over_dialog.test_ref();
         main_assert_eq!(
             dialog
@@ -3040,7 +3040,7 @@ fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() 
         .join("|");
     app.handle_game_over().test_value();
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let custom = app
@@ -3229,7 +3229,7 @@ fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
 #[test]
 fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
     let mut app = new_classic_running_sandbox_app();
-    app.display_flags.portraits = false;
+    app.rendering.display_flags.portraits = false;
     let player_info_id = app.snapshot.players.first().test_value().player_info_id;
     app.snapshot.round_results.players = vec![clonk_engine::RoundResultsPlayerState {
         player_info_id,
@@ -3653,8 +3653,8 @@ fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CELL_TEXT");
                    }"#,
     );
-    eligible.display_flags.scroll_smooth = 1;
-    eligible.graphics.set_scroll_smooth(1);
+    eligible.rendering.display_flags.scroll_smooth = 1;
+    eligible.rendering.graphics.set_scroll_smooth(1);
     let mut hidden = vec![0_u8; 320 * 200 * 4];
     eligible.test_render(&mut hidden);
     toggle_scoreboard(&mut eligible, ModifiersState::empty());
@@ -3685,7 +3685,7 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     toggle_scoreboard(&mut app, ModifiersState::empty());
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let baseline = app.graphics.surface().pixels().to_vec();
+    let baseline = app.rendering.graphics.surface().pixels().to_vec();
     let close = current_scoreboard_test_layout(&mut app)
         .close_button
         .test_value();
@@ -3696,13 +3696,13 @@ fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
     app.test_cursor(point);
     main_assert!(app.dialogs.scoreboard_runtime.close_hovered);
     app.test_render(&mut frame);
-    let hovered = app.graphics.surface().pixels().to_vec();
+    let hovered = app.rendering.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&baseline, &hovered, 320, close));
     let sounds_before_press = app.sound.ui_log.len();
     app.test_left_button(ElementState::Pressed);
     main_assert_eq!(&app.sound.ui_log[sounds_before_press..] => &["ArrowHit".to_string()]);
     app.test_render(&mut frame);
-    let down = app.graphics.surface().pixels().to_vec();
+    let down = app.rendering.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&hovered, &down, 320, close));
     main_assert!(app.dialogs.scoreboard_close_pointer_capture);
     main_assert!(app.dialogs.scoreboard.is_some());
@@ -4240,7 +4240,7 @@ fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
 
     let mut frame = vec![0_u8; 1024 * 768 * 4];
     app.test_render(&mut frame);
-    let baseline = app.graphics.surface().pixels().to_vec();
+    let baseline = app.rendering.graphics.surface().pixels().to_vec();
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(point.x),
@@ -4249,7 +4249,7 @@ fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
     main_assert!(matches!(app.running_active_dialog, Some(RunningDialogStackEntry::Message(_))));
     main_assert!(app.dialogs.scoreboard_runtime.close_hovered);
     app.test_render(&mut frame);
-    let hovered = app.graphics.surface().pixels().to_vec();
+    let hovered = app.rendering.graphics.surface().pixels().to_vec();
     main_assert!(frames_differ_in_rect(&baseline, &hovered, 1024, close));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
@@ -4775,12 +4775,12 @@ fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
     positive.engine.restore_state(&saved_positive).test_value();
     positive.snapshot = positive.engine.snapshot();
     positive.arm_initial_scoreboard_reconcile();
-    let before_surface = positive.graphics.surface().pixels().to_vec();
+    let before_surface = positive.rendering.graphics.surface().pixels().to_vec();
     let mut frame = vec![0x4c; 320 * 200 * 4];
     let sentinel = frame.clone();
     positive.test_render(&mut frame);
     main_assert_ne!(frame => sentinel);
-    main_assert_ne!(positive.graphics.surface().pixels() => before_surface.as_slice());
+    main_assert_ne!(positive.rendering.graphics.surface().pixels() => before_surface.as_slice());
     main_assert!(positive.dialogs.scoreboard.is_some());
     main_assert_eq!(positive.engine.scoreboard_snapshot() => saved_positive.scoreboard);
 
@@ -4993,13 +4993,13 @@ fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
     main_assert_eq!((app.snapshot.hud.scoreboard.row_count(), app.snapshot.hud.scoreboard.column_count(),) => (2, 2));
 
     let before_ui = runtime_global_ui_snapshot(&app);
-    let before_surface = app.graphics.surface().pixels().to_vec();
+    let before_surface = app.rendering.graphics.surface().pixels().to_vec();
     let mut frame = vec![0x6d; 320 * 200 * 4];
     let sentinel = frame.clone();
     for _ in 0..2 {
         app.test_render(&mut frame);
         main_assert_ne!(frame => sentinel);
-        main_assert_ne!(app.graphics.surface().pixels() => before_surface.as_slice());
+        main_assert_ne!(app.rendering.graphics.surface().pixels() => before_surface.as_slice());
         main_assert_eq!(runtime_global_ui_snapshot(&app) => before_ui);
     }
 
@@ -5037,7 +5037,7 @@ fn an_unresolved_scoreboard_font_image_still_draws_the_rest_of_the_board() {
         let mut frame = vec![0x71; 320 * 200 * 4];
         app.render(&mut frame)
             .expect("an unresolved FontRegular image does not fail the frame");
-        (app.graphics.surface().pixels().to_vec(), frame)
+        (app.rendering.graphics.surface().pixels().to_vec(), frame)
     };
 
     // The frame is drawn rather than refused, and the board reached it.
@@ -5262,7 +5262,7 @@ fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
 fn game_over_arrows_and_space_never_activate_a_hovered_button() {
     let mut app = new_game_over_keyboard_app();
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let mut continue_point = None;
@@ -5316,7 +5316,7 @@ fn game_over_arrows_and_space_never_activate_a_hovered_button() {
 
 fn hover_game_over_action_for_test(app: &mut GameApp, action: GameOverAction) {
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     for y in 0..height {

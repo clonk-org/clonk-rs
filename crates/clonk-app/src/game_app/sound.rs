@@ -298,7 +298,10 @@ impl GameApp {
             MESSAGE_TYPE_NORMAL | MESSAGE_TYPE_ME => {
                 let (line, color) = match sender.as_ref() {
                     Some((_, _, name, color)) => {
-                        let line = match (control.message_type, self.display_flags.white_chat) {
+                        let line = match (
+                            control.message_type,
+                            self.rendering.display_flags.white_chat,
+                        ) {
                             (MESSAGE_TYPE_NORMAL, true) => {
                                 format!("<c {color:x}><{name}></c> {message}")
                             }
@@ -356,7 +359,7 @@ impl GameApp {
                         })
                     });
                     if visible {
-                        let line = if self.display_flags.white_chat {
+                        let line = if self.rendering.display_flags.white_chat {
                             format!("<c {color:x}>{{{name}}}</c> {message}")
                         } else {
                             format!("<c {color:x}>{{{name}}} {message}")
@@ -405,7 +408,7 @@ impl GameApp {
                     .local_players
                     .contains(&control.to_player);
                 if visible {
-                    let line = if self.display_flags.white_chat {
+                    let line = if self.rendering.display_flags.white_chat {
                         format!("<c {color:x}>[{name}]</c> {message}")
                     } else {
                         format!("<c {color:x}>[{name}] {message}")
@@ -596,7 +599,7 @@ impl GameApp {
     }
 
     pub(crate) fn update_before_sound_instance_step(&mut self) -> Result<(), EngineError> {
-        let viewports = self.graphics.active_viewport_projections();
+        let viewports = self.rendering.graphics.active_viewport_projections();
         let game_running = matches!(self.mode, AppMode::Running);
         if let Some(audio) = self.sound.context.as_ref() {
             audio
@@ -1101,7 +1104,7 @@ impl GameApp {
         // the music system to stop/play. Fold that flag in command order so
         // a SetPlayList restart sees the state at its exact event position.
         let mut runtime_music_enabled = self.sound.runtime_music_enabled;
-        let viewports = self.graphics.active_viewport_projections();
+        let viewports = self.rendering.graphics.active_viewport_projections();
         let speech_outcomes = if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             audio.process_audio_with_viewports(
@@ -1153,7 +1156,7 @@ impl GameApp {
 
     pub(crate) fn update_sound_instances_for_current_mode(&mut self) {
         let game_running = matches!(self.mode, AppMode::Running);
-        let viewports = self.graphics.active_viewport_projections();
+        let viewports = self.rendering.graphics.active_viewport_projections();
         if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             audio.pump_queued_music_starts();

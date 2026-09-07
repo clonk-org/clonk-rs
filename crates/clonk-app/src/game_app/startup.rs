@@ -811,7 +811,7 @@ impl GameApp {
             network_enabled: self.network.is_some(),
             network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
             network_has_clients: self.network.is_some(),
-            is_fullscreen: self.display_flags.is_fullscreen,
+            is_fullscreen: self.rendering.display_flags.is_fullscreen,
             team_switch_allowed: self.engine.team_configuration().allow_team_switch,
         }
     }
@@ -3415,8 +3415,8 @@ impl GameApp {
             big_icon,
         );
         controller.resize(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
         );
         controller
     }
@@ -3463,8 +3463,8 @@ impl GameApp {
                 index, player, comment, portrait, big_icon,
             );
         controller.resize(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
         );
         self.startup.player_properties_dialog = Some(PendingStartupPlayerProperties {
             origin: StartupPlayerPropertiesOrigin::SelectionEdit {
@@ -4881,7 +4881,7 @@ impl GameApp {
         let scenario_loading_label = self.scenario_selector_loading_label();
         let gamma = self.startup_fragment_gamma();
         render_startup_frame(
-            &mut self.graphics,
+            &mut self.rendering.graphics,
             self.assets.as_ref(),
             &mut self.main_menu_state,
             &mut self.menu_state,
@@ -4915,13 +4915,13 @@ impl GameApp {
 
     fn capture_startup_dialog_fade_layers(&mut self) -> Result<StartupDialogFadeLayers> {
         let (width, height) = {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             (surface.width(), surface.height())
         };
         let mut underlay = vec![0_u8; width as usize * height as usize * 4];
         let gamma = self.startup_fragment_gamma();
         render_startup_underlay(
-            &mut self.graphics,
+            &mut self.rendering.graphics,
             self.assets.as_ref(),
             &gamma,
             &mut underlay,
@@ -4933,7 +4933,11 @@ impl GameApp {
             self.begin_native_text_capture(false);
             let mut outgoing_native = vec![0_u8; underlay.len()];
             let native_result = self.render_inactive_startup_dialog_layer(&mut outgoing_native);
-            let outgoing_native_text = self.graphics.surface_mut().take_clonk_text_capture();
+            let outgoing_native_text = self
+                .rendering
+                .graphics
+                .surface_mut()
+                .take_clonk_text_capture();
             native_result?;
             (outgoing_native, outgoing_native_text)
         } else {
@@ -4943,15 +4947,19 @@ impl GameApp {
             (outgoing.clone(), Vec::new())
         };
 
-        self.graphics.begin_gpu_scene_capture();
+        self.rendering.graphics.begin_gpu_scene_capture();
         let mut ignored_underlay_pixel = [0_u8; 4];
         render_startup_underlay(
-            &mut self.graphics,
+            &mut self.rendering.graphics,
             self.assets.as_ref(),
             &gamma,
             &mut ignored_underlay_pixel,
         );
-        let underlay_gpu_recorder = self.graphics.surface_mut().take_gpu_scene_capture();
+        let underlay_gpu_recorder = self
+            .rendering
+            .graphics
+            .surface_mut()
+            .take_gpu_scene_capture();
 
         self.presentation.pending_native_presentation = None;
         let mut ignored_outgoing_pixel = [0_u8; 4];
@@ -5021,26 +5029,30 @@ impl GameApp {
         }
         self.pointer_left_unchecked();
         let (width, height) = {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             (surface.width(), surface.height())
         };
         let mut underlay = vec![0_u8; width as usize * height as usize * 4];
         let gamma = self.startup_fragment_gamma();
         render_startup_underlay(
-            &mut self.graphics,
+            &mut self.rendering.graphics,
             self.assets.as_ref(),
             &gamma,
             &mut underlay,
         );
-        self.graphics.begin_gpu_scene_capture();
+        self.rendering.graphics.begin_gpu_scene_capture();
         let mut ignored_underlay_pixel = [0_u8; 4];
         render_startup_underlay(
-            &mut self.graphics,
+            &mut self.rendering.graphics,
             self.assets.as_ref(),
             &gamma,
             &mut ignored_underlay_pixel,
         );
-        let underlay_gpu_recorder = self.graphics.surface_mut().take_gpu_scene_capture();
+        let underlay_gpu_recorder = self
+            .rendering
+            .graphics
+            .surface_mut()
+            .take_gpu_scene_capture();
         self.startup.dialog_fade = Some(StartupDialogFade {
             outgoing: None,
             incoming,
@@ -5307,7 +5319,7 @@ impl GameApp {
 
         if let Some(library) = material_library {
             self.boot_loading = None;
-            self.material_library = library;
+            self.rendering.material_library = library;
             self.apply_material_library();
             if !self.console_mode
                 && !self.headless
@@ -5570,7 +5582,7 @@ impl GameApp {
             .context("classic shadowless tooltip font is unavailable")?;
         let gamma = self.startup_fragment_gamma();
         clonk_frontend::context_menu::draw_classic_tooltip(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             tooltip_font,
             pointer,
             &text,
@@ -5601,7 +5613,7 @@ impl GameApp {
                 let gamma = self.startup_fragment_gamma();
                 if let Some(lobby) = self.network_lobby.as_mut() {
                     lobby.render_classic_tooltips(
-                        self.graphics.surface_mut(),
+                        self.rendering.graphics.surface_mut(),
                         assets.as_ref(),
                         &self.scenario_game_options,
                         &gamma,
@@ -5615,7 +5627,12 @@ impl GameApp {
     }
 
     pub(crate) fn startup_active_gamma(&self) -> clonk_graphics::GammaRamp {
-        if self.graphics.advanced_renderer_config().disable_gamma {
+        if self
+            .rendering
+            .graphics
+            .advanced_renderer_config()
+            .disable_gamma
+        {
             startup_identity_gamma().clone()
         } else {
             self.loader_gamma
@@ -5625,7 +5642,7 @@ impl GameApp {
     }
 
     pub(crate) fn startup_fragment_gamma(&self) -> clonk_graphics::GammaRamp {
-        if self.graphics.fragment_gamma_enabled() {
+        if self.rendering.graphics.fragment_gamma_enabled() {
             self.startup_active_gamma()
         } else {
             startup_identity_gamma().clone()
@@ -5633,7 +5650,8 @@ impl GameApp {
     }
 
     pub(crate) fn startup_monitor_gamma(&self) -> Option<clonk_graphics::GammaRamp> {
-        self.graphics
+        self.rendering
+            .graphics
             .monitor_gamma_enabled()
             .then(|| self.startup_active_gamma())
     }
@@ -5645,7 +5663,7 @@ impl GameApp {
         frame_height: u32,
     ) -> Result<()> {
         let _renderer_config = clonk_frontend::activate_advanced_renderer_config(
-            self.graphics.advanced_renderer_config(),
+            self.rendering.graphics.advanced_renderer_config(),
         );
         let gamma = self.startup_fragment_gamma();
         self.preflight_startup_presentation()?;
@@ -5673,7 +5691,7 @@ impl GameApp {
         ) else {
             return Ok(());
         };
-        let logical = self.graphics.surface();
+        let logical = self.rendering.graphics.surface();
         let viewport_width = scaled_viewport_extent(logical.width(), fonts.scale())
             .context("native main-menu viewport width overflow")?;
         let viewport_height = scaled_viewport_extent(logical.height(), fonts.scale())
@@ -5730,8 +5748,16 @@ impl GameApp {
         // directly and is also the headless/menu-dump oracle. Scale-native
         // atlases become mandatory only when retained/semantic capture must
         // lower text to stable textured glyph quads.
-        let retained_text_capture = self.graphics.surface().is_clonk_text_capture_active()
-            || self.graphics.surface().is_gpu_scene_capture_active();
+        let retained_text_capture = self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active()
+            || self
+                .rendering
+                .graphics
+                .surface()
+                .is_gpu_scene_capture_active();
         let scaled_output = self
             .loader_render_config
             .as_ref()
@@ -5895,7 +5921,7 @@ impl GameApp {
         frame_height: u32,
     ) -> Result<()> {
         let _renderer_config = clonk_frontend::activate_advanced_renderer_config(
-            self.graphics.advanced_renderer_config(),
+            self.rendering.graphics.advanced_renderer_config(),
         );
         self.reject_classic_global_gui_bootstrap()?;
         let gamma = self.startup_fragment_gamma();
@@ -5934,7 +5960,7 @@ impl GameApp {
             frame.to_vec(),
         )
         .map_err(|error| self.loader_boundary(error.to_string()))?;
-        let logical = self.graphics.surface();
+        let logical = self.rendering.graphics.surface();
         loader
             .render_native_text(
                 &mut surface,
@@ -5963,7 +5989,7 @@ impl GameApp {
             assets.clonk_fonts = fonts.clone();
             assets.global_tooltip_font = tooltip;
         }
-        self.graphics.set_clonk_fonts(fonts.clone());
+        self.rendering.graphics.set_clonk_fonts(fonts.clone());
         self.main_menu_state.menu.set_clonk_fonts(fonts);
         self.native_startup_fonts = None;
         if let Some(config) = self.loader_render_config {

@@ -3261,7 +3261,7 @@ fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
     let mut frame = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut frame);
     let pixel = app
-        .graphics
+        .rendering.graphics
         .surface()
         .get_pixel(sample_x as u32, sample_y as u32)
         .test_value();
@@ -3898,7 +3898,7 @@ fn scensel_enhanced_search_translation_reaches_the_rendered_frame() {
 
     let mut frame = vec![0_u8; 800 * 600 * 4];
     main_assert!(app.render(&mut frame).expect("render the search result"));
-    let hinted = app.graphics.surface().pixels().to_vec();
+    let hinted = app.rendering.graphics.surface().pixels().to_vec();
 
     app.menu_state
         .set_enhanced_search_resources(EnhancedSearchResources::default());
@@ -3906,7 +3906,7 @@ fn scensel_enhanced_search_translation_reaches_the_rendered_frame() {
     main_assert!(app.render(&mut plain).expect("render the English hint"));
 
     main_assert_ne!(
-        hinted => app.graphics.surface().pixels().to_vec(),
+        hinted => app.rendering.graphics.surface().pixels().to_vec(),
         "the translated clear hint is drawn, not the English one"
     );
 }

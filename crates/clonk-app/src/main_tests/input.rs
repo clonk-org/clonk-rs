@@ -272,7 +272,7 @@ fn install_l067_context_stack(
     let front = *objects.last().test_value();
     let point = mouse_test_object_point(app, owner, front);
     main_assert_eq!(app.ingame_primary_mouse_target(owner, point) => selectable_windwing.then_some(front));
-    main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, point) => Some(front));
+    main_assert_eq!(app.rendering.graphics.object_at_point(&app.snapshot, owner, point) => Some(front));
     main_assert_eq!(app.ingame_viewport_region(owner, point) => None);
     (objects, point)
 }
@@ -515,7 +515,7 @@ fn ordinary_moves_clear_single_mouse_selection_over_region_help_and_scroll() {
     app.live_input.ingame_mouse_help = false;
 
     acquire(&mut app);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let edge = GuiPoint::new(
         viewport.x as f32,
         (viewport.y + i32::try_from(viewport.height).test_value() / 2) as f32,
@@ -720,13 +720,13 @@ fn shift_left_clicks_append_and_sample_release_modifiers() {
     let owner = app.players.local_owner;
     let cursor = app.engine.test_crew_cursor(owner);
     render_mouse_test_app(&mut app);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let mut clicks = Vec::new();
     'rows: for y in viewport.y..viewport.y + viewport.height as i32 {
         for x in viewport.x..viewport.x + viewport.width as i32 {
             let screen = GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5);
             let routed = GuiPoint::new(screen.x.ceil(), screen.y.ceil());
-            let Some(pointer) = app.graphics.viewport_point_at(routed) else {
+            let Some(pointer) = app.rendering.graphics.viewport_point_at(routed) else {
                 continue;
             };
             let world = ingame_pointer_world_pixel(pointer);
@@ -900,7 +900,7 @@ fn deleted_mouse_fog_ignore_target(
     );
     render_mouse_test_app(&mut app);
     let point = mouse_test_object_point(&app, owner, target);
-    let pointer = app.graphics.viewport_point_at(point).test_value();
+    let pointer = app.rendering.graphics.viewport_point_at(point).test_value();
     main_assert!(app.ingame_pointer_fog_blocked(pointer));
     move_cursor(&mut app, point, "cache fog-covered IgnoreFoW target");
     app.engine
@@ -1002,13 +1002,13 @@ fn mouse_fog_hidden_right_click_cycles_then_contexts_hidden_target() {
         .into_iter()
         .find_map(|offset| {
             let world = Vector2::new(cursor_position.x + offset, cursor_position.y);
-            let (x, y) = app.graphics.world_to_screen(owner, world)?;
+            let (x, y) = app.rendering.graphics.world_to_screen(owner, world)?;
             let point = GuiPoint::new(x.ceil(), y.ceil());
-            let pointer = app.graphics.viewport_point_at(point)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
             (pointer.owner == owner
                 && app.ingame_pointer_fog_blocked(pointer)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none()
                 && app.ingame_viewport_region(owner, point).is_none())
@@ -1017,7 +1017,7 @@ fn mouse_fog_hidden_right_click_cycles_then_contexts_hidden_target() {
         .test_value();
     let target_point = mouse_test_object_point(&app, owner, target);
     let target_pointer = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
         .test_value();
     main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
@@ -1083,13 +1083,13 @@ fn mouse_fog_free_right_click_reuses_the_preevent_select_next_target() {
         .into_iter()
         .find_map(|offset| {
             let world = Vector2::new(cursor_position.x + offset, cursor_position.y);
-            let (x, y) = app.graphics.world_to_screen(owner, world)?;
+            let (x, y) = app.rendering.graphics.world_to_screen(owner, world)?;
             let point = GuiPoint::new(x.ceil(), y.ceil());
-            let pointer = app.graphics.viewport_point_at(point)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
             (pointer.owner == owner
                 && app.ingame_pointer_fog_blocked(pointer)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none()
                 && app.ingame_viewport_region(owner, point).is_none())
@@ -1129,7 +1129,7 @@ fn mouse_fog_keeps_ignore_fow_target_clickable() {
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
     let target_pointer = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
         .test_value();
     main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
@@ -1166,7 +1166,7 @@ fn mouse_fog_ignore_fow_right_click_clears_cached_selection_after_cycling() {
     );
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
-    let target_pointer = app.graphics.viewport_point_at(target_point).test_value();
+    let target_pointer = app.rendering.graphics.viewport_point_at(target_point).test_value();
     main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
     let expected_next = app
         .engine
@@ -1210,7 +1210,7 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
 
     let target_point = mouse_test_object_point(&app, owner, target);
     let target_point = GuiPoint::new(target_point.x.ceil(), target_point.y.ceil());
-    let target_pointer = app.graphics.viewport_point_at(target_point).test_value();
+    let target_pointer = app.rendering.graphics.viewport_point_at(target_point).test_value();
     main_assert!(app.ingame_pointer_fog_blocked(target_pointer));
     main_assert_eq!(app.ingame_primary_mouse_target(owner, target_point) => Some(target));
     let target_cursor = app.engine.mouse_world_cursor(
@@ -1240,9 +1240,9 @@ fn fog_keeps_ignore_fow_target_and_jump_captions() {
     );
 
     let jump = Vector2::new(cursor_position.x + 8, cursor_position.y - 15);
-    let (jump_x, jump_y) = app.graphics.world_to_screen(owner, jump).test_value();
+    let (jump_x, jump_y) = app.rendering.graphics.world_to_screen(owner, jump).test_value();
     let jump_point = GuiPoint::new(jump_x.ceil(), jump_y.ceil());
-    let jump_pointer = app.graphics.viewport_point_at(jump_point).test_value();
+    let jump_pointer = app.rendering.graphics.viewport_point_at(jump_point).test_value();
     let jump = ingame_pointer_world_pixel(jump_pointer);
     main_assert!(app.ingame_pointer_fog_blocked(jump_pointer));
     let jump_cursor = app.engine.mouse_world_cursor(
@@ -1280,21 +1280,21 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
     );
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
-    let start = app.graphics.viewport_point_at(target_point).test_value();
+    let start = app.rendering.graphics.viewport_point_at(target_point).test_value();
     main_assert!(!app.ingame_pointer_fog_blocked(start));
     main_assert_eq!(app.engine.mouse_world_drag_source(owner, target, ingame_pointer_world_pixel(start)) => Some(MouseDragSource::Carryable));
 
     let landscape = app.snapshot.landscape.test_ref();
     let width = i32::try_from(landscape.width()).test_value();
     let height = landscape.estimated_height();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let visible_drag_point = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32, y as f32))
         })
         .find(|point| {
-            let Some(pointer) = app.graphics.viewport_point_at(*point) else {
+            let Some(pointer) = app.rendering.graphics.viewport_point_at(*point) else {
                 return false;
             };
             pointer.owner == owner
@@ -1302,7 +1302,7 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
                     || (point.y - target_point.y).abs() >= 12.0)
                 && !app.ingame_pointer_fog_blocked(pointer)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *point)
                     .is_none()
                 && app.ingame_viewport_region(owner, *point).is_none()
@@ -1314,7 +1314,7 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
                 .map(move |x| GuiPoint::new(x as f32, y as f32))
         })
         .find_map(|point| {
-            let pointer = app.graphics.viewport_point_at(point)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
             let world = ingame_pointer_world_pixel(pointer);
             (pointer.owner == owner
                 && world.x >= 0
@@ -1325,7 +1325,7 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
                     || (point.y - target_point.y).abs() >= 12.0)
                 && app.ingame_pointer_fog_blocked(pointer)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none()
                 && app.ingame_viewport_region(owner, point).is_none())
@@ -1379,7 +1379,7 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
     );
     render_mouse_test_app(&mut app);
     let to_screen = |app: &GameApp, world: Vector2| {
-        let (x, y) = app.graphics.world_to_screen(owner, world).test_value();
+        let (x, y) = app.rendering.graphics.world_to_screen(owner, world).test_value();
         GuiPoint::new(x.ceil(), y.ceil())
     };
     let start = to_screen(
@@ -1395,11 +1395,11 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
         Vector2::new(cursor_position.x + 110, cursor_position.y + 10),
     );
     for point in [start, visible_end, hidden_end] {
-        main_assert!(app.graphics.object_at_point(&app.snapshot, owner, point).is_none());
+        main_assert!(app.rendering.graphics.object_at_point(&app.snapshot, owner, point).is_none());
         main_assert!(app.ingame_viewport_region(owner, point).is_none());
     }
-    main_assert!(app.graphics.viewport_point_at(visible_end).is_some_and(|pointer| !app.ingame_pointer_fog_blocked(pointer)));
-    main_assert!(app.graphics.viewport_point_at(hidden_end).is_some_and(|pointer| app.ingame_pointer_fog_blocked(pointer)));
+    main_assert!(app.rendering.graphics.viewport_point_at(visible_end).is_some_and(|pointer| !app.ingame_pointer_fog_blocked(pointer)));
+    main_assert!(app.rendering.graphics.viewport_point_at(hidden_end).is_some_and(|pointer| app.ingame_pointer_fog_blocked(pointer)));
 
     move_cursor(&mut app, start, "move to selection start");
     app.test_right_button(ElementState::Pressed);
@@ -1448,7 +1448,7 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
     let mut app = new_running_sandbox_app();
     let (owner, _cursor, _cursor_position, _layer) = configure_mouse_fog(&mut app, 40);
     render_mouse_test_app(&mut app);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let points = || {
         (viewport.y..viewport.y + viewport.height as i32).flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
@@ -1457,13 +1457,13 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
     };
     let visible = points()
         .find(|point| {
-            let Some(pointer) = app.graphics.viewport_point_at(*point) else {
+            let Some(pointer) = app.rendering.graphics.viewport_point_at(*point) else {
                 return false;
             };
             pointer.owner == owner
                 && !app.ingame_pointer_fog_blocked(pointer)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *point)
                     .is_none()
                 && app.ingame_viewport_region(owner, *point).is_none()
@@ -1474,14 +1474,14 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
         .test_value();
     let hidden = points()
         .find(|point| {
-            let Some(pointer) = app.graphics.viewport_point_at(*point) else {
+            let Some(pointer) = app.rendering.graphics.viewport_point_at(*point) else {
                 return false;
             };
             pointer.owner == owner
                 && ((point.x - visible.x).abs() >= 12.0 || (point.y - visible.y).abs() >= 12.0)
                 && app.ingame_pointer_fog_blocked(pointer)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *point)
                     .is_none()
                 && app.ingame_viewport_region(owner, *point).is_none()
@@ -1652,12 +1652,12 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
     let vehicle_point = mouse_test_object_point(&app, owner, vehicle);
     let container_point = mouse_test_object_point(&app, owner, container);
     let start_world = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(vehicle_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
     main_assert_eq!(app.engine.mouse_world_drag_source(owner, vehicle, start_world) => Some(MouseDragSource::Vehicle));
-    main_assert_eq!(app.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => Some(container));
+    main_assert_eq!(app.rendering.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => Some(container));
     let (open_point, open_world) = mouse_test_empty_point(&mut app, owner, vehicle_point, None);
     let mut commands = install_mouse_network_capture(&mut app);
 
@@ -1682,7 +1682,7 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
     move_cursor(&mut app, container_point, "resolve VehiclePut cursor and target");
     main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::VehiclePut);
     let put_world = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(GuiPoint::new(
             container_point.x.ceil(),
             container_point.y.ceil(),
@@ -1697,7 +1697,7 @@ fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
         )
         .test_value();
     app.snapshot = app.engine.snapshot();
-    main_assert_eq!(app.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => None);
+    main_assert_eq!(app.rendering.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => None);
     app.test_left_button(ElementState::Released);
     app.test_modifiers(ModifiersState::empty());
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
@@ -1757,16 +1757,16 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
         first_point.y.max(second_point.y) + 8.0,
     );
     for point in [frame_start, frame_end] {
-        main_assert!(app.graphics.viewport_point_at(point).is_some_and(|pointer| pointer.owner == owner));
-        main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, point) => None, "selection frame endpoints remain on landscape");
+        main_assert!(app.rendering.graphics.viewport_point_at(point).is_some_and(|pointer| pointer.owner == owner));
+        main_assert_eq!(app.rendering.graphics.object_at_point(&app.snapshot, owner, point) => None, "selection frame endpoints remain on landscape");
     }
     let first_world = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(frame_start)
         .map(ingame_pointer_world_pixel)
         .test_value();
     let second_world = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(frame_end)
         .map(ingame_pointer_world_pixel)
         .test_value();
@@ -1852,7 +1852,7 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
     app.engine
         .spawn_test_object(SpawnConfig::new("MLEN").with_container(crew));
     render_mouse_test_app(&mut app);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let (empty_start, empty_end) = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32 - 8).map(move |x| {
@@ -1863,10 +1863,10 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
             })
         })
         .find(|(first, second)| {
-            let Some(first_pointer) = app.graphics.viewport_point_at(*first) else {
+            let Some(first_pointer) = app.rendering.graphics.viewport_point_at(*first) else {
                 return false;
             };
-            let Some(second_pointer) = app.graphics.viewport_point_at(*second) else {
+            let Some(second_pointer) = app.rendering.graphics.viewport_point_at(*second) else {
                 return false;
             };
             if first_pointer.owner != owner
@@ -1874,11 +1874,11 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
                 || app.ingame_viewport_region(owner, *first).is_some()
                 || app.ingame_viewport_region(owner, *second).is_some()
                 || app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *first)
                     .is_some()
                 || app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *second)
                     .is_some()
             {
@@ -1911,7 +1911,7 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
 
     let entrance_point = mouse_test_object_point(&app, owner, entrance);
     let entrance_world = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(entrance_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
@@ -1955,10 +1955,10 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
     app.test_render(&mut frame);
     let vehicle_snapshot = app.snapshot.object(vehicle).cloned().test_value();
     let (vehicle_x, vehicle_y) = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, vehicle_snapshot.position)
         .test_value();
-    let direct_pick = app.graphics.object_at_point_with_ocf(
+    let direct_pick = app.rendering.graphics.object_at_point_with_ocf(
         &app.snapshot,
         owner,
         GuiPoint::new(vehicle_x, vehicle_y),
@@ -1980,13 +1980,13 @@ fn physical_right_drag_vehicle_queues_cpp_push_to() {
         .into_iter()
         .map(|dx| GuiPoint::new(vehicle_point.x + dx, vehicle_point.y))
         .find(|point| {
-            app.graphics
+            app.rendering.graphics
                 .viewport_point_at(*point)
                 .is_some_and(|pointer| pointer.owner == owner)
         })
         .test_value();
     let release_world = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(release_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
@@ -2028,7 +2028,7 @@ fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
     let target = app.engine.spawn_test_object(spawn);
     render_mouse_test_app(&mut app);
     let target_point = mouse_test_object_point(&app, owner, target);
-    let pointer = app.graphics.viewport_point_at(target_point).test_value();
+    let pointer = app.rendering.graphics.viewport_point_at(target_point).test_value();
     let world = ingame_pointer_world_pixel(pointer);
     main_assert_eq!(app.engine.mouse_world_cursor(owner, Some(target), world, false) => MouseWorldCursor::Grab(target));
 
@@ -2061,7 +2061,7 @@ fn mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
 #[test]
 fn inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
     let (mut app, owner, _crew, _first, target, region_point) = inventory_region_fixture();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let (_, region) = app
         .ingame_inventory_region_hit(owner, region_point)
         .test_value();
@@ -2123,7 +2123,7 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
         }
         render_mouse_test_app(&mut app);
 
-        let viewport = app.graphics.viewport_rect(owner).test_value();
+        let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
         let inventory_point = GuiPoint::new(
             (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + clonk_frontend::hud::SYMBOL_SIZE / 2)
                 as f32,
@@ -2133,7 +2133,7 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
         );
         main_assert_eq!(app.ingame_inventory_region_target(owner, inventory_point) => Some(dragged));
         let container_point = mouse_test_object_point(&app, owner, container);
-        main_assert_eq!(app.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => Some(container));
+        main_assert_eq!(app.rendering.graphics.object_at_point_with_ocf(&app.snapshot, owner, container_point, clonk_engine::ocf::CONTAINER,) => Some(container));
 
         let (key, template, expected_kind, expected_cursor) = if vehicle_drag {
             (
@@ -2293,7 +2293,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
         .find(|y| landscape.is_solid_at(drop_x, *y))
         .test_value();
     let drop_world = Vector2::new(drop_x, ground_y - 1);
-    let (drop_x, drop_y) = app.graphics.world_to_screen(owner, drop_world).test_value();
+    let (drop_x, drop_y) = app.rendering.graphics.world_to_screen(owner, drop_world).test_value();
     let drop_point = GuiPoint::new(drop_x, drop_y);
     main_assert_eq!(app.engine.mouse_drag_carryable_command(owner, drop_world) => Some(CommandId::Drop));
     let (manager, _events, mut network_commands) =
@@ -2404,7 +2404,7 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let region_point = GuiPoint::new(
         (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + 1) as f32,
         (viewport.y + viewport.height as i32
@@ -2415,12 +2415,12 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     main_assert_eq!(app.engine.mouse_region_drag_source(vehicle) => Some(MouseDragSource::Vehicle));
 
     let (x, y) = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, destination)
         .test_value();
     let destination_point = GuiPoint::new(x, y);
     let destination = app
-        .graphics
+        .rendering.graphics
         .viewport_point_at(destination_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
@@ -2482,7 +2482,7 @@ fn command_region_caption_is_immediate_and_anchored_to_region_top() {
     move_cursor(&mut app, point, "hover command region");
 
     let caption = app.live_input.ingame_mouse_caption.caption.test_ref();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     main_assert_eq!(caption.text => expected_caption);
     main_assert_eq!(caption.text => "Sell");
     main_assert_eq!(caption.caption_bottom_y => Some(region.y - viewport.y));
@@ -2515,7 +2515,7 @@ fn help_cursor_gets_the_delayed_red_help_caption() {
 #[test]
 fn threshold_region_entry_waits_to_cancel_and_focus_loss_clears_drag() {
     let (mut app, owner, _cursor, _first, _target, region_point) = inventory_region_fixture();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let start = (viewport.y + 10..viewport.y + viewport.height as i32 - 48)
         .step_by(4)
         .flat_map(|y| {
@@ -2526,11 +2526,11 @@ fn threshold_region_entry_waits_to_cancel_and_focus_loss_clears_drag() {
         .find(|point| {
             ((point.x - region_point.x).abs() > 5.0 || (point.y - region_point.y).abs() > 5.0)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .viewport_point_at(*point)
                     .is_some_and(|pointer| pointer.owner == owner)
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, *point)
                     .is_none()
                 && app.ingame_viewport_region(owner, *point).is_none()
@@ -2564,7 +2564,7 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
     // Append commands (C4ObjectList.cpp:343-372;
     // C4MouseControl.cpp:942-961,1171-1227).
     let (mut app, owner, crew, first, second, region_point) = inventory_region_fixture();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
 
     let mut hidden_cursor_definition = test_definition("HINV", "Hidden inventory cursor", "");
     hidden_cursor_definition.set_hide_hud_elements(clonk_engine::HIDE_HUD_ELEMENT_INVENTORY);
@@ -2620,9 +2620,9 @@ fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
         .find(|y| landscape.is_solid_at(drop_x, *y))
         .test_value();
     let drop_world = Vector2::new(drop_x, ground_y - 1);
-    let (drop_x, drop_y) = app.graphics.world_to_screen(owner, drop_world).test_value();
+    let (drop_x, drop_y) = app.rendering.graphics.world_to_screen(owner, drop_world).test_value();
     let drop_pointer = (GuiPoint::new(drop_x, drop_y), drop_world, CommandId::Drop);
-    main_assert!(app.graphics.viewport_point_at(drop_pointer.0).is_some_and(|pointer| pointer.owner == owner), "ground drop point remains in the local viewport");
+    main_assert!(app.rendering.graphics.viewport_point_at(drop_pointer.0).is_some_and(|pointer| pointer.owner == owner), "ground drop point remains in the local viewport");
     main_assert_eq!(app.engine.mouse_drag_carryable_command(owner, drop_world) => Some(CommandId::Drop));
 
     move_cursor(
@@ -2849,7 +2849,7 @@ fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
         .test_value();
     let crew = viewport_player.crew.first_mut().test_value();
     crew.object_id = viewed_object;
-    app.display_flags.portraits = true;
+    app.rendering.display_flags.portraits = true;
     app.populate_crew_portraits(&mut players);
 
     let portrait = players
@@ -3448,7 +3448,7 @@ fn scale_native_portrait_selector_keeps_dialog_layers_in_cpp_painter_order() {
     // C4GuiContainers.cpp:33-44; C4Gui.cpp:669-689).
     for retained_gpu in [false, true] {
         let mut app = new_real_classic_menu_app(640, 480);
-        app.graphics.set_runtime_sprite_filtering(3.0, false);
+        app.rendering.graphics.set_runtime_sprite_filtering(3.0, false);
         app.configure_native_startup_fonts(3.0, false);
         app.presentation.retained_gpu_ordered_capture_active = retained_gpu;
         open_portrait_selector(
@@ -5384,7 +5384,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     let mut faded_base = vec![0_u8; scratch.len()];
     expected_app.test_render(&mut faded_base);
     expected_app
-        .graphics
+        .rendering.graphics
         .surface_mut()
         .pixels_mut()
         .copy_from_slice(&faded_base);
@@ -5392,7 +5392,7 @@ fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
     expected_app
         .render_message_dialogs(Some(startup_gamma()))
         .test_value();
-    let expected = expected_app.graphics.surface().pixels().to_vec();
+    let expected = expected_app.rendering.graphics.surface().pixels().to_vec();
     main_assert_eq!(actual => expected, "modal pixels must be composed after the fade");
 
     actual_app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
@@ -5480,7 +5480,7 @@ fn chart_gamepad_high_close_respects_player_control_priority() {
 #[test]
 fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
     let mut app = new_classic_running_sandbox_app();
-    main_assert!(app.graphics.hud_graphics().crew.is_some(), "fixture must carry Crew.png so the forbidden fallback is observable");
+    main_assert!(app.rendering.graphics.hud_graphics().crew.is_some(), "fixture must carry Crew.png so the forbidden fallback is observable");
 
     let temp = tempdir();
     let def_dir = temp.path().join("NoPortrait.c4d");
@@ -5514,9 +5514,9 @@ fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
         .next()
         .test_value();
     crew.object_id = object;
-    crew.portrait = app.graphics.hud_graphics().crew.clone();
-    crew.portrait_owner_overlay = app.graphics.hud_graphics().crew.clone();
-    app.display_flags.portraits = true;
+    crew.portrait = app.rendering.graphics.hud_graphics().crew.clone();
+    crew.portrait_owner_overlay = app.rendering.graphics.hud_graphics().crew.clone();
+    app.rendering.display_flags.portraits = true;
 
     app.populate_crew_portraits(&mut players);
 
@@ -5553,7 +5553,7 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     move_cursor_to(
         &mut app,
         PhysicalPosition::new(
@@ -5767,7 +5767,7 @@ fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(secondary).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(secondary).test_value();
     let corner = GuiPoint::new(
         (viewport.x + viewport.width as i32 - 1) as f32,
         (viewport.y + viewport.height as i32 - 1) as f32,
@@ -5807,7 +5807,7 @@ fn establish_free_scroll_test_viewport(
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     let center = GuiPoint::new(
         (rect.x + rect.width as i32 / 2) as f32,
@@ -6105,12 +6105,12 @@ fn reused_player_number_gets_a_distinct_physical_camera_identity() {
 fn sandbox_pointer_at_world(app: &mut GameApp, owner: i32, world: Vector2) -> ViewportPointer {
     app.snapshot = app.engine.snapshot();
     app.refresh_focus();
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     let mut frame = vec![0_u8; surface.width() as usize * surface.height() as usize * 4];
     app.test_render(&mut frame);
-    let (screen_x, screen_y) = app.graphics.world_to_screen(owner, world).test_value();
+    let (screen_x, screen_y) = app.rendering.graphics.world_to_screen(owner, world).test_value();
     let screen = GuiPoint::new(screen_x, screen_y);
-    let projected = app.graphics.viewport_point_at(screen).test_value();
+    let projected = app.rendering.graphics.viewport_point_at(screen).test_value();
     main_assert_eq!(projected.owner => owner);
     main_assert_eq!(ingame_pointer_world_pixel(projected) => world);
     ViewportPointer {
@@ -6131,14 +6131,14 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
     app.refresh_focus();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let pointer = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
         .find_map(|screen| {
-            let pointer = app.graphics.viewport_point_at(screen)?;
+            let pointer = app.rendering.graphics.viewport_point_at(screen)?;
             let point = ingame_pointer_world_pixel(pointer);
             (pointer.owner == owner
                 && point.x != 0
@@ -6440,7 +6440,7 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     let view = app.startup.view;
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F11, ElementState::Released);
-    main_assert!(!app.display_flags.is_fullscreen);
+    main_assert!(!app.rendering.display_flags.is_fullscreen);
     main_assert_eq!(app.startup.view => view);
 
     // ... and while running.
@@ -6448,7 +6448,7 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     app.set_display_mode(DisplayMode::Window);
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F11, ElementState::Released);
-    main_assert!(!app.display_flags.is_fullscreen);
+    main_assert!(!app.rendering.display_flags.is_fullscreen);
     main_assert!(app.pending_screenshots.is_empty());
 
     // A KeyConfig action bound to F11 reaches ordinary classic dispatch.
@@ -6462,7 +6462,7 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     main_assert!(!app.dialogs.help_visible);
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     main_assert!(app.dialogs.help_visible, "a KeyConfig action bound to F11 must reach classic dispatch");
-    main_assert!(!app.display_flags.is_fullscreen, "dispatching the bound action must not change the display mode");
+    main_assert!(!app.rendering.display_flags.is_fullscreen, "dispatching the bound action must not change the display mode");
 }
 
 /// A rebound `FullscreenPauseToggle` **replaces** the Pause key rather than
@@ -6763,7 +6763,7 @@ fn overlapping_mouse_candidates_pick_the_frontmost_regardless_of_foreground() {
 
     let point = mouse_test_object_point(&app, owner, in_front);
     main_assert_eq!(
-        app.graphics.object_at_point_with_ocf(&app.snapshot, owner, point, clonk_engine::ocf::GRAB) => Some(in_front),
+        app.rendering.graphics.object_at_point_with_ocf(&app.snapshot, owner, point, clonk_engine::ocf::GRAB) => Some(in_front),
         "the frontmost candidate wins even though the one behind it is C4D_Foreground"
     );
     let _ = behind;
@@ -6802,7 +6802,7 @@ fn overlapping_mouse_candidates_pick_the_frontmost_regardless_of_foreground() {
 
     let point = mouse_test_object_point(&swapped, owner, fore_front);
     main_assert_eq!(
-        swapped.graphics.object_at_point_with_ocf(&swapped.snapshot, owner, point, clonk_engine::ocf::GRAB) => Some(fore_front),
+        swapped.rendering.graphics.object_at_point_with_ocf(&swapped.snapshot, owner, point, clonk_engine::ocf::GRAB) => Some(fore_front),
         "a foreground object is neither preferred nor excluded — only its depth decides"
     );
 }

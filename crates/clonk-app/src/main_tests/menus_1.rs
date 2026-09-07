@@ -144,7 +144,7 @@ fn help_suppresses_open_ingame_menu_and_right_up_exits() {
     app.activate_ingame_main_menu_for_player(owner).test_value();
     render_mouse_test_app(&mut app);
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let close = (0..height)
@@ -262,7 +262,7 @@ fn viewport_buttons_dispatch_help_and_player_menu_locally() {
     main_assert_eq!(app.ingame_menu.get(owner).expect("mouse menu remains open").selection() => 0, "a second mouse activation reinitializes the main menu");
     main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "reinitializing the mouse menu remains entirely local");
 
-    app.display_flags.show_commands = false;
+    app.rendering.display_flags.show_commands = false;
     main_assert_eq!(app.ingame_viewport_region(owner, help) => None);
     main_assert_eq!(app.ingame_viewport_region(owner, menu) => None);
 }
@@ -333,7 +333,7 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     main_assert_eq!(app.ingame_menu.get(OWNER_NONE).expect("observer fullscreen menu").page() => ingame_menu::MenuPage::Main);
 
     render_mouse_test_app(&mut app);
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     let menu_target = (0..surface.height())
         .flat_map(|y| (0..surface.width()).map(move |x| (x, y)))
         .find_map(|(x, y)| {
@@ -417,7 +417,7 @@ fn script_menu_owns_threshold_crossing_inventory_drag_move() {
     main_assert!(app.ingame_inventory_region_target(owner, inventory_point).is_some());
     main_assert_eq!(app.script_menu_pointer_target(inventory_point).expect("hit-test inventory point") => None, "inventory down begins outside the open GUI menu");
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width() as i32, surface.height() as i32)
     };
     let menu_point = (0..height)
@@ -2349,15 +2349,15 @@ fn menu_cursor_moves_and_clears_on_leave() {
     let background = Color::opaque(9, 10, 11);
 
     app.test_cursor(PhysicalPosition::new(20.0, 18.0));
-    app.graphics.surface_mut().fill(background);
+    app.rendering.graphics.surface_mut().fill(background);
     main_assert!(app.draw_classic_gui_cursor(None));
-    main_assert_eq!(app.graphics.surface().get_pixel(18, 16) => Some(Color::opaque(0, 40, 200)));
+    main_assert_eq!(app.rendering.graphics.surface().get_pixel(18, 16) => Some(Color::opaque(0, 40, 200)));
 
     app.test_cursor(PhysicalPosition::new(40.0, 30.0));
-    app.graphics.surface_mut().fill(background);
+    app.rendering.graphics.surface_mut().fill(background);
     main_assert!(app.draw_classic_gui_cursor(None));
-    main_assert_eq!(app.graphics.surface().get_pixel(18, 16) => Some(background));
-    main_assert_eq!(app.graphics.surface().get_pixel(38, 28) => Some(Color::opaque(0, 40, 200)));
+    main_assert_eq!(app.rendering.graphics.surface().get_pixel(18, 16) => Some(background));
+    main_assert_eq!(app.rendering.graphics.surface().get_pixel(38, 28) => Some(Color::opaque(0, 40, 200)));
 
     app.pointer_left().test_value();
     main_assert!(!app.draw_classic_gui_cursor(None));
@@ -2404,7 +2404,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     let mut app = new_synthetic_running_sandbox_app();
     install_l018_cursor_atlas(&mut app);
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
@@ -3062,7 +3062,7 @@ fn menu_render_defers_or_applies_the_monitor_gamma_post_pass() {
     let configured_gamma =
         clonk_graphics::GammaRamp::from_control_points([0x101010, 0x707070, 0xe0e0e0]);
     app.loader_gamma = Some(configured_gamma.clone());
-    app.graphics
+    app.rendering.graphics
         .set_advanced_renderer_config(clonk_frontend::AdvancedRendererConfig {
             shader: false,
             use_shader_gamma: true,
@@ -3536,7 +3536,7 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
     remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
     let modifiers = app.live_input.modifiers;
     let dimensions = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let engine_game_time = app.engine.game_time();
@@ -3571,7 +3571,7 @@ fn global_gui_guard_is_first_at_every_external_ui_ingress() {
         .expect_err("resize must fail at global guard");
     main_assert!(matches!(resize.downcast_ref::<ClassicParityBoundary>(), Some(ClassicParityBoundary::GlobalGuiBootstrapResources { .. })));
     main_assert_eq!(app.live_input.modifiers => modifiers);
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     main_assert_eq!((surface.width(), surface.height()) => dimensions);
     main_assert_eq!(app.engine.game_time() => engine_game_time);
     main_assert_eq!(app.snapshot.game_time => snapshot_game_time);
@@ -4550,7 +4550,7 @@ fn menu_resize_renders_at_new_dimensions() {
     app.resize(400, 300).test_value();
     let mut larger = vec![0u8; 400 * 300 * 4];
     app.test_render(&mut larger);
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     main_assert_eq!((surface.width(), surface.height()) => (400, 300), "the composed surface must track the resized window");
     main_assert!(larger.iter().any(|byte| *byte != 0), "the resized menu must reach the enlarged frame");
 }
@@ -4607,7 +4607,7 @@ fn script_menu_hit_testing_gives_an_unresolved_inline_image_zero_advance() {
         menu.items[0].caption = caption.to_string();
         install_test_cursor_menu(&mut app, cursor, menu);
         let (width, height) = {
-            let surface = app.graphics.surface();
+            let surface = app.rendering.graphics.surface();
             (surface.width() as i32, surface.height() as i32)
         };
         let point = (0..height)

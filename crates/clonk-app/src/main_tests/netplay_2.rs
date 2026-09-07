@@ -767,7 +767,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         "the runtime seam exercises a speaking selected crew inside a container",
     );
     let viewport_inputs = collect_viewport_inputs(&app.snapshot).test_value();
-    app.graphics.render_frame(&app.snapshot, &viewport_inputs);
+    app.rendering.graphics.render_frame(&app.snapshot, &viewport_inputs);
     let remote_position = crate::voice_chat::authenticated_selected_voice_crew(
         &app.snapshot,
         remote_client,
@@ -778,7 +778,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     let (remote_audibility, remote_pan) = compute_object_positional_mix(
         remote_position,
         &app.snapshot,
-        &app.graphics.active_viewport_projections(),
+        &app.rendering.graphics.active_viewport_projections(),
     );
     let remote_volume = remote_audibility * app.test_audio_ref().options.voice_volume;
     let reference_audio = clonk_audio::AudioSystem::new_manual_with_resampling(
@@ -990,7 +990,7 @@ fn voice_volume_action_scales_remote_playback_gain_above_unity() {
             .set_cursor(Some(remote_cursor));
         app.snapshot = app.engine.snapshot();
         let viewport_inputs = collect_viewport_inputs(&app.snapshot).test_value();
-        app.graphics.render_frame(&app.snapshot, &viewport_inputs);
+        app.rendering.graphics.render_frame(&app.snapshot, &viewport_inputs);
 
         let (manager, _events, voice) =
             NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
@@ -4746,7 +4746,7 @@ fn dirty_axis_calibration_updates_cpp_keys_without_rewriting_other_bytes() {
 fn startup_dialog_fade_preserves_ordered_native_text_at_scaled_output() {
     let scale = 1.5;
     let mut app = new_real_classic_menu_app(320, 200);
-    app.graphics.set_runtime_sprite_filtering(scale, false);
+    app.rendering.graphics.set_runtime_sprite_filtering(scale, false);
     app.configure_native_startup_fonts(scale, false);
     let _ = render_ordered_test_frame(&mut app, scale, 480, 300);
 
@@ -5522,7 +5522,7 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
     paths.ensure_user_dirs().test_value();
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
-    let line_height = app.graphics.message_board_line_height();
+    let line_height = app.rendering.graphics.message_board_line_height();
 
     app.process_running_chat_text("/msgboard 4");
     main_assert_eq!(app.message_board.mode => MessageBoardMode::Continuous);
@@ -5782,7 +5782,7 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
     let chart_point = {
         let resources = app.assets.network_chart_resources().test_value();
         let preferred = scoreboard_preferred_rect(
-            app.graphics
+            app.rendering.graphics
                 .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
         );
         let layout = app
@@ -5983,7 +5983,7 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     let assets = Arc::clone(&app.assets);
     let resources = assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
-        app.graphics
+        app.rendering.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let layout = app
@@ -6240,7 +6240,7 @@ fn portrait_crew_label_decodes_native_info_name_for_presentation() {
         &app.bindings,
         &app.gamepad_bindings,
     );
-    app.display_flags.portraits = true;
+    app.rendering.display_flags.portraits = true;
     app.populate_crew_infos(&mut players);
     app.populate_crew_portraits(&mut players);
 
@@ -6322,7 +6322,7 @@ fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination(
             (second.id, Vector2::new(700, 800), 2.0, focus),
         ]
     );
-    let mut ordinary_frame = vec![0x73; app.graphics.surface().pixels().len()];
+    let mut ordinary_frame = vec![0x73; app.rendering.graphics.surface().pixels().len()];
     app.render_running(&mut ordinary_frame, false).test_value();
 
     // An unset or deleted slot focus follows only the owning player's
@@ -6357,7 +6357,7 @@ fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination(
 
     app.snapshot.players = vec![eliminated];
     app.snapshot.hud.local_players = vec![local_owner];
-    let mut frame = vec![0x91; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0x91; app.rendering.graphics.surface().pixels().len()];
     app.render_running(&mut frame, false).test_value();
 }
 
@@ -9349,7 +9349,7 @@ fn disable_debug_set_executes_for_every_author_and_does_not_preflight_batch() {
         app.network = Some(manager);
         app.engine.set_debug_mode(true);
         app.engine.set_allow_debug(true);
-        app.graphics
+        app.rendering.graphics
             .set_debug_draw_flags(clonk_frontend::DebugDrawFlags {
                 show_vertices: true,
                 show_entrance: true,
@@ -9374,7 +9374,7 @@ fn disable_debug_set_executes_for_every_author_and_does_not_preflight_batch() {
         main_assert_ne!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms => initial_pressed);
         main_assert!(!app.engine.debug_mode());
         main_assert!(!app.engine.allow_debug());
-        main_assert_eq!(app.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
+        main_assert_eq!(app.rendering.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
         main_assert_eq!(app.executing_ready_tick => None);
     }
 }
@@ -13101,7 +13101,7 @@ fn debug_key_gates_remaps_and_native_priority_body() {
         app.test_modifiers(ModifiersState::CONTROL);
         app.test_key(key, ElementState::Pressed);
         main_assert_eq!(runtime_flash_text(&app) => Some("No debug mode!"));
-        main_assert_eq!(app.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
+        main_assert_eq!(app.rendering.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
         main_assert!(!app.exit_requested);
     }
 
@@ -13230,7 +13230,7 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     disable.engine.set_allow_debug(false);
     disable.engine.set_debug_mode(true);
     disable
-        .graphics
+        .rendering.graphics
         .set_debug_draw_flags(clonk_frontend::DebugDrawFlags {
             show_vertices: true,
             show_entrance: true,
@@ -13243,7 +13243,7 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     disable.test_modifiers(ModifiersState::CONTROL);
     disable.test_key(VirtualKeyCode::F5, ElementState::Pressed);
     main_assert!(!disable.engine.debug_mode());
-    main_assert_eq!(disable.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
+    main_assert_eq!(disable.rendering.graphics.debug_draw_flags() => clonk_frontend::DebugDrawFlags::default());
 
     let mut later_collision = n2_app_with_key_config(
         new_running_sandbox_app(),
@@ -13264,7 +13264,7 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     rebound.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
     main_assert!(rebound.engine.debug_mode());
     rebound.test_key(VirtualKeyCode::KeyH, ElementState::Pressed);
-    main_assert!(rebound.graphics.debug_draw_flags().show_vertices);
+    main_assert!(rebound.rendering.graphics.debug_draw_flags().show_vertices);
 
     let mut player_collision = n2_app_with_key_config(
         new_running_sandbox_app(),
@@ -13290,7 +13290,7 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     game_over.engine.set_debug_mode(true);
     game_over.test_modifiers(ModifiersState::CONTROL);
     game_over.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(game_over.graphics.debug_draw_flags().show_solid_mask);
+    main_assert!(game_over.rendering.graphics.debug_draw_flags().show_solid_mask);
     main_assert!(game_over.game_over_dialog.is_some());
     main_assert_eq!(runtime_flash_text(&game_over) => Some("SolidMasks: on"));
     main_assert!(!game_over.exit_requested);
@@ -13452,7 +13452,7 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
-    app.graphics
+    app.rendering.graphics
         .set_debug_draw_flags(clonk_frontend::DebugDrawFlags {
             show_net_status: true,
             ..clonk_frontend::DebugDrawFlags::default()
@@ -13473,7 +13473,7 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
 
     // An unsampled accumulator reads zero, exactly like native startup.
     app.update_network_status_overlay();
-    let text = app.graphics.network_status_text().test_value();
+    let text = app.rendering.graphics.network_status_text().test_value();
     main_assert!(text.contains("i0 o0 bc0"), "{text}");
 
     let network = app.network.test_ref();
@@ -13484,7 +13484,7 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
     network.generate_test_statistics(2_000);
 
     app.update_network_status_overlay();
-    let text = app.graphics.network_status_text().test_value();
+    let text = app.rendering.graphics.network_status_text().test_value();
     let protocols = text
         .split('|')
         .find(|line| line.starts_with("Protocols:"))
@@ -13497,7 +13497,7 @@ fn network_status_overlay_displays_live_protocol_rate_samples() {
     let first = protocols.to_string();
     app.update_network_status_overlay();
     let second = app
-        .graphics
+        .rendering.graphics
         .network_status_text()
         .expect("second network status text")
         .split('|')
@@ -13521,28 +13521,28 @@ fn net_stats_toggle_is_default_unbound_and_a_custom_chord_shows_the_overlay() {
         .replace_snapshot([message_client(0, b"Host")]);
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(!app.graphics.debug_draw_flags().show_net_status);
+    main_assert!(!app.rendering.graphics.debug_draw_flags().show_net_status);
 
     let parsed = parse_runtime_key_config(b"[Keys]\nNetStatsToggle=F8\n").test_value();
     app.runtime_key_config_cache = OnceLock::new();
     app.runtime_key_config_cache.set(Ok(parsed)).test_value();
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(app.graphics.debug_draw_flags().show_net_status);
+    main_assert!(app.rendering.graphics.debug_draw_flags().show_net_status);
     main_assert!(!app.engine.debug_mode(), "ToggleShowNetStatus has no debug-mode guard");
     main_assert!(app.runtime_flash_message.is_none(), "ToggleShowNetStatus flashes no message");
 
     app.update_network_status_overlay();
-    let text = app.graphics.network_status_text().test_value();
+    let text = app.rendering.graphics.network_status_text().test_value();
     main_assert!(text.contains("Local: Active host Host (ID 0)"), "{text}");
 
     app.test_key(VirtualKeyCode::F8, ElementState::Released);
-    main_assert!(app.graphics.debug_draw_flags().show_net_status);
+    main_assert!(app.rendering.graphics.debug_draw_flags().show_net_status);
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
-    main_assert!(!app.graphics.debug_draw_flags().show_net_status);
+    main_assert!(!app.rendering.graphics.debug_draw_flags().show_net_status);
     app.update_network_status_overlay();
-    main_assert!(app.graphics.network_status_text().is_none());
+    main_assert!(app.rendering.graphics.network_status_text().is_none());
 }
 
 // CtrlRateDown and CtrlRateUp are registered in this order in the native
@@ -13687,7 +13687,7 @@ fn network_status_collector_uses_native_client_next_control_baselines() {
             9, clonk_network::RemoteBarrierState::NotReady, true, 5
         ),
     ]);
-    app.graphics
+    app.rendering.graphics
         .set_debug_draw_flags(clonk_frontend::DebugDrawFlags {
             show_net_status: true,
             ..clonk_frontend::DebugDrawFlags::default()
@@ -13695,14 +13695,14 @@ fn network_status_collector_uses_native_client_next_control_baselines() {
 
     app.update_network_status_overlay();
 
-    let text = app.graphics.network_status_text().test_value();
+    let text = app.rendering.graphics.network_status_text().test_value();
     main_assert!(text.contains("|- Active client Remote (ID 7) (wait -12 ms, behind 4) (ready to start) (!ctrl)"), "{text}");
     main_assert!(text.contains("|- Inactive client Inactive (ID 9) (wait 5 ms, behind 44) (!rdy)"), "{text}");
 
     app.refresh_network_client_next_control_ticks();
     app.update_network_status_overlay();
     main_assert!(app
-        .graphics
+        .rendering.graphics
         .network_status_text()
         .expect("refreshed network status text")
         .contains(
@@ -14083,7 +14083,7 @@ fn runtime_client_list_prevents_tick5_from_reviving_edge_scroll() {
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let edge = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     app.test_cursor(PhysicalPosition::new(f64::from(edge.x), f64::from(edge.y)));
     main_assert!(app.live_input.ingame_edge_scroll.is_some());

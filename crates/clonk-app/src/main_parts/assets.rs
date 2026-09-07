@@ -8374,13 +8374,13 @@ pub(crate) fn run_sandbox_dump(
 
     // Render one frame to the CPU surface, then encode it.
     let (w, h) = {
-        let s = app.graphics.surface();
+        let s = app.rendering.graphics.surface();
         (s.width(), s.height())
     };
     let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
     app.render(&mut frame)
         .context("failed to render dump frame")?;
-    let png = encode_surface_to_png(app.graphics.surface())
+    let png = encode_surface_to_png(app.rendering.graphics.surface())
         .context("failed to encode dump frame to PNG")?;
     std::fs::write(dump_path, &png)
         .with_context(|| format!("failed to write {}", dump_path.display()))?;
@@ -8524,7 +8524,7 @@ pub(crate) fn run_menu_dump(
 /// Renders one settled startup frame and writes it to `dump_path`.
 fn finish_menu_dump(app: &mut GameApp, dump_path: &std::path::Path) -> Result<()> {
     let (w, h) = {
-        let s = app.graphics.surface();
+        let s = app.rendering.graphics.surface();
         (s.width(), s.height())
     };
     let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
@@ -8534,7 +8534,7 @@ fn finish_menu_dump(app: &mut GameApp, dump_path: &std::path::Path) -> Result<()
     }
     app.render(&mut frame)
         .context("failed to render menu frame")?;
-    let png = encode_surface_to_png(app.graphics.surface())
+    let png = encode_surface_to_png(app.rendering.graphics.surface())
         .context("failed to encode menu frame to PNG")?;
     std::fs::write(dump_path, &png)
         .with_context(|| format!("failed to write {}", dump_path.display()))?;
@@ -8730,13 +8730,13 @@ pub(crate) fn run_integration_test(
     if let Ok(dump) = std::env::var("LC_APP_DUMP_FRAME") {
         app.discard_terminal_loader_frame_for_headless_render();
         let (w, h) = {
-            let s = app.graphics.surface();
+            let s = app.rendering.graphics.surface();
             (s.width(), s.height())
         };
         let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
         app.render(&mut frame).context("render integration frame")?;
-        let png =
-            encode_surface_to_png(app.graphics.surface()).context("encode integration frame")?;
+        let png = encode_surface_to_png(app.rendering.graphics.surface())
+            .context("encode integration frame")?;
         std::fs::write(&dump, &png).with_context(|| format!("write {dump}"))?;
         println!("  wrote {dump} ({w}x{h})");
     }

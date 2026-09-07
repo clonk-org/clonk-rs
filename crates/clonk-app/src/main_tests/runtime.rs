@@ -4588,28 +4588,28 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
 
-    let initial = app.graphics.active_viewport_projections()[0];
+    let initial = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(initial.owner, owner);
     assert!(initial.is_no_owner_viewport);
     assert!(app.primary_physical_viewport_is_no_owner());
     let players_before = app.engine.snapshot().players;
 
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
-    let production_left = app.graphics.active_viewport_projections()[0];
+    let production_left = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(production_left.target_x, initial.target_x - 5);
     assert_eq!(production_left.target_y, initial.target_y);
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Released);
-    runtime_assert_eq!(app.graphics.active_viewport_projections()[0].target_x => production_left.target_x);
+    runtime_assert_eq!(app.rendering.graphics.active_viewport_projections()[0].target_x => production_left.target_x);
 
     app.free_view_scroll_momentum = FreeViewScrollMomentum::default();
-    let start = app.graphics.active_viewport_projections()[0];
+    let start = app.rendering.graphics.active_viewport_projections()[0];
     let now = Instant::now();
     runtime_assert!(app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowLeft,
         ElementState::Pressed,
         now,
     ));
-    let first_left = app.graphics.active_viewport_projections()[0];
+    let first_left = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(first_left.target_x, start.target_x - 5);
     assert_eq!(first_left.target_y, start.target_y);
 
@@ -4618,14 +4618,14 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
         ElementState::Released,
         now + Duration::from_millis(25),
     ));
-    assert_eq!(app.graphics.active_viewport_projections()[0], first_left);
+    assert_eq!(app.rendering.graphics.active_viewport_projections()[0], first_left);
 
     runtime_assert!(app.handle_viewport_player_cycle_key_at(
         VirtualKeyCode::ArrowLeft,
         ElementState::Pressed,
         now + Duration::from_millis(50),
     ));
-    let second_left = app.graphics.active_viewport_projections()[0];
+    let second_left = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(second_left.target_x, start.target_x - 15);
     assert_eq!(second_left.target_y, start.target_y);
 
@@ -4634,7 +4634,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
         ElementState::Pressed,
         now + Duration::from_millis(75),
     ));
-    let cross_axis = app.graphics.active_viewport_projections()[0];
+    let cross_axis = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(cross_axis.target_x, start.target_x - 25);
     assert_eq!(cross_axis.target_y, start.target_y - 5);
 
@@ -4643,7 +4643,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
         ElementState::Pressed,
         now + Duration::from_millis(175),
     ));
-    let reset_right = app.graphics.active_viewport_projections()[0];
+    let reset_right = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(reset_right.target_x, start.target_x - 20);
     assert_eq!(reset_right.target_y, start.target_y - 5);
 
@@ -4652,7 +4652,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
         ElementState::Pressed,
         now + Duration::from_millis(275),
     ));
-    let reset_down = app.graphics.active_viewport_projections()[0];
+    let reset_down = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(reset_down.target_x, start.target_x - 20);
     assert_eq!(reset_down.target_y, start.target_y);
     assert_eq!(app.engine.snapshot().players, players_before);
@@ -4662,7 +4662,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     let mut owned_frame = vec![0_u8; 320 * 200 * 4];
     owned.test_render(&mut owned_frame);
     assert!(!owned.primary_physical_viewport_is_no_owner());
-    let owned_camera = owned.graphics.active_viewport_projections()[0];
+    let owned_camera = owned.rendering.graphics.active_viewport_projections()[0];
     owned
         .engine
         .test_player_mut(owned.players.local_owner)
@@ -4696,7 +4696,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
         owned.test_key(key, ElementState::Released);
         runtime_assert_eq!(owned.engine.player(owned.players.local_owner).expect("local player").control.pressed_coms & (1 << command) => 0);
     }
-    let owned_after = owned.graphics.active_viewport_projections()[0];
+    let owned_after = owned.rendering.graphics.active_viewport_projections()[0];
     runtime_assert_eq!((owned_after.target_x, owned_after.target_y) => (owned_camera.target_x, owned_camera.target_y));
     assert!(owned.free_view_scroll_momentum.most_recent.is_none());
 }
@@ -4946,13 +4946,13 @@ fn console_viewport_render_applies_the_live_pxs_graphics_flag() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
     let identity = open_test_console_viewport(&mut app, None);
-    app.display_flags.pxs_gfx = false;
-    assert!(app.graphics.pxs_graphics_enabled());
+    app.rendering.display_flags.pxs_gfx = false;
+    assert!(app.rendering.graphics.pxs_graphics_enabled());
 
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
     runtime_assert!(
-        !app.graphics.pxs_graphics_enabled(),
+        !app.rendering.graphics.pxs_graphics_enabled(),
         "the detached viewport must honor the same live flag as the main PXS draw"
     );
 }
@@ -4965,15 +4965,15 @@ fn console_shell_render_applies_the_live_pxs_graphics_flag() {
     // (src/C4GraphicsSystem.cpp:167-177; src/C4PXS.cpp:259-260,279-281).
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.display_flags.pxs_gfx = false;
-    assert!(app.graphics.pxs_graphics_enabled());
-    let frame_len = app.graphics.surface().pixels().len();
+    app.rendering.display_flags.pxs_gfx = false;
+    assert!(app.rendering.graphics.pxs_graphics_enabled());
+    let frame_len = app.rendering.graphics.surface().pixels().len();
     let mut frame = vec![0; frame_len];
 
     assert!(app.test_render(&mut frame));
 
     runtime_assert!(
-        !app.graphics.pxs_graphics_enabled(),
+        !app.rendering.graphics.pxs_graphics_enabled(),
         "the console shell must synchronize the flag before its early return"
     );
 }
@@ -6083,7 +6083,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
 
     let bars = |app: &GameApp, identity: u64| {
         let (view_x, view_y, view_width, view_height) =
-            app.graphics.detached_viewport_view(identity)?;
+            app.rendering.graphics.detached_viewport_view(identity)?;
         let landscape = app.snapshot.landscape.as_ref()?;
         let ranges = scroll_ranges(
             app.console_viewport_player_lock(identity),
@@ -6102,14 +6102,14 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     runtime_assert!(!app.console_viewport_scroll_press(identity, (4, 4), extent));
 
     // The trailing arrow of the horizontal bar steps the view right.
-    let before = app.graphics.detached_viewport_view(identity).test_value().0;
+    let before = app.rendering.graphics.detached_viewport_view(identity).test_value().0;
     let track = layout.horizontal.track;
     runtime_assert!(app.console_viewport_scroll_press(
         identity,
         (track.x + track.width - 2, track.y + track.height / 2),
         extent
     ));
-    let after = app.graphics.detached_viewport_view(identity).test_value().0;
+    let after = app.rendering.graphics.detached_viewport_view(identity).test_value().0;
     runtime_assert!(
         after > before,
         "the arrow scrolled right: {before} -> {after}"
@@ -6117,7 +6117,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
 
     // A press on the thumb captures instead of stepping.
     let thumb = layout.horizontal.thumb;
-    let held = app.graphics.detached_viewport_view(identity).test_value().0;
+    let held = app.rendering.graphics.detached_viewport_view(identity).test_value().0;
     runtime_assert!(app.console_viewport_scroll_press(
         identity,
         (thumb.x + thumb.width / 2, track.y + track.height / 2),
@@ -6127,7 +6127,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
         app.console_viewport_scroll_drag => Some((identity, ScrollAxis::Horizontal))
     );
     runtime_assert_eq!(
-        app.graphics.detached_viewport_view(identity).test_value().0 => held,
+        app.rendering.graphics.detached_viewport_view(identity).test_value().0 => held,
         "grabbing the thumb does not move it",
     );
 
@@ -6141,7 +6141,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
         (track.x + track.width, track.y),
         extent
     ));
-    let dragged = app.graphics.detached_viewport_view(identity).test_value().0;
+    let dragged = app.rendering.graphics.detached_viewport_view(identity).test_value().0;
     runtime_assert!(
         dragged > held,
         "the drag moved the view: {held} -> {dragged}"
@@ -7722,8 +7722,8 @@ fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     // instead re-derive the position from its player every frame, so
     // scrolling far past the landscape edge and finding it still there is
     // what pins the lock actually being off.
-    let (view_x, ..) = app.graphics.detached_viewport_view(identity).test_value();
-    runtime_assert_eq!(app.graphics.scroll_detached_viewport(identity, -(view_x + 400), 0) => Some((-400, after.target_y)));
+    let (view_x, ..) = app.rendering.graphics.detached_viewport_view(identity).test_value();
+    runtime_assert_eq!(app.rendering.graphics.scroll_detached_viewport(identity, -(view_x + 400), 0) => Some((-400, after.target_y)));
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     runtime_assert_eq!(app.console_viewport_projections[&identity].target_x => -400, "an owned viewport keeps a view position outside the landscape");
     // And the next step moves relative to it rather than snapping back:
@@ -7893,7 +7893,7 @@ fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
         (UpperBoardMode::Small, 35),
         (UpperBoardMode::Mini, 10),
     ] {
-        app.display_flags.upper_board = mode;
+        app.rendering.display_flags.upper_board = mode;
         let message = app
             .prepare_runtime_flash_message("A", RuntimeHelpCharset::Windows1252)
             .expect("prepare placement")
@@ -7910,11 +7910,11 @@ fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
     player
         .viewports
         .push(player.viewports.first().test_value().clone());
-    app.display_flags.upper_board = UpperBoardMode::Full;
+    app.rendering.display_flags.upper_board = UpperBoardMode::Full;
     app.set_runtime_flash_message("AB", RuntimeHelpCharset::Windows1252)
         .test_value();
     assert_eq!(app.runtime_flash_message.as_ref().expect("flash").y, 124);
-    app.display_flags.upper_board = UpperBoardMode::Hide;
+    app.rendering.display_flags.upper_board = UpperBoardMode::Hide;
     app.snapshot
         .players
         .iter_mut()
@@ -8753,16 +8753,16 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         (UpperBoardMode::Mini, 0),
     ] {
         let mut app = new_classic_running_sandbox_app();
-        app.display_flags.upper_board = mode;
+        app.rendering.display_flags.upper_board = mode;
         app.test_key(VirtualKeyCode::F1, ElementState::Pressed);
         assert!(app.dialogs.help_visible, "mode {mode:?}");
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut frame);
-        runtime_assert_eq!(app.graphics.preferred_dialog_rect(None).y => expected_top, "mode {mode:?}");
+        runtime_assert_eq!(app.rendering.graphics.preferred_dialog_rect(None).y => expected_top, "mode {mode:?}");
     }
 
     let mut missing_board = new_running_sandbox_app();
-    missing_board.graphics = GraphicsSystem::new(
+    missing_board.rendering.graphics = GraphicsSystem::new(
         320,
         200,
         DEFAULT_GROUND_HEIGHT,
@@ -8773,7 +8773,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         Arc::new(HudGraphics::default()),
     );
     missing_board
-        .graphics
+        .rendering.graphics
         .set_clonk_fonts(missing_board.assets.clonk_fonts.clone());
     let error = missing_board
         .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
@@ -8782,7 +8782,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
     assert!(!missing_board.dialogs.help_visible);
 
     let mut tiny = new_classic_running_sandbox_app();
-    tiny.graphics = GraphicsSystem::new(
+    tiny.rendering.graphics = GraphicsSystem::new(
         320,
         50,
         DEFAULT_GROUND_HEIGHT,
@@ -8792,7 +8792,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         tiny.assets.cursor_atlas(),
         tiny.assets.hud_graphics(),
     );
-    tiny.graphics
+    tiny.rendering.graphics
         .set_clonk_fonts(tiny.assets.clonk_fonts.clone());
     let error = tiny
         .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
@@ -8801,8 +8801,8 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
     assert!(!tiny.dialogs.help_visible);
 
     let mut tiny_hide = new_classic_running_sandbox_app();
-    tiny_hide.display_flags.upper_board = UpperBoardMode::Hide;
-    tiny_hide.graphics = GraphicsSystem::new(
+    tiny_hide.rendering.display_flags.upper_board = UpperBoardMode::Hide;
+    tiny_hide.rendering.graphics = GraphicsSystem::new(
         320,
         1,
         DEFAULT_GROUND_HEIGHT,
@@ -8813,7 +8813,7 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         tiny_hide.assets.hud_graphics(),
     );
     tiny_hide
-        .graphics
+        .rendering.graphics
         .set_clonk_fonts(tiny_hide.assets.clonk_fonts.clone());
     let error = tiny_hide
         .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
@@ -8823,22 +8823,22 @@ fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
 
     let mut visible = new_classic_running_sandbox_app();
     visible.dialogs.help_visible = true;
-    visible.display_flags.upper_board = UpperBoardMode::Small;
+    visible.rendering.display_flags.upper_board = UpperBoardMode::Small;
     let mut frame = vec![0x6d; 320 * 200 * 4];
     let sentinel = frame.clone();
     visible.test_render(&mut frame);
     assert_ne!(frame, sentinel);
     assert!(visible.dialogs.help_visible);
-    assert_eq!(visible.graphics.preferred_dialog_rect(None).y, 25);
+    assert_eq!(visible.rendering.graphics.preferred_dialog_rect(None).y, 25);
 
     let mut recover = new_classic_running_sandbox_app();
     recover.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(recover.dialogs.help_visible);
-    recover.display_flags.upper_board = UpperBoardMode::Small;
+    recover.rendering.display_flags.upper_board = UpperBoardMode::Small;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     recover.test_render(&mut frame);
     assert!(recover.dialogs.help_visible);
-    assert_eq!(recover.graphics.preferred_dialog_rect(None).y, 25);
+    assert_eq!(recover.rendering.graphics.preferred_dialog_rect(None).y, 25);
     recover.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(!recover.dialogs.help_visible);
 }
@@ -8849,24 +8849,24 @@ fn upper_board_display_toggle_reinitializes_geometry_synchronously() {
     let owner = app.players.local_owner;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let initial_strip_width = app.graphics.upper_board_text_strip_width();
-    assert_eq!(app.graphics.preferred_dialog_rect(None).y, 50);
-    assert_eq!(app.graphics.viewport_rect(owner).expect("viewport").y, 50);
+    let initial_strip_width = app.rendering.graphics.upper_board_text_strip_width();
+    assert_eq!(app.rendering.graphics.preferred_dialog_rect(None).y, 50);
+    assert_eq!(app.rendering.graphics.viewport_rect(owner).expect("viewport").y, 50);
 
     app.snapshot.game_time = 100 * 60 * 60;
 
     app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
         .test_value();
 
-    assert_eq!(app.display_flags.upper_board, UpperBoardMode::Small);
+    assert_eq!(app.rendering.display_flags.upper_board, UpperBoardMode::Small);
     runtime_assert!(
-        app.graphics.upper_board_text_strip_width() > initial_strip_width,
+        app.rendering.graphics.upper_board_text_strip_width() > initial_strip_width,
         "the synchronous reinitialization latches the current 100-hour game time"
     );
-    runtime_assert_eq!(app.graphics.preferred_dialog_rect(None).y => 25, "Display:UpperBoard reinitializes viewport/dialog geometry before the next render");
+    runtime_assert_eq!(app.rendering.graphics.preferred_dialog_rect(None).y => 25, "Display:UpperBoard reinitializes viewport/dialog geometry before the next render");
     runtime_assert_eq!(
-        app.graphics.viewport_rect(owner).expect("viewport").y => 25;
-        app.graphics.preferred_dialog_rect(Some(owner)).y => 25;
+        app.rendering.graphics.viewport_rect(owner).expect("viewport").y => 25;
+        app.rendering.graphics.preferred_dialog_rect(Some(owner)).y => 25;
         app.active_ingame_mouse_viewport().expect("active mouse viewport").rect.y => 25;
     );
 }
@@ -9075,7 +9075,7 @@ fn unresolved_runtime_help_language_fails_typed_before_pixels() {
         .help_text_cache
         .set(Err("LanguageZZ.txt cannot be resolved".to_string()))
         .test_value();
-    let before_surface = app.graphics.surface().pixels().to_vec();
+    let before_surface = app.rendering.graphics.surface().pixels().to_vec();
     let mut frame = vec![0x6d; 320 * 200 * 4];
     let sentinel = frame.clone();
 
@@ -9085,7 +9085,7 @@ fn unresolved_runtime_help_language_fails_typed_before_pixels() {
     assert!(error.to_string().contains("runtime F1 help resources"));
     assert!(error.to_string().contains("LanguageZZ.txt"));
     assert_eq!(frame, sentinel);
-    assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+    assert_eq!(app.rendering.graphics.surface().pixels(), before_surface.as_slice());
 }
 
 #[test]
@@ -9464,11 +9464,11 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
     }
 
     runtime_assert_eq!(app.ingame_menu.get(app.players.local_owner).test_value().selection() => 1);
-    assert!(!app.display_flags.player_names);
-    assert!(!app.display_flags.clonk_names);
-    assert!(app.display_flags.clock);
-    assert!(app.display_flags.fps);
-    assert_eq!(app.display_flags.upper_board, UpperBoardMode::Small);
+    assert!(!app.rendering.display_flags.player_names);
+    assert!(!app.rendering.display_flags.clonk_names);
+    assert!(app.rendering.display_flags.clock);
+    assert!(app.rendering.display_flags.fps);
+    assert_eq!(app.rendering.display_flags.upper_board, UpperBoardMode::Small);
     assert_eq!(app.config.deferred.len(), 5);
 
     runtime_assert_eq!(fs::read(paths.config_file()).test_value() => initial_config, "Display toggles mutate the process-local config only until shutdown");
@@ -10160,10 +10160,10 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
     // `C4GraphicsSystem::ToggleShowNetStatus` has no DebugMode guard and
     // flashes nothing (src/C4GraphicsSystem.cpp:811-815).
     let mut stats = bound("NetStatsToggle");
-    runtime_assert!(!stats.graphics.debug_draw_flags().show_net_status);
+    runtime_assert!(!stats.rendering.graphics.debug_draw_flags().show_net_status);
     press(&mut stats);
     runtime_assert!(
-        stats.graphics.debug_draw_flags().show_net_status,
+        stats.rendering.graphics.debug_draw_flags().show_net_status,
         "the rebound button reaches ToggleShowNetStatus"
     );
 
@@ -10417,9 +10417,9 @@ fn runtime_gamepad_overrides_reach_every_fullscreen_global_action() {
     runtime_assert!(!app.dialogs.help_visible);
 
     // The port-only stats overlay is off by default and toggles like the rest.
-    runtime_assert!(!app.display_flags.show_stats);
+    runtime_assert!(!app.rendering.display_flags.show_stats);
     press(&mut app, 0x12);
-    runtime_assert!(app.display_flags.show_stats);
+    runtime_assert!(app.rendering.display_flags.show_stats);
 
     // The message board scrolls in both directions without erroring.
     press(&mut app, 0x10);
@@ -10445,7 +10445,7 @@ fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
     let before = (
         app.pending_screenshots.len(),
         app.dialogs.help_visible,
-        app.display_flags.show_stats,
+        app.rendering.display_flags.show_stats,
         app.chat.external_dialog_visible,
     );
 
@@ -10471,7 +10471,7 @@ fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
         (
             app.pending_screenshots.len(),
             app.dialogs.help_visible,
-            app.display_flags.show_stats,
+            app.rendering.display_flags.show_stats,
             app.chat.external_dialog_visible,
         ) => before
     );
@@ -10498,7 +10498,7 @@ fn runtime_gamepad_stats_toggle_yields_its_code_to_the_actions_it_shadows() {
     .test_value();
 
     runtime_assert!(
-        !app.display_flags.show_stats,
+        !app.rendering.display_flags.show_stats,
         "the earlier registration owns the shared code"
     );
 }
@@ -10565,7 +10565,7 @@ fn unbound_network_globals_claim_no_gamepad_code() {
         .test_value();
     }
     runtime_assert_eq!(runtime_global_ui_snapshot(&app) => before);
-    runtime_assert!(!app.graphics.debug_draw_flags().show_net_status);
+    runtime_assert!(!app.rendering.graphics.debug_draw_flags().show_net_status);
 }
 
 // The four debug toggles are registered between the message board and the
@@ -10641,7 +10641,7 @@ fn a_refused_debug_gamepad_override_flashes_without_toggling() {
         !app.engine.debug_mode(),
         "a sandbox round starts outside debug mode"
     );
-    let before = app.graphics.debug_draw_flags();
+    let before = app.rendering.graphics.debug_draw_flags();
 
     app.handle_gamepad_button(
         GamepadSlot::new(0),
@@ -10651,7 +10651,7 @@ fn a_refused_debug_gamepad_override_flashes_without_toggling() {
     .test_value();
 
     runtime_assert_eq!(
-        app.graphics.debug_draw_flags() => before,
+        app.rendering.graphics.debug_draw_flags() => before,
         "a refused toggle changes no draw flag",
     );
     runtime_assert!(

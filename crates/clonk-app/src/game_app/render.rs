@@ -39,8 +39,8 @@ impl GameApp {
     /// stay in lockstep and cross-play against a stock LegacyClonk client is
     /// unaffected.
     pub(crate) fn update_diagnostics_overlay(&mut self) {
-        if !self.display_flags.show_stats {
-            self.graphics.set_diagnostics_overlay_text(None);
+        if !self.rendering.display_flags.show_stats {
+            self.rendering.graphics.set_diagnostics_overlay_text(None);
             return;
         }
         let format_ms = |duration: Duration| format!("{:.1} ms", duration.as_secs_f64() * 1_000.0);
@@ -85,19 +85,22 @@ impl GameApp {
                 format_ms(clock.control_latency_budget()),
             ));
         }
-        self.graphics
+        self.rendering
+            .graphics
             .set_diagnostics_overlay_text(Some(lines.join("|")));
     }
 
     pub(crate) fn current_hud_graphics(&self) -> Arc<HudGraphics> {
-        self.active_game_graphics
+        self.rendering
+            .active_game_graphics
             .as_ref()
             .map(|resources| Arc::clone(&resources.hud_graphics))
             .unwrap_or_else(|| self.assets.hud_graphics())
     }
 
     pub(crate) fn current_hud_graphics_ref(&self) -> &HudGraphics {
-        self.active_game_graphics
+        self.rendering
+            .active_game_graphics
             .as_ref()
             .map(|resources| resources.hud_graphics.as_ref())
             .unwrap_or(self.assets.hud_graphics.as_ref())
@@ -132,7 +135,7 @@ impl GameApp {
     /// The process-wide display settings remain owned by the window loop;
     /// `DisplayFlags` is their presentation projection for running menus.
     pub(crate) fn set_display_mode(&mut self, mode: DisplayMode) {
-        self.display_flags.is_fullscreen = matches!(mode, DisplayMode::Fullscreen);
+        self.rendering.display_flags.is_fullscreen = matches!(mode, DisplayMode::Fullscreen);
     }
 
     /// Rust creates the fullscreen physical observer viewport from the
@@ -231,9 +234,9 @@ impl GameApp {
                     .clone()
                     .or_else(|| self.assets.dialog_image("Player.png")),
                 caption_bar: self.assets.dialog_image("GUICaption.png"),
-                show_commands: self.display_flags.show_commands,
-                show_portraits: self.display_flags.portraits,
-                show_command_keys: self.display_flags.show_command_keys,
+                show_commands: self.rendering.display_flags.show_commands,
+                show_portraits: self.rendering.display_flags.portraits,
+                show_command_keys: self.rendering.display_flags.show_command_keys,
                 throw_key,
                 special2_key,
                 dig_key,
@@ -292,6 +295,7 @@ impl GameApp {
             return None;
         }
         let viewport = self
+            .rendering
             .graphics
             .active_viewport_projections()
             .into_iter()
@@ -307,7 +311,8 @@ impl GameApp {
         if let Some(button) = clonk_frontend::hud::viewport_button_region(
             viewport.rect,
             point,
-            self.display_flags.show_commands && !(self.engine.film() && self.engine.replay()),
+            self.rendering.display_flags.show_commands
+                && !(self.engine.film() && self.engine.replay()),
             mouse_viewport,
             self.startup_irc_client_active(),
         ) {
@@ -324,7 +329,7 @@ impl GameApp {
 
     fn reset_menu_positions_for_viewport_changes(&mut self) {
         let mut current = BTreeMap::new();
-        for viewport in self.graphics.active_viewport_projections() {
+        for viewport in self.rendering.graphics.active_viewport_projections() {
             current.entry(viewport.owner).or_insert(viewport.rect);
         }
         let mut changed = self
@@ -407,7 +412,8 @@ impl GameApp {
 
     pub(crate) fn clear_physical_viewport_states(&mut self) {
         for viewport in std::mem::take(&mut self.viewports.physical_viewports) {
-            self.graphics
+            self.rendering
+                .graphics
                 .drop_physical_camera(viewport.physical_identity);
         }
         self.update_film_viewport_availability();
@@ -568,7 +574,7 @@ impl GameApp {
         if self.viewports.physical_viewports.len() == previous_count {
             return false;
         }
-        self.graphics.drop_physical_camera(identity);
+        self.rendering.graphics.drop_physical_camera(identity);
         if primary_removed {
             self.film_view_player = None;
         }
@@ -603,7 +609,7 @@ impl GameApp {
             return false;
         }
         for identity in removed_identities {
-            self.graphics.drop_physical_camera(identity);
+            self.rendering.graphics.drop_physical_camera(identity);
         }
         if primary_removed {
             self.film_view_player = None;
@@ -811,13 +817,17 @@ impl GameApp {
         let active_index = (!self.running_chat_active())
             .then(|| self.active_message_dialog_index())
             .flatten();
-        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        let ordered_native = self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active();
         let now = Instant::now();
         for index in 0..=last {
             let keyboard_active = Some(index) == active_index && self.context_menu.is_none();
             let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
             self.dialogs.messages[index].state.render_at(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 resources,
                 keyboard_active,
                 mouse_active,
@@ -854,7 +864,7 @@ impl GameApp {
             && !self.running_chat_active()
             && self.context_menu.is_none();
         self.dialogs.messages[index].state.render_at(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             resources,
             keyboard_active,
             true,
@@ -879,7 +889,7 @@ impl GameApp {
             .league_signup_resources()
             .context("classic C4LeagueSignupDialog resources are unavailable")?;
         dialog.controller.render(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             resources,
             self.dialogs.messages.is_empty() && self.context_menu.is_none(),
             gamma,
@@ -891,7 +901,7 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<bool> {
         let (width, height) = {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             (surface.width() as i32, surface.height() as i32)
         };
         let Some((pointer, text)) = self.league_signup_tooltip(width, height) else {
@@ -903,7 +913,7 @@ impl GameApp {
             .clone()
             .context("classic shadowless tooltip font is unavailable")?;
         clonk_frontend::context_menu::draw_classic_tooltip(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             &font,
             pointer,
             &text,
@@ -923,7 +933,7 @@ impl GameApp {
             return Ok(false);
         };
         let (surface_width, surface_height) = {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             (surface.width(), surface.height())
         };
         let text = self
@@ -941,7 +951,7 @@ impl GameApp {
             .clone()
             .context("classic shadowless tooltip font is unavailable")?;
         clonk_frontend::context_menu::draw_classic_tooltip(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             font.as_ref(),
             pointer,
             &text,
@@ -1018,7 +1028,7 @@ impl GameApp {
             .clone()
             .context("classic shadowless tooltip font is unavailable")?;
         clonk_frontend::context_menu::draw_classic_tooltip(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             font.as_ref(),
             pointer,
             &text,
@@ -1047,7 +1057,7 @@ impl GameApp {
             return Ok(());
         };
         let (surface_width, surface_height) = {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             (surface.width() as i32, surface.height() as i32)
         };
         let index = if self.mode == AppMode::Running {
@@ -1069,11 +1079,16 @@ impl GameApp {
         let Some(index) = index else {
             return Ok(());
         };
-        if self.graphics.surface().is_clonk_text_capture_active() {
+        if self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active()
+        {
             self.next_pending_native_overlay();
         }
         self.dialogs.messages[index].state.render_tooltip(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             resources,
             Some(tooltip_pointer),
             gamma,
@@ -1092,7 +1107,7 @@ impl GameApp {
             self.context_menu
                 .as_ref()
                 .expect("context menu panel count came from an installed menu")
-                .render_panel(self.graphics.surface_mut(), index, gamma)?;
+                .render_panel(self.rendering.graphics.surface_mut(), index, gamma)?;
             self.next_pending_native_overlay();
         }
         Ok(())
@@ -1103,7 +1118,7 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
         if let Some(context_menu) = self.context_menu.as_ref() {
-            context_menu.render_panels(self.graphics.surface_mut(), gamma)?;
+            context_menu.render_panels(self.rendering.graphics.surface_mut(), gamma)?;
         }
         Ok(())
     }
@@ -1112,7 +1127,7 @@ impl GameApp {
         let Some(context_menu) = self.context_menu.as_ref() else {
             return false;
         };
-        context_menu.render_tooltip(self.graphics.surface_mut(), gamma)
+        context_menu.render_tooltip(self.rendering.graphics.surface_mut(), gamma)
     }
 
     fn render_network_chart_layer(
@@ -1129,11 +1144,12 @@ impl GameApp {
             .network_chart_resources()
             .expect("network chart resources were preflighted before rendering");
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.render(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             preferred,
             resources,
             Some(frame_gamma),
@@ -1154,7 +1170,8 @@ impl GameApp {
         };
         let assets = Arc::clone(&self.assets);
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let keyboard_active = self.runtime_client_list_draw_active();
@@ -1164,7 +1181,7 @@ impl GameApp {
                 .static_info_dialog_resources()
                 .expect("static InfoDialog resources were preflighted before rendering");
             dialog.render_static_info(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 preferred,
                 resources,
                 mouse_active,
@@ -1175,7 +1192,7 @@ impl GameApp {
                 .runtime_client_list_resources()
                 .expect("runtime client-list resources were preflighted before rendering");
             dialog.render_body_with_activity(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 preferred,
                 resources,
                 keyboard_active,
@@ -1205,11 +1222,12 @@ impl GameApp {
             .runtime_client_list_resources()
             .expect("runtime client-list resources were preflighted before rendering");
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.render_tooltip(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             preferred,
             resources,
             mouse_active,
@@ -1264,7 +1282,7 @@ impl GameApp {
         };
         if ordered_native {
             clonk_frontend::scoreboard::render_scoreboard_body_with_layout(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &scoreboard,
                 &resources,
                 &layout,
@@ -1273,7 +1291,7 @@ impl GameApp {
             .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
             self.next_pending_native_overlay();
             clonk_frontend::scoreboard::render_scoreboard_caption_with_layout(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &scoreboard,
                 &resources,
                 &layout,
@@ -1284,7 +1302,7 @@ impl GameApp {
             self.next_pending_native_overlay();
         } else {
             clonk_frontend::scoreboard::render_scoreboard_with_layout(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &scoreboard,
                 &resources,
                 &layout,
@@ -1348,14 +1366,19 @@ impl GameApp {
         self.presentation.pending_native_presentation = Some(NativePresentationPlan::default());
         self.begin_native_text_capture(false);
         if let Err(error) = self.render_for_presentation(frame, false, false, false) {
-            let surface = self.graphics.surface_mut();
+            let surface = self.rendering.graphics.surface_mut();
             let _ = surface.take_clonk_text_capture();
             let _ = surface.take_gpu_scene_capture();
             surface.clear_clip();
             self.presentation.pending_native_presentation = None;
             return Err(error);
         }
-        if self.graphics.surface().is_clonk_text_capture_active() {
+        if self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active()
+        {
             let has_base = self
                 .presentation
                 .pending_native_presentation
@@ -1395,16 +1418,18 @@ impl GameApp {
         defer_monitor_gamma: bool,
     ) -> Result<bool> {
         let _renderer_config_guard = clonk_frontend::activate_advanced_renderer_config(
-            self.graphics.advanced_renderer_config(),
+            self.rendering.graphics.advanced_renderer_config(),
         );
-        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
+        self.rendering
+            .graphics
+            .set_pxs_graphics(self.rendering.display_flags.pxs_gfx);
         if self.console_mode {
             self.sync_developer_console_view();
             let font = self.assets.font_arc();
             self.developer_console
-                .render(self.graphics.surface_mut(), font.as_ref());
+                .render(self.rendering.graphics.surface_mut(), font.as_ref());
             self.render_message_dialogs(None)?;
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             if !surface.is_gpu_scene_capture_active() {
                 if surface.pixels().len() == frame.len() {
                     frame.copy_from_slice(surface.pixels());
@@ -1419,7 +1444,11 @@ impl GameApp {
                 let menu_gamma_value = self.startup_fragment_gamma();
                 let menu_gamma = &menu_gamma_value;
                 let monitor_gamma = self.startup_monitor_gamma();
-                let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+                let ordered_native = self
+                    .rendering
+                    .graphics
+                    .surface()
+                    .is_clonk_text_capture_active();
                 if ordered_native {
                     self.presentation
                         .pending_native_presentation
@@ -1536,8 +1565,10 @@ impl GameApp {
                         self.render_ordered_context_menu(gamma.as_ref())?;
                     } else if !ordered_native && self.game_option_input_dialog.is_none() {
                         if let Some(context_menu) = self.context_menu.as_ref() {
-                            context_menu
-                                .render_panels(self.graphics.surface_mut(), gamma.as_ref())?;
+                            context_menu.render_panels(
+                                self.rendering.graphics.surface_mut(),
+                                gamma.as_ref(),
+                            )?;
                         }
                     }
                     let gui_cursor_drawn = self.draw_classic_gui_cursor(gamma.as_ref());
@@ -1569,8 +1600,14 @@ impl GameApp {
                     if self.render_context_menu_tooltip(gamma.as_ref()) && ordered_native {
                         self.next_pending_native_overlay();
                     }
-                    if !ordered_native && !self.graphics.surface().is_gpu_scene_capture_active() {
-                        let surface = self.graphics.surface();
+                    if !ordered_native
+                        && !self
+                            .rendering
+                            .graphics
+                            .surface()
+                            .is_gpu_scene_capture_active()
+                    {
+                        let surface = self.rendering.graphics.surface();
                         if surface.pixels().len() == frame.len() {
                             frame.copy_from_slice(surface.pixels());
                         } else {
@@ -1590,12 +1627,16 @@ impl GameApp {
                     return Ok(true);
                 }
                 let (width, height) = {
-                    let surface = self.graphics.surface();
+                    let surface = self.rendering.graphics.surface();
                     (surface.width(), surface.height())
                 };
                 let expected_len = width as usize * height as usize * 4;
                 let visible_dialog = self.visible_startup_dialog();
-                let retained_fade = self.graphics.surface().is_gpu_scene_capture_active();
+                let retained_fade = self
+                    .rendering
+                    .graphics
+                    .surface()
+                    .is_gpu_scene_capture_active();
                 let fade_compatible = self.startup.dialog_fade.as_ref().is_some_and(|fade| {
                     Some(fade.incoming) == visible_dialog
                         && (frame.len() == expected_len || retained_fade)
@@ -1651,7 +1692,7 @@ impl GameApp {
                 let scenario_loading_label = self.scenario_selector_loading_label();
                 let network_lobby = self.network_lobby.as_mut();
                 render_startup_frame(
-                    &mut self.graphics,
+                    &mut self.rendering.graphics,
                     self.assets.as_ref(),
                     &mut self.main_menu_state,
                     &mut self.menu_state,
@@ -1692,12 +1733,18 @@ impl GameApp {
                         .expect("compatible startup fade must still be present");
                     if ordered_native || retained_fade {
                         let incoming_text = if ordered_native {
-                            self.graphics.surface_mut().take_clonk_text_capture()
+                            self.rendering
+                                .graphics
+                                .surface_mut()
+                                .take_clonk_text_capture()
                         } else {
                             Vec::new()
                         };
-                        let incoming_gpu_recorder =
-                            self.graphics.surface_mut().take_gpu_scene_capture();
+                        let incoming_gpu_recorder = self
+                            .rendering
+                            .graphics
+                            .surface_mut()
+                            .take_gpu_scene_capture();
                         let incoming_opacity =
                             startup_dialog_fade_opacity(fade.step.saturating_mul(10));
                         let outgoing_opacity = startup_dialog_fade_opacity(
@@ -1778,7 +1825,7 @@ impl GameApp {
                         if ordered_native {
                             self.begin_native_text_capture(true);
                         } else {
-                            self.graphics.begin_gpu_scene_capture();
+                            self.rendering.graphics.begin_gpu_scene_capture();
                         }
                     } else {
                         if fade.step < STARTUP_DIALOG_FADE_STEPS {
@@ -1789,7 +1836,8 @@ impl GameApp {
                                 fade.step * 10,
                             );
                         }
-                        self.graphics
+                        self.rendering
+                            .graphics
                             .surface_mut()
                             .pixels_mut()
                             .copy_from_slice(frame);
@@ -1804,8 +1852,8 @@ impl GameApp {
                 }
                 let startup_assets = Arc::clone(&self.assets);
                 // Read before the surface is borrowed mutably below.
-                let point_filtering = self.graphics.point_filtering();
-                let application_scale = self.graphics.presentation_scale();
+                let point_filtering = self.rendering.graphics.point_filtering();
+                let application_scale = self.rendering.graphics.presentation_scale();
                 let portrait_selector_open = self
                     .startup
                     .player_properties_dialog
@@ -1824,7 +1872,7 @@ impl GameApp {
                 ) {
                     if let Some(pending) = self.startup.player_properties_dialog.as_ref() {
                         clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_player_form(
-                            self.graphics.surface_mut(),
+                            self.rendering.graphics.surface_mut(),
                             &properties_assets,
                             book,
                             &pending.controller,
@@ -1841,7 +1889,7 @@ impl GameApp {
                         .filter(|_| portrait_selector_open)
                     {
                         clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_portrait_selector_dialog(
-                            self.graphics.surface_mut(),
+                            self.rendering.graphics.surface_mut(),
                             &properties_assets,
                             fonts,
                             &mut pending.controller,
@@ -1898,7 +1946,7 @@ impl GameApp {
                         self.startup.player_properties_dialog.as_ref(),
                     ) {
                         clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render_portrait_location_popup(
-                            self.graphics.surface_mut(),
+                            self.rendering.graphics.surface_mut(),
                             &properties_assets,
                             fonts,
                             &pending.controller,
@@ -1914,8 +1962,10 @@ impl GameApp {
                     self.render_ordered_context_menu(Some(menu_gamma))?;
                 } else if fade_was_active && !game_option_input_open {
                     if let Some(context_menu) = self.context_menu.as_ref() {
-                        context_menu
-                            .render_panels(self.graphics.surface_mut(), Some(menu_gamma))?;
+                        context_menu.render_panels(
+                            self.rendering.graphics.surface_mut(),
+                            Some(menu_gamma),
+                        )?;
                     }
                 }
                 let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(menu_gamma));
@@ -1947,7 +1997,11 @@ impl GameApp {
                     self.next_pending_native_overlay();
                 }
                 if !ordered_native
-                    && !self.graphics.surface().is_gpu_scene_capture_active()
+                    && !self
+                        .rendering
+                        .graphics
+                        .surface()
+                        .is_gpu_scene_capture_active()
                     && (fade_was_active
                         || self.startup.player_properties_dialog.is_some()
                         || definition_selector_open
@@ -1959,7 +2013,7 @@ impl GameApp {
                         || gui_cursor_drawn
                         || startup_tooltips_drawn)
                 {
-                    let surface = self.graphics.surface();
+                    let surface = self.rendering.graphics.surface();
                     if surface.pixels().len() == frame.len() {
                         frame.copy_from_slice(surface.pixels());
                     } else {
@@ -2058,8 +2112,16 @@ impl GameApp {
         let gamma_value = self.startup_fragment_gamma();
         let gamma = &gamma_value;
         let monitor_gamma = self.startup_monitor_gamma();
-        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
-        let retained_gpu = self.graphics.surface().is_gpu_scene_capture_active();
+        let ordered_native = self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active();
+        let retained_gpu = self
+            .rendering
+            .graphics
+            .surface()
+            .is_gpu_scene_capture_active();
         if ordered_native {
             self.presentation
                 .pending_native_presentation
@@ -2082,7 +2144,7 @@ impl GameApp {
             ));
         }
         let (width, height) = {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             (surface.width(), surface.height())
         };
         let expected_len = (width as usize)
@@ -2100,7 +2162,7 @@ impl GameApp {
             self.loader_screen
                 .as_ref()
                 .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
-                .render_chrome(self.graphics.surface_mut(), config, Some(gamma));
+                .render_chrome(self.rendering.graphics.surface_mut(), config, Some(gamma));
 
             // C4GraphicsSystem draws the startup message-board loader before
             // C4GUI. Commit that base with the loader's dedicated native-text
@@ -2121,7 +2183,12 @@ impl GameApp {
                         .as_ref()
                         .expect("visibility was checked above")
                         .controller
-                        .render(self.graphics.surface_mut(), &resources, true, Some(gamma))
+                        .render(
+                            self.rendering.graphics.surface_mut(),
+                            &resources,
+                            true,
+                            Some(gamma),
+                        )
                         .map_err(|error| self.loader_boundary(error.to_string()))?;
                 }
                 self.next_pending_native_overlay();
@@ -2155,7 +2222,7 @@ impl GameApp {
                 .loader_screen
                 .as_ref()
                 .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
-                .render_with_config(self.graphics.surface_mut(), config, Some(gamma));
+                .render_with_config(self.rendering.graphics.surface_mut(), config, Some(gamma));
             render.map_err(|error| self.loader_boundary(error.to_string()))?;
             if self
                 .network_start_wait
@@ -2170,7 +2237,12 @@ impl GameApp {
                     .as_ref()
                     .expect("visibility was checked above")
                     .controller
-                    .render(self.graphics.surface_mut(), &resources, true, Some(gamma))
+                    .render(
+                        self.rendering.graphics.surface_mut(),
+                        &resources,
+                        true,
+                        Some(gamma),
+                    )
                     .map_err(|error| self.loader_boundary(error.to_string()))?;
             }
             self.render_league_signup_dialog(Some(gamma))
@@ -2309,7 +2381,7 @@ impl GameApp {
         gamma: &clonk_graphics::GammaRamp,
     ) -> Result<()> {
         let _renderer_config = clonk_frontend::activate_advanced_renderer_config(
-            self.graphics.advanced_renderer_config(),
+            self.rendering.graphics.advanced_renderer_config(),
         );
         if self.mode != AppMode::Running || self.snapshot.hud.messages.is_empty() {
             return Ok(());
@@ -2328,7 +2400,7 @@ impl GameApp {
             "native C4GameMessage frame has {} bytes, expected {expected_len}",
             frame.len()
         );
-        let logical = self.graphics.surface();
+        let logical = self.rendering.graphics.surface();
         anyhow::ensure!(
             geometry.logical_size() == (logical.width(), logical.height()),
             "native C4GameMessage geometry {:?} does not match its {}x{} logical target",
@@ -2342,7 +2414,7 @@ impl GameApp {
             PixelFormat::Rgba8888,
             frame.to_vec(),
         )?;
-        let viewports = self.graphics.active_viewport_projections();
+        let viewports = self.rendering.graphics.active_viewport_projections();
         for viewport in viewports {
             for message in &self.snapshot.hud.messages {
                 let target_position = match message.kind {
@@ -2494,6 +2566,7 @@ impl GameApp {
         match self.mode {
             AppMode::Menu | AppMode::Loading => self.startup_active_gamma(),
             AppMode::Running => self
+                .rendering
                 .graphics
                 .active_gamma_ramp(&self.snapshot.environment.gamma),
         }
@@ -2504,7 +2577,7 @@ impl GameApp {
         presentation: GpuPresentation,
     ) -> Result<RetainedGpuFrame> {
         let gamma = self.retained_gpu_frame_gamma();
-        let renderer_config = self.graphics.advanced_renderer_config();
+        let renderer_config = self.rendering.graphics.advanced_renderer_config();
         // The monitor resolve is a second full-screen pass; the detail
         // governor drops it before it drops anything the player controls.
         let gamma_mode = match retained_gpu_gamma_mode(renderer_config) {
@@ -2541,7 +2614,7 @@ impl GameApp {
             );
         }
 
-        self.graphics.begin_gpu_scene_capture();
+        self.rendering.graphics.begin_gpu_scene_capture();
         let mut ignored_cpu_pixel = [0_u8; 4];
         if let Err(error) = self.render_for_presentation_with_monitor_defer(
             &mut ignored_cpu_pixel,
@@ -2550,10 +2623,11 @@ impl GameApp {
             false,
             true,
         ) {
-            let _ = self.graphics.finish_gpu_scene_capture(&gamma);
+            let _ = self.rendering.graphics.finish_gpu_scene_capture(&gamma);
             return Err(error);
         }
         let (mut scene, capture_stats) = self
+            .rendering
             .graphics
             .finish_gpu_scene_capture_with_stats(&gamma)
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
@@ -2587,8 +2661,8 @@ impl GameApp {
         gamma_mode: GpuGammaMode,
     ) -> Result<RetainedGpuFrame> {
         let logical_extent = [
-            self.graphics.surface().width(),
-            self.graphics.surface().height(),
+            self.rendering.graphics.surface().width(),
+            self.rendering.graphics.surface().height(),
         ];
         let [physical_width, physical_height] = logical_presentation.physical_extent;
         let default_fonts = self.native_startup_fonts.clone();
@@ -4376,8 +4450,8 @@ impl GameApp {
             self.developer_tools.grade(),
             material,
             self.developer_tools.texture(),
-            &self.material_render_info,
-            &self.material_texture_images,
+            &self.rendering.material_render_info,
+            &self.rendering.material_texture_images,
             clonk_graphics::Color::opaque(0x40, 0x40, 0x40),
         )
     }
@@ -4739,7 +4813,7 @@ impl GameApp {
         use clonk_engine::developer_viewport::scroll_ranges;
 
         let Some((view_x, view_y, view_width, view_height)) =
-            self.graphics.detached_viewport_view(identity)
+            self.rendering.graphics.detached_viewport_view(identity)
         else {
             return false;
         };
@@ -4783,7 +4857,8 @@ impl GameApp {
         if (dx, dy) == (0, 0) {
             return false;
         }
-        self.graphics
+        self.rendering
+            .graphics
             .scroll_detached_viewport(identity, dx, dy)
             .is_some()
     }
@@ -4806,7 +4881,7 @@ impl GameApp {
         use clonk_engine::developer_viewport::{scroll_bar_layout, scroll_ranges};
 
         let (view_x, view_y, view_width, view_height) =
-            self.graphics.detached_viewport_view(identity)?;
+            self.rendering.graphics.detached_viewport_view(identity)?;
         let landscape = self.snapshot.landscape.as_ref()?;
         let ranges = scroll_ranges(
             self.console_viewport_player_lock(identity),
@@ -5353,18 +5428,21 @@ impl GameApp {
         width: u32,
         height: u32,
     ) -> Option<clonk_graphics::Surface> {
-        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
+        self.rendering
+            .graphics
+            .set_pxs_graphics(self.rendering.display_flags.pxs_gfx);
         let Self {
             snapshot,
-            graphics,
+            rendering,
             viewports,
             ..
         } = self;
         let inputs =
             collect_viewport_inputs_from_physical_state(snapshot, &viewports.physical_viewports)
                 .ok()?;
-        let mut frame =
-            graphics.render_detached_viewport(snapshot, &inputs, identity, width, height)?;
+        let mut frame = rendering
+            .graphics
+            .render_detached_viewport(snapshot, &inputs, identity, width, height)?;
         // `C4Viewport::Draw` calls `Console.EditCursor.Draw(cgo)` after the
         // foreground objects and before the per-player HUD, gated on
         // `!Application.isFullScreen` (`C4Viewport.cpp:1102-1108`). It draws
@@ -5380,7 +5458,7 @@ impl GameApp {
         // not a later one, so a bar can never describe a position the window
         // is not showing.
         if let Some((view_x, view_y, view_width, view_height)) =
-            self.graphics.detached_viewport_view(identity)
+            self.rendering.graphics.detached_viewport_view(identity)
         {
             let locked = self.console_viewport_player_lock(identity);
             let ranges = self.snapshot.landscape.as_ref().and_then(|landscape| {
@@ -5550,21 +5628,29 @@ impl GameApp {
         defer_native_game_messages: bool,
         defer_monitor_gamma: bool,
     ) -> Result<()> {
-        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
-        self.graphics
-            .set_scroll_smooth(self.display_flags.scroll_smooth);
-        self.graphics.set_renderer_config(
-            self.display_flags.show_player_hud_always,
-            self.display_flags.splitscreen_dividers,
+        let ordered_native = self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active();
+        self.rendering
+            .graphics
+            .set_scroll_smooth(self.rendering.display_flags.scroll_smooth);
+        self.rendering.graphics.set_renderer_config(
+            self.rendering.display_flags.show_player_hud_always,
+            self.rendering.display_flags.splitscreen_dividers,
         );
-        self.graphics.set_pxs_graphics(self.display_flags.pxs_gfx);
+        self.rendering
+            .graphics
+            .set_pxs_graphics(self.rendering.display_flags.pxs_gfx);
         // Only the measured-cost governor suppresses the flame draws. The
         // static `Config.Graphics.FireParticles` is honoured engine-side by
         // `Engine::set_fire_particles`, where C++ folds it into
         // `SetDefParticles`: it stops the automatic emitter without hiding
         // script-created Fire/Fire2 particles, which a renderer gate on the
         // same flag would.
-        self.graphics
+        self.rendering
+            .graphics
             .set_fire_particle_detail(self.presentation.presentation_detail.draws_fire_particles());
         // C4Viewport suppresses only its gameplay overlays for a film replay;
         // game messages and C4GraphicsSystem-owned chrome remain independent.
@@ -5684,13 +5770,15 @@ impl GameApp {
         // overlay below with this same pre-latch ramp
         // (C4GraphicsSystem.cpp:160-199).
         let active_gamma = self
+            .rendering
             .graphics
             .active_gamma_ramp(&self.snapshot.environment.gamma);
         let monitor_gamma = self
+            .rendering
             .graphics
             .monitor_gamma_enabled()
             .then(|| active_gamma.clone());
-        let frame_gamma = if self.graphics.fragment_gamma_enabled() {
+        let frame_gamma = if self.rendering.graphics.fragment_gamma_enabled() {
             active_gamma
         } else {
             clonk_graphics::GammaRamp::identity()
@@ -5739,7 +5827,7 @@ impl GameApp {
             &self.engine,
             &self.snapshot,
             &mut players,
-            self.graphics.advanced_renderer_config(),
+            self.rendering.graphics.advanced_renderer_config(),
         );
         self.populate_crew_infos(&mut players);
         self.populate_crew_portraits(&mut players);
@@ -5748,7 +5836,7 @@ impl GameApp {
         // skipped while the cursor's menu is active
         // (src/C4Object.cpp:2952).
         if viewport_overlays_visible
-            && self.display_flags.show_commands
+            && self.rendering.display_flags.show_commands
             && self.object_menu.is_none()
             && self
                 .engine
@@ -5813,24 +5901,29 @@ impl GameApp {
                 object_ids: speaking_object_ids,
             },
             clock_text: self
+                .rendering
                 .display_flags
                 .clock
                 .then(|| clonk_core::chrono_util::current_timestamp(false)),
             frames_per_second: self
+                .rendering
                 .display_flags
                 .fps
                 .then_some(self.presentation.frames_per_second),
-            upper_board_mode: frontend_upper_board_mode(self.display_flags.upper_board),
+            upper_board_mode: frontend_upper_board_mode(self.rendering.display_flags.upper_board),
             // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
             // from the Display menu (src/C4Config.cpp:448-450).
-            show_portraits: self.display_flags.portraits,
-            show_commands: self.display_flags.show_commands,
-            show_command_keys: self.display_flags.show_command_keys,
+            show_portraits: self.rendering.display_flags.portraits,
+            show_commands: self.rendering.display_flags.show_commands,
+            show_command_keys: self.rendering.display_flags.show_command_keys,
         };
-        self.graphics.update_overlay(&overlay);
+        self.rendering.graphics.update_overlay(&overlay);
         if ordered_native {
-            let pending_hud = self.graphics.render_frame_base(&self.snapshot, &viewports);
-            let surface = self.graphics.surface_mut();
+            let pending_hud = self
+                .rendering
+                .graphics
+                .render_frame_base(&self.snapshot, &viewports);
+            let surface = self.rendering.graphics.surface_mut();
             let text = surface.take_clonk_text_capture();
             if surface.pixels().len() == frame.len() {
                 frame.copy_from_slice(surface.pixels());
@@ -5859,27 +5952,34 @@ impl GameApp {
                 debug_assert!(!surface.is_gpu_scene_capture_active());
                 surface.begin_gpu_scene_capture();
             }
-            self.graphics.render_frame_foreground(&pending_hud);
+            self.rendering
+                .graphics
+                .render_frame_foreground(&pending_hud);
             Self::next_native_overlay_parts(
-                &mut self.graphics,
+                &mut self.rendering.graphics,
                 &mut self.presentation.pending_native_presentation,
                 self.presentation.retained_gpu_ordered_capture_active,
             );
-            let pending_chrome = self.graphics.render_frame_hud_players(pending_hud);
+            let pending_chrome = self
+                .rendering
+                .graphics
+                .render_frame_hud_players(pending_hud);
             Self::next_native_overlay_parts(
-                &mut self.graphics,
+                &mut self.rendering.graphics,
                 &mut self.presentation.pending_native_presentation,
                 self.presentation.retained_gpu_ordered_capture_active,
             );
-            self.graphics
+            self.rendering
+                .graphics
                 .render_frame_hud_chrome_without_atlas_deferred_monitor_gamma(pending_chrome);
             Self::next_native_overlay_parts(
-                &mut self.graphics,
+                &mut self.rendering.graphics,
                 &mut self.presentation.pending_native_presentation,
                 self.presentation.retained_gpu_ordered_capture_active,
             );
         } else {
-            self.graphics
+            self.rendering
+                .graphics
                 .render_frame_without_atlas_deferred_monitor_gamma(&self.snapshot, &viewports);
         }
         // C4Viewport::AdjustPosition consumes ViewOffs for an ownerless
@@ -6095,10 +6195,11 @@ impl GameApp {
                     })
                     .unwrap_or((None, 0, true, false, None));
                 let area = self
+                    .rendering
                     .graphics
                     .viewport_rect(script_menu_owner)
                     .unwrap_or_else(|| {
-                        let surface = self.graphics.surface();
+                        let surface = self.rendering.graphics.surface();
                         Rect::new(0, 0, surface.width(), surface.height())
                     });
                 let layout_font =
@@ -6109,7 +6210,7 @@ impl GameApp {
                             area,
                             &layout_font,
                             menu,
-                            self.display_flags.show_commands,
+                            self.rendering.display_flags.show_commands,
                             &font_images,
                             menu_location.expect("free anchor has a location"),
                             retained_scroll_y,
@@ -6121,7 +6222,7 @@ impl GameApp {
                             area,
                             &layout_font,
                             menu,
-                            self.display_flags.show_commands,
+                            self.rendering.display_flags.show_commands,
                             &font_images,
                             menu_location,
                             retained_scroll_y,
@@ -6141,7 +6242,7 @@ impl GameApp {
                         &layout_font,
                         menu,
                         &item_icons,
-                        self.display_flags.show_commands,
+                        self.rendering.display_flags.show_commands,
                         &font_images,
                         menu_location.expect("free anchor has a location"),
                         retained_scroll_y,
@@ -6180,8 +6281,8 @@ impl GameApp {
                 // corners are clipped by `C4Facet::Draw`
                 // (C4GuiDialogs.cpp:110-135, 150-196).
                 {
-                    let show_commands = self.display_flags.show_commands;
-                    let show_command_keys = self.display_flags.show_command_keys;
+                    let show_commands = self.rendering.display_flags.show_commands;
+                    let show_command_keys = self.rendering.display_flags.show_command_keys;
                     let owner_colors = self
                         .snapshot
                         .players
@@ -6226,7 +6327,7 @@ impl GameApp {
                             )
                         });
                     if dim_for_construction_drag {
-                        let surface = self.graphics.surface_mut();
+                        let surface = self.rendering.graphics.surface_mut();
                         let mut menu_layer =
                             Surface::new(surface.width(), surface.height(), surface.format());
                         let capture_text = surface.is_clonk_text_capture_active();
@@ -6264,7 +6365,7 @@ impl GameApp {
                             );
                         }
                     } else {
-                        let surface = self.graphics.surface_mut();
+                        let surface = self.rendering.graphics.surface_mut();
                         render_engine_script_menu_with_gamma(
                             surface,
                             area,
@@ -6299,9 +6400,9 @@ impl GameApp {
                 .filter(|&player| self.ingame_menu_has_visible_surface(player))
                 .collect::<Vec<_>>();
             {
-                let show_commands = self.display_flags.show_commands;
-                let show_command_keys = self.display_flags.show_command_keys;
-                let show_portraits = self.display_flags.portraits;
+                let show_commands = self.rendering.display_flags.show_commands;
+                let show_command_keys = self.rendering.display_flags.show_command_keys;
+                let show_portraits = self.rendering.display_flags.portraits;
                 self.hydrate_runtime_player_big_icons();
                 let owner_colors = self
                     .engine
@@ -6332,10 +6433,14 @@ impl GameApp {
                 gfx.hostility_big_icons = hostility_big_icons;
             }
             for player in players {
-                let area = self.graphics.viewport_rect(player).unwrap_or_else(|| {
-                    let surface = self.graphics.surface();
-                    Rect::new(0, 0, surface.width(), surface.height())
-                });
+                let area = self
+                    .rendering
+                    .graphics
+                    .viewport_rect(player)
+                    .unwrap_or_else(|| {
+                        let surface = self.rendering.graphics.surface();
+                        Rect::new(0, 0, surface.width(), surface.height())
+                    });
                 if let Some(gfx) = self.ingame_menu_gfx.as_mut() {
                     // C4MainMenu::Init calls DoInit while Player is NO_OWNER,
                     // so SetTitle creates the close button before Init assigns
@@ -6355,7 +6460,7 @@ impl GameApp {
                     let tiny = fonts
                         .as_deref()
                         .map(|set| clonk_frontend::hud::HudFont::Clonk(&set.mini));
-                    let surface = self.graphics.surface_mut();
+                    let surface = self.rendering.graphics.surface_mut();
                     menu.render_with_gamma(
                         surface,
                         area,
@@ -6372,7 +6477,8 @@ impl GameApp {
         }
 
         let elimination_notices = if viewport_overlays_visible {
-            self.graphics
+            self.rendering
+                .graphics
                 .active_viewport_projections()
                 .into_iter()
                 .filter_map(|viewport| {
@@ -6389,7 +6495,7 @@ impl GameApp {
                 .clonk_fonts
                 .clone()
                 .expect("global GUI preflight guarantees FontRegular");
-            let surface = self.graphics.surface_mut();
+            let surface = self.rendering.graphics.surface_mut();
             let previous_clip = surface.clip();
             for (viewport, text) in elimination_notices {
                 let width = i32::try_from(viewport.width).unwrap_or(i32::MAX);
@@ -6415,7 +6521,7 @@ impl GameApp {
             }
         }
 
-        let message_viewports = self.graphics.active_viewport_projections();
+        let message_viewports = self.rendering.graphics.active_viewport_projections();
         let mut unsupported_message_count = 0;
         for message in &self.snapshot.hud.messages {
             match self.hud_message_drawability(message, &message_viewports) {
@@ -6444,7 +6550,7 @@ impl GameApp {
                 .active_ingame_mouse_viewport()
                 .map(|viewport| viewport.index);
             let irc_chat_active = self.startup_irc_client_active();
-            self.graphics.draw_viewport_control_overlays(
+            self.rendering.graphics.draw_viewport_control_overlays(
                 mouse_viewport_index,
                 irc_chat_active,
                 None,
@@ -6491,7 +6597,8 @@ impl GameApp {
             });
         let construction_viewport_clip =
             construction_cursor.and_then(|(_, viewport_index, _, _)| {
-                self.graphics
+                self.rendering
+                    .graphics
                     .active_viewport_projections()
                     .into_iter()
                     .find(|viewport| viewport.index == viewport_index)
@@ -6502,11 +6609,11 @@ impl GameApp {
             .map(|(image, _, _, _)| {
                 GuiPoint::new((image.width() / 2) as f32, image.height() as f32)
             })
-            .or_else(|| self.graphics.construction_cursor_primary_offset());
+            .or_else(|| self.rendering.graphics.construction_cursor_primary_offset());
         let construction_cursor_drawn =
             match (construction_preview.as_ref(), construction_viewport_clip) {
                 (Some((image, _, pointer, valid)), Some(viewport_clip)) => {
-                    self.graphics.draw_construction_drag_preview(
+                    self.rendering.graphics.draw_construction_drag_preview(
                         image,
                         viewport_clip,
                         pointer.screen,
@@ -6516,7 +6623,7 @@ impl GameApp {
                 }
                 (None, Some(viewport_clip)) => {
                     construction_cursor.is_some_and(|(_, _, pointer, _)| {
-                        self.graphics.draw_construction_cursor_fallback(
+                        self.rendering.graphics.draw_construction_cursor_fallback(
                             viewport_clip,
                             pointer.screen,
                             Some(&frame_gamma),
@@ -6532,7 +6639,7 @@ impl GameApp {
                 construction_primary_offset,
                 construction_viewport_clip,
             ) {
-                self.graphics.draw_construction_add_marker(
+                self.rendering.graphics.draw_construction_add_marker(
                     viewport_clip,
                     pointer.screen,
                     primary_offset,
@@ -6542,13 +6649,13 @@ impl GameApp {
         }
         let selection_frame_drawn = if running_world_cursor_drawable {
             if let Some((selection, down_world, current_screen)) = self.ingame_selection_frame() {
-                self.graphics.draw_mouse_selection_marks(
+                self.rendering.graphics.draw_mouse_selection_marks(
                     &self.snapshot,
                     self.players.local_owner,
                     &selection,
                     Some(&frame_gamma),
                 );
-                self.graphics.draw_mouse_selection_frame(
+                self.rendering.graphics.draw_mouse_selection_frame(
                     self.players.local_owner,
                     down_world,
                     current_screen,
@@ -6570,7 +6677,8 @@ impl GameApp {
                 self.window_active && self.ingame_mouse_controls_owner(pointer.owner)
             }) {
                 let viewport = self.live_input.ingame_viewport_mouse.and_then(|retained| {
-                    self.graphics
+                    self.rendering
+                        .graphics
                         .active_viewport_projections()
                         .into_iter()
                         .find(|viewport| viewport.index == retained.viewport_index)
@@ -6592,7 +6700,7 @@ impl GameApp {
                         (self.live_input.ingame_mouse_caption.cursor, pointer.screen)
                     };
                     let phase = cursor_kind.phase();
-                    let cursor_drawn = self.graphics.draw_mouse_cursor_clipped(
+                    let cursor_drawn = self.rendering.graphics.draw_mouse_cursor_clipped(
                         phase,
                         viewport.rect,
                         screen,
@@ -6601,7 +6709,7 @@ impl GameApp {
                     if cursor_drawn {
                         if let Some(landing) = cursor_kind.throw_landing() {
                             let (x, y) = viewport.logical_to_output(landing);
-                            self.graphics.draw_mouse_cursor_clipped(
+                            self.rendering.graphics.draw_mouse_cursor_clipped(
                                 MouseCursorPhase::Point,
                                 viewport.rect,
                                 GuiPoint::new(x, y),
@@ -6613,9 +6721,9 @@ impl GameApp {
                             && cursor_kind.allows_add_marker()
                         {
                             if let Some(primary_offset) =
-                                self.graphics.mouse_cursor_primary_offset(phase)
+                                self.rendering.graphics.mouse_cursor_primary_offset(phase)
                             {
-                                self.graphics.draw_construction_add_marker(
+                                self.rendering.graphics.draw_construction_add_marker(
                                     viewport.rect,
                                     screen,
                                     primary_offset,
@@ -6633,7 +6741,8 @@ impl GameApp {
                     .as_ref()
                     .zip(self.live_input.ingame_pointer)
                     .and_then(|(caption, pointer)| {
-                        self.graphics
+                        self.rendering
+                            .graphics
                             .viewport_rect(pointer.owner)
                             .map(|facet| (caption.text.clone(), pointer.screen, facet))
                     })
@@ -6645,7 +6754,7 @@ impl GameApp {
             let font = clonk_frontend::hud::HudFont::Clonk(font.as_ref());
             let caption = c4_presentation_text(&caption);
             ingame_menu::draw_tooltip(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &font,
                 facet,
                 pointer.x as i32,
@@ -6660,7 +6769,8 @@ impl GameApp {
                     .caption
                     .clone()
                     .and_then(|caption| {
-                        self.graphics
+                        self.rendering
+                            .graphics
                             .active_viewport_projections()
                             .into_iter()
                             .find(|viewport| viewport.index == caption.viewport_index)
@@ -6677,7 +6787,7 @@ impl GameApp {
                 viewport.y.saturating_add(caption.position.y) as f32,
             );
             clonk_frontend::hud::draw_mouse_caption(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &font,
                 viewport,
                 pointer,
@@ -6695,14 +6805,24 @@ impl GameApp {
         // Native C4Viewport draws network status after its complete viewport
         // overlay (menus, messages, controls and mouse), but before the
         // process-global GUI layers below.
-        if self.graphics.draw_network_status(Some(&frame_gamma)) && ordered_native {
+        if self
+            .rendering
+            .graphics
+            .draw_network_status(Some(&frame_gamma))
+            && ordered_native
+        {
             self.next_pending_native_overlay();
         }
 
         // The port's own overlay follows the status it yields to. It composes
         // nothing unless `Graphics.ShowStats` is on, so with the key unset
         // this adds no draw site and the frame stays oracle-exact.
-        if self.graphics.draw_diagnostics_overlay(Some(&frame_gamma)) && ordered_native {
+        if self
+            .rendering
+            .graphics
+            .draw_diagnostics_overlay(Some(&frame_gamma))
+            && ordered_native
+        {
             self.next_pending_native_overlay();
         }
 
@@ -6712,9 +6832,9 @@ impl GameApp {
                 .clonk_fonts
                 .clone()
                 .expect("global GUI preflight guarantees FontRegular");
-            let viewport_area = self.graphics.preferred_dialog_rect(None);
+            let viewport_area = self.rendering.graphics.preferred_dialog_rect(None);
             clonk_frontend::runtime_help::render_runtime_help(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &fonts.text,
                 viewport_area,
                 &columns.left,
@@ -6733,13 +6853,14 @@ impl GameApp {
                 .clonk_fonts
                 .clone()
                 .expect("global GUI preflight guarantees FontRegular");
-            let screen_height = i32::try_from(self.graphics.surface().height()).unwrap_or(i32::MAX);
+            let screen_height =
+                i32::try_from(self.rendering.graphics.surface().height()).unwrap_or(i32::MAX);
             let y = screen_height / 2 - fonts.text.line_height.saturating_mul(2);
             // DrawHoldMessages uses the same default message color, centered
             // FontRegular TextOut path as a flash message, but with a fixed
             // literal and no lifetime counter.
             clonk_frontend::flash_message::render_flash_message(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &fonts.text,
                 "Pause",
                 y,
@@ -6758,7 +6879,7 @@ impl GameApp {
                 .clone()
                 .expect("global GUI preflight guarantees FontRegular");
             clonk_frontend::flash_message::render_flash_message(
-                self.graphics.surface_mut(),
+                self.rendering.graphics.surface_mut(),
                 &fonts.text,
                 &message.text,
                 message.y,
@@ -6827,7 +6948,7 @@ impl GameApp {
                             .game_over_classic_resources(hud.as_ref())
                             .expect("game-over resources were preflighted before rendering");
                         dialog.render_with_gamma_active(
-                            self.graphics.surface_mut(),
+                            self.rendering.graphics.surface_mut(),
                             font.as_ref(),
                             Some(classic),
                             Some(&frame_gamma),
@@ -6883,7 +7004,8 @@ impl GameApp {
             if ordered_native {
                 self.render_ordered_context_menu(Some(&frame_gamma))?;
             } else if let Some(context_menu) = self.context_menu.as_ref() {
-                context_menu.render_panels(self.graphics.surface_mut(), Some(&frame_gamma))?;
+                context_menu
+                    .render_panels(self.rendering.graphics.surface_mut(), Some(&frame_gamma))?;
             }
         }
         let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(&frame_gamma));
@@ -6924,10 +7046,10 @@ impl GameApp {
         if !ordered_native {
             if !defer_monitor_gamma {
                 if let Some(gamma) = monitor_gamma.as_ref() {
-                    self.graphics.apply_monitor_gamma(gamma);
+                    self.rendering.graphics.apply_monitor_gamma(gamma);
                 }
             }
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             let pixels = surface.pixels();
             if pixels.len() == frame.len() {
                 frame.copy_from_slice(pixels);
@@ -7042,8 +7164,12 @@ impl GameApp {
                 *line = c4_presentation_text(line);
             }
         }
-        let viewports = self.graphics.active_viewport_projections();
-        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        let viewports = self.rendering.graphics.active_viewport_projections();
+        let ordered_native = self
+            .rendering
+            .graphics
+            .surface()
+            .is_clonk_text_capture_active();
         for viewport in viewports {
             for message in &messages {
                 let target_position = match message.kind {
@@ -7074,7 +7200,7 @@ impl GameApp {
                 if let Some(position) = target_position {
                     let anchor = viewport.logical_to_output(position);
                     game_message::draw_target_message(
-                        self.graphics.surface_mut(),
+                        self.rendering.graphics.surface_mut(),
                         &fonts.text,
                         viewport.rect,
                         (anchor.0.round() as i32, anchor.1.round() as i32),
@@ -7095,7 +7221,7 @@ impl GameApp {
                                 .map(default_owner_definition_sprite)
                         });
                     game_message::draw_global_message(
-                        self.graphics.surface_mut(),
+                        self.rendering.graphics.surface_mut(),
                         &fonts.text,
                         viewport.rect,
                         message,
