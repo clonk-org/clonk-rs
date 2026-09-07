@@ -4,6 +4,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use std::rc::Rc;
 
 fn effect_callback_needs_owned_snapshot(effects: &[EffectState], event: &EffectEvent) -> bool {
     matches!(event.kind, EffectEventKind::Stopped(_))
@@ -2115,7 +2116,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_effect_events_for_object(
         definition: &Definition,
-        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
         game_over_triggered: bool,
         rng: LcgRng,
         object_id: ObjectId,
@@ -2156,7 +2157,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_effect_events_for_object_with_continuation(
         definition: &Definition,
-        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
         game_over_triggered: bool,
         mut rng: LcgRng,
         object_id: ObjectId,
@@ -2588,7 +2589,10 @@ impl Engine {
                 &world,
                 definitions,
                 Some((object_id, object.definition_id.as_str())),
-                definitions.get(&object.definition_id).unwrap_or(definition),
+                definitions
+                    .get(&object.definition_id)
+                    .map(Rc::as_ref)
+                    .unwrap_or(definition),
             );
             // Engine-internal fire callbacks: when no script overload
             // shadows the engine function (AddFunc C4Script.cpp:6994-6996),
@@ -3060,6 +3064,7 @@ impl Engine {
                 } else {
                     definitions
                         .get(&object.definition_id)
+                        .map(Rc::as_ref)
                         .unwrap_or(definition)
                         .action_library()
                 };
@@ -4618,7 +4623,7 @@ impl Engine {
         match self
             .definitions
             .get(&info.definition_id)
-            .and_then(Definition::rank_names)
+            .and_then(|definition| definition.rank_names())
         {
             Some(names) => usize::try_from(info.rank)
                 .ok()
@@ -4729,7 +4734,9 @@ impl Engine {
                     definition_id,
                     name,
                 } => {
-                    if let Some(definition) = self.definitions.get_mut(&definition_id) {
+                    if let Some(definition) =
+                        self.definitions.get_mut(&definition_id).map(Rc::make_mut)
+                    {
                         definition.set_name(name);
                         self.definition_order.metadata_cache.borrow_mut().take();
                     }
@@ -5708,7 +5715,7 @@ impl Engine {
         let no_stabilize = self
             .definitions
             .get(&self.objects[idx].definition_id)
-            .is_some_and(Definition::no_stabilize);
+            .is_some_and(|definition| definition.no_stabilize());
         // C4Shape::ContactDensity is live object state. C4Object::Stabilize
         // probes Shape.CheckContact after SetContactDensity mutations
         // (C4Movement.cpp:488-516; C4Shape.cpp:495-510).

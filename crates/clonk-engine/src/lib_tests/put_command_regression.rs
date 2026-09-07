@@ -1,5 +1,6 @@
 use super::*;
 use crate::lib_test_support::{register_fixture, spawn_fixture, EngineTestExt};
+use std::rc::Rc;
 
 fn put_fixture_engine() -> Engine {
     let actor_script = r#"#strict
@@ -515,8 +516,13 @@ fn command_references_accept_inactive_sell_candidates_like_cpp() {
 #[test]
 fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
     let mut engine = put_fixture_engine();
-    crate::TestValueExt::test_value(engine.definitions.get_mut(&DefinitionId::from("TARG")))
-        .set_collection_limit(1);
+    crate::TestValueExt::test_value(
+        engine
+            .definitions
+            .get_mut(&DefinitionId::from("TARG"))
+            .map(Rc::make_mut),
+    )
+    .set_collection_limit(1);
     let (actor, first_item, target) = spawn_push_put_triplet(&mut engine, false);
     let second_item = spawn_fixture!(engine, "ITEM", with_container: actor);
     let actor_index = engine.test_object_index(actor);
@@ -1544,13 +1550,14 @@ fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
 fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double_is_armed() {
     for (down_double, should_drop) in [(0, false), (-3, true)] {
         let mut engine = put_fixture_engine();
-        let actor_definition = crate::TestValueExt::test_value(engine.definitions.get_mut("ACTR"));
+        let actor_definition =
+            crate::TestValueExt::test_value(engine.definitions.get_mut("ACTR").map(Rc::make_mut));
         actor_definition.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
         actor_definition.set_physical(PhysicalInfo {
             throw: 50_000,
             ..PhysicalInfo::default()
         });
-        crate::TestValueExt::test_value(engine.definitions.get_mut("ITEM"))
+        crate::TestValueExt::test_value(engine.definitions.get_mut("ITEM").map(Rc::make_mut))
             .set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
         engine.register_test_script_definition("NOPU", "No put", "#strict");
         engine.register_test_player(PlayerConfig::new(1, "PutTake owner"));

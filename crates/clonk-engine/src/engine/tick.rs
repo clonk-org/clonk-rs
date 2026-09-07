@@ -1160,7 +1160,7 @@ impl Engine {
                         || self
                             .definitions
                             .get(&current_definition_id)
-                            .is_some_and(Definition::incomplete_activity);
+                            .is_some_and(|definition| definition.incomplete_activity());
                     stop_previous_action_sound = exec_action_library
                         .phase_end_requested_action_changed(
                             &self.objects[idx].state.action,
@@ -2225,7 +2225,7 @@ impl Engine {
         let desired = self
             .definitions
             .get(&self.objects[index].definition_id)
-            .map(Definition::action_library)
+            .map(|definition| definition.action_library())
             .and_then(|library| library.spec_for_state(&self.objects[index].state.action))
             .and_then(|spec| spec.sound.clone())
             .filter(|sound| !sound.is_empty());

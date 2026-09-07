@@ -394,6 +394,7 @@ std::thread_local! {
     static FIND_CONDITION_OBJECT_REFRESHES: Cell<usize> = const { Cell::new(0) };
     static CONTENTS_SCOPE_GROWTH_VISITS: Cell<usize> = const { Cell::new(0) };
     static CONTACT_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
+    static DEFINITION_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static NO_ATTACH_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static CONTAINED_CALL_ACTION_LIBRARY_DEEP_CLONES: Cell<usize> = const { Cell::new(0) };
     static PARTICLE_DEF_NAME_REBUILDS: Cell<usize> = const { Cell::new(0) };
@@ -4802,6 +4803,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
         engine
             .definitions
             .get_mut("VBND")
+            .map(Rc::make_mut)
             .expect("definition remains registered")
             .set_border_bound(case.border_bound);
         {
@@ -8494,7 +8496,7 @@ pub struct Engine {
     /// `report_unresolved_inherited` only logs, and `definition_ids` is
     /// consumed into keyed maps and `.any()` predicates.
     #[doc(hidden)]
-    pub(crate) definitions: rustc_hash::FxHashMap<DefinitionId, Definition>,
+    pub(crate) definitions: rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
     /// The two definition orders and every view derived from `definitions`.
     definition_order: DefinitionOrderState,
     /// The engine-global `static` table (Game.ScriptEngine.GlobalNamed):
@@ -9408,14 +9410,18 @@ enum MovementContactDispatch {
 
 fn movement_live_config_for(
     object: &Object,
-    definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+    definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
     layer_bounds: Option<LayerMovementBounds>,
 ) -> MovementLiveConfig {
     let definition = definitions.get(&object.definition_id);
-    let action_library = definition.map(Definition::action_library);
+    let action_library = definition.map(|definition| definition.action_library());
     MovementLiveConfig {
-        border_bound: definition.map(Definition::border_bound).unwrap_or(0),
-        rotateable: definition.map(Definition::rotateable).unwrap_or(0),
+        border_bound: definition
+            .map(|definition| definition.border_bound())
+            .unwrap_or(0),
+        rotateable: definition
+            .map(|definition| definition.rotateable())
+            .unwrap_or(0),
         action_procedure: action_library
             .map(|library| {
                 library.procedure_for_entry(
@@ -12950,7 +12956,7 @@ fn dispatch_global_effect_callback_with_continuation(
 fn resolve_effect_dispatch_definition<'a>(
     effect: &EffectState,
     world: &HostWorldContext,
-    definitions: &'a rustc_hash::FxHashMap<DefinitionId, Definition>,
+    definitions: &'a rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
     live_host: Option<(ObjectId, &str)>,
     fallback: &'a Definition,
 ) -> &'a Definition {
@@ -12969,6 +12975,7 @@ fn resolve_effect_dispatch_definition<'a>(
         })
         .or_else(|| effect.command_id.clone())
         .and_then(|def_id| definitions.get(&def_id))
+        .map(Rc::as_ref)
         .unwrap_or(fallback)
 }
 
@@ -14319,6 +14326,9 @@ mod component_con_regression;
 #[cfg(test)]
 #[path = "lib_tests/command_contact_regression.rs"]
 mod command_contact_regression;
+#[cfg(test)]
+#[path = "lib_tests/definition_callback_clone_regression.rs"]
+mod definition_callback_clone_regression;
 
 #[cfg(test)]
 #[path = "lib_tests/pending_spawn_sector_regression.rs"]

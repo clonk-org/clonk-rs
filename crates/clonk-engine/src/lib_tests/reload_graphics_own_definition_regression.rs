@@ -1,4 +1,5 @@
 use super::*;
+use std::rc::Rc;
 
 /// `C4DefGraphics::Update` re-resolves by name in three steps
 /// (oracle-src-pinned `src/C4DefGraphics.cpp:362-368`):
@@ -47,6 +48,7 @@ fn a_reload_offers_the_objects_own_definition_before_removing_it() {
     engine
         .definitions
         .get_mut("OWNR")
+        .map(Rc::make_mut)
         .expect("the owner definition is registered")
         .set_sprite_variants(variants);
 

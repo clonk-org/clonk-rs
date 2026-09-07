@@ -1,5 +1,6 @@
 use super::*;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tracing::field::{Field, Visit};
 use tracing::{subscriber, Level};
@@ -135,8 +136,11 @@ private func MissingTimer() { return 1; }
     // script or relinking. C++ must keep using its five cached nulls.
     let injected =
         crate::TestValueExt::test_value(clonk_script::Script::compile_c4_string(valid_source));
-    Arc::make_mut(&mut crate::TestValueExt::test_value(engine.definitions.get_mut("CBLK")).script)
-        .add_script(injected);
+    Arc::make_mut(
+        &mut crate::TestValueExt::test_value(engine.definitions.get_mut("CBLK").map(Rc::make_mut))
+            .script,
+    )
+    .add_script(injected);
     engine.invalidate_host_definition_tables();
     assert!(engine
         .definitions
@@ -186,8 +190,11 @@ private func MissingTimer() { return 1; }
     let driver_only = crate::TestValueExt::test_value(clonk_script::Script::compile_c4_string(
         "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
     ));
-    Arc::make_mut(&mut crate::TestValueExt::test_value(engine.definitions.get_mut("CBLK")).script)
-        .replace_script(driver_only, false);
+    Arc::make_mut(
+        &mut crate::TestValueExt::test_value(engine.definitions.get_mut("CBLK").map(Rc::make_mut))
+            .script,
+    )
+    .replace_script(driver_only, false);
     engine.invalidate_host_definition_tables();
     assert!(!engine
         .definitions

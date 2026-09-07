@@ -682,7 +682,7 @@ impl Engine {
                 && object.state.owner == owner
                 && definitions
                     .get(&object.definition_id)
-                    .is_some_and(Definition::is_crew)
+                    .is_some_and(|definition| definition.is_crew())
             {
                 object.state.command_direction = CommandDirection::Stop;
             }
@@ -927,7 +927,7 @@ impl Engine {
         magic.sort_by_key(|(id, _)| {
             self.definitions
                 .get(id)
-                .map(Definition::value)
+                .map(|definition| definition.value())
                 .unwrap_or_default()
         });
         {
@@ -1638,7 +1638,7 @@ impl Engine {
     ) -> String {
         self.definitions
             .get(definition_id)
-            .and_then(Definition::rank_names)
+            .and_then(|definition| definition.rank_names())
             .filter(|names| !names.is_empty())
             .and_then(|names| {
                 usize::try_from(rank)
@@ -2168,7 +2168,7 @@ impl Engine {
         let color_by_owner = self
             .definitions
             .get(&graphics_definition_id)
-            .is_some_and(Definition::color_by_owner);
+            .is_some_and(|definition| definition.color_by_owner());
         let owner_color = (new_owner != OWNER_NONE && color_by_owner).then(|| {
             self.players
                 .get(&new_owner)
@@ -2533,7 +2533,7 @@ impl Engine {
             if !self
                 .definitions
                 .get(&definition_id)
-                .is_some_and(Definition::is_crew)
+                .is_some_and(|definition| definition.is_crew())
             {
                 if already_in_crew {
                     let crew = player

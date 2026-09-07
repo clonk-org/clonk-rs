@@ -1,5 +1,6 @@
 use super::*;
 use crate::lib_test_support::spawn_fixture;
+use std::rc::Rc;
 
 fn register(engine: &mut Engine, id: &str, source: &str) {
     crate::TestValueExt::test_value(engine.register_script_definition(id, id, source));
@@ -672,11 +673,11 @@ fn relink_resets_include_metadata_and_refreshes_step_flags() {
     register(&mut engine, "PRBB", "");
     register(&mut engine, "META", "#include PRAA\n#include PRBB");
     register(&mut engine, "APNM", "#appendto META");
-    crate::TestValueExt::test_value(engine.definitions.get_mut("PRAA"))
+    crate::TestValueExt::test_value(engine.definitions.get_mut("PRAA").map(Rc::make_mut))
         .set_clonk_names(Some("Alpha".into()));
-    crate::TestValueExt::test_value(engine.definitions.get_mut("PRBB"))
+    crate::TestValueExt::test_value(engine.definitions.get_mut("PRBB").map(Rc::make_mut))
         .set_clonk_names(Some("Beta".into()));
-    crate::TestValueExt::test_value(engine.definitions.get_mut("APNM"))
+    crate::TestValueExt::test_value(engine.definitions.get_mut("APNM").map(Rc::make_mut))
         .set_clonk_names(Some("Append".into()));
 
     crate::TestValueExt::test_value(engine.relink_scripts());

@@ -4,6 +4,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use std::rc::Rc;
 
 impl Engine {
     pub(crate) fn definition_metadata_table(
@@ -283,7 +284,7 @@ impl Engine {
     }
 
     fn host_world_object(
-        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
         object: &Object,
     ) -> HostWorldObject {
         Self::host_world_object_with_snapshot(
@@ -294,7 +295,7 @@ impl Engine {
     }
 
     fn host_world_object_with_snapshot(
-        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
         object: &Object,
         state_snapshot: Rc<ObjectState>,
     ) -> HostWorldObject {
@@ -302,7 +303,7 @@ impl Engine {
     }
 
     fn host_world_object_projection(
-        definitions: &rustc_hash::FxHashMap<DefinitionId, Definition>,
+        definitions: &rustc_hash::FxHashMap<DefinitionId, Rc<Definition>>,
         object: &Object,
     ) -> HostWorldObject {
         #[cfg(test)]
@@ -354,10 +355,10 @@ impl Engine {
         .with_fixed_rotation(object.fixed_rotation)
         .with_rotation_velocity(object.rotation_velocity)
         .with_own_vertices(object.own_shape_vertices.is_some())
-        .with_move_to_range(definition.map_or(0, Definition::move_to_range))
-        .with_pathfinder(definition.map_or(0, Definition::pathfinder))
-        .with_no_transfer_zones(definition.map_or(0, Definition::no_transfer_zones))
-        .with_no_push_enter(definition.map_or(0, Definition::no_push_enter))
+        .with_move_to_range(definition.map_or(0, |definition| definition.move_to_range()))
+        .with_pathfinder(definition.map_or(0, |definition| definition.pathfinder()))
+        .with_no_transfer_zones(definition.map_or(0, |definition| definition.no_transfer_zones()))
+        .with_no_push_enter(definition.map_or(0, |definition| definition.no_push_enter()))
         .with_contact_density(object.state.contact_density)
         .with_direction(object.state.direction.to_script_value())
         .with_selected(object.state.selected)
@@ -365,13 +366,13 @@ impl Engine {
         .with_contents(object.state.contents.clone())
         .with_alive(object.state.alive)
         .with_need_energy(object.state.need_energy)
-        .with_collectible(definition.is_some_and(Definition::is_collectible))
+        .with_collectible(definition.is_some_and(|definition| definition.is_collectible()))
         .with_collection_enabled(
             definition
                 .is_some_and(|definition| definition.collection_ocf_enabled(&object.state, 0, 0)),
         )
         .with_no_collect_delay(object.state.no_collect_delay)
-        .with_collection_limit(definition.map_or(0, Definition::collection_limit))
+        .with_collection_limit(definition.map_or(0, |definition| definition.collection_limit()))
         .with_in_liquid(object.state.in_liquid)
         .with_ocf(ocf)
         .with_commands(object.commands.command_views())
@@ -1085,7 +1086,7 @@ impl Engine {
 
     pub fn clear_scenario_script(&mut self) {
         self.scenario_script = None;
-        for definition in self.definitions.values_mut() {
+        for definition in self.definitions.values_mut().map(Rc::make_mut) {
             definition.set_game_script_name("Script.c");
         }
         for source in &mut self.script_link_sources {
@@ -1193,7 +1194,7 @@ impl Engine {
         let mut script = ScenarioScript::from_source(name, source)?;
         script.c4_args = c4_args;
         let game_script_name = script.script.script_name().to_owned();
-        for definition in self.definitions.values_mut() {
+        for definition in self.definitions.values_mut().map(Rc::make_mut) {
             definition.set_game_script_name(game_script_name.clone());
         }
         for source in &mut self.script_link_sources {

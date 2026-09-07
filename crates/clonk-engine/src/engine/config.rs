@@ -4,6 +4,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use std::rc::Rc;
 
 impl Engine {
     /// Connect the app-owned, client-local sound instance registry used by
@@ -543,7 +544,7 @@ impl Engine {
         // Scenario application normally runs before installing any new
         // definition/scenario host. Reattach surviving hosts as well so a
         // reused Engine cannot keep registering literals in the old table.
-        for definition in self.definitions.values_mut() {
+        for definition in self.definitions.values_mut().map(Rc::make_mut) {
             Arc::make_mut(&mut definition.script)
                 .set_string_registrations_deferred(registrations.clone());
         }

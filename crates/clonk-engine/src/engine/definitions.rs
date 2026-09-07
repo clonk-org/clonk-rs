@@ -4,6 +4,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScriptLinkSummary {
@@ -177,7 +178,7 @@ impl Engine {
                 .map(|id| id as u32)
                 .unwrap_or_default()
         });
-        self.definitions.insert(id, definition);
+        self.definitions.insert(id, Rc::new(definition));
         self.definition_order.metadata_cache.borrow_mut().take();
         self.definition_order
             .command_snapshot_cache
@@ -204,7 +205,7 @@ impl Engine {
     ) {
         self.global_script_functions = table.clone();
         self.global_script_function_order = function_order;
-        for definition in self.definitions.values_mut() {
+        for definition in self.definitions.values_mut().map(Rc::make_mut) {
             definition.set_global_functions(table.clone());
         }
         if let Some(scenario) = self.scenario_script.as_mut() {
@@ -457,7 +458,8 @@ impl Engine {
                         .collect(),
                 };
                 for target_id in resolved {
-                    if let Some(definition) = self.definitions.get_mut(&target_id) {
+                    if let Some(definition) = self.definitions.get_mut(&target_id).map(Rc::make_mut)
+                    {
                         if let Some(source) = source_definition.as_ref() {
                             definition.include_definition_metadata(source);
                         }
@@ -565,7 +567,7 @@ impl Engine {
                     function_order.extend(declaration_order);
                     for (name, function) in declarations {
                         let linked = chain_function(&mut functions, name.clone(), function);
-                        if let Some(definition) = self.definitions.get_mut(&id) {
+                        if let Some(definition) = self.definitions.get_mut(&id).map(Rc::make_mut) {
                             Arc::make_mut(&mut definition.script)
                                 .link_global_access_function(&name, linked);
                         }
@@ -624,7 +626,11 @@ impl Engine {
         // guards only `err.show()` and `++errCnt`. So a suppressed host still
         // gets its function truncated; it just does not log.
         let mut reports = Vec::new();
-        for (id, definition) in self.definitions.iter_mut() {
+        for (id, definition) in self
+            .definitions
+            .iter_mut()
+            .map(|(id, definition)| (id, Rc::make_mut(definition)))
+        {
             let host = id.to_string();
             reports.extend(
                 definition
@@ -738,7 +744,7 @@ impl Engine {
                     Arc::make_mut(script).replace_script_deferred(base_script, false);
                 }
                 ScriptLinkSource::Definition(id) => {
-                    if let Some(definition) = self.definitions.get_mut(&id) {
+                    if let Some(definition) = self.definitions.get_mut(&id).map(Rc::make_mut) {
                         definition.reset_script_links();
                     }
                 }
@@ -807,6 +813,7 @@ impl Engine {
         }
         self.definitions
             .get_mut(definition_id)
+            .map(Rc::make_mut)
             .expect("definition existence checked")
             .replace_base_script(source, script);
         let definition_id = DefinitionId::from(definition_id);
@@ -832,7 +839,7 @@ impl Engine {
                     Arc::make_mut(script).acquire_string_literal_holds();
                 }
                 ScriptLinkSource::Definition(id) => {
-                    if let Some(definition) = self.definitions.get_mut(&id) {
+                    if let Some(definition) = self.definitions.get_mut(&id).map(Rc::make_mut) {
                         Arc::make_mut(&mut definition.script).acquire_string_literal_holds();
                     }
                 }
@@ -892,7 +899,7 @@ impl Engine {
                     definition = %child_id,
                     "Circular include chain detected - ignoring all includes!"
                 );
-                if let Some(definition) = engine.definitions.get_mut(child_id) {
+                if let Some(definition) = engine.definitions.get_mut(child_id).map(Rc::make_mut) {
                     definition.includes_resolved = true;
                 }
                 return Ok(false);
@@ -923,12 +930,12 @@ impl Engine {
                     .get(parent_id)
                     .expect("checked include exists")
                     .clone();
-                if let Some(child) = engine.definitions.get_mut(child_id) {
+                if let Some(child) = engine.definitions.get_mut(child_id).map(Rc::make_mut) {
                     child.merge_from(&parent);
                 }
             }
             resolving.remove(child_id);
-            if let Some(definition) = engine.definitions.get_mut(child_id) {
+            if let Some(definition) = engine.definitions.get_mut(child_id).map(Rc::make_mut) {
                 definition.includes_resolved = true;
             }
             resolved.insert(child_id.to_string());
@@ -991,7 +998,7 @@ impl Engine {
         // Native AfterLink resolves these only once the complete function
         // tree exists. UnLink/reload clears the cache before rebuilding it.
         for definition_id in self.definition_order.load_order.clone() {
-            if let Some(definition) = self.definitions.get_mut(&definition_id) {
+            if let Some(definition) = self.definitions.get_mut(&definition_id).map(Rc::make_mut) {
                 definition.link_callbacks();
             }
         }
@@ -1008,7 +1015,7 @@ impl Engine {
     /// Read-only definition access. Keeping mutation behind engine methods
     /// ensures definition-derived runtime caches cannot become stale.
     pub fn definition(&self, definition_id: &str) -> Option<&Definition> {
-        self.definitions.get(definition_id)
+        self.definitions.get(definition_id).map(Rc::as_ref)
     }
 
     pub fn definition_name(&self, definition_id: &str) -> Option<&str> {
@@ -1018,7 +1025,7 @@ impl Engine {
     pub fn definition_description(&self, definition_id: &str) -> Option<&str> {
         self.definitions
             .get(definition_id)
-            .and_then(Definition::description)
+            .and_then(|definition| definition.description())
     }
 
     /// Whether the definition's script defines `function`
@@ -1105,7 +1112,7 @@ impl Engine {
     pub fn definition_hide_hud_bars(&self, definition_id: &str) -> i32 {
         self.definitions
             .get(definition_id)
-            .map(Definition::hide_hud_bars)
+            .map(|definition| definition.hide_hud_bars())
             .unwrap_or(0)
     }
 
@@ -1113,7 +1120,7 @@ impl Engine {
     pub fn definition_hide_hud_elements(&self, definition_id: &str) -> i32 {
         self.definitions
             .get(definition_id)
-            .map(Definition::hide_hud_elements)
+            .map(|definition| definition.hide_hud_elements())
             .unwrap_or(0)
     }
 
@@ -1402,7 +1409,7 @@ impl Engine {
         let scale = self
             .definitions
             .get(&object.definition_id)
-            .map_or(1.0, Definition::graphics_scale);
+            .map_or(1.0, |definition| definition.graphics_scale());
         let scaled = |value: i32| (value as f32 * scale) as i32;
         let rect = DefinitionRect::new(
             scaled(rect.x),
@@ -1438,7 +1445,7 @@ impl Engine {
         let scale = self
             .definitions
             .get(&object.definition_id)
-            .map_or(1.0, Definition::graphics_scale);
+            .map_or(1.0, |definition| definition.graphics_scale());
         let scaled = |value: i32| (value as f32 * scale) as i32;
         let rect = DefinitionRect::new(
             scaled(rect.x),
@@ -1576,7 +1583,7 @@ impl Engine {
     pub fn definition_rank_symbol_count(&self, definition_id: &str) -> Option<u32> {
         self.definitions
             .get(definition_id)
-            .and_then(Definition::rank_symbol_count)
+            .and_then(|definition| definition.rank_symbol_count())
     }
 
     pub fn definition_sprite_image(
@@ -1594,7 +1601,7 @@ impl Engine {
     pub fn definition_graphics_scale(&self, definition_id: &str) -> f32 {
         self.definitions
             .get(definition_id)
-            .map_or(1.0, Definition::graphics_scale)
+            .map_or(1.0, |definition| definition.graphics_scale())
     }
 
     pub fn definition_sprite_variant_names(&self, definition_id: &str) -> Vec<String> {
@@ -1616,19 +1623,19 @@ impl Engine {
     pub fn definition_entrance_rect(&self, definition_id: &str) -> Option<DefinitionRect> {
         self.definitions
             .get(definition_id)
-            .and_then(Definition::entrance_rect)
+            .and_then(|definition| definition.entrance_rect())
     }
 
     pub fn definition_collection_rect(&self, definition_id: &str) -> Option<DefinitionRect> {
         self.definitions
             .get(definition_id)
-            .and_then(Definition::collection_rect)
+            .and_then(|definition| definition.collection_rect())
     }
 
     pub fn definition_solid_mask(&self, definition_id: &str) -> Option<DefinitionTargetRect> {
         self.definitions
             .get(definition_id)
-            .and_then(Definition::solid_mask)
+            .and_then(|definition| definition.solid_mask())
     }
 
     /// C4Shape::FireTop copied from DefCore and scaled with the live shape
@@ -1637,7 +1644,7 @@ impl Engine {
     pub fn definition_fire_top(&self, definition_id: &str) -> i32 {
         self.definitions
             .get(definition_id)
-            .map_or(0, Definition::fire_top)
+            .map_or(0, |definition| definition.fire_top())
     }
 
     /// DefCore Rotateable. Positive values make UpdateShape rotate vertices
@@ -1645,13 +1652,13 @@ impl Engine {
     pub fn definition_rotateable(&self, definition_id: &str) -> i32 {
         self.definitions
             .get(definition_id)
-            .map_or(0, Definition::rotateable)
+            .map_or(0, |definition| definition.rotateable())
     }
 
     pub fn definition_line(&self, definition_id: &str) -> i32 {
         self.definitions
             .get(definition_id)
-            .map_or(0, Definition::line)
+            .map_or(0, |definition| definition.line())
     }
 
     /// The live object-local C4Shape rectangle after per-instance shape,
@@ -1950,7 +1957,7 @@ impl Engine {
         let oversize = self
             .definitions
             .get(&self.objects[index].definition_id)
-            .is_some_and(Definition::oversize);
+            .is_some_and(|definition| definition.oversize());
         let mut after = before.saturating_add(change).max(0);
         if !oversize {
             after = after.min(FULL_CON);

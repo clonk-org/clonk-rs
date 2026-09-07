@@ -705,7 +705,7 @@ impl Engine {
             let raw_mask = object.state.solid_mask_override.or_else(|| {
                 self.definitions
                     .get(&object.definition_id)
-                    .and_then(Definition::solid_mask)
+                    .and_then(|definition| definition.solid_mask())
             });
             if let Some(raw_mask) = raw_mask {
                 if let Some(checked) = self.checked_solid_mask_rect_for_object(&object, raw_mask) {

@@ -3249,7 +3249,11 @@ protected func Entrance()
 "#;
         let (mut engine, crew, line, structure, endpoint) =
             line_pickup_gate_fixture_with_linekit(0, false, false, clonk_script, linekit_script);
-        let linekit_definition = engine.definitions.get_mut("LNKT").test_value();
+        let linekit_definition = engine
+            .definitions
+            .get_mut("LNKT")
+            .map(Rc::make_mut)
+            .test_value();
         linekit_definition.set_shape_rect(Some(crate::DefinitionRect::new(-2, -2, 4, 4)));
         linekit_definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 4, 4, 0, 0)));
         let densities = vec![0, 100, 100];
@@ -9095,6 +9099,7 @@ public func ContextMagic(object caller)
         engine
             .definitions
             .get_mut("CLNK")
+            .map(Rc::make_mut)
             .test_value()
             .set_collection_limit(1);
         let mut hut = structure_definition("HUT3", "Hut", "#strict\n");
