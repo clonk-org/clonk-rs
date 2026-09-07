@@ -497,14 +497,30 @@ pub(crate) struct ViewportState {
     pub(crate) menu_viewport_rects: BTreeMap<i32, Rect>,
 }
 
-pub(crate) struct GameApp {
-    pub(crate) engine: Engine,
+/// The rendering-resource half of the app: the `GraphicsSystem` and what
+/// C4GraphicsResource and Config.Graphics attach to it for the active
+/// game. `GameApp` composes it as `rendering`.
+pub(crate) struct RenderingResources {
     pub(crate) graphics: GraphicsSystem,
     pub(crate) sky: Option<SkyRenderState>,
     /// Landscape texture surfaces + material render metadata (re-applied on
     /// every GraphicsSystem rebuild, like the sky).
     pub(crate) material_texture_images: Arc<HashMap<String, MaterialTextureSurface>>,
     pub(crate) material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
+    pub(crate) material_library: Option<Arc<MaterialSet>>,
+    /// C4GraphicsResource's game-local HUD, cursor and palette selection.
+    /// `None` means the process-startup Graphics.c4g bundle is active.
+    pub(crate) active_game_graphics: Option<GameGraphicsResources>,
+    /// `Config.Graphics` display toggles loaded at process startup and driven
+    /// by the Display submenu (C4MainMenu.cpp:855-884).
+    pub(crate) display_flags: DisplayFlags,
+    /// Process-local `Config.Graphics.SmokeLevel`; object bubbles consult it
+    /// only outside network/recording sync mode, while particles always do.
+    pub(crate) graphics_smoke_level: i32,
+}
+
+pub(crate) struct GameApp {
+    pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
     /// fresh game engine (the C++ `Game.ScriptEngine` scripts).
     pub(crate) system_scripts: Vec<(String, String)>,
@@ -575,6 +591,11 @@ pub(crate) struct GameApp {
     /// key off. Presentation state, never consulted by simulation
     /// (clonk-org/clonk-rs#1232).
     pub(crate) viewports: ViewportState,
+    /// The graphics system and the game-local resources re-applied on every
+    /// rebuild of it: sky, material surfaces and metadata, the material
+    /// library, the game graphics bundle, and the Config.Graphics toggles
+    /// (clonk-org/clonk-rs#1232).
+    pub(crate) rendering: RenderingResources,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
@@ -654,17 +675,11 @@ pub(crate) struct GameApp {
     /// This is deliberately outside the deterministic engine menu state
     /// (C4Menu.cpp:804-821).
     pub(crate) script_menu_presentations: BTreeMap<i32, ScriptMenuPresentationState>,
-    /// `Config.Graphics` display toggles loaded at process startup and driven
-    /// by the Display submenu (C4MainMenu.cpp:855-884).
-    pub(crate) display_flags: DisplayFlags,
     /// `Config.General.UseWhiteLobbyChat`, which is intentionally distinct
     /// from the in-game white-chat display toggle.
     pub(crate) white_lobby_chat: bool,
     /// Prefix GUI log lines with C++'s markup-colored wall-clock timestamp.
     pub(crate) show_log_timestamps: bool,
-    /// Process-local `Config.Graphics.SmokeLevel`; object bubbles consult it
-    /// only outside network/recording sync mode, while particles always do.
-    pub(crate) graphics_smoke_level: i32,
     /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
     /// input (C4MainMenu.cpp:847-849).
     pub(crate) mouse_control: bool,
@@ -683,9 +698,6 @@ pub(crate) struct GameApp {
     /// C4GameSave::WriteDescDefinitions. The String-based load vector cannot
     /// retain native Unix path bytes that are not valid UTF-8.
     pub(crate) active_description_definition_modules: Vec<Vec<u8>>,
-    /// C4GraphicsResource's game-local HUD, cursor and palette selection.
-    /// `None` means the process-startup Graphics.c4g bundle is active.
-    pub(crate) active_game_graphics: Option<GameGraphicsResources>,
     /// The audio device and its music lifetime.
     pub(crate) sound: SoundState,
     /// Presentation-only proximity voice state; never serialized or passed to
@@ -925,7 +937,6 @@ pub(crate) struct GameApp {
     /// need to survive sandbox restart and saved-game restoration.
     pub(crate) sandbox_crew_definition_paths: Option<AppPaths>,
     pub(crate) configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
-    pub(crate) material_library: Option<Arc<MaterialSet>>,
     // Fields drop in declaration order. Cancel an in-flight league request
     // before NetworkManager joins its worker so shutdown cannot wait for the
     // HTTP timeout.

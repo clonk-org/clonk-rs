@@ -762,7 +762,7 @@ fn stage_tutorial_checkpoint(
         .borrow_mut()
         .install_presentation_capture_clock();
     let (presentation_width, presentation_height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     let mut discarded_presentation =
@@ -893,7 +893,7 @@ fn route_canonical_capture_pointer(app: &mut crate::GameApp) -> Result<()> {
 fn render_checkpoint_png(app: &mut crate::GameApp, render_ordinal: u32) -> Result<Vec<u8>> {
     anyhow::ensure!(render_ordinal > 0, "render ordinal must be positive");
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     anyhow::ensure!(
@@ -933,7 +933,7 @@ fn render_runtime_layout_frame(
     );
     anyhow::ensure!(render_ordinal > 0, "render ordinal must be positive");
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     anyhow::ensure!(
@@ -1036,7 +1036,7 @@ fn render_runtime_layout_capture(
         .clonk_fonts
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("{} has no live GUI fonts", case.id()))?;
-    let snapshot = app.graphics.runtime_presentation_snapshot();
+    let snapshot = app.rendering.graphics.runtime_presentation_snapshot();
     let case_elements = match case {
         PixelCaptureCase::IngameMenu => {
             let viewport = snapshot.active_viewports.first().ok_or_else(|| {
@@ -1335,7 +1335,7 @@ fn stage_layout_checkpoint(
         }
     }
     if app.startup_dialog_fade_active() {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         let mut frame = vec![0; surface.width() as usize * surface.height() as usize * 4];
         let mut steps = 0_u8;
         while app.startup_dialog_fade_active() {
@@ -1391,7 +1391,7 @@ fn render_layout_capture(
     case: LayoutCaptureCase,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     anyhow::ensure!(
@@ -3806,7 +3806,7 @@ mod tests {
         )
         .expect("tracked Tutorial01 loader scenario");
         let checkpoint = crate::presentation_pixel_startup::stage_loader_checkpoint(app, scenario)?;
-        let stale_surface = crate::encode_surface_to_png(app.graphics.surface())?;
+        let stale_surface = crate::encode_surface_to_png(app.rendering.graphics.surface())?;
 
         let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
 
@@ -4075,7 +4075,7 @@ mod tests {
         assert_eq!(checkpoint.render_ordinal, 2);
 
         let (png, _layout) = render_layout_capture(app, LayoutCaptureCase::Main)?;
-        let uncomposed = crate::encode_surface_to_png(app.graphics.surface())?;
+        let uncomposed = crate::encode_surface_to_png(app.rendering.graphics.surface())?;
         let (_, _, presented_pixels) = decode_capture_png("presented", &png)?;
         let (_, _, uncomposed_pixels) = decode_capture_png("uncomposed", &uncomposed)?;
 

@@ -308,8 +308,8 @@ impl GameApp {
         }
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         );
         let edit = layout.search_edit;
@@ -361,8 +361,8 @@ impl GameApp {
             return Ok(false);
         };
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         );
         let clear = clonk_frontend::startup_scensel::search_clear_button_bounds(&layout);
@@ -404,8 +404,8 @@ impl GameApp {
                 return true;
             };
             let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-                self.graphics.surface().width() as i32,
-                self.graphics.surface().height() as i32,
+                self.rendering.graphics.surface().width() as i32,
+                self.rendering.graphics.surface().height() as i32,
                 &fonts,
             );
             let edit = &mut self.menu_state.search_edit;
@@ -463,8 +463,8 @@ impl GameApp {
             .iter()
             .position(|entry| entry.identifier == rename.identifier)?;
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         );
         let item_height = clonk_frontend::startup_scensel::scen_list_item_height(&book.text);
@@ -572,8 +572,8 @@ impl GameApp {
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let book_fonts = self.assets.book_fonts.as_deref()?;
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         );
         let (rect, max_scroll, offset) = match target {
@@ -815,8 +815,8 @@ impl GameApp {
             return Ok(true);
         };
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         );
         let item_height = clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
@@ -1364,8 +1364,8 @@ impl GameApp {
             return Ok(());
         };
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             &fonts,
         );
         let (px, py) = (point.x as i32, point.y as i32);
@@ -1471,7 +1471,7 @@ impl GameApp {
             return self.handle_menu_input(move |_| action.into_iter().collect());
         }
 
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let button = {
             let map = self
                 .menu_state
@@ -1510,7 +1510,7 @@ impl GameApp {
         let Some(map) = self.menu_state.current_map() else {
             return false;
         };
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
             surface.width() as i32,
             surface.height() as i32,
@@ -1545,7 +1545,7 @@ impl GameApp {
     ) -> Option<clonk_frontend::definition_sel::DefinitionSelLayout> {
         let controller = self.definition_selector.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         Some(controller.layout(surface.width() as i32, surface.height() as i32, &fonts.text))
     }
 
@@ -1786,7 +1786,7 @@ impl GameApp {
             );
         };
         controller.render(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             resources,
             self.dialogs.messages.is_empty(),
             gamma,

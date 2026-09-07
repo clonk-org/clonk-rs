@@ -186,14 +186,14 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
         f64::from(screen_y),
     ));
     main_assert_eq!(
-        app.graphics
+        app.rendering.graphics
             .object_at_point(&app.snapshot, owner, GuiPoint::new(screen_x, screen_y),) =>
         Some(mage),
         "C++ front-to-back object picking selects the topmost MCLK",
     );
     let pointer = app.live_input.ingame_pointer.test_value();
     let projection = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == owner)
@@ -228,7 +228,7 @@ fn real_alchemy_right_click_positions_classic_context_magic_menu(
             )
         });
 
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     app.test_render(&mut frame);
     let latched_screen = app
         .script_menu_presentations
@@ -378,7 +378,7 @@ fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
     app.snapshot = app.engine.snapshot();
     app.test_render(&mut frame);
     let (original_x, original_y) = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, app.engine.test_object_snapshot(original).position)
         .test_value();
     let target_pointer = (45..155)
@@ -387,18 +387,18 @@ fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
         .find_map(|(x, y)| {
             let point = GuiPoint::new(x as f32, y as f32);
             let start = GuiPoint::new(x as f32 - 24.0, y as f32 - 24.0);
-            let pointer = app.graphics.viewport_point_at(point)?;
-            let start_pointer = app.graphics.viewport_point_at(start)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
+            let start_pointer = app.rendering.graphics.viewport_point_at(start)?;
             (pointer.owner == owner
                 && start_pointer.owner == owner
                 && (point.x - original_x).abs() > 50.0
                 && (point.y - original_y).abs() > 30.0
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none()
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, start)
                     .is_none())
             .then_some(pointer)
@@ -420,17 +420,17 @@ fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
     app.test_render(&mut frame);
     let target_position = app.engine.test_object_snapshot(replacement).position;
     let (target_x, target_y) = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, target_position)
         .test_value();
     let target = GuiPoint::new(target_x, target_y);
     let start = GuiPoint::new(target.x - 24.0, target.y - 24.0);
     main_assert_eq!(
-        app.graphics.object_at_point(&app.snapshot, owner, target) =>
+        app.rendering.graphics.object_at_point(&app.snapshot, owner, target) =>
         Some(replacement),
         "right-up lands on the second mage, which would expose a collapsed context click"
     );
-    main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, start) => None, "right-down begins on ordinary landscape");
+    main_assert_eq!(app.rendering.graphics.object_at_point(&app.snapshot, owner, start) => None, "right-down begins on ordinary landscape");
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(start.x),
@@ -478,9 +478,9 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
     app.refresh_focus();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let (mage_x, mage_y) = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, app.engine.test_object_snapshot(mage).position)
         .test_value();
     let anchor = (50..150)
@@ -488,7 +488,7 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
         .flat_map(|y| (50..250).step_by(10).map(move |x| (x, y)))
         .find_map(|(x, y)| {
             let point = GuiPoint::new(x as f32, y as f32);
-            let pointer = app.graphics.viewport_point_at(point)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
             (pointer.owner == owner
                 && point.x >= viewport.x as f32 + 30.0
                 && point.x <= (viewport.x + viewport.width as i32) as f32 - 55.0
@@ -497,7 +497,7 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
                 && (point.x - mage_x).abs() > 70.0
                 && (point.y - mage_y).abs() > 35.0
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none())
             .then_some(ingame_pointer_world_pixel(pointer))
@@ -530,16 +530,16 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
 
     app.snapshot = app.engine.snapshot();
     app.test_render(&mut frame);
-    let (first_x, first_y) = app.graphics.world_to_screen(owner, anchor).test_value();
+    let (first_x, first_y) = app.rendering.graphics.world_to_screen(owner, anchor).test_value();
     let (second_x, second_y) = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, Vector2::new(anchor.x + 20, anchor.y))
         .test_value();
     let frame_start = GuiPoint::new(first_x.min(second_x) - 24.0, first_y.min(second_y) - 24.0);
     let frame_end = GuiPoint::new(first_x.max(second_x) + 24.0, first_y.max(second_y) + 24.0);
     for point in [frame_start, frame_end] {
-        main_assert!(app.graphics.viewport_point_at(point).is_some_and(|pointer| pointer.owner == owner), "selection frame endpoint remains in the local viewport");
-        main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, point) => None, "selection begins and ends on landscape");
+        main_assert!(app.rendering.graphics.viewport_point_at(point).is_some_and(|pointer| pointer.owner == owner), "selection frame endpoint remains in the local viewport");
+        main_assert_eq!(app.rendering.graphics.object_at_point(&app.snapshot, owner, point) => None, "selection begins and ends on landscape");
     }
 
     app.test_cursor(PhysicalPosition::new(
@@ -569,7 +569,7 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32, y as f32))
         })
-        .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(first_bag))
+        .find(|point| app.rendering.graphics.object_at_point(&app.snapshot, owner, *point) == Some(first_bag))
         .test_value();
     let drop_pointer = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
@@ -577,7 +577,7 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
                 .map(move |x| GuiPoint::new(x as f32, y as f32))
         })
         .find_map(|point| {
-            let pointer = app.graphics.viewport_point_at(point)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
             let world = ingame_pointer_world_pixel(pointer);
             let landscape = app.engine.landscape()?;
             let ground_y = (world.y..landscape.estimated_height())
@@ -587,7 +587,7 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
                 && !landscape.is_solid_at(world.x, world.y)
                 && (ground_y - world.y).abs() <= 5
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none())
             .then_some((point, world))
@@ -660,13 +660,13 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
     app.refresh_focus();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let hut_point = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
-        .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(hut))
+        .find(|point| app.rendering.graphics.object_at_point(&app.snapshot, owner, *point) == Some(hut))
         .test_value();
     let mouse_inset = 24;
     let bag_pointer = (viewport.y + mouse_inset
@@ -678,12 +678,12 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
         .find_map(|point| {
-            let pointer = app.graphics.viewport_point_at(point)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
             (pointer.owner == owner
                 && (point.x - hut_point.x).abs() > 24.0
                 && (point.y - hut_point.y).abs() > 12.0
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none())
             .then_some(pointer)
@@ -704,7 +704,7 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
                 .map(move |x| GuiPoint::new(x as f32, y as f32))
         })
         .find(|point| {
-            app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag)
+            app.rendering.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag)
                 && app.ingame_viewport_region(owner, *point).is_none()
         })
         .test_value();
@@ -788,10 +788,10 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
         .flat_map(|y| (20..300).step_by(20).map(move |x| (x, y)))
         .find_map(|(x, y)| {
             let point = GuiPoint::new(x as f32, y as f32);
-            let pointer = app.graphics.viewport_point_at(point)?;
+            let pointer = app.rendering.graphics.viewport_point_at(point)?;
             (pointer.owner == owner
                 && app
-                    .graphics
+                    .rendering.graphics
                     .object_at_point(&app.snapshot, owner, point)
                     .is_none())
             .then_some(pointer)
@@ -824,14 +824,14 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
 
     app.snapshot = app.engine.snapshot();
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let bag_point = (viewport.y..viewport.y + viewport.height as i32)
         .flat_map(|y| {
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
         .find(|point| {
-            app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(blocker)
+            app.rendering.graphics.object_at_point(&app.snapshot, owner, *point) == Some(blocker)
                 && app.ingame_primary_mouse_target(owner, *point) == Some(bag)
         })
         .test_value();
@@ -840,7 +840,7 @@ fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
         f64::from(bag_point.y),
     ));
     let click_world = ingame_pointer_world_pixel(app.live_input.ingame_pointer.test_value());
-    main_assert_eq!(app.graphics.object_at_point(&app.snapshot, owner, bag_point) => Some(blocker), "the unfiltered foreground pick sees the newer blocker",);
+    main_assert_eq!(app.rendering.graphics.object_at_point(&app.snapshot, owner, bag_point) => Some(blocker), "the unfiltered foreground pick sees the newer blocker",);
     main_assert_eq!(app.ingame_primary_mouse_target(owner, bag_point) => Some(bag), "the primary mouse OCF pick skips that blocker and resolves the carryable",);
 
     app.test_left_button(ElementState::Pressed);
@@ -965,18 +965,18 @@ fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
         app.snapshot.object(rider).expect("initial rider").position,
         "C4Player::UpdateView follows the live ViewCursor position"
     );
-    app.graphics
+    app.rendering.graphics
         .render_frame(&initial_snapshot, &initial_inputs);
 
     let initial_case = app.snapshot.object(case_id).test_value().position;
     let initial_rider = app.snapshot.object(rider).test_value().position;
     let initial_world_origin = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, Vector2::ZERO)
         .test_value()
         .1;
     let initial_rider_screen = app
-        .graphics
+        .rendering.graphics
         .world_to_screen(owner, initial_rider)
         .test_value()
         .1;
@@ -1011,14 +1011,14 @@ fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
         main_assert_eq!(inputs.len() => 1, "one local viewport on frame {frame}");
         main_assert_eq!(inputs[0].focus.expect("player viewport focus").id => rider);
         main_assert_eq!(inputs[0].center => rider_now.position, "the app must present the rider's current frame position to C4Viewport on frame {frame}");
-        app.graphics.render_frame(&render_snapshot, &inputs);
+        app.rendering.graphics.render_frame(&render_snapshot, &inputs);
         let world_origin = app
-            .graphics
+            .rendering.graphics
             .world_to_screen(owner, Vector2::ZERO)
             .unwrap_or_else(|| panic!("viewport maps world origin on frame {frame}"))
             .1;
         let rider_screen = app
-            .graphics
+            .rendering.graphics
             .world_to_screen(owner, rider_now.position)
             .unwrap_or_else(|| panic!("viewport maps rider on frame {frame}"))
             .1;
@@ -1155,7 +1155,7 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
     let mut warm = vec![0_u8; 1152 * 644 * 4];
     app.test_render(&mut warm);
     let frame_gamma = app
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
     let mut baseline = vec![0_u8; 1152 * 644 * 4];
     app.test_render(&mut baseline);
@@ -1164,7 +1164,7 @@ fn real_tutorial01_renders_cpp_decorated_portrait_message(
     app.test_render(&mut rendered);
 
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -1255,7 +1255,7 @@ fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
     main_assert!(app.can_defer_native_game_messages(3.0));
 
     let gamma = app
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
     let mut presenter = clonk_scaling::FramePresenter::new(3.0, 960, 598);
     let mut output = vec![0_u8; 960 * 598 * 4];
@@ -1276,7 +1276,7 @@ fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
     // the top. Native message pixels must retain that offset and the
     // owning C4Viewport clip.
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -1417,7 +1417,7 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
     // the breath bar occupies x=5+(8+1), y=35+10+10, h=200-95. Its
     // filled pixels come from cyan columns 4/5 selected by bar_idx=2
     // (C4Facet.cpp:334-387).
-    let hud = app.graphics.hud_graphics();
+    let hud = app.rendering.graphics.hud_graphics();
     let bars = hud.energy_bars.test_ref();
     main_assert_eq!((bars.width(), bars.height()) => (48, 36));
     let mut surface = Surface::new(320, 200, PixelFormat::Rgba8888);
@@ -1459,7 +1459,7 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
     // capacity suppresses only C++'s `Breath < GetPhysical()->Breath`
     // predicate; restoring 50000 must add fragments exclusively inside
     // the compact second bar slot (C4Viewport.cpp:924-943).
-    let mut frame = vec![0; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0; app.rendering.graphics.surface().pixels().len()];
     app.snapshot
         .objects
         .iter_mut()
@@ -1488,7 +1488,7 @@ fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
     app.render_running(&mut frame, false).test_value();
     main_assert_eq!(frame => without_breath, "the stationary real frame is otherwise deterministic");
 
-    let viewport = app.graphics.viewport_rect(app.players.local_owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(app.players.local_owner).test_value();
     let bar_x = viewport.x + 14;
     let bar_y = viewport.y + 55;
     let bar_height = viewport.height as i32 - 95;

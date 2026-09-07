@@ -508,7 +508,7 @@ impl GameApp {
             return Ok(());
         };
         let _renderer_config = clonk_frontend::activate_advanced_renderer_config(
-            self.graphics.advanced_renderer_config(),
+            self.rendering.graphics.advanced_renderer_config(),
         );
         let NativePresentationPlan {
             batches,

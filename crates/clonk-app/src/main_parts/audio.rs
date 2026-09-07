@@ -1175,7 +1175,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
         // The renderer sizes point and line rasters from this; the frontend is
         // no longer the only place that knows the zoom
         // (clonk-org/clonk-rs#359).
-        world_zoom: app.graphics.viewport_zoom(),
+        world_zoom: app.rendering.graphics.viewport_zoom(),
     };
     let request_native_save_readback = !app.saves.pending_native_thumbnails.is_empty();
     let request_current_readback =
@@ -1187,7 +1187,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
     let profile_context = RetainedGpuFrameContext::capture(
         pixels,
         renderer,
-        app.graphics.advanced_renderer_config(),
+        app.rendering.graphics.advanced_renderer_config(),
         &geometry,
     );
     let mut previous_native_readback = None;
@@ -1199,7 +1199,7 @@ pub(crate) fn present_retained_gpu_frame_profiled(
         let mut frame_preparation = DeferredRetainedFramePreparation::new(|| {
             let frame_preparation_started = Instant::now();
             let frame = app.render_retained_gpu_frame(presentation)?;
-            let shader_landscape = app.graphics.take_shader_landscape_plan();
+            let shader_landscape = app.rendering.graphics.take_shader_landscape_plan();
             let frame_preparation = frame_preparation_started.elapsed();
             Ok::<_, anyhow::Error>((frame, shader_landscape, frame_preparation))
         });
@@ -1529,7 +1529,7 @@ pub(crate) fn apply_options_display_requests(
             OptionsDisplayRequest::SetScale { percent, persist } => {
                 anyhow::ensure!(percent > 0, "application scale must remain positive");
                 presenter.set_scale(percent as f32 / 100.0);
-                let point_filtering = app.graphics.point_filtering();
+                let point_filtering = app.rendering.graphics.point_filtering();
                 app.configure_native_startup_fonts(presenter.scale(), point_filtering);
                 let (logical_width, logical_height) = presenter.logical_size();
                 app.resize(logical_width, logical_height)?;
@@ -2232,7 +2232,7 @@ fn handle_developer_console_window_event(
             if message_dialog_active {
                 app.handle_mouse_button(state)?;
             } else {
-                let surface = app.graphics.surface();
+                let surface = app.rendering.graphics.surface();
                 let (width, height) = (surface.width(), surface.height());
                 let point = app.developer_console_pointer;
                 match state {

@@ -67,7 +67,8 @@ impl GameApp {
     }
 
     pub(crate) fn current_cursor_atlas(&self) -> Arc<CursorAtlas> {
-        self.active_game_graphics
+        self.rendering
+            .active_game_graphics
             .as_ref()
             .map(|resources| Arc::clone(&resources.cursor_atlas))
             .unwrap_or_else(|| self.assets.cursor_atlas())
@@ -587,7 +588,7 @@ impl GameApp {
                         }
                         RuntimeDefaultDialog::GameOver => {
                             let (width, height) = {
-                                let surface = self.graphics.surface();
+                                let surface = self.rendering.graphics.surface();
                                 (surface.width(), surface.height())
                             };
                             if let Some(dialog) = self.game_over_dialog.as_mut() {
@@ -648,7 +649,7 @@ impl GameApp {
                 Some(lobby) => lobby
                     .wheel_right_sheet(
                         amount,
-                        self.graphics.surface(),
+                        self.rendering.graphics.surface(),
                         self.assets.as_ref(),
                         &self.scenario_game_options,
                     )
@@ -794,8 +795,8 @@ impl GameApp {
             return Ok(());
         };
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         );
         let amount = match delta {
@@ -817,8 +818,8 @@ impl GameApp {
             let transform = MapFolderTransform::for_map(
                 map,
                 &layout,
-                self.graphics.surface().width(),
-                self.graphics.surface().height(),
+                self.rendering.graphics.surface().width(),
+                self.rendering.graphics.surface().height(),
             );
             let info_rect = transform.rect(map.scenario_info_area);
             if !point_in_map_rect(point, &info_rect) {
@@ -1402,7 +1403,8 @@ impl GameApp {
             return release_captured;
         };
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let action = self
@@ -1448,7 +1450,8 @@ impl GameApp {
             return false;
         };
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.pointer_move(point, preferred, resources)
@@ -2133,6 +2136,7 @@ impl GameApp {
             }
             if state == ElementState::Pressed {
                 let gamma = self
+                    .rendering
                     .graphics
                     .active_gamma_ramp(&self.snapshot.environment.gamma);
                 self.pending_screenshots.push_back(ScreenshotRequest {
@@ -2287,7 +2291,8 @@ impl GameApp {
         let dialog = self.dialogs.client_list.as_ref()?;
         let font = &self.assets.clonk_fonts.as_deref()?.text;
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         dialog.prepare_info_lines(preferred, font);
@@ -2620,6 +2625,7 @@ impl GameApp {
                     ScreenshotKind::PresentedFrame
                 };
                 let gamma = self
+                    .rendering
                     .graphics
                     .active_gamma_ramp(&self.snapshot.environment.gamma);
                 self.pending_screenshots
@@ -3204,9 +3210,9 @@ impl GameApp {
         if state != ElementState::Pressed {
             return false;
         }
-        let mut flags = self.graphics.debug_draw_flags();
+        let mut flags = self.rendering.graphics.debug_draw_flags();
         flags.show_net_status = !flags.show_net_status;
-        self.graphics.set_debug_draw_flags(flags);
+        self.rendering.graphics.set_debug_draw_flags(flags);
         true
     }
 
@@ -3232,7 +3238,7 @@ impl GameApp {
         if state != ElementState::Pressed {
             return false;
         }
-        self.display_flags.show_stats = !self.display_flags.show_stats;
+        self.rendering.display_flags.show_stats = !self.rendering.display_flags.show_stats;
         true
     }
 
@@ -3696,6 +3702,7 @@ impl GameApp {
                     ScreenshotKind::PresentedFrame
                 };
                 let gamma = self
+                    .rendering
                     .graphics
                     .active_gamma_ramp(&self.snapshot.environment.gamma);
                 self.pending_screenshots
@@ -3728,12 +3735,14 @@ impl GameApp {
             }
             RuntimeCustomGamepadAction::FreeViewScroll(delta) => {
                 let applied = self.free_view_scroll_momentum.apply(delta, Instant::now());
-                if !self.graphics.scroll_observer_viewport(0, applied) {
-                    self.graphics.queue_primary_observer_scroll(applied);
+                if !self.rendering.graphics.scroll_observer_viewport(0, applied) {
+                    self.rendering
+                        .graphics
+                        .queue_primary_observer_scroll(applied);
                 }
             }
             RuntimeCustomGamepadAction::StatsToggle => {
-                self.display_flags.show_stats = !self.display_flags.show_stats;
+                self.rendering.display_flags.show_stats = !self.rendering.display_flags.show_stats;
             }
             RuntimeCustomGamepadAction::ConsoleTools(action) => {
                 self.execute_console_tools_action(action);
@@ -3758,9 +3767,9 @@ impl GameApp {
                 self.toggle_runtime_join_admission();
             }
             RuntimeCustomGamepadAction::NetStatsToggle => {
-                let mut flags = self.graphics.debug_draw_flags();
+                let mut flags = self.rendering.graphics.debug_draw_flags();
                 flags.show_net_status = !flags.show_net_status;
-                self.graphics.set_debug_draw_flags(flags);
+                self.rendering.graphics.set_debug_draw_flags(flags);
             }
             RuntimeCustomGamepadAction::Chart => self.toggle_network_chart(),
             RuntimeCustomGamepadAction::SpeedUp => self.step_runtime_speed(true)?,
@@ -5107,8 +5116,10 @@ impl GameApp {
             // NO_OWNER-classified viewport exists. The active camera may
             // not be projected yet, but the built-in callback still owns
             // this key ahead of a custom NetObsNextPlayer binding.
-            if !self.graphics.scroll_observer_viewport(0, applied) {
-                self.graphics.queue_primary_observer_scroll(applied);
+            if !self.rendering.graphics.scroll_observer_viewport(0, applied) {
+                self.rendering
+                    .graphics
+                    .queue_primary_observer_scroll(applied);
             }
             return true;
         }
@@ -5154,24 +5165,25 @@ impl GameApp {
                 });
                 self.engine.set_debug_mode(enabled);
                 if !enabled {
-                    self.graphics
+                    self.rendering
+                        .graphics
                         .set_debug_draw_flags(clonk_frontend::DebugDrawFlags::default());
                 }
                 self.runtime_flash_message = flash;
             }
             RuntimeDebugKey::Vertices => {
-                let mut flags = self.graphics.debug_draw_flags();
+                let mut flags = self.rendering.graphics.debug_draw_flags();
                 flags.show_vertices = !flags.show_vertices;
                 flags.show_entrance = !flags.show_entrance;
                 let enabled = flags.show_vertices || flags.show_entrance;
                 let flash = self.prepare_runtime_resource_flash(|resources| {
                     resources.on_off("Entrance+Vertices", enabled)
                 });
-                self.graphics.set_debug_draw_flags(flags);
+                self.rendering.graphics.set_debug_draw_flags(flags);
                 self.runtime_flash_message = flash;
             }
             RuntimeDebugKey::ActionCycle => {
-                let mut flags = self.graphics.debug_draw_flags();
+                let mut flags = self.rendering.graphics.debug_draw_flags();
                 let flash = if !(flags.show_action || flags.show_command || flags.show_pathfinder) {
                     flags.show_action = true;
                     self.prepare_runtime_resource_flash(|_| "Actions".to_string())
@@ -5189,17 +5201,17 @@ impl GameApp {
                         resources.on_off("Actions/Commands/Pathfinder", false)
                     })
                 };
-                self.graphics.set_debug_draw_flags(flags);
+                self.rendering.graphics.set_debug_draw_flags(flags);
                 self.runtime_flash_message = flash;
             }
             RuntimeDebugKey::SolidMask => {
-                let mut flags = self.graphics.debug_draw_flags();
+                let mut flags = self.rendering.graphics.debug_draw_flags();
                 flags.show_solid_mask = !flags.show_solid_mask;
                 let enabled = flags.show_solid_mask;
                 let flash = self.prepare_runtime_resource_flash(|resources| {
                     resources.on_off("SolidMasks", enabled)
                 });
-                self.graphics.set_debug_draw_flags(flags);
+                self.rendering.graphics.set_debug_draw_flags(flags);
                 self.runtime_flash_message = flash;
             }
         }
@@ -6691,7 +6703,7 @@ impl GameApp {
                         .as_mut()
                         .expect("joined lobby was checked above")
                         .with_classic_controller_input(
-                            self.graphics.surface(),
+                            self.rendering.graphics.surface(),
                             assets.as_ref(),
                             &self.scenario_game_options,
                             |controller, layout, roster| {
@@ -7089,7 +7101,7 @@ impl GameApp {
                                     match state {
                                         ElementState::Pressed => lobby
                                             .with_classic_controller_input(
-                                                self.graphics.surface(),
+                                                self.rendering.graphics.surface(),
                                                 assets.as_ref(),
                                                 &self.scenario_game_options,
                                                 |controller, layout, roster| {
@@ -7693,7 +7705,7 @@ impl GameApp {
                     StartupView::NetworkLobby => {
                         if self.network_lobby.is_some() {
                             let (width, height) = {
-                                let surface = self.graphics.surface();
+                                let surface = self.rendering.graphics.surface();
                                 (surface.width() as f32, surface.height() as f32)
                             };
                             let region = self
@@ -7916,7 +7928,9 @@ impl GameApp {
         let Some((position, help)) = self.classic_gui_cursor_request() else {
             return false;
         };
-        self.graphics.draw_gui_mouse_cursor(position, help, gamma)
+        self.rendering
+            .graphics
+            .draw_gui_mouse_cursor(position, help, gamma)
     }
 
     pub(crate) fn draw_classic_gui_cursor_to_surface(
@@ -7927,12 +7941,13 @@ impl GameApp {
         let Some((position, help)) = self.classic_gui_cursor_request() else {
             return false;
         };
-        self.graphics
+        self.rendering
+            .graphics
             .draw_gui_mouse_cursor_to_surface(surface, position, help, gamma)
     }
 
     pub(crate) fn active_ingame_mouse_viewport(&self) -> Option<ActiveViewportProjection> {
-        let projections = self.graphics.active_viewport_projections();
+        let projections = self.rendering.graphics.active_viewport_projections();
         let matches = |viewport: &ActiveViewportProjection| match self.local_controls.mouse_owner()
         {
             Some(owner) => viewport.owner == owner,
@@ -8311,7 +8326,7 @@ impl GameApp {
             .modifiers
             .control_key()
             .then(|| {
-                self.graphics.object_at_point_with_ocf(
+                self.rendering.graphics.object_at_point_with_ocf(
                     &self.snapshot,
                     self.players.local_owner,
                     pointer.screen,
@@ -8388,10 +8403,10 @@ impl GameApp {
             return None;
         }
         let area = if player == OWNER_NONE {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             Rect::new(0, 0, surface.width(), surface.height())
         } else {
-            self.graphics.viewport_rect(player)?
+            self.rendering.graphics.viewport_rect(player)?
         };
         let menu = self.ingame_menu.get(player)?;
         let fallback = self.assets.font_arc();
@@ -8400,7 +8415,7 @@ impl GameApp {
             fallback.as_ref(),
         );
         let gfx = IngameMenuGraphics {
-            show_commands: self.display_flags.show_commands,
+            show_commands: self.rendering.display_flags.show_commands,
             show_close_button: true,
             ..IngameMenuGraphics::default()
         };
@@ -8424,7 +8439,7 @@ impl GameApp {
             fallback.as_ref(),
         );
         let gfx = IngameMenuGraphics {
-            show_commands: self.display_flags.show_commands,
+            show_commands: self.rendering.display_flags.show_commands,
             show_close_button: true,
             ..IngameMenuGraphics::default()
         };
@@ -8568,10 +8583,14 @@ impl GameApp {
             | clonk_engine::ocf::LIVING
             | clonk_engine::ocf::CARRYABLE
             | clonk_engine::ocf::EXCLUSIVE;
-        let target =
-            self.graphics
-                .object_at_point_with_ocf(&self.snapshot, owner, point, primary_ocf)?;
+        let target = self.rendering.graphics.object_at_point_with_ocf(
+            &self.snapshot,
+            owner,
+            point,
+            primary_ocf,
+        )?;
         let blocked = self
+            .rendering
             .graphics
             .viewport_point_at(point)
             .filter(|pointer| pointer.owner == owner)
@@ -8631,9 +8650,11 @@ impl GameApp {
     /// while retaining the same viewport visibility and fog gates.
     pub(crate) fn ingame_help_mouse_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
         let target = self
+            .rendering
             .graphics
             .object_at_point(&self.snapshot, owner, point)?;
         let blocked = self
+            .rendering
             .graphics
             .viewport_point_at(point)
             .filter(|pointer| pointer.owner == owner)
@@ -8803,6 +8824,7 @@ impl GameApp {
             return;
         };
         let viewport_y = self
+            .rendering
             .graphics
             .active_viewport_projections()
             .into_iter()
@@ -8831,6 +8853,7 @@ impl GameApp {
         match region {
             IngameViewportRegion::ViewportButton(button) => {
                 let viewport = self
+                    .rendering
                     .graphics
                     .active_viewport_projections()
                     .into_iter()
@@ -9285,7 +9308,7 @@ impl GameApp {
                 }
                 RuntimeDefaultDialog::GameOver => {
                     if self.game_over_pointer_route_hit(point) {
-                        let surface = self.graphics.surface();
+                        let surface = self.rendering.graphics.surface();
                         let (width, height) = (surface.width(), surface.height());
                         if let Some(dialog) = self.game_over_dialog.as_mut() {
                             dialog.handle_pointer_move(point.x, point.y, width, height);
@@ -10095,8 +10118,11 @@ impl GameApp {
         }
         let primary_target = self.retained_ingame_mouse_target();
         let context_target = primary_target.or_else(|| {
-            self.graphics
-                .object_at_point(&self.snapshot, self.players.local_owner, pointer.screen)
+            self.rendering.graphics.object_at_point(
+                &self.snapshot,
+                self.players.local_owner,
+                pointer.screen,
+            )
         });
         // RightUpDragNone makes one exact-object exclusion pass for the
         // windmill wing. Do not loop: another WWNG behind it is the target.
@@ -10108,7 +10134,7 @@ impl GameApp {
                     .is_some_and(|object| object.definition_id == "WWNG") =>
             {
                 // C++ does not re-run its fog gate after the excluded pick.
-                self.graphics.object_at_point_excluding(
+                self.rendering.graphics.object_at_point_excluding(
                     &self.snapshot,
                     self.players.local_owner,
                     pointer.screen,
@@ -10161,6 +10187,7 @@ impl GameApp {
                 0
             };
             let (x, y) = self
+                .rendering
                 .graphics
                 .active_viewport_projections()
                 .into_iter()
@@ -10223,10 +10250,14 @@ impl GameApp {
             self.assets.clonk_fonts.as_deref(),
             fallback.as_ref(),
         );
-        let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
-            let surface = self.graphics.surface();
-            Rect::new(0, 0, surface.width(), surface.height())
-        });
+        let area = self
+            .rendering
+            .graphics
+            .viewport_rect(owner)
+            .unwrap_or_else(|| {
+                let surface = self.rendering.graphics.surface();
+                Rect::new(0, 0, surface.width(), surface.height())
+            });
         let resources = self.script_text_spec_resources();
         let font_images = resolve_script_menu_font_images(&self.engine, menu, resources);
         // An unresolved inline image is consumed with no advance here exactly
@@ -10258,7 +10289,7 @@ impl GameApp {
                     &font,
                     menu,
                     &item_icons,
-                    self.display_flags.show_commands,
+                    self.rendering.display_flags.show_commands,
                     true,
                     point,
                     &font_images,
@@ -10273,7 +10304,7 @@ impl GameApp {
                 &font,
                 menu,
                 &item_icons,
-                self.display_flags.show_commands,
+                self.rendering.display_flags.show_commands,
                 true,
                 point,
                 &font_images,
@@ -11469,7 +11500,7 @@ impl GameApp {
                     StartupView::NetworkLobby => {
                         if self.network_lobby.is_some() {
                             let (width, height) = {
-                                let surface = self.graphics.surface();
+                                let surface = self.rendering.graphics.surface();
                                 (surface.width() as f32, surface.height() as f32)
                             };
                             let panel_pointer = self.network_lobby.as_mut().and_then(|lobby| {
@@ -12156,7 +12187,7 @@ impl GameApp {
                             false
                         } else {
                             let (width, height) = {
-                                let surface = self.graphics.surface();
+                                let surface = self.rendering.graphics.surface();
                                 (surface.width(), surface.height())
                             };
                             if !matches!(phase, TouchPhase::Cancelled) {
@@ -12470,7 +12501,7 @@ impl GameApp {
             StartupView::NetworkLobby => {
                 if self.network_lobby.is_some() {
                     let (width, height) = {
-                        let surface = self.graphics.surface();
+                        let surface = self.rendering.graphics.surface();
                         (surface.width() as f32, surface.height() as f32)
                     };
                     let region = self
@@ -13011,8 +13042,8 @@ impl GameApp {
             dialog.set_text_font(&fonts.text);
         }
         dialog.resize(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
         );
         dialog
     }

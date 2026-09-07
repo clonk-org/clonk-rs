@@ -298,19 +298,24 @@ fn render_mouse_test_app(app: &mut GameApp) {
 }
 
 fn mouse_test_object_point(app: &GameApp, owner: i32, object: ObjectId) -> GuiPoint {
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     // Prefer the object's own origin when the target search already resolves
     // there. Scanning for the first hit returns the TOP of the pick box, and
     // FindVisObject expands a short object's box upward by addtop()
     // (src/C4Game.cpp:1476-1477), so the scan can land above the object's real
     // shape - on whatever lies behind it. Tests want a point on the object.
-    if let Some((origin_x, origin_y)) = app
-        .snapshot
-        .object(object)
-        .and_then(|snapshot| app.graphics.world_to_screen(owner, snapshot.position))
-    {
+    if let Some((origin_x, origin_y)) = app.snapshot.object(object).and_then(|snapshot| {
+        app.rendering
+            .graphics
+            .world_to_screen(owner, snapshot.position)
+    }) {
         let origin = GuiPoint::new(origin_x, origin_y);
-        if app.graphics.object_at_point(&app.snapshot, owner, origin) == Some(object) {
+        if app
+            .rendering
+            .graphics
+            .object_at_point(&app.snapshot, owner, origin)
+            == Some(object)
+        {
             return origin;
         }
     }
@@ -319,7 +324,12 @@ fn mouse_test_object_point(app: &GameApp, owner: i32, object: ObjectId) -> GuiPo
             (viewport.x..viewport.x + viewport.width as i32)
                 .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
         })
-        .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(object))
+        .find(|point| {
+            app.rendering
+                .graphics
+                .object_at_point(&app.snapshot, owner, *point)
+                == Some(object)
+        })
         .test_value()
 }
 
@@ -338,7 +348,7 @@ fn mouse_test_matching_empty_point(
     require_drop_geometry: bool,
 ) -> Option<(GuiPoint, Vector2)> {
     let routed_point = GuiPoint::new(point.x.ceil(), point.y.ceil());
-    let pointer = app.graphics.viewport_point_at(routed_point)?;
+    let pointer = app.rendering.graphics.viewport_point_at(routed_point)?;
     let world = ingame_pointer_world_pixel(pointer);
     if pointer.owner != owner
         || ((point.x - start.x).abs() < 12.0 && (point.y - start.y).abs() < 12.0)
@@ -355,6 +365,7 @@ fn mouse_test_matching_empty_point(
     }
     if app.ingame_viewport_region(owner, routed_point).is_some()
         || app
+            .rendering
             .graphics
             .object_at_point(&app.snapshot, owner, routed_point)
             .is_some()
@@ -375,7 +386,7 @@ fn mouse_test_empty_point(
     start: GuiPoint,
     carry_command: Option<CommandId>,
 ) -> (GuiPoint, Vector2) {
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
 
     // Drop has an exact cheap geometry case: liquid, or air at most five
     // pixels above ground (C4MouseControl.cpp:833-846). Probe sparse columns
@@ -440,7 +451,7 @@ fn install_mouse_help_target(
 ) -> (ObjectId, GuiPoint) {
     render_mouse_test_app(app);
     let owner = app.players.local_owner;
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let inset_x = 24_i32.min(viewport.width as i32 / 4);
     let inset_y = 24_i32.min(viewport.height as i32 / 4);
     let position = (viewport.y + inset_y..viewport.y + viewport.height as i32 - inset_y)
@@ -450,10 +461,11 @@ fn install_mouse_help_target(
         })
         .find_map(|point| {
             let routed = GuiPoint::new(point.x.ceil(), point.y.ceil());
-            let pointer = app.graphics.viewport_point_at(routed)?;
+            let pointer = app.rendering.graphics.viewport_point_at(routed)?;
             (pointer.owner == owner
                 && app.ingame_viewport_region(owner, routed).is_none()
                 && app
+                    .rendering
                     .graphics
                     .object_at_point(&app.snapshot, owner, routed)
                     .is_none())
@@ -516,7 +528,7 @@ fn inventory_region_fixture() -> (GameApp, i32, ObjectId, ObjectId, ObjectId, Gu
     app.snapshot = app.engine.snapshot();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.render(&mut frame).test_value();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let region_point = GuiPoint::new(
         (viewport.x + clonk_frontend::hud::SYMBOL_BORDER + clonk_frontend::hud::SYMBOL_SIZE / 2)
             as f32,
@@ -543,7 +555,7 @@ fn command_region_point(app: &GameApp, command: u8) -> GuiPoint {
         .find(|player| player.id == owner)
         .and_then(|player| player.cursor)
         .test_value();
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let context = AppCommandContext {
         engine: &app.engine,
         bindings: &app.bindings,
@@ -572,7 +584,7 @@ fn viewport_button_point(
     owner: i32,
     button: clonk_frontend::hud::ViewportButton,
 ) -> GuiPoint {
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let rect = clonk_frontend::hud::viewport_button_rect(viewport, button);
     GuiPoint::new(
         rect.x as f32 + rect.width as f32 / 2.0,
@@ -1537,7 +1549,9 @@ fn sample_scenarios() -> Vec<FrontendScenario> {
 }
 
 fn install_native_test_fonts(app: &mut GameApp, scale: f32) {
-    app.graphics.set_runtime_sprite_filtering(scale, false);
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(scale, false);
     app.loader_render_config = Some(LoaderRenderConfig::new(scale, false).test_value());
     app.loader_render_error = None;
     let font_path =
@@ -2050,8 +2064,9 @@ fn new_real_menu_app(width: u32, height: u32) -> GameApp {
 fn apply_test_post_migration_renderer_config(app: &mut GameApp) {
     // These pathless fixtures bypass clonk-game::prepare_config. Model the
     // post-AdaptToCurrentVersion device state used by a normal launch.
-    let renderer_config = app.graphics.advanced_renderer_config();
-    app.graphics
+    let renderer_config = app.rendering.graphics.advanced_renderer_config();
+    app.rendering
+        .graphics
         .set_advanced_renderer_config(clonk_frontend::AdvancedRendererConfig {
             shader: true,
             ..renderer_config
@@ -2344,10 +2359,12 @@ fn apply_test_frontend_assets(app: &mut GameApp, assets: Arc<FrontendAssets>) {
     main_menu.set_highlight_texture(assets.button_highlight.clone());
     main_menu.set_clonk_fonts(assets.clonk_fonts.clone());
     main_menu.set_gamma_ramp(Some(Arc::new(clonk_graphics::GammaRamp::standard())));
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     main_menu.resize(surface.width() as f32, surface.height() as f32);
     app.main_menu_state.menu = main_menu;
-    app.graphics.set_clonk_fonts(assets.clonk_fonts.clone());
+    app.rendering
+        .graphics
+        .set_clonk_fonts(assets.clonk_fonts.clone());
     app.assets = assets;
     app.active_global_gui_failures.clear();
     app.menu_backdrop_cache = StartupBackdropCache::default();
@@ -2369,12 +2386,12 @@ fn drag_cursor_atlas() -> Arc<CursorAtlas> {
 
 fn install_l018_cursor_atlas(app: &mut GameApp) {
     assert!(
-        app.active_game_graphics.is_none(),
+        app.rendering.active_game_graphics.is_none(),
         "focused cursor fixtures use the process atlas"
     );
     Arc::get_mut(&mut app.assets).test_value().cursor_atlas = drag_cursor_atlas();
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     app.resize(width, height).test_value();
@@ -2498,7 +2515,7 @@ fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartup
 
 fn enter_about_licenses(app: &mut GameApp) {
     app.open_about_dialog();
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     let button = clonk_frontend::startup_about_dlg::about_layout(
         surface.width() as i32,
         surface.height() as i32,
@@ -2567,8 +2584,8 @@ fn write_map_png(path: &Path, width: u32, height: u32, pixel: [u8; 4]) {
 
 fn retained_test_presentation(app: &GameApp) -> GpuPresentation {
     GpuPresentation::identity(
-        app.graphics.surface().width(),
-        app.graphics.surface().height(),
+        app.rendering.graphics.surface().width(),
+        app.rendering.graphics.surface().height(),
     )
 }
 
@@ -3006,7 +3023,7 @@ fn install_message_fixture(app: &mut GameApp) {
         .test_value()
         .set_at_client(clonk_engine::PlayerAtClient::new(7));
     app.engine.set_local_players([app.players.local_owner]);
-    let line_height = app.graphics.message_board_line_height();
+    let line_height = app.rendering.graphics.message_board_line_height();
     app.message_board.initialize(true, line_height);
     let _ = app.message_board.advance_frame(line_height, false);
 }
@@ -3391,18 +3408,19 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     );
     assert!(Arc::ptr_eq(
         &expected_hud,
-        &app.active_game_graphics
+        &app.rendering
+            .active_game_graphics
             .as_ref()
             .expect("active client graphics")
             .hud_graphics
     ));
     assert!(Arc::ptr_eq(
         &expected_textures,
-        &app.material_texture_images
+        &app.rendering.material_texture_images
     ));
     assert!(Arc::ptr_eq(
         &expected_render_info,
-        &app.material_render_info
+        &app.rendering.material_render_info
     ));
     assert_eq!(
         commands.take_framed_status_acknowledgements(),
@@ -3850,7 +3868,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     // file requests both overload chains to continue (pristine 9ffa0a5d
     // src/C4Game.cpp:882-952; src/C4GameParameters.cpp:73-80,255-270).
     assert_eq!(
-        app.material_render_info.get("networkonly"),
+        app.rendering.material_render_info.get("networkonly"),
         Some(
             &clonk_frontend::MaterialRenderInfo::new(
                 [11, 12, 13, 14, 15, 16, 17, 18, 19],
@@ -3862,9 +3880,18 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
             .with_placement(70)
         ),
     );
-    assert!(app.material_texture_images.contains_key("hosttexture"));
-    assert!(!app.material_render_info.contains_key("fallbackonly"));
-    assert!(!app.material_texture_images.contains_key("fallbacktexture"));
+    assert!(app
+        .rendering
+        .material_texture_images
+        .contains_key("hosttexture"));
+    assert!(!app
+        .rendering
+        .material_render_info
+        .contains_key("fallbackonly"));
+    assert!(!app
+        .rendering
+        .material_texture_images
+        .contains_key("fallbacktexture"));
     assert_eq!(
         app.engine.random_seed(),
         u64::from(network_random_seed as u32),
@@ -4245,7 +4272,7 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
     app.mouse_control = false;
     app.live_input.ingame_mouse_init_centered = true;
     let controls_before = app.local_controls.assignments().collect::<Vec<_>>();
-    let viewports_before = app.graphics.active_viewport_projections();
+    let viewports_before = app.rendering.graphics.active_viewport_projections();
     let player_file = tempdir();
     let player_file_path = player_file.path().join("LatePlayer.c4p");
     // Local C4Control joins pass the filename to C4PlayerList::Join. Its
@@ -4281,7 +4308,10 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
         app.local_controls.assignments().collect::<Vec<_>>(),
         controls_before
     );
-    assert_eq!(app.graphics.active_viewport_projections(), viewports_before);
+    assert_eq!(
+        app.rendering.graphics.active_viewport_projections(),
+        viewports_before
+    );
     assert!(
         app.live_input.ingame_mouse_init_centered,
         "a rejected player never reaches C4Player::InitControl"
@@ -4455,10 +4485,12 @@ fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, V
     app.snapshot = app.engine.snapshot();
     let render_snapshot = app.snapshot.clone();
     let viewports = collect_viewport_inputs(&render_snapshot).test_value();
-    app.graphics.render_frame(&render_snapshot, &viewports);
+    app.rendering
+        .graphics
+        .render_frame(&render_snapshot, &viewports);
 
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width() as i32, surface.height() as i32)
     };
     let menu_point = (0..height)
@@ -4473,7 +4505,7 @@ fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, V
 
     let mut valid = None;
     let mut invalid = None;
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     'points: for y in viewport.y..viewport.y + viewport.height as i32 {
         for x in viewport.x..viewport.x + viewport.width as i32 {
             let point = GuiPoint::new(x as f32, y as f32);
@@ -4485,7 +4517,7 @@ fn construction_drag_fixture() -> (GameApp, i32, GuiPoint, GuiPoint, GuiPoint, V
             {
                 continue;
             }
-            let Some(pointer) = app.graphics.viewport_point_at(point) else {
+            let Some(pointer) = app.rendering.graphics.viewport_point_at(point) else {
                 continue;
             };
             if pointer.owner != owner {

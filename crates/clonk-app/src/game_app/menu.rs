@@ -498,7 +498,8 @@ impl GameApp {
 
     pub(crate) fn open_scoreboard_dialog(&mut self, request: ScoreboardPresentationRequest) {
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let layout_revision = request.layout_revision;
@@ -546,7 +547,7 @@ impl GameApp {
     }
 
     pub(crate) fn game_over_dialog_contains_point(&self, point: GuiPoint) -> bool {
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         self.game_over_dialog.as_ref().is_some_and(|dialog| {
             dialog.classic_dialog_contains_point(
                 point.x,
@@ -1363,7 +1364,7 @@ impl GameApp {
                 self.ingame_menu.replace(
                     player,
                     Some(IngameMenuState::display_menu(
-                        &self.display_flags,
+                        &self.rendering.display_flags,
                         0,
                         &self.ingame_menu_labels(),
                     )),
@@ -1633,19 +1634,19 @@ impl GameApp {
                 // Toggle + reopen with the previous selection
                 // (C4MainMenu.cpp:855-884).
                 let selection = self.ingame_menu_selection(player);
-                self.display_flags.toggle(toggle);
+                self.rendering.display_flags.toggle(toggle);
                 self.defer_display_toggle(toggle);
                 if toggle == DisplayToggle::UpperBoard {
                     let game_time_seconds = self.game_time_seconds();
-                    self.graphics.set_upper_board_mode(
-                        frontend_upper_board_mode(self.display_flags.upper_board),
+                    self.rendering.graphics.set_upper_board_mode(
+                        frontend_upper_board_mode(self.rendering.display_flags.upper_board),
                         game_time_seconds,
                     );
                 }
                 self.ingame_menu.replace(
                     player,
                     Some(IngameMenuState::display_menu(
-                        &self.display_flags,
+                        &self.rendering.display_flags,
                         selection,
                         &self.ingame_menu_labels(),
                     )),
@@ -2063,6 +2064,7 @@ impl GameApp {
             .filter(|retained| !retained.observer && retained.owner == owner);
         let pointer = match retained_viewport {
             Some(retained) => self
+                .rendering
                 .graphics
                 .active_viewport_projections()
                 .into_iter()
@@ -2074,7 +2076,8 @@ impl GameApp {
                         viewport.rect.x.saturating_add(retained.position.x) as f32,
                         viewport.rect.y.saturating_add(retained.position.y) as f32,
                     );
-                    self.graphics
+                    self.rendering
+                        .graphics
                         .viewport_output_point_for_index(viewport.index, screen)
                 }),
             None => self
@@ -2155,10 +2158,10 @@ impl GameApp {
 
     pub(crate) fn ingame_menu_area(&self, player: i32) -> Option<Rect> {
         if player == OWNER_NONE {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             Some(Rect::new(0, 0, surface.width(), surface.height()))
         } else {
-            self.graphics.viewport_rect(player)
+            self.rendering.graphics.viewport_rect(player)
         }
     }
 
@@ -2172,7 +2175,7 @@ impl GameApp {
             fallback.as_ref(),
         );
         let gfx = IngameMenuGraphics {
-            show_commands: self.display_flags.show_commands,
+            show_commands: self.rendering.display_flags.show_commands,
             show_close_button: true,
             ..IngameMenuGraphics::default()
         };
@@ -2224,7 +2227,7 @@ impl GameApp {
                         false
                     } else {
                         let (width, height) = {
-                            let surface = self.graphics.surface();
+                            let surface = self.rendering.graphics.surface();
                             (surface.width(), surface.height())
                         };
                         let action =
@@ -2357,10 +2360,14 @@ impl GameApp {
             self.assets.clonk_fonts.as_deref(),
             fallback.as_ref(),
         );
-        let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
-            let surface = self.graphics.surface();
-            Rect::new(0, 0, surface.width(), surface.height())
-        });
+        let area = self
+            .rendering
+            .graphics
+            .viewport_rect(owner)
+            .unwrap_or_else(|| {
+                let surface = self.rendering.graphics.surface();
+                Rect::new(0, 0, surface.width(), surface.height())
+            });
         let font_images =
             resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources());
         let presentation = self
@@ -2383,7 +2390,7 @@ impl GameApp {
                 area,
                 &font,
                 menu,
-                self.display_flags.show_commands,
+                self.rendering.display_flags.show_commands,
                 &font_images,
                 location.expect("free anchor has a location"),
                 scroll_y,
@@ -2395,7 +2402,7 @@ impl GameApp {
                 area,
                 &font,
                 menu,
-                self.display_flags.show_commands,
+                self.rendering.display_flags.show_commands,
                 &font_images,
                 location,
                 scroll_y,
@@ -2424,10 +2431,14 @@ impl GameApp {
             self.assets.clonk_fonts.as_deref(),
             fallback.as_ref(),
         );
-        let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
-            let surface = self.graphics.surface();
-            Rect::new(0, 0, surface.width(), surface.height())
-        });
+        let area = self
+            .rendering
+            .graphics
+            .viewport_rect(owner)
+            .unwrap_or_else(|| {
+                let surface = self.rendering.graphics.surface();
+                Rect::new(0, 0, surface.width(), surface.height())
+            });
         let font_images =
             resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources());
         let item_icons = if menu.style == 3 {
@@ -2452,7 +2463,7 @@ impl GameApp {
                 &font,
                 menu,
                 &item_icons,
-                self.display_flags.show_commands,
+                self.rendering.display_flags.show_commands,
                 &font_images,
                 location.expect("free anchor has a location"),
                 scroll_y,
@@ -2466,7 +2477,7 @@ impl GameApp {
             &font,
             menu,
             &item_icons,
-            self.display_flags.show_commands,
+            self.rendering.display_flags.show_commands,
             &font_images,
             location,
             scroll_y,
@@ -2511,10 +2522,14 @@ impl GameApp {
         menu: &clonk_engine::ObjectMenuState,
     ) -> Option<(i32, i32)> {
         if let Some(location) = menu.location {
-            let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
-                let surface = self.graphics.surface();
-                Rect::new(0, 0, surface.width(), surface.height())
-            });
+            let area = self
+                .rendering
+                .graphics
+                .viewport_rect(owner)
+                .unwrap_or_else(|| {
+                    let surface = self.rendering.graphics.surface();
+                    Rect::new(0, 0, surface.width(), surface.height())
+                });
             return Some((
                 area.x.saturating_add(location.x),
                 area.y.saturating_add(location.y),
@@ -2535,7 +2550,8 @@ impl GameApp {
                 .saturating_add(10),
             target.position.y.saturating_add(shape.y),
         );
-        self.graphics
+        self.rendering
+            .graphics
             .world_to_screen(owner, anchor)
             .map(|(x, y)| (x.floor() as i32, y.floor() as i32))
     }
@@ -3058,7 +3074,7 @@ impl GameApp {
             .assets
             .context_menu_resources()
             .map_err(|error| Self::gui_overlay_engine_error("C4GUI context menu", error))?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let screen = clonk_frontend::classic_gui::IntRect::new(
             0,
             0,
@@ -3102,8 +3118,8 @@ impl GameApp {
             ));
         };
         let search = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         )
         .search_edit;
@@ -3798,8 +3814,8 @@ impl GameApp {
                 .map(|player| player.activated)
                 .collect(),
         );
-        let width = self.graphics.surface().width() as i32;
-        let height = self.graphics.surface().height() as i32;
+        let width = self.rendering.graphics.surface().width() as i32;
+        let height = self.rendering.graphics.surface().height() as i32;
         if let (Some(fonts), Some(book)) = (
             self.assets.clonk_fonts.as_deref(),
             self.assets.plrsel_book_fonts.as_deref(),
@@ -3831,8 +3847,8 @@ impl GameApp {
         });
         if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
             dialog.resize(
-                self.graphics.surface().width() as i32,
-                self.graphics.surface().height() as i32,
+                self.rendering.graphics.surface().width() as i32,
+                self.rendering.graphics.surface().height() as i32,
                 fonts,
             );
         }
@@ -4630,7 +4646,7 @@ impl GameApp {
     ) -> Option<clonk_frontend::message_dialog::MessageDialogLayout> {
         let dialog = self.dialogs.messages.get(index)?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         Some(
             dialog
                 .state
@@ -4746,9 +4762,10 @@ impl GameApp {
                 Some(RunningDialogStackEntry::RuntimeClientList) => {
                     let dialog = self.dialogs.client_list.as_ref()?;
                     let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
-                    let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
-                        self.mouse_control.then_some(self.players.local_owner),
-                    ));
+                    let preferred =
+                        scoreboard_preferred_rect(self.rendering.graphics.preferred_dialog_rect(
+                            self.mouse_control.then_some(self.players.local_owner),
+                        ));
                     dialog.tooltip_at(point, preferred, line_height)
                 }
                 Some(RunningDialogStackEntry::Message(_))
@@ -4768,7 +4785,7 @@ impl GameApp {
             {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
                 let preferred =
-                    scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+                    scoreboard_preferred_rect(self.rendering.graphics.preferred_dialog_rect(
                         self.mouse_control.then_some(self.players.local_owner),
                     ));
                 return dialog.tooltip_at(point, preferred, line_height);
@@ -4807,7 +4824,7 @@ impl GameApp {
             if let Some(dialog) = self.dialogs.client_list.as_ref() {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
                 let preferred =
-                    scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+                    scoreboard_preferred_rect(self.rendering.graphics.preferred_dialog_rect(
                         self.mouse_control.then_some(self.players.local_owner),
                     ));
                 if let Some(target) = dialog.tooltip_at(point, preferred, line_height) {
@@ -4945,7 +4962,7 @@ impl GameApp {
             let mut audio = audio.borrow_mut();
             audio.stop_lobby_elevator();
         }
-        self.active_game_graphics = None;
+        self.rendering.active_game_graphics = None;
         self.ingame_menu_gfx = None;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
@@ -5022,9 +5039,10 @@ impl GameApp {
         self.default_rank_names = self.loaded_default_rank_names.clone();
         self.engine = Engine::new();
         reconnect_audio_context(&mut self.engine, self.sound.context.as_ref());
-        self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
-            .set_fire_particles(self.display_flags.fire_particles);
+            .set_smoke_level(self.rendering.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.rendering.display_flags.fire_particles);
         self.engine.set_local_players([self.players.local_owner]);
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
@@ -5047,7 +5065,7 @@ impl GameApp {
         self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
-        self.sky = None;
+        self.rendering.sky = None;
         self.snapshot = self.engine.snapshot();
         self.sync_checks.clear();
         self.network_ticks.clear();
@@ -5131,8 +5149,8 @@ impl GameApp {
         self.object_sprites = self.assets.base_sprite_map().clone();
         self.sprite_cache = Arc::new(self.object_sprites.clone());
 
-        let width = self.graphics.surface().width();
-        let height = self.graphics.surface().height();
+        let width = self.rendering.graphics.surface().width();
+        let height = self.rendering.graphics.surface().height();
         let mut graphics = GraphicsSystem::new(
             width,
             height,
@@ -5143,22 +5161,31 @@ impl GameApp {
             self.assets.cursor_atlas(),
             self.assets.hud_graphics(),
         );
-        graphics.inherit_liquid_animation_cycle(&self.graphics);
-        graphics.inherit_runtime_sprite_filtering(&self.graphics);
-        graphics.inherit_advanced_renderer_config(&self.graphics);
-        graphics.inherit_cursor_tiers(&self.graphics);
-        self.graphics = graphics;
-        self.graphics
+        graphics.inherit_liquid_animation_cycle(&self.rendering.graphics);
+        graphics.inherit_runtime_sprite_filtering(&self.rendering.graphics);
+        graphics.inherit_advanced_renderer_config(&self.rendering.graphics);
+        graphics.inherit_cursor_tiers(&self.rendering.graphics);
+        self.rendering.graphics = graphics;
+        self.rendering
+            .graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
-        self.graphics.set_game_palette(self.assets.game_palette());
-        self.graphics
+        self.rendering
+            .graphics
+            .set_game_palette(self.assets.game_palette());
+        self.rendering
+            .graphics
             .set_liquid_animation(self.assets.liquid_animation());
-        self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
-        self.graphics.set_sky(self.sky.clone());
-        self.graphics
-            .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
-        self.graphics
-            .set_material_render_info(Arc::clone(&self.material_render_info));
+        self.rendering
+            .graphics
+            .surface_mut()
+            .fill(Color::opaque(16, 28, 52));
+        self.rendering.graphics.set_sky(self.rendering.sky.clone());
+        self.rendering
+            .graphics
+            .set_material_texture_surfaces(Arc::clone(&self.rendering.material_texture_images));
+        self.rendering
+            .graphics
+            .set_material_render_info(Arc::clone(&self.rendering.material_render_info));
 
         self.menu_state.set_pointer_position(None);
         self.menu_state.refresh_menu_entries();

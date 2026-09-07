@@ -369,7 +369,7 @@ impl GameApp {
         &self,
         viewports: &[ViewportInput<'_>],
     ) -> Vec<CrewNameOverlay> {
-        if (!self.display_flags.player_names && !self.display_flags.clonk_names)
+        if (!self.rendering.display_flags.player_names && !self.rendering.display_flags.clonk_names)
             || self.engine.film_replay()
         {
             return Vec::new();
@@ -414,8 +414,8 @@ impl GameApp {
                     .unwrap_or(object.definition_id.as_str());
                 let clonk_name = c4_presentation_text(clonk_name);
                 let text = match (
-                    self.display_flags.player_names,
-                    self.display_flags.clonk_names,
+                    self.rendering.display_flags.player_names,
+                    self.rendering.display_flags.clonk_names,
                 ) {
                     (true, true) => format!("{clonk_name} ({player_name})"),
                     (true, false) => player_name,
@@ -453,7 +453,7 @@ impl GameApp {
     pub(crate) fn populate_crew_portraits(&self, players: &mut [PlayerOverlay]) {
         // Config.Graphics.ShowPortraits from the Display menu
         // (C4MainMenu.cpp:872) gates only the portrait branch.
-        let show_portraits = self.display_flags.portraits;
+        let show_portraits = self.rendering.display_flags.portraits;
         let mut portrait_cache: HashMap<(String, String), Option<CursorPortraitImages>> =
             HashMap::new();
         let mut rank_cache: HashMap<String, Option<ImageData>> = HashMap::new();
@@ -958,7 +958,7 @@ impl GameApp {
     /// created the runtime player. Cache by PlayerInfo ID because runtime
     /// numbers may be recreated while loading a savegame.
     pub(crate) fn hydrate_runtime_player_big_icons(&mut self) {
-        if !self.display_flags.portraits {
+        if !self.rendering.display_flags.portraits {
             return;
         }
         self.hydrate_runtime_player_big_icons_unconditionally();

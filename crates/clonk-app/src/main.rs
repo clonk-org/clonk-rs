@@ -1133,7 +1133,8 @@ fn run() -> Result<()> {
             app.presentation.display_refresh_period_ms,
         );
         app.set_display_mode(display_options.mode);
-        app.graphics
+        app.rendering
+            .graphics
             .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
         app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
         app.apply_classic_command_line_with_profile(&classic, compat_profile)?;
@@ -1647,7 +1648,7 @@ fn run() -> Result<()> {
                                     &mut report,
                                     pixels,
                                     renderer,
-                                    app.graphics.advanced_renderer_config(),
+                                    app.rendering.graphics.advanced_renderer_config(),
                                     presenter.presentation_geometry(),
                                 )
                             });
@@ -1858,7 +1859,9 @@ fn run() -> Result<()> {
                     event: WindowEvent::RedrawRequested,
                 } if window_id == window.id() => {
                     let graphics_started = Instant::now();
-                    app.graphics.set_presentation_scale(presenter.scale());
+                    app.rendering
+                        .graphics
+                        .set_presentation_scale(presenter.scale());
                     if matches!(
                         app.mode,
                         AppMode::Menu | AppMode::Loading | AppMode::Running
@@ -2066,17 +2069,21 @@ fn run() -> Result<()> {
                     } else {
                         match app.mode {
                             AppMode::Menu | AppMode::Loading => app.startup_monitor_gamma(),
-                            AppMode::Running => app.graphics.monitor_gamma_enabled().then(|| {
-                                app.graphics
-                                    .active_gamma_ramp(&app.snapshot.environment.gamma)
-                            }),
+                            AppMode::Running => {
+                                app.rendering.graphics.monitor_gamma_enabled().then(|| {
+                                    app.rendering
+                                        .graphics
+                                        .active_gamma_ramp(&app.snapshot.environment.gamma)
+                                })
+                            }
                         }
                     };
                     let native_game_message_gamma = if defer_native_game_messages {
                         let active = app
+                            .rendering
                             .graphics
                             .active_gamma_ramp(&app.snapshot.environment.gamma);
-                        Some(if app.graphics.fragment_gamma_enabled() {
+                        Some(if app.rendering.graphics.fragment_gamma_enabled() {
                             active
                         } else {
                             clonk_graphics::GammaRamp::identity()
@@ -2890,13 +2897,9 @@ impl GameApp {
 
         let mut app = Self {
             engine,
-            graphics,
             taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress::new(
                 Box::new(clonk_platform::taskbar_progress::NoTaskbarProgress),
             ),
-            sky: None,
-            material_texture_images: Arc::new(HashMap::new()),
-            material_render_info: Arc::new(HashMap::new()),
             system_scripts,
             standard_names,
             needed_material_need,
@@ -2977,6 +2980,16 @@ impl GameApp {
                 physical_viewports_authoritative: false,
                 menu_viewport_rects: BTreeMap::new(),
             },
+            rendering: RenderingResources {
+                graphics,
+                sky: None,
+                material_texture_images: Arc::new(HashMap::new()),
+                material_render_info: Arc::new(HashMap::new()),
+                material_library: None,
+                active_game_graphics: None,
+                display_flags,
+                graphics_smoke_level,
+            },
             #[cfg(test)]
             gamepad_poll_count: 0,
             #[cfg(test)]
@@ -3040,10 +3053,8 @@ impl GameApp {
             runtime_player_big_icons: HashMap::new(),
             runtime_player_big_icon_misses: HashSet::new(),
             script_menu_presentations: BTreeMap::new(),
-            display_flags,
             white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
-            graphics_smoke_level,
             mouse_control: true,
             mouse_control_allowed: true,
             mode: AppMode::Loading,
@@ -3057,7 +3068,6 @@ impl GameApp {
             active_scenario: None,
             active_definition_load: None,
             active_description_definition_modules: Vec::new(),
-            active_game_graphics: None,
             sound: SoundState {
                 // Only the device is supplied here; every music latch starts
                 // clear and is armed by the first playback decision.
@@ -3124,7 +3134,6 @@ impl GameApp {
             script_created_objects: false,
             sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,
-            material_library: None,
             pending_lobby_internet_signup: None,
             pending_league_player_auth: None,
             network_event_waker: None,
@@ -3472,7 +3481,7 @@ impl GameApp {
     }
 
     fn begin_native_text_capture(&mut self, clear_to_transparent: bool) {
-        let surface = self.graphics.surface_mut();
+        let surface = self.rendering.graphics.surface_mut();
         surface.clear_clip();
         if clear_to_transparent && !self.presentation.retained_gpu_ordered_capture_active {
             surface.fill(Color::transparent());
@@ -3485,7 +3494,7 @@ impl GameApp {
     }
 
     fn finish_native_base_batch(&mut self, frame: &mut [u8], plan: &mut NativePresentationPlan) {
-        let surface = self.graphics.surface_mut();
+        let surface = self.rendering.graphics.surface_mut();
         let text = surface.take_clonk_text_capture();
         let gpu_recorder = surface.take_gpu_scene_capture();
         if gpu_recorder.is_none() {
@@ -3506,7 +3515,7 @@ impl GameApp {
     }
 
     fn finish_native_overlay_batch(&mut self, plan: &mut NativePresentationPlan) {
-        Self::capture_native_overlay_batch(self.graphics.surface_mut(), plan, None);
+        Self::capture_native_overlay_batch(self.rendering.graphics.surface_mut(), plan, None);
     }
 
     fn capture_native_overlay_batch(
@@ -3598,7 +3607,7 @@ impl GameApp {
 
     fn next_pending_native_overlay(&mut self) {
         Self::next_native_overlay_parts(
-            &mut self.graphics,
+            &mut self.rendering.graphics,
             &mut self.presentation.pending_native_presentation,
             self.presentation.retained_gpu_ordered_capture_active,
         );
@@ -3606,7 +3615,7 @@ impl GameApp {
 
     fn next_pending_native_overlay_with_clip(&mut self, isolated_clip: Rect) {
         Self::next_native_overlay_parts_with_clip(
-            &mut self.graphics,
+            &mut self.rendering.graphics,
             &mut self.presentation.pending_native_presentation,
             Some(isolated_clip),
             self.presentation.retained_gpu_ordered_capture_active,
@@ -3614,14 +3623,16 @@ impl GameApp {
     }
 
     fn current_game_palette(&self) -> Arc<GamePalette> {
-        self.active_game_graphics
+        self.rendering
+            .active_game_graphics
             .as_ref()
             .map(|resources| Arc::clone(&resources.palette))
             .unwrap_or_else(|| self.assets.game_palette())
     }
 
     fn current_liquid_animation(&self) -> Option<ImageData> {
-        self.active_game_graphics
+        self.rendering
+            .active_game_graphics
             .as_ref()
             .and_then(|resources| resources.liquid_animation.as_deref().cloned())
             .or_else(|| self.assets.liquid_animation())
@@ -3649,7 +3660,11 @@ impl GameApp {
         };
         let text_spec_resources = self.script_text_spec_resources();
         let hud_graphics = self.current_hud_graphics();
-        let allowed_blit_modes = self.graphics.advanced_renderer_config().allowed_blit_modes;
+        let allowed_blit_modes = self
+            .rendering
+            .graphics
+            .advanced_renderer_config()
+            .allowed_blit_modes;
         // A Context ObjectRank facet is sized by the menu's resolved
         // ItemHeight, which only the layout knows (C4Script.cpp:1721).
         let context_item_height = (menu.style == 1).then(|| {
@@ -3738,24 +3753,26 @@ impl GameApp {
             cursor_atlas,
             hud_graphics,
         );
-        graphics.inherit_liquid_animation_cycle(&self.graphics);
-        graphics.inherit_pending_observer_scroll(&self.graphics);
-        graphics.inherit_debug_draw_state(&self.graphics);
-        graphics.inherit_runtime_sprite_filtering(&self.graphics);
-        graphics.inherit_advanced_renderer_config(&self.graphics);
-        graphics.inherit_cursor_tiers(&self.graphics);
+        graphics.inherit_liquid_animation_cycle(&self.rendering.graphics);
+        graphics.inherit_pending_observer_scroll(&self.rendering.graphics);
+        graphics.inherit_debug_draw_state(&self.rendering.graphics);
+        graphics.inherit_runtime_sprite_filtering(&self.rendering.graphics);
+        graphics.inherit_advanced_renderer_config(&self.rendering.graphics);
+        graphics.inherit_cursor_tiers(&self.rendering.graphics);
         graphics.set_particle_sprites(Arc::new(particle_sprite_map(&self.engine)));
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
         graphics.set_liquid_animation(liquid_animation);
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
-        self.graphics = graphics;
+        self.rendering.graphics = graphics;
         self.sync_scenario_game_option_bounds();
-        self.graphics.set_sky(self.sky.clone());
-        self.graphics
-            .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
-        self.graphics
-            .set_material_render_info(Arc::clone(&self.material_render_info));
+        self.rendering.graphics.set_sky(self.rendering.sky.clone());
+        self.rendering
+            .graphics
+            .set_material_texture_surfaces(Arc::clone(&self.rendering.material_texture_images));
+        self.rendering
+            .graphics
+            .set_material_render_info(Arc::clone(&self.rendering.material_render_info));
 
         // Startup models are constructed before boot relinquishes Loading.
         // macOS may apply the real fullscreen size during that interval, so
@@ -3883,7 +3900,7 @@ impl GameApp {
         if let Some(names) = self.default_rank_names.as_ref() {
             self.engine.set_default_rank_names(names.clone());
         }
-        if let Some(materials) = self.material_library.as_ref() {
+        if let Some(materials) = self.rendering.material_library.as_ref() {
             self.engine.set_materials((**materials).clone());
         } else {
             self.engine.set_materials(MaterialSet::default());
@@ -3917,7 +3934,7 @@ impl GameApp {
         if let Some(names) = self.default_rank_names.as_ref() {
             engine.set_default_rank_names(names.clone());
         }
-        if let Some(materials) = self.material_library.as_ref() {
+        if let Some(materials) = self.rendering.material_library.as_ref() {
             engine.set_materials((**materials).clone());
         } else {
             engine.set_materials(MaterialSet::default());
@@ -3963,7 +3980,8 @@ impl GameApp {
 
     fn update_sprite_cache(&mut self) {
         self.sprite_cache = Arc::new(self.object_sprites.clone());
-        self.graphics
+        self.rendering
+            .graphics
             .set_object_sprites(Arc::clone(&self.sprite_cache));
     }
 
@@ -4126,10 +4144,14 @@ impl GameApp {
                 }
             }
         }
-        self.graphics
+        self.rendering
+            .graphics
             .set_rotateable_definitions(rotateable_definitions);
-        self.graphics.set_definition_debug_geometry(debug_geometry);
-        self.graphics
+        self.rendering
+            .graphics
+            .set_definition_debug_geometry(debug_geometry);
+        self.rendering
+            .graphics
             .set_particle_sprites(Arc::new(particle_sprites));
         if sprites != self.object_sprites {
             self.object_sprites = sprites;
@@ -4278,19 +4300,20 @@ impl GameApp {
 
     fn runtime_help_resources(&self) -> Result<&RuntimeHelpColumns> {
         anyhow::ensure!(
-            self.graphics.hud_graphics().upper_board.is_some(),
+            self.rendering.graphics.hud_graphics().upper_board.is_some(),
             "runtime F1 help requires the classic UpperBoard resource for viewport geometry"
         );
-        let mode = frontend_upper_board_mode(self.display_flags.upper_board);
+        let mode = frontend_upper_board_mode(self.rendering.display_flags.upper_board);
         let viewport_area = self
+            .rendering
             .graphics
             .preferred_dialog_rect_for_upper_board_mode(None, mode);
         let expected_top = clonk_frontend::hud::upper_board_reserved_height(mode);
         anyhow::ensure!(
             viewport_area.y == expected_top
-                && viewport_area.height < self.graphics.surface().height(),
+                && viewport_area.height < self.rendering.graphics.surface().height(),
             "runtime F1 help cannot establish the {:?}-mode {}px viewport origin and message-board bounds on this surface",
-            self.display_flags.upper_board,
+            self.rendering.display_flags.upper_board,
             expected_top
         );
         self.runtime_key_config()?;
@@ -4310,7 +4333,7 @@ impl GameApp {
     }
 
     fn runtime_flash_y(&self) -> i32 {
-        let upper_board_height = match self.display_flags.upper_board {
+        let upper_board_height = match self.rendering.display_flags.upper_board {
             UpperBoardMode::Hide | UpperBoardMode::Mini => 0,
             UpperBoardMode::Full => clonk_frontend::hud::UPPER_BOARD_HEIGHT,
             UpperBoardMode::Small => clonk_frontend::hud::UPPER_BOARD_HEIGHT / 2,
@@ -4446,7 +4469,8 @@ impl GameApp {
         let assets = Arc::clone(&self.assets);
         let resources = assets.scoreboard_resources(&font_images)?;
         let live_preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let preferred = self
@@ -4486,7 +4510,8 @@ impl GameApp {
         let layout_revision = self.engine.scoreboard_layout_revision();
         if self.dialogs.scoreboard_runtime.layout_revision != layout_revision {
             let preferred = scoreboard_preferred_rect(
-                self.graphics
+                self.rendering
+                    .graphics
                     .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
             );
             self.dialogs.scoreboard_runtime.preferred = Some(preferred);
@@ -5955,6 +5980,7 @@ impl GameApp {
         }
 
         let viewport = self
+            .rendering
             .graphics
             .active_viewport_projections()
             .into_iter()
@@ -5979,6 +6005,7 @@ impl GameApp {
         // world-space pointer and drag motion from the camera's current
         // position before applying the next direct scroll step.
         let Some(pointer) = self
+            .rendering
             .graphics
             .viewport_output_point_for_index(viewport.index, screen)
         else {
@@ -6035,6 +6062,7 @@ impl GameApp {
         if scroll.observer {
             for delta in scroll.edge.steps() {
                 if !self
+                    .rendering
                     .graphics
                     .scroll_observer_viewport(scroll.viewport_index, delta)
                 {
@@ -6151,11 +6179,11 @@ impl GameApp {
     /// and retain the group's first object as their Target
     /// (C4Viewport.cpp:911-917; C4ObjectList.cpp:343-372).
     fn ingame_inventory_region_hit(&self, owner: i32, point: GuiPoint) -> Option<(ObjectId, Rect)> {
-        let pointer = self.graphics.viewport_output_point_at(point)?;
+        let pointer = self.rendering.graphics.viewport_output_point_at(point)?;
         if pointer.owner != owner {
             return None;
         }
-        let viewport = self.graphics.viewport_rect(pointer.owner)?;
+        let viewport = self.rendering.graphics.viewport_rect(pointer.owner)?;
         let cursor = self
             .snapshot
             .players
@@ -6173,7 +6201,7 @@ impl GameApp {
             &self.engine,
             &self.snapshot,
             cursor,
-            self.graphics.advanced_renderer_config(),
+            self.rendering.graphics.advanced_renderer_config(),
         );
         let section =
             clonk_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
@@ -6188,13 +6216,13 @@ impl GameApp {
     }
 
     fn ingame_command_region_hit(&self, owner: i32, point: GuiPoint) -> Option<(u8, String, Rect)> {
-        if !self.display_flags.show_commands
+        if !self.rendering.display_flags.show_commands
             || self.object_menu.is_some()
             || self.engine.cursor_object_menu(owner).is_some()
         {
             return None;
         }
-        let pointer = self.graphics.viewport_output_point_at(point)?;
+        let pointer = self.rendering.graphics.viewport_output_point_at(point)?;
         if pointer.owner != owner {
             return None;
         }
@@ -6204,7 +6232,7 @@ impl GameApp {
             .iter()
             .find(|player| player.id == pointer.owner)
             .and_then(|player| player.cursor)?;
-        let viewport = self.graphics.viewport_rect(pointer.owner)?;
+        let viewport = self.rendering.graphics.viewport_rect(pointer.owner)?;
         let context = AppCommandContext {
             engine: &self.engine,
             bindings: &self.bindings,
@@ -6287,7 +6315,7 @@ impl GameApp {
         let control_down = self.live_input.modifiers.control_key();
         let target = control_down
             .then(|| {
-                self.graphics.object_at_point_with_ocf(
+                self.rendering.graphics.object_at_point_with_ocf(
                     &self.snapshot,
                     pointer.owner,
                     pointer.screen,
@@ -6788,8 +6816,8 @@ impl GameApp {
         // replacing the outer dialog. Mirror native element destruction by
         // dropping hover ownership before resolving the rebuilt hierarchy.
         self.startup_tooltip.pointer_left();
-        let width = self.graphics.surface().width() as i32;
-        let height = self.graphics.surface().height() as i32;
+        let width = self.rendering.graphics.surface().width() as i32;
+        let height = self.rendering.graphics.surface().height() as i32;
         let languages = self
             .app_paths
             .as_ref()
@@ -7092,7 +7120,8 @@ impl GameApp {
                 let debug_was_enabled = self.engine.debug_mode();
                 self.engine.disable_debug();
                 if debug_was_enabled {
-                    self.graphics
+                    self.rendering
+                        .graphics
                         .set_debug_draw_flags(clonk_frontend::DebugDrawFlags::default());
                 }
                 if let Some(prepared) = self
@@ -7876,7 +7905,7 @@ impl GameApp {
         {
             self.sec1_timer_call_count += 1;
         }
-        let viewports = self.graphics.active_viewport_projections();
+        let viewports = self.rendering.graphics.active_viewport_projections();
         let game_running = matches!(self.mode, AppMode::Running);
         if let Some(audio) = self.sound.context.as_ref() {
             audio
@@ -7930,8 +7959,8 @@ impl GameApp {
     }
 
     fn finish_rendered_object_audibility_pass(&mut self) {
-        let viewports = self.graphics.active_viewport_projections();
-        let calls = self.graphics.rendered_object_audibility_calls();
+        let viewports = self.rendering.graphics.active_viewport_projections();
+        let calls = self.rendering.graphics.rendered_object_audibility_calls();
         if let Some(audio) = self.sound.context.as_ref() {
             let mut audio = audio.borrow_mut();
             audio.cache_rendered_object_audibility(calls, &self.snapshot, &viewports);
@@ -8370,7 +8399,7 @@ impl GameApp {
     fn about_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
         let dialog = self.startup.about_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let layout = clonk_frontend::startup_about_dlg::about_layout(
             surface.width() as i32,
             surface.height() as i32,
@@ -8572,7 +8601,7 @@ impl GameApp {
 
     fn apply_show_commands_enable_request(&mut self) {
         if self.config.show_commands_requests.take_enable_request() {
-            self.display_flags.show_commands = true;
+            self.rendering.display_flags.show_commands = true;
         }
     }
 
@@ -8593,7 +8622,7 @@ impl GameApp {
         if let Some(tooltip) = tooltip {
             assets.global_tooltip_font = Some(tooltip);
         }
-        self.graphics.set_clonk_fonts(Some(fonts.clone()));
+        self.rendering.graphics.set_clonk_fonts(Some(fonts.clone()));
         self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
         self.native_startup_fonts = native_fonts;
     }
@@ -8824,9 +8853,10 @@ impl GameApp {
         self.film_view_player = None;
         self.clear_physical_viewport_states();
         self.viewports.physical_viewports_authoritative = false;
-        self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
-            .set_fire_particles(self.display_flags.fire_particles);
+            .set_smoke_level(self.rendering.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.rendering.display_flags.fire_particles);
         self.engine.set_local_players([self.players.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_network_control_mode(self.network.is_some());
@@ -9264,7 +9294,7 @@ impl GameApp {
             .network
             .is_none()
             .then(|| std::mem::take(&mut self.control_player_infos));
-        self.active_game_graphics = loaded_game_graphics;
+        self.rendering.active_game_graphics = loaded_game_graphics;
         self.ingame_menu_gfx = None;
         self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
         if let Some(player_infos) = offline_player_infos {
@@ -9359,8 +9389,8 @@ impl GameApp {
         self.network_stats_players.clear();
         self.scenario_label = label;
         self.fallback_ground = fallback_ground;
-        let width = self.graphics.surface().width();
-        let height = self.graphics.surface().height();
+        let width = self.rendering.graphics.surface().width();
+        let height = self.rendering.graphics.surface().height();
         let cursor_atlas = self.current_cursor_atlas();
         let hud_graphics = self.current_hud_graphics();
         let game_palette = self.current_game_palette();
@@ -9375,26 +9405,34 @@ impl GameApp {
             cursor_atlas,
             hud_graphics,
         );
-        graphics.inherit_liquid_animation_cycle(&self.graphics);
-        graphics.inherit_runtime_sprite_filtering(&self.graphics);
-        graphics.inherit_advanced_renderer_config(&self.graphics);
-        graphics.inherit_cursor_tiers(&self.graphics);
+        graphics.inherit_liquid_animation_cycle(&self.rendering.graphics);
+        graphics.inherit_runtime_sprite_filtering(&self.rendering.graphics);
+        graphics.inherit_advanced_renderer_config(&self.rendering.graphics);
+        graphics.inherit_cursor_tiers(&self.rendering.graphics);
         // Particle definitions live in Game.Particles independently of the
         // viewport (oracle-src-pinned src/C4Particles.cpp:118-189). Rebind
         // their draw resources when entering the running presentation just
         // like a viewport recreation.
         graphics.set_particle_sprites(Arc::new(particle_sprite_map(&self.engine)));
-        self.graphics = graphics;
-        self.graphics
+        self.rendering.graphics = graphics;
+        self.rendering
+            .graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
-        self.graphics.set_game_palette(game_palette);
-        self.graphics.set_liquid_animation(liquid_animation);
-        self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
-        self.graphics.set_sky(self.sky.clone());
-        self.graphics
-            .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
-        self.graphics
-            .set_material_render_info(Arc::clone(&self.material_render_info));
+        self.rendering.graphics.set_game_palette(game_palette);
+        self.rendering
+            .graphics
+            .set_liquid_animation(liquid_animation);
+        self.rendering
+            .graphics
+            .surface_mut()
+            .fill(Color::opaque(12, 24, 40));
+        self.rendering.graphics.set_sky(self.rendering.sky.clone());
+        self.rendering
+            .graphics
+            .set_material_texture_surfaces(Arc::clone(&self.rendering.material_texture_images));
+        self.rendering
+            .graphics
+            .set_material_render_info(Arc::clone(&self.rendering.material_render_info));
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
@@ -9468,7 +9506,7 @@ impl GameApp {
         self.league_signup_consumed_keys.clear();
         self.league_signup_pointer_capture = false;
         self.league_signup_pointer_position = None;
-        let line_height = self.graphics.message_board_line_height();
+        let line_height = self.rendering.graphics.message_board_line_height();
         // `C4MessageBoard::Init` reads the live `Config.Graphics.MsgBoard`
         // (C4MessageBoard.cpp:236) that `ChangeMode` wrote without saving
         // (:65-118), so a `/msgboard` from the previous round carries into this

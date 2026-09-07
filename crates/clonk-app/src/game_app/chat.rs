@@ -459,7 +459,7 @@ impl GameApp {
         );
         let compact = !input.prompt.contains('|')
             && self.assets.clonk_fonts.as_deref().is_some_and(|fonts| {
-                let screen_width = self.graphics.surface().width() as i32;
+                let screen_width = self.rendering.graphics.surface().width() as i32;
                 fonts.text.measure(&prompt, true).0 < screen_width / 5
             });
         let controller = if compact {
@@ -577,8 +577,8 @@ impl GameApp {
             return None;
         }
         let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
+            self.rendering.graphics.surface().width() as i32,
+            self.rendering.graphics.surface().height() as i32,
             fonts,
         );
         Some(clonk_frontend::startup_scensel::search_caret_area(
@@ -1153,7 +1153,7 @@ impl GameApp {
             return Ok(());
         }
         let (width, height) = {
-            let surface = self.graphics.surface();
+            let surface = self.rendering.graphics.surface();
             (surface.width() as i32, surface.height() as i32)
         };
         let bounds =
@@ -1307,7 +1307,7 @@ impl GameApp {
             && self.dialogs.messages.is_empty()
             && self.context_menu.is_none();
         clonk_frontend::startup_netdlg::NetDlgScreen::render_standalone_chat_dialog(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             &assets,
             &fonts,
             gamma,
@@ -1349,7 +1349,7 @@ impl GameApp {
             .as_deref()
             .context("classic shadowless tooltip font is unavailable")?;
         clonk_frontend::context_menu::draw_classic_tooltip(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             font,
             pointer,
             &text,
@@ -1375,7 +1375,7 @@ impl GameApp {
         let keyboard_active = self.context_menu.is_none() && self.running_chat_active();
         let mouse_active = self.context_menu.is_none();
         controller.render_with_activity(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             &resources,
             keyboard_active,
             mouse_active,
@@ -1416,7 +1416,12 @@ impl GameApp {
             .input_dialog_resources()
             .context("classic C4GUI::InputDialog resources are unavailable")?;
         let mouse_active = self.context_menu.is_none();
-        controller.render_tooltip(self.graphics.surface_mut(), &resources, mouse_active, gamma)
+        controller.render_tooltip(
+            self.rendering.graphics.surface_mut(),
+            &resources,
+            mouse_active,
+            gamma,
+        )
     }
 
     /// The C4MessageBoard line selected by its live LogBuffer cursor.
@@ -1425,18 +1430,18 @@ impl GameApp {
     }
 
     pub(crate) fn advance_message_board_overlay(&mut self) -> MessageBoardOverlay {
-        let line_height = self.graphics.message_board_line_height();
+        let line_height = self.rendering.graphics.message_board_line_height();
         let type_in = self.running_chat_active();
         self.message_board.advance_frame(line_height, type_in)
     }
 
     pub(crate) fn enqueue_control_message_board_line(&mut self, line: String) {
         let game_time_seconds = self.game_time_seconds();
-        self.graphics.set_upper_board_mode(
-            frontend_upper_board_mode(self.display_flags.upper_board),
+        self.rendering.graphics.set_upper_board_mode(
+            frontend_upper_board_mode(self.rendering.display_flags.upper_board),
             game_time_seconds,
         );
-        for physical_line in self.graphics.prepare_message_board_lines(&line) {
+        for physical_line in self.rendering.graphics.prepare_message_board_lines(&line) {
             self.message_board.enqueue(physical_line);
         }
     }
@@ -1475,7 +1480,7 @@ impl GameApp {
     }
 
     pub(crate) fn set_message_board_line_count(&mut self, line_count: i32) {
-        let line_height = self.graphics.message_board_line_height();
+        let line_height = self.rendering.graphics.message_board_line_height();
         let enabled = self.message_board.set_line_count(line_count, line_height);
         // `C4MessageBoard::ChangeMode` assigns `Config.Graphics.MsgBoard` for
         // each of its three modes and saves nothing (C4MessageBoard.cpp:65-118),
@@ -1486,7 +1491,7 @@ impl GameApp {
     }
 
     pub(crate) fn message_board_overlay(&mut self) -> MessageBoardOverlay {
-        let line_height = self.graphics.message_board_line_height();
+        let line_height = self.rendering.graphics.message_board_line_height();
         let type_in = self.running_chat_active();
         self.message_board.overlay(line_height, type_in)
     }

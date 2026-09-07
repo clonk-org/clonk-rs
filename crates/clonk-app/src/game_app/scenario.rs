@@ -801,8 +801,8 @@ impl GameApp {
         self.menu_state.set_include_back(false);
         self.menu_state.refresh_menu_entries();
         self.refresh_scenario_entry_enabled();
-        let width = self.graphics.surface().width() as f32;
-        let height = self.graphics.surface().height() as f32;
+        let width = self.rendering.graphics.surface().width() as f32;
+        let height = self.rendering.graphics.surface().height() as f32;
         self.menu_state.menu().resize(width, height);
         if let Err(err) = self.handle_menu_input(|menu| menu.select_default_entry()) {
             tracing::error!(error = %err, "failed to select default scenario entry");
@@ -897,7 +897,7 @@ impl GameApp {
     ) -> Option<StartupTooltip> {
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let book = self.assets.book_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let (width, height) = (surface.width(), surface.height());
         let layout =
             clonk_frontend::startup_scensel::scen_sel_layout(width as i32, height as i32, fonts);
@@ -1851,8 +1851,8 @@ impl GameApp {
         if let Some(audio) = self.sound.context.as_ref() {
             audio.borrow_mut().clear_object_sound_instances();
         }
-        engine.set_smoke_level(self.graphics_smoke_level);
-        engine.set_fire_particles(self.display_flags.fire_particles);
+        engine.set_smoke_level(self.rendering.graphics_smoke_level);
+        engine.set_fire_particles(self.rendering.display_flags.fire_particles);
         let frozen_startup_player_count = if replay {
             replay_startup_player_count
         } else {
@@ -2539,7 +2539,7 @@ impl GameApp {
             self.advance_scenario_loader(98, "Players initialized");
         }
 
-        self.sky = scenario_data.sky().map(sky_render_state_from_config);
+        self.rendering.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
         {
@@ -2554,22 +2554,24 @@ impl GameApp {
             if let Some((texture_images, render_info)) =
                 preloaded_materials.filter(|_| reuse_preloaded_materials)
             {
-                self.material_texture_images = texture_images;
-                self.material_render_info = render_info;
+                self.rendering.material_texture_images = texture_images;
+                self.rendering.material_render_info = render_info;
             } else {
-                self.material_texture_images = Arc::new(load_scenario_material_textures(
+                self.rendering.material_texture_images = Arc::new(load_scenario_material_textures(
                     &path,
                     authoritative_external_groups,
                 ));
-                self.material_render_info = Arc::new(load_material_render_info(
+                self.rendering.material_render_info = Arc::new(load_material_render_info(
                     &path,
                     authoritative_external_groups,
                 ));
             }
-            self.graphics
-                .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
-            self.graphics
-                .set_material_render_info(Arc::clone(&self.material_render_info));
+            self.rendering
+                .graphics
+                .set_material_texture_surfaces(Arc::clone(&self.rendering.material_texture_images));
+            self.rendering
+                .graphics
+                .set_material_render_info(Arc::clone(&self.rendering.material_render_info));
         }
 
         // `begin_loading_scenario` stores the pack-aware Title component (or
@@ -2583,7 +2585,7 @@ impl GameApp {
         let offline_player_infos = offline_startup_players
             .is_some()
             .then(|| std::mem::take(&mut self.control_player_infos));
-        self.active_game_graphics = Some(active_game_graphics);
+        self.rendering.active_game_graphics = Some(active_game_graphics);
         self.ingame_menu_gfx = None;
         self.configure_running_state(label, ground);
         // PlayScenarioMusic one-way enables Game.IsMusicEnabled when the
@@ -2631,7 +2633,8 @@ impl GameApp {
         self.arm_initial_scoreboard_reconcile();
         // C4Game::InitGame applies the scenario gamma before its first frame
         // (C4Game.cpp:487-490).
-        self.graphics
+        self.rendering
+            .graphics
             .apply_gamma_now(&self.snapshot.environment.gamma);
         self.refresh_object_menu();
         self.refresh_focus();
@@ -2687,7 +2690,7 @@ impl GameApp {
         self.auto_frame_skip =
             configured_auto_frame_skip(&load_native_config_bytes(self.app_paths.as_ref()));
 
-        self.active_game_graphics = None;
+        self.rendering.active_game_graphics = None;
         self.ingame_menu_gfx = None;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
@@ -2705,9 +2708,10 @@ impl GameApp {
         self.film_view_player = None;
         self.clear_physical_viewport_states();
         self.viewports.physical_viewports_authoritative = false;
-        self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine
-            .set_fire_particles(self.display_flags.fire_particles);
+            .set_smoke_level(self.rendering.graphics_smoke_level);
+        self.engine
+            .set_fire_particles(self.rendering.display_flags.fire_particles);
         self.engine.set_local_players([self.players.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_network_control_mode(self.network.is_some());
@@ -2739,7 +2743,7 @@ impl GameApp {
         self.mouse_control = true;
         self.active_definition_load = None;
         self.active_description_definition_modules.clear();
-        self.sky = None;
+        self.rendering.sky = None;
 
         arm_configured_engine_debug_mode(
             &mut self.engine,

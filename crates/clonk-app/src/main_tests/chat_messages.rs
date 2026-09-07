@@ -732,7 +732,7 @@ fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
 
     let (_, _, plan) = render_ordered_test_frame(&mut app, 1.5, 480, 300);
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -803,7 +803,7 @@ fn secondary_local_viewport_draws_its_player_global_message_only_there() {
     let mut rendered = vec![0; 320 * 200 * 4];
     app.test_render(&mut rendered);
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == secondary.id)
@@ -1046,7 +1046,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
 
     let mut baseline = vec![0; 320 * 200 * 4];
     app.test_render(&mut baseline);
-    let viewports = app.graphics.active_viewport_projections();
+    let viewports = app.rendering.graphics.active_viewport_projections();
     main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::Drawable);
     let viewport = viewports
         .iter()
@@ -1089,7 +1089,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     );
     let mut fog_baseline = vec![0; 320 * 200 * 4];
     app.test_render(&mut fog_baseline);
-    let viewports = app.graphics.active_viewport_projections();
+    let viewports = app.rendering.graphics.active_viewport_projections();
     main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::NotDrawable);
     app.snapshot.hud.messages = vec![message.clone()];
     let mut fogged = vec![0; 320 * 200 * 4];
@@ -1113,7 +1113,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
         .visibility = clonk_engine::VIS_NONE;
     let mut visibility_baseline = vec![0; 320 * 200 * 4];
     app.test_render(&mut visibility_baseline);
-    let viewports = app.graphics.active_viewport_projections();
+    let viewports = app.rendering.graphics.active_viewport_projections();
     main_assert_eq!(app.hud_message_drawability(&message, &viewports) => HudMessageDrawability::NotDrawable);
     app.snapshot.hud.messages = vec![message.clone()];
     let mut invisible = vec![0; 320 * 200 * 4];
@@ -1123,7 +1123,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     message.kind = MessageKind::TargetPlayer;
     message.player = Some(app.players.local_owner);
     main_assert_eq!(
-        app.hud_message_drawability(&message, &app.graphics.active_viewport_projections()) =>
+        app.hud_message_drawability(&message, &app.rendering.graphics.active_viewport_projections()) =>
         HudMessageDrawability::Drawable,
         "C4GM_TargetPlayer bypasses C4Object::IsVisible"
     );
@@ -1145,7 +1145,7 @@ fn target_messages_render_only_for_cpp_visibility_and_fog() {
     target_object.visibility = clonk_engine::VIS_ALL;
     target_object.category |= C4D_IGNORE_FOW;
     main_assert_eq!(
-        app.hud_message_drawability(&message, &app.graphics.active_viewport_projections()) =>
+        app.hud_message_drawability(&message, &app.rendering.graphics.active_viewport_projections()) =>
         HudMessageDrawability::Drawable,
         "C4D_IgnoreFoW bypasses only the FoW predicate"
     );
@@ -1497,7 +1497,7 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
 
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
-        app.graphics
+        app.rendering.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let chart = app
@@ -1962,7 +1962,7 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     main_assert!(!halted_pass.skip_redraw);
     main_assert_eq!(app.engine.frame() => frame_before_pause);
 
-    let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0_u8; app.rendering.graphics.surface().pixels().len()];
     app.render_ordered_native_base(&mut frame).test_value();
     let hold_messages = app
         .presentation.pending_native_presentation

@@ -1193,7 +1193,8 @@ impl GameApp {
             return false;
         };
         let preferred = scoreboard_preferred_rect(
-            self.graphics
+            self.rendering
+                .graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
         );
         let bounds = dialog.layout(preferred, resources).bounds;
@@ -1470,8 +1471,8 @@ impl GameApp {
     /// diagnostics. Collection is skipped while its renderer flag is off so
     /// the normal frame path never blocks on worker inspection.
     pub(crate) fn update_network_status_overlay(&mut self) {
-        if !self.graphics.debug_draw_flags().show_net_status {
-            self.graphics.set_network_status_text(None);
+        if !self.rendering.graphics.debug_draw_flags().show_net_status {
+            self.rendering.graphics.set_network_status_text(None);
             return;
         }
         let Some(local_client_id) = self
@@ -1479,7 +1480,7 @@ impl GameApp {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
         else {
-            self.graphics.set_network_status_text(None);
+            self.rendering.graphics.set_network_status_text(None);
             return;
         };
 
@@ -1739,7 +1740,9 @@ impl GameApp {
         if clients.is_empty() {
             lines.push(" - none -".to_string());
         }
-        self.graphics.set_network_status_text(Some(lines.join("|")));
+        self.rendering
+            .graphics
+            .set_network_status_text(Some(lines.join("|")));
     }
 
     pub(crate) fn runtime_client_list_snapshot(
@@ -5232,7 +5235,7 @@ impl GameApp {
     ) -> Option<clonk_frontend::league_signup::LeagueSignupLayout> {
         let dialog = self.league_signup_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         Some(
             dialog
                 .controller
@@ -6597,7 +6600,7 @@ impl GameApp {
             .as_ref()
             .filter(|wait| wait.visible)?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         Some(
             wait.controller
                 .layout(surface.width() as i32, surface.height() as i32, fonts),
@@ -9188,7 +9191,7 @@ impl GameApp {
             self.engine.teams(),
             self.engine.auto_generate_teams(),
             self.players.local_owner,
-            self.graphics.surface().width(),
+            self.rendering.graphics.surface().width(),
             host_or_cinematic_film,
             scenario_title.clone(),
             next_mission,
@@ -9763,7 +9766,7 @@ impl GameApp {
     pub(crate) fn network_game_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
         let dialog = self.startup_network_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let layout = clonk_frontend::startup_netdlg::net_dlg_layout(
             surface.width() as i32,
             surface.height() as i32,
@@ -10913,7 +10916,8 @@ impl GameApp {
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         self.initialize_physical_viewports(false);
-        self.graphics
+        self.rendering
+            .graphics
             .apply_gamma_now(&self.snapshot.environment.gamma);
         self.refresh_object_menu();
         self.refresh_focus();

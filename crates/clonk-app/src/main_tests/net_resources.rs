@@ -1429,7 +1429,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         .text
         .line_height;
     let mut preferred = scoreboard_preferred_rect(
-        app.graphics
+        app.rendering.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let mut runtime = RuntimeClientListDialog::new(
@@ -1509,7 +1509,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     app.resize(641, 481).test_value();
     main_assert!(!app.dialogs.client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
     preferred = scoreboard_preferred_rect(
-        app.graphics
+        app.rendering.graphics
             .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
     );
     let retained_after_resize = app
@@ -1563,7 +1563,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     let mut definition =
         clonk_frontend::definition_sel::DefinitionSelController::new("", Vec::new(), Vec::new());
     let (definition_width, definition_height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width() as i32, surface.height() as i32)
     };
     let definition_layout = definition.layout(
@@ -3615,7 +3615,7 @@ fn a_script_menu_with_an_unresolved_image_still_owns_its_pointer() {
     // A point the menu owns, found through the same hit test the renderer's
     // geometry feeds.
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width() as i32, surface.height() as i32)
     };
     let menu_point = (0..height)
@@ -3654,7 +3654,7 @@ fn script_menu_pointer_requires_global_resources_before_fallback_layout() {
     let mut app = new_running_sandbox_app();
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let viewport = app.graphics.viewport_rect(app.players.local_owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(app.players.local_owner).test_value();
     let point = PhysicalPosition::new(
         f64::from(viewport.x) + f64::from(viewport.width) / 2.0,
         f64::from(viewport.y) + f64::from(viewport.height) / 2.0,
@@ -3717,7 +3717,7 @@ fn running_hud_rejects_each_missing_mandatory_graphics_facet() {
     ];
 
     // With the whole inventory present the frame renders.
-    let mut frame = vec![0x5a; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0x5a; app.rendering.graphics.surface().pixels().len()];
     app.test_render(&mut frame);
     let _ = &frame;
 
@@ -3729,8 +3729,8 @@ fn running_hud_rejects_each_missing_mandatory_graphics_facet() {
             })
         };
 
-        app.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
-        let surface_before = app.graphics.surface().pixels().to_vec();
+        app.rendering.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
+        let surface_before = app.rendering.graphics.surface().pixels().to_vec();
         let mut frame = vec![0x5a; surface_before.len()];
         let frame_before = frame.clone();
         let error = match app.render(&mut frame) {
@@ -3745,7 +3745,7 @@ fn running_hud_rejects_each_missing_mandatory_graphics_facet() {
             "{name} must be reported as the single missing facet"
         );
         main_assert_eq!(frame => frame_before, "{name}: preflight must precede output writes");
-        main_assert_eq!(app.graphics.surface().pixels() => surface_before.as_slice(), "{name}: preflight must precede logical-surface writes");
+        main_assert_eq!(app.rendering.graphics.surface().pixels() => surface_before.as_slice(), "{name}: preflight must precede logical-surface writes");
 
         let hud = Arc::make_mut(&mut Arc::get_mut(&mut app.assets).test_value().hud_graphics);
         *field(hud) = Some(taken);
@@ -3753,7 +3753,7 @@ fn running_hud_rejects_each_missing_mandatory_graphics_facet() {
 
     // Restoring the whole inventory renders again, so the sweep left no
     // facet behind.
-    let mut frame = vec![0x5a; app.graphics.surface().pixels().len()];
+    let mut frame = vec![0x5a; app.rendering.graphics.surface().pixels().len()];
     app.test_render(&mut frame);
 }
 
@@ -3761,8 +3761,8 @@ fn running_hud_rejects_each_missing_mandatory_graphics_facet() {
 fn upper_board_and_message_board_fail_closed_when_resources_missing() {
     let mut app = new_classic_lightweight_running_sandbox_app();
     let assert_refusal = |app: &mut GameApp, missing: Vec<&'static str>| {
-        app.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
-        let surface_before = app.graphics.surface().pixels().to_vec();
+        app.rendering.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
+        let surface_before = app.rendering.graphics.surface().pixels().to_vec();
         let mut frame = vec![0x5a; surface_before.len()];
         let frame_before = frame.clone();
 
@@ -3773,7 +3773,7 @@ fn upper_board_and_message_board_fail_closed_when_resources_missing() {
         main_assert_eq!(error.downcast_ref::<ClassicParityBoundary>() => Some(&expected));
         main_assert!(error.to_string().contains("refusing generic Rust fallback"), "boundary must explain why the fallback is unreachable: {error:#}");
         main_assert_eq!(frame => frame_before, "preflight must precede output writes");
-        main_assert_eq!(app.graphics.surface().pixels() => surface_before.as_slice(), "preflight must precede logical-surface writes");
+        main_assert_eq!(app.rendering.graphics.surface().pixels() => surface_before.as_slice(), "preflight must precede logical-surface writes");
     };
 
     let upper_board = Arc::make_mut(&mut Arc::get_mut(&mut app.assets).test_value().hud_graphics)

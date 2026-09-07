@@ -861,7 +861,7 @@ fn joined_lobby_tooltips_survive_frames_and_use_shared_delay() {
     let assets = Arc::clone(&app.assets);
     let layout = app_lobby_mut(&mut app.network_lobby)
         .with_classic_controller_input(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             assets.as_ref(),
             &app.scenario_game_options,
             |_, layout, _| layout.clone(),
@@ -1178,7 +1178,7 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
     persist_config_value(&paths, "Graphics", "Shader", "1").test_value();
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     main_assert!(
-        app.graphics.fragment_gamma_enabled(),
+        app.rendering.graphics.fragment_gamma_enabled(),
         "the exact background comparison requires the post-migration shader-gamma path"
     );
     let accepted = GameOptionValues {
@@ -1286,7 +1286,7 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
         .collect::<Vec<_>>();
     main_assert_eq!(projected_player_ids => authoritative_player_ids);
     let fonts = app.assets.clonk_fonts.as_deref().test_value();
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     let layout = lobby.layout(surface.width() as i32, surface.height() as i32, fonts);
     main_assert_eq!(app.scenario_game_options.layout().bounds => layout.game_option_strip);
 
@@ -2551,7 +2551,7 @@ fn generic_client_lobby_external_irc_button_is_retained_and_emits_typed_action()
     let app = new_menu_app(640, 480);
     let (controller, _) = lobby
         .classic_render_state(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             app.assets.as_ref(),
             &app.scenario_game_options,
         )
@@ -2577,7 +2577,7 @@ fn generic_client_lobby_external_irc_button_is_retained_and_emits_typed_action()
         .classic_pointer_down(
             point,
             false,
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             app.assets.as_ref(),
             &app.scenario_game_options,
         )
@@ -2586,7 +2586,7 @@ fn generic_client_lobby_external_irc_button_is_retained_and_emits_typed_action()
     main_assert_eq!(lobby.controller.take_sounds() => [LobbySound::ArrowHit]);
     let up = lobby
         .with_classic_controller_input(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             app.assets.as_ref(),
             &app.scenario_game_options,
             |controller, layout, roster| {
@@ -2628,7 +2628,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     let assets = Arc::clone(&app.assets);
     let (layout, max_scroll) = app_lobby_mut(&mut app.network_lobby)
         .with_classic_controller_input(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             assets.as_ref(),
             &app.scenario_game_options,
             |controller, layout, _| {
@@ -2740,7 +2740,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     let assets = Arc::clone(&app.assets);
     app_lobby_mut(&mut app.network_lobby)
         .classic_render_state(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             assets.as_ref(),
             &app.scenario_game_options,
         )
@@ -2763,7 +2763,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     let assets = Arc::clone(&app.assets);
     app_lobby_mut(&mut app.network_lobby)
         .classic_render_state(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             assets.as_ref(),
             &app.scenario_game_options,
         )
@@ -3070,7 +3070,7 @@ fn joined_lobby_options_tab_click_opens_the_read_only_sheet() {
     let assets = Arc::clone(&app.assets);
     let options_tab = app_lobby_mut(&mut app.network_lobby)
         .with_classic_controller_input(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             assets.as_ref(),
             &app.scenario_game_options,
             |_, layout, _| {
@@ -3111,7 +3111,7 @@ fn joined_lobby_options_tab_click_opens_the_read_only_sheet() {
     // no selection popup (src/C4GameOptions.cpp:80,126).
     let combo = app_lobby_mut(&mut app.network_lobby)
         .with_classic_controller_input(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             assets.as_ref(),
             &app.scenario_game_options,
             |_, _, roster| roster.rows.first().and_then(|row| row.option_value),
@@ -3171,7 +3171,7 @@ fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app_lobby(&app).active_sheet => LobbySheet::Resources);
     let (controller, _) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         app_lobby_mut(&mut app.network_lobby).classic_render_state(
             surface,
             app.assets.as_ref(),
@@ -3188,7 +3188,7 @@ fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
     main_assert_eq!(app_lobby(&app).resource_rows[&9].present_percent => 73);
     process_joined_lobby_action(&mut app, LobbyAction::SelectSheet(LobbySheet::Resources));
     let (controller, _) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         app_lobby_mut(&mut app.network_lobby).classic_render_state(
             surface,
             app.assets.as_ref(),
@@ -3535,7 +3535,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     }
 
     fn right_caption_context_point(app: &mut GameApp) -> GuiPoint {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         let lobby = app_lobby_mut(&mut app.network_lobby);
         let (controller, _) = lobby
             .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
@@ -3704,7 +3704,7 @@ fn joined_client_roster_context_reaches_mute_and_info_without_host_actions() {
     main_assert_eq!(labels => vec!["Mute", "Info"]);
 
     let point = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         let lobby = app_lobby_mut(&mut app.network_lobby);
         let (mut controller, _) = lobby
             .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
@@ -4697,7 +4697,7 @@ fn network_lobby_game_option_state_matches_role_and_render_focus() {
             "focus cycle never reaches the strip: {seen:?}"
         );
     }
-    let surface = app.graphics.surface();
+    let surface = app.rendering.graphics.surface();
     let (controller, options) = app_lobby_mut(&mut app.network_lobby)
         .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
         .test_value();
@@ -6314,7 +6314,7 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
         OptionsDlgAction::FairCrewStrengthChanged(strength),
     ])
     .test_value();
-    main_assert!(!app.display_flags.white_chat);
+    main_assert!(!app.rendering.display_flags.white_chat);
     main_assert!(!app.white_lobby_chat);
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
         .test_value();
@@ -8208,15 +8208,15 @@ fn configured_automatic_lobby_preload_runs_off_thread_and_activation_reuses_it()
         .test_value();
     main_assert!(Arc::ptr_eq(
         &expected_hud,
-        &some(&app.active_game_graphics).hud_graphics
+        &some(&app.rendering.active_game_graphics).hud_graphics
     ));
     main_assert!(Arc::ptr_eq(
         &expected_textures,
-        &app.material_texture_images
+        &app.rendering.material_texture_images
     ));
     main_assert!(Arc::ptr_eq(
         &expected_render_info,
-        &app.material_render_info
+        &app.rendering.material_render_info
     ));
 }
 
@@ -8296,15 +8296,15 @@ fn catalog_host_lobby_preload_is_eligible_and_caches_the_selected_scenario() {
     }
     main_assert!(Arc::ptr_eq(
         &expected_hud,
-        &some(&app.active_game_graphics).hud_graphics
+        &some(&app.rendering.active_game_graphics).hud_graphics
     ));
     main_assert!(Arc::ptr_eq(
         &expected_textures,
-        &app.material_texture_images
+        &app.rendering.material_texture_images
     ));
     main_assert!(Arc::ptr_eq(
         &expected_render_info,
-        &app.material_render_info
+        &app.rendering.material_render_info
     ));
 }
 
@@ -9257,7 +9257,7 @@ fn joined_lobby_long_countdown_keeps_game_options_unlocked_and_renderable() {
     // the final ten seconds and Start lock it
     // (src/C4GameLobby.cpp:346-425; src/C4GameLobby.h:93).
     let mut app = new_real_menu_app(320, 200);
-    app.graphics.set_runtime_sprite_filtering(1.0, false);
+    app.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
     app.startup.view = StartupView::NetworkLobby;
     let event_tx = install_client_network_stub(&mut app, 7);
@@ -9278,7 +9278,7 @@ fn joined_lobby_long_countdown_keeps_game_options_unlocked_and_renderable() {
     let assets = Arc::clone(&app.assets);
     let (_, options) = app_lobby_mut(&mut app.network_lobby)
         .classic_render_state(
-            app.graphics.surface(),
+            app.rendering.graphics.surface(),
             assets.as_ref(),
             &app.scenario_game_options,
         )
@@ -9344,7 +9344,7 @@ fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
         let assets = Arc::clone(&app.assets);
         let (projection, _) = app_lobby_mut(&mut app.network_lobby)
             .classic_render_state(
-                app.graphics.surface(),
+                app.rendering.graphics.surface(),
                 assets.as_ref(),
                 &app.scenario_game_options,
             )

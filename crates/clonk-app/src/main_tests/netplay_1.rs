@@ -695,7 +695,7 @@ fn help_regions_share_one_native_caption_slot() {
     );
     let caption = app.live_input.ingame_mouse_caption.caption.test_ref();
     let expected = app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
-    let viewport = app.graphics.viewport_rect(owner).test_value();
+    let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let button_rect = clonk_frontend::hud::viewport_button_rect(
         viewport,
         clonk_frontend::hud::ViewportButton::Help,
@@ -1415,7 +1415,7 @@ fn ordered_overlay_retains_additive_rgb_with_zero_alpha() {
     let mut app = new_running_sandbox_app();
     app.presentation.pending_native_presentation = Some(NativePresentationPlan::default());
     app.begin_native_text_capture(true);
-    app.graphics.surface_mut().pixels_mut()[..4].copy_from_slice(&[37, 11, 5, 0]);
+    app.rendering.graphics.surface_mut().pixels_mut()[..4].copy_from_slice(&[37, 11, 5, 0]);
 
     app.commit_pending_native_overlay();
 
@@ -1436,7 +1436,7 @@ fn ordered_overlay_does_not_infer_clipper_from_shared_text_clip() {
     app.presentation.pending_native_presentation = Some(NativePresentationPlan::default());
     app.begin_native_text_capture(true);
     {
-        let surface = app.graphics.surface_mut();
+        let surface = app.rendering.graphics.surface_mut();
         surface.set_clip(clip);
         surface.pixels_mut()[..4].copy_from_slice(&[9, 17, 25, 255]);
         fonts.text.draw(
@@ -1495,7 +1495,7 @@ fn scale_three_target_message_commits_through_native_viewport_projection() {
     main_assert!(app.can_defer_native_game_messages(3.0));
 
     let gamma = app
-        .graphics
+        .rendering.graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
     let mut presenter = clonk_scaling::FramePresenter::new(3.0, 960, 600);
     let mut output = vec![0_u8; 960 * 600 * 4];
@@ -1509,7 +1509,7 @@ fn scale_three_target_message_commits_through_native_viewport_projection() {
     app.render_native_game_messages(&mut output, presenter.presentation_geometry(), &gamma)
         .test_value();
     let viewport = app
-        .graphics
+        .rendering.graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -4660,7 +4660,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
     let (width, height) = {
-        let surface = app.graphics.surface();
+        let surface = app.rendering.graphics.surface();
         (surface.width(), surface.height())
     };
     app.menu_backdrop_cache = StartupBackdropCache {
@@ -4692,7 +4692,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     });
 
     app.synchronize_advanced_options_runtime();
-    main_assert!(app.graphics.advanced_renderer_config().disable_gamma);
+    main_assert!(app.rendering.graphics.advanced_renderer_config().disable_gamma);
     main_assert_eq!(app.loader_gamma => None);
     main_assert_eq!(app.startup_active_gamma() => clonk_graphics::GammaRamp::identity());
     main_assert!(app.menu_backdrop_cache.key.is_none());
@@ -4705,7 +4705,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     )
     .test_value();
     app.synchronize_advanced_options_runtime();
-    main_assert!(!app.graphics.advanced_renderer_config().disable_gamma);
+    main_assert!(!app.rendering.graphics.advanced_renderer_config().disable_gamma);
     main_assert_eq!(app.loader_gamma => Some(clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,])));
     main_assert_eq!(app.startup_active_gamma() => clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,]));
 }
@@ -5469,7 +5469,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 fn all_graphical_modes_produce_retained_scenes() {
     let mut menu = new_real_menu_app(320, 200);
     menu.startup.dialog_fade = None;
-    menu.graphics.set_runtime_sprite_filtering(1.0, false);
+    menu.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
     menu.configure_native_startup_fonts(1.0, false);
     let menu_presentation = retained_test_presentation(&menu);
     let menu_frame = menu
@@ -5478,7 +5478,7 @@ fn all_graphical_modes_produce_retained_scenes() {
     assert_retained_frame_has_commands("menu", &menu_frame);
 
     let mut loading = new_real_menu_app(320, 200);
-    loading.graphics.set_runtime_sprite_filtering(1.0, false);
+    loading.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
     loading.configure_native_startup_fonts(1.0, false);
     let fonts = loading.assets.clonk_fonts.clone().test_value();
     loading.loader_screen = Some(
@@ -5502,7 +5502,7 @@ fn all_graphical_modes_produce_retained_scenes() {
     assert_retained_frame_has_commands("loading", &loading_frame);
 
     let mut running = new_classic_running_sandbox_app();
-    running.graphics.set_runtime_sprite_filtering(1.0, false);
+    running.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
     running.configure_native_startup_fonts(1.0, false);
     let running_presentation = retained_test_presentation(&running);
     let running_frame = running
@@ -5523,7 +5523,7 @@ fn all_graphical_modes_produce_retained_scenes() {
 fn scale_native_text_keeps_logical_physical_painter_order() {
     let mut app = new_real_menu_app(320, 200);
     app.startup.dialog_fade = None;
-    app.graphics.set_runtime_sprite_filtering(2.0, false);
+    app.rendering.graphics.set_runtime_sprite_filtering(2.0, false);
     app.configure_native_startup_fonts(2.0, false);
     let presentation = GpuPresentation {
         physical_extent: [640, 400],
@@ -5747,7 +5747,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         .expect_err("missing loader must still fail closed");
     main_assert!(error.to_string().contains("no selected classic loader"));
     main_assert!(app.presentation.pending_native_presentation.is_none());
-    main_assert!(!app.graphics.surface().is_clonk_text_capture_active());
+    main_assert!(!app.rendering.graphics.surface().is_clonk_text_capture_active());
 }
 
 #[test]
@@ -5820,7 +5820,7 @@ fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
 #[test]
 fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
     let mut app = new_real_classic_menu_app(640, 480);
-    app.graphics.set_runtime_sprite_filtering(3.0, false);
+    app.rendering.graphics.set_runtime_sprite_filtering(3.0, false);
     app.configure_native_startup_fonts(3.0, false);
     for label in ["LOWER", "H"] {
         app.push_message_dialog(

@@ -897,7 +897,7 @@ impl GameApp {
                 detail: "CStdFont-faithful lobby fonts are unavailable".to_string(),
             })
         })?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
         options.set_bounds(layout.game_option_strip);
         // Prime scroll metrics before the first pointer or wheel event.
@@ -3723,7 +3723,7 @@ impl GameApp {
             match state {
                 ElementState::Pressed => lobby
                     .with_classic_controller_input(
-                        self.graphics.surface(),
+                        self.rendering.graphics.surface(),
                         assets.as_ref(),
                         &self.scenario_game_options,
                         |controller, layout, roster| {
@@ -4005,7 +4005,7 @@ impl GameApp {
                 }),
             ))
         })?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let (width, height) = (surface.width() as i32, surface.height() as i32);
         let state = self.classic_host_lobby.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
@@ -4030,7 +4030,7 @@ impl GameApp {
                 }),
             ))
         })?;
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let (width, height) = (surface.width() as i32, surface.height() as i32);
         let state = self.network_lobby.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
@@ -5863,7 +5863,7 @@ impl GameApp {
             return self.classic_host_lobby_layouts().map(|(layout, _)| layout);
         }
         let assets = Arc::clone(&self.assets);
-        let surface = self.graphics.surface();
+        let surface = self.rendering.graphics.surface();
         let lobby = self.network_lobby.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
@@ -6625,7 +6625,7 @@ impl GameApp {
                 lobby.handle_panel_pointer_move(point);
                 lobby.classic_pointer_move(
                     point,
-                    self.graphics.surface(),
+                    self.rendering.graphics.surface(),
                     assets.as_ref(),
                     &self.scenario_game_options,
                 )
@@ -6660,7 +6660,7 @@ impl GameApp {
                         .classic_pointer_down(
                             point,
                             double_click,
-                            self.graphics.surface(),
+                            self.rendering.graphics.surface(),
                             assets.as_ref(),
                             &self.scenario_game_options,
                         )
@@ -6673,7 +6673,7 @@ impl GameApp {
                     let now = Instant::now();
                     let (mut actions, clicked) = lobby
                         .with_classic_controller_input(
-                            self.graphics.surface(),
+                            self.rendering.graphics.surface(),
                             assets.as_ref(),
                             &self.scenario_game_options,
                             |controller, layout, roster| {
@@ -6722,7 +6722,7 @@ impl GameApp {
                     phase,
                     point,
                     double_click,
-                    self.graphics.surface(),
+                    self.rendering.graphics.surface(),
                     assets.as_ref(),
                     &self.scenario_game_options,
                 )
@@ -6954,7 +6954,7 @@ impl GameApp {
             .expect("network lobby was checked above")
             .classic_note_pointer_button(
                 point,
-                self.graphics.surface(),
+                self.rendering.graphics.surface(),
                 assets.as_ref(),
                 &self.scenario_game_options,
             )
@@ -6969,7 +6969,7 @@ impl GameApp {
             .expect("network lobby was checked above")
             .classic_secondary_down(
                 point,
-                self.graphics.surface(),
+                self.rendering.graphics.surface(),
                 assets.as_ref(),
                 &self.scenario_game_options,
             )
@@ -6990,7 +6990,7 @@ impl GameApp {
             .as_mut()
             .expect("network lobby context key requires live state")
             .classic_context_key(
-                self.graphics.surface(),
+                self.rendering.graphics.surface(),
                 assets.as_ref(),
                 &self.scenario_game_options,
             )
@@ -7044,7 +7044,7 @@ impl GameApp {
             .expect("network lobby was checked above")
             .classic_note_pointer_button(
                 point,
-                self.graphics.surface(),
+                self.rendering.graphics.surface(),
                 assets.as_ref(),
                 &self.scenario_game_options,
             )
@@ -7059,7 +7059,7 @@ impl GameApp {
             .expect("network lobby was checked above")
             .classic_middle_down(
                 point,
-                self.graphics.surface(),
+                self.rendering.graphics.surface(),
                 assets.as_ref(),
                 &self.scenario_game_options,
             )
@@ -7321,8 +7321,8 @@ impl GameApp {
         self.menu_state.set_pointer_position(None);
         self.menu_state.set_include_back(true);
         self.menu_state.refresh_menu_entries();
-        let width = self.graphics.surface().width() as f32;
-        let height = self.graphics.surface().height() as f32;
+        let width = self.rendering.graphics.surface().width() as f32;
+        let height = self.rendering.graphics.surface().height() as f32;
         self.menu_state.menu().resize(width, height);
         if let Err(err) = self.handle_menu_input(|menu| menu.select_default_entry()) {
             tracing::error!(error = %err, "failed to select default scenario entry");
@@ -7797,7 +7797,7 @@ impl GameApp {
             && self.dialogs.messages.is_empty()
             && self.dialogs.client_list.is_none()
             && !self.chat.external_dialog_visible;
-        let surface = self.graphics.surface_mut();
+        let surface = self.rendering.graphics.surface_mut();
         loader.render_background(surface, config, Some(&gamma));
         lobby.controller.render_without_tooltips(
             surface,
@@ -7835,7 +7835,7 @@ impl GameApp {
             && self.dialogs.client_list.is_none()
             && !self.chat.external_dialog_visible;
         lobby.controller.render_tooltips(
-            self.graphics.surface_mut(),
+            self.rendering.graphics.surface_mut(),
             &lobby_resources,
             &self.scenario_game_options,
             &option_resources,
