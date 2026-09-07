@@ -780,7 +780,7 @@ impl GameApp {
             .is_clonk_text_capture_active();
         let now = Instant::now();
         for index in 0..=last {
-            let keyboard_active = Some(index) == active_index && self.context_menu.is_none();
+            let keyboard_active = Some(index) == active_index && self.context_menus.open.is_none();
             let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
             self.dialogs.messages[index].state.render_at(
                 self.rendering.graphics.surface_mut(),
@@ -818,7 +818,7 @@ impl GameApp {
             .context("classic message-dialog resources are unavailable")?;
         let keyboard_active = Some(index) == self.active_message_dialog_index()
             && !self.running_chat_active()
-            && self.context_menu.is_none();
+            && self.context_menus.open.is_none();
         self.dialogs.messages[index].state.render_at(
             self.rendering.graphics.surface_mut(),
             resources,
@@ -847,7 +847,7 @@ impl GameApp {
         dialog.controller.render(
             self.rendering.graphics.surface_mut(),
             resources,
-            self.dialogs.messages.is_empty() && self.context_menu.is_none(),
+            self.dialogs.messages.is_empty() && self.context_menus.open.is_none(),
             gamma,
         )
     }
@@ -933,7 +933,7 @@ impl GameApp {
             .render(
                 surface,
                 resources,
-                self.dialogs.messages.is_empty() && self.context_menu.is_none(),
+                self.dialogs.messages.is_empty() && self.context_menus.open.is_none(),
                 Some(gamma),
             )
             .map_err(|error| self.loader_boundary(error.to_string()))
@@ -997,7 +997,7 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
-        if self.context_menu.is_some() {
+        if self.context_menus.open.is_some() {
             return Ok(());
         }
         let Some(tooltip_pointer) = self.startup_tooltip.eligible_pointer() else {
@@ -1056,11 +1056,13 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
         let panel_count = self
-            .context_menu
+            .context_menus
+            .open
             .as_ref()
             .map_or(0, ClassicContextMenu::panel_count);
         for index in 0..panel_count {
-            self.context_menu
+            self.context_menus
+                .open
                 .as_ref()
                 .expect("context menu panel count came from an installed menu")
                 .render_panel(self.rendering.graphics.surface_mut(), index, gamma)?;
@@ -1073,14 +1075,14 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
-        if let Some(context_menu) = self.context_menu.as_ref() {
+        if let Some(context_menu) = self.context_menus.open.as_ref() {
             context_menu.render_panels(self.rendering.graphics.surface_mut(), gamma)?;
         }
         Ok(())
     }
 
     fn render_context_menu_tooltip(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> bool {
-        let Some(context_menu) = self.context_menu.as_ref() else {
+        let Some(context_menu) = self.context_menus.open.as_ref() else {
             return false;
         };
         context_menu.render_tooltip(self.rendering.graphics.surface_mut(), gamma)
@@ -1196,11 +1198,11 @@ impl GameApp {
             self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
                 && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
                 && (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
         } else {
             (self.game_over_dialog.is_none() || self.dialogs.client_list_above_game_over)
                 && self.dialogs.messages.is_empty()
-                && self.context_menu.is_none()
+                && self.context_menus.open.is_none()
         }
     }
 
@@ -1515,12 +1517,12 @@ impl GameApp {
                     }
                     if ordered_native
                         && self.game_option_input_dialog.is_none()
-                        && self.context_menu.is_some()
+                        && self.context_menus.open.is_some()
                     {
                         self.next_pending_native_overlay();
                         self.render_ordered_context_menu(gamma.as_ref())?;
                     } else if !ordered_native && self.game_option_input_dialog.is_none() {
-                        if let Some(context_menu) = self.context_menu.as_ref() {
+                        if let Some(context_menu) = self.context_menus.open.as_ref() {
                             context_menu.render_panels(
                                 self.rendering.graphics.surface_mut(),
                                 gamma.as_ref(),
@@ -1629,7 +1631,7 @@ impl GameApp {
                 let league_signup_open = self.league_signup_dialog.is_some();
                 // A fading C4GUI::Dialog is inactive even when it retains its
                 // focused control. Reuse the renderer's inactive-focus path.
-                let context_menu_open = self.context_menu.is_some()
+                let context_menu_open = self.context_menus.open.is_some()
                     || self.startup.player_properties_dialog.is_some()
                     || league_signup_open
                     || self.chat.external_dialog_visible
@@ -1641,7 +1643,7 @@ impl GameApp {
                     None
                 } else {
                     Self::startup_base_context_menu(
-                        self.context_menu.as_ref(),
+                        self.context_menus.open.as_ref(),
                         game_option_input_open,
                     )
                 };
@@ -1913,11 +1915,11 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                 }
-                if ordered_native && !game_option_input_open && self.context_menu.is_some() {
+                if ordered_native && !game_option_input_open && self.context_menus.open.is_some() {
                     self.next_pending_native_overlay();
                     self.render_ordered_context_menu(Some(menu_gamma))?;
                 } else if fade_was_active && !game_option_input_open {
-                    if let Some(context_menu) = self.context_menu.as_ref() {
+                    if let Some(context_menu) = self.context_menus.open.as_ref() {
                         context_menu.render_panels(
                             self.rendering.graphics.surface_mut(),
                             Some(menu_gamma),
@@ -2272,7 +2274,7 @@ impl GameApp {
         })?;
         let last = self.dialogs.messages.len() - 1;
         let active_index = self.active_message_dialog_index();
-        let context_menu_closed = self.context_menu.is_none();
+        let context_menu_closed = self.context_menus.open.is_none();
         let now = Instant::now();
         for index in 0..=last {
             let keyboard_active = Some(index) == active_index && context_menu_closed;
@@ -6942,7 +6944,7 @@ impl GameApp {
         if render_network_chart_elevated {
             self.render_network_chart_layer(&frame_gamma, ordered_native)?;
         }
-        if self.context_menu.is_some()
+        if self.context_menus.open.is_some()
             && (!running_chat_input_open || use_running_dialog_stack || self.dialogs.chart_elevated)
         {
             // C4GUI::Screen draws its recursively owned context chain after
@@ -6950,7 +6952,7 @@ impl GameApp {
             // scoreboard, evaluation and message dialogs.
             if ordered_native {
                 self.render_ordered_context_menu(Some(&frame_gamma))?;
-            } else if let Some(context_menu) = self.context_menu.as_ref() {
+            } else if let Some(context_menu) = self.context_menus.open.as_ref() {
                 context_menu
                     .render_panels(self.rendering.graphics.surface_mut(), Some(&frame_gamma))?;
             }

@@ -4731,7 +4731,7 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
 
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.close_context_menu_silently();
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
     app.test_modifiers(ModifiersState::empty());
@@ -4745,7 +4745,7 @@ fn options_program_font_combos_accept_native_alt_open_bindings() {
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().focused_program_control() => Some(OptionsProgramFocusTarget::FontSizeCombo));
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
 }
 
 #[test]

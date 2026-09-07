@@ -1683,10 +1683,10 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
     app.menu_state.set_search_text("context");
     app.menu_state.set_search_focused(true);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     main_assert!(app.game_option_input_dialog.is_none());
     main_assert_eq!(app.scenario_game_options.values().comment => "unchanged comment");
     app.close_context_menu_silently();
@@ -2463,7 +2463,7 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
     );
     app.test_cursor(label_point);
     app.test_right_button(ElementState::Pressed);
-    main_assert!(app.context_menu.is_none(), "wooden label has no edit context");
+    main_assert!(app.context_menus.open.is_none(), "wooden label has no edit context");
 
     app.menu_state.set_search_text("alpha beta");
     app.menu_state.search_edit.anchor = 0;
@@ -2487,39 +2487,39 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         })
         .test_value();
     app.test_right_button(ElementState::Pressed);
-    let popup = app.context_menu.test_ref();
+    let popup = app.context_menus.open.test_ref();
     main_assert_eq!(popup.pointer_position() => anchor);
     main_assert_eq!(popup.layout().panels[0].rows.len() => expected_entries.len());
     main_assert_eq!(app.menu_state.search_edit.selected_text() => Some("alpha"));
     main_assert!(!app.menu_state.search_focused(), "right-down does not focus edit");
     app.test_right_button(ElementState::Released);
 
-    let popup_margin = app.context_menu.test_ref().layout().panels[0].bounds;
+    let popup_margin = app.context_menus.open.test_ref().layout().panels[0].bounds;
     app.test_cursor(PhysicalPosition::new(
         f64::from(popup_margin.x + 1),
         f64::from(popup_margin.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left));
+    main_assert_eq!(app.context_menus.pointer_capture => Some(ContextMenuPointerButton::Left));
     app.pointer_left().test_value();
-    main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left), "an open popup retains capture across CursorLeft");
+    main_assert_eq!(app.context_menus.pointer_capture => Some(ContextMenuPointerButton::Left), "an open popup retains capture across CursorLeft");
     app.test_cursor(PhysicalPosition::new(0.0, 0.0));
     app.test_left_button(ElementState::Released);
-    main_assert!(app.context_menu.is_some());
-    main_assert_eq!(app.context_menu_pointer_capture => None);
+    main_assert!(app.context_menus.open.is_some());
+    main_assert_eq!(app.context_menus.pointer_capture => None);
 
-    let clear = app.context_menu.test_ref().layout().panels[0].rows[clear_index].rect;
+    let clear = app.context_menus.open.test_ref().layout().panels[0].rows[clear_index].rect;
     app.test_cursor(PhysicalPosition::new(
         f64::from(clear.x + 1),
         f64::from(clear.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.menu_state.search_text() => " beta");
     main_assert_eq!(app.menu_state.applied_search_text => " beta");
     app.test_left_button(ElementState::Released);
     main_assert!(!app.menu_state.search_focused(), "activation release must not click the underlying edit");
-    main_assert_eq!(app.context_menu_pointer_capture => None);
+    main_assert_eq!(app.context_menus.pointer_capture => None);
 
     app.menu_state.set_search_focused(true);
     app.menu_state.search_edit.anchor = app.menu_state.search_edit.caret;
@@ -2529,7 +2529,7 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         (layout.search_edit.x + layout.search_edit.w / 2) as f32,
         (layout.search_edit.y + layout.search_edit.h / 2) as f32,
     );
-    main_assert_eq!(app.context_menu.as_ref().expect("Apps context").pointer_position() => expected_center);
+    main_assert_eq!(app.context_menus.open.as_ref().expect("Apps context").pointer_position() => expected_center);
     app.test_text_input('Z');
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::KeyA, ElementState::Pressed);
@@ -2538,11 +2538,11 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
     app.test_modifiers(ModifiersState::empty());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
     main_assert!(app.menu_state.search_focused(), "logical focus is retained");
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    let select_all = app.context_menu.test_ref().layout().panels[0]
+    let select_all = app.context_menus.open.test_ref().layout().panels[0]
         .rows
         .last()
         .test_value()
@@ -2552,10 +2552,10 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         f64::from(select_all.y + 1),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
-    main_assert_eq!(app.context_menu_pointer_capture => Some(ContextMenuPointerButton::Left));
+    main_assert!(app.context_menus.open.is_none());
+    main_assert_eq!(app.context_menus.pointer_capture => Some(ContextMenuPointerButton::Left));
     app.pointer_left().test_value();
-    main_assert_eq!(app.context_menu_pointer_capture => None);
+    main_assert_eq!(app.context_menus.pointer_capture => None);
 
     app.test_cursor(edit_point);
     app.test_left_button(ElementState::Pressed);
@@ -2565,12 +2565,12 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
 
     app.menu_state.set_search_focused(false);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert!(app.context_menu.is_none());
+    main_assert!(app.context_menus.open.is_none());
 
     let empty_entries = scensel_search_context_entries(&SearchEditState::default(), false);
     app.open_context_menu_at(empty_entries, expected_center)
         .test_value();
-    let empty = app.context_menu.test_ref().layout();
+    let empty = app.context_menus.open.test_ref().layout();
     main_assert!(empty.panels[0].rows.is_empty());
     main_assert_eq!((empty.panels[0].bounds.w, empty.panels[0].bounds.h) => (40, 7));
     app.close_context_menu_silently();

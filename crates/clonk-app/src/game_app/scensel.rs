@@ -1023,7 +1023,7 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::ScenarioBrowser
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || state != ElementState::Pressed
         {
             return Ok(false);

@@ -1016,14 +1016,14 @@ impl GameApp {
     }
 
     pub(crate) fn set_context_menu_lobby_team_player(&mut self, player_id: Option<i32>) {
-        self.context_menu_lobby_team_player = player_id;
+        self.context_menus.lobby_team_player = player_id;
         if let Some(controller) = self.visible_classic_lobby_controller_mut() {
             controller.set_open_team_combo_player(player_id);
         }
     }
 
     pub(crate) fn set_context_menu_lobby_option(&mut self, option: Option<LobbyOptionKind>) {
-        self.context_menu_lobby_option = option;
+        self.context_menus.lobby_option = option;
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.set_open_option_combo(option);
         }
@@ -1037,7 +1037,8 @@ impl GameApp {
             .visible_classic_lobby_controller()
             .is_some_and(|controller| controller.active_sheet().is_roster());
         let stale_team_combo = self
-            .context_menu_lobby_team_player
+            .context_menus
+            .lobby_team_player
             .is_some_and(|player_id| {
                 !roster_active
                     || self
@@ -1046,13 +1047,14 @@ impl GameApp {
                         != Some(player_id)
             });
         let stale_kick = self
-            .context_menu_lobby_kick_client
+            .context_menus
+            .lobby_kick_client
             .is_some_and(|client_id| {
                 !roster_active
                     || !self.control_clients.contains(client_id)
                     || self.visible_lobby_client_is_local(client_id).is_none()
             });
-        let stale_player = self.context_menu_lobby_player.is_some_and(
+        let stale_player = self.context_menus.lobby_player.is_some_and(
             |(client_id, player_id, opened_as_free_savegame)| {
                 !roster_active
                     || !self
@@ -1063,7 +1065,7 @@ impl GameApp {
                         })
             },
         );
-        let stale_option = self.context_menu_lobby_option.is_some_and(|option| {
+        let stale_option = self.context_menus.lobby_option.is_some_and(|option| {
             let lobby_owns = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
                 lobby.controller.active_sheet() == LobbySheet::Options
                     && lobby.controller.open_option_combo() == Some(option)
@@ -1781,10 +1783,10 @@ impl GameApp {
             return false;
         }
         if (!sheet.is_roster()
-            && (self.context_menu_lobby_team_player.is_some()
-                || self.context_menu_lobby_kick_client.is_some()
-                || self.context_menu_lobby_player.is_some()))
-            || (sheet != LobbySheet::Options && self.context_menu_lobby_option.is_some())
+            && (self.context_menus.lobby_team_player.is_some()
+                || self.context_menus.lobby_kick_client.is_some()
+                || self.context_menus.lobby_player.is_some()))
+            || (sheet != LobbySheet::Options && self.context_menus.lobby_option.is_some())
         {
             self.close_context_menu_silently();
         }
@@ -2111,7 +2113,7 @@ impl GameApp {
                     let opened_as_free_savegame = self
                         .visible_classic_lobby_player_context_target(player_id)
                         .is_some_and(|(_, free_savegame_player)| free_savegame_player);
-                    self.context_menu_lobby_player =
+                    self.context_menus.lobby_player =
                         Some((client_id, player_id, opened_as_free_savegame));
                 }
                 Ok(opened)
@@ -2122,7 +2124,7 @@ impl GameApp {
                 };
                 let opened = self.open_context_menu_at(entries, position)?;
                 if opened {
-                    self.context_menu_lobby_kick_client = Some(client_id);
+                    self.context_menus.lobby_kick_client = Some(client_id);
                 }
                 Ok(opened)
             }
@@ -2393,7 +2395,10 @@ impl GameApp {
     }
 
     fn open_classic_lobby_team_combo(&mut self, player_id: i32) -> Result<bool, EngineError> {
-        let dismissed_player = self.context_menu_pointer_dismissed_lobby_team_player.take();
+        let dismissed_player = self
+            .context_menus
+            .pointer_dismissed_lobby_team_player
+            .take();
         if dismissed_player == Some(player_id) {
             // Screen::MouseInput already aborted this combo's menu on the
             // same left-down. ComboBox::MouseInput rechecks the last menu ID
@@ -2404,7 +2409,7 @@ impl GameApp {
             || self.startup.view != StartupView::NetworkLobby
             || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -2505,7 +2510,7 @@ impl GameApp {
         anchor: GuiPoint,
         minimum_width: i32,
     ) -> Result<bool, EngineError> {
-        if self.context_menu_pointer_dismissed_lobby_option.take() == Some(option) {
+        if self.context_menus.pointer_dismissed_lobby_option.take() == Some(option) {
             // The outside click which closed this ComboBox is still being
             // delivered to the underlying sheet; do not reopen it.
             return Ok(false);
@@ -2514,7 +2519,7 @@ impl GameApp {
             || self.startup.view != StartupView::NetworkLobby
             || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || option == LobbyOptionKind::ControlMode
         {
             return Ok(false);
@@ -7790,7 +7795,7 @@ impl GameApp {
                 detail: "exact host lobby state is absent".to_string(),
             })
         })?;
-        let active = self.context_menu.is_none()
+        let active = self.context_menus.open.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.league_signup_dialog.is_none()
@@ -7827,7 +7832,7 @@ impl GameApp {
                 detail: "exact host lobby state is absent".to_string(),
             })
         })?;
-        let active = self.context_menu.is_none()
+        let active = self.context_menus.open.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.league_signup_dialog.is_none()

@@ -1539,7 +1539,7 @@ fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode()
     main_assert!(app
         .open_startup_player_context_menu(false)
         .expect("open crew context menu"));
-    main_assert_eq!(app.context_menu.as_ref().expect("crew context menu").layout().panels[0].rows.len() => 3);
+    main_assert_eq!(app.context_menus.open.as_ref().expect("crew context menu").layout().panels[0].rows.len() => 3);
     app.close_context_menu_silently();
 
     app.process_player_dialog_actions(vec![
@@ -4868,7 +4868,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         )
         .test_value();
     exercise(&mut context, "context above retained Options Sound sheet");
-    main_assert!(context.context_menu.is_some());
+    main_assert!(context.context_menus.open.is_some());
 
     let mut loading = new_running_sandbox_app();
     loading.return_to_menu();

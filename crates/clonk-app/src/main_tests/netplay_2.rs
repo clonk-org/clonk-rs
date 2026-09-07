@@ -4211,14 +4211,14 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.test_left_button(ElementState::Released);
 
     app.test_right_button(ElementState::Pressed);
-    let popup = app.context_menu.test_ref();
+    let popup = app.context_menus.open.test_ref();
     main_assert_eq!(popup.layout().panels[0].rows.len() => 4 + usize::from(clipboard_text_available()));
     main_assert_eq!(app.startup_network_dialog.test_ref().join_address_selection() => Some(selection), "right click preserves the Edit selection");
     app.test_right_button(ElementState::Released);
     app.close_context_menu_silently();
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    main_assert!(app.context_menu.is_some());
+    main_assert!(app.context_menus.open.is_some());
     main_assert!(!app.netdlg_edit_consumed_keys.contains(&VirtualKeyCode::ContextMenu));
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     app.close_context_menu_silently();
@@ -11096,7 +11096,7 @@ fn classic_roster_sync_without_a_lobby_is_cpp_guarded_noop() {
 
     app.sync_classic_lobby_roster();
 
-    main_assert_eq!(app.context_menu_lobby_team_player => Some(41));
+    main_assert_eq!(app.context_menus.lobby_team_player => Some(41));
 }
 
 #[test]
@@ -13797,8 +13797,8 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
     app.live_input.running_pointer = Some(point);
     main_assert!(app.handle_runtime_client_list_pointer_button(ElementState::Pressed).expect("press control-rate combo"));
     main_assert!(app.handle_runtime_client_list_pointer_button(ElementState::Released).expect("open control-rate dropdown"));
-    main_assert!(app.context_menu.is_some());
-    main_assert_eq!(app.context_menu_lobby_option => Some(LobbyOptionKind::ControlRate));
+    main_assert!(app.context_menus.open.is_some());
+    main_assert_eq!(app.context_menus.lobby_option => Some(LobbyOptionKind::ControlRate));
 
     app.process_context_menu_outcome(ContextMenuOutcome {
         captured: true,

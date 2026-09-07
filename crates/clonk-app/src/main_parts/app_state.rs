@@ -655,6 +655,39 @@ impl SoundState {
     }
 }
 
+/// The shared classic context menu: the recursively open tree, the owner
+/// that opened it (a startup player row, a lobby combo box, a client popup),
+/// the owner remembered across the pointer-down that dismissed it, and the
+/// button retained until release. `GameApp` composes it as `context_menus`.
+pub(crate) struct ContextMenuState {
+    /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
+    /// tree. The first caller is a startup player row; the chassis is shared
+    /// by every later context-menu producer.
+    pub(crate) open: Option<ClassicContextMenu<AppContextMenuCommand>>,
+    /// Player row whose C4GUI::ComboBox owns the shared context menu. This
+    /// keeps the simple combo's arrow/highlight in its open phase.
+    pub(crate) lobby_team_player: Option<i32>,
+    /// Core lobby/runtime option row whose C4GUI::ComboBox owns the shared
+    /// context menu. The frontend retains this identity to render its open
+    /// arrow phase.
+    pub(crate) lobby_option: Option<LobbyOptionKind>,
+    /// Client row whose popup owns the shared context menu. A synchronized
+    /// removal closes this menu before input can target a row that no longer
+    /// exists.
+    pub(crate) lobby_kick_client: Option<i32>,
+    /// Player row whose root context menu is open. An authoritative update
+    /// that removes the row closes the stale popup before it can dispatch.
+    pub(crate) lobby_player: Option<(i32, i32, bool)>,
+    /// C4GUI::ComboBox remembers the last menu index after Screen closes an
+    /// outside-clicked menu. Retain that owner for the remainder of the same
+    /// pointer-down so clicking the open combo closes instead of reopening it.
+    pub(crate) pointer_dismissed_lobby_team_player: Option<i32>,
+    pub(crate) pointer_dismissed_lobby_option: Option<LobbyOptionKind>,
+    /// A context action may close on pointer-down. Retain that button until
+    /// release so the underlying screen cannot receive a synthetic click.
+    pub(crate) pointer_capture: Option<ContextMenuPointerButton>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -732,6 +765,11 @@ pub(crate) struct GameApp {
     /// library, the game graphics bundle, and the Config.Graphics toggles
     /// (clonk-org/clonk-rs#1232).
     pub(crate) rendering: RenderingResources,
+    /// The classic context-menu chassis (`C4GUI::Screen::pContext`), which
+    /// combo box or row owns it, and the pointer latches that keep an
+    /// outside click or a closing action from reaching the screen underneath
+    /// (clonk-org/clonk-rs#1236).
+    pub(crate) context_menus: ContextMenuState,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
@@ -1421,32 +1459,6 @@ pub(crate) struct GameApp {
     /// Classic input dialog shared by startup prompts, game options, and the
     /// compact running-chat layout.
     pub(crate) game_option_input_dialog: Option<PendingGameOptionInputDialog>,
-    /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
-    /// tree. The first caller is a startup player row; the chassis is shared
-    /// by every later context-menu producer.
-    pub(crate) context_menu: Option<ClassicContextMenu<AppContextMenuCommand>>,
-    /// Player row whose C4GUI::ComboBox owns the shared context menu. This
-    /// keeps the simple combo's arrow/highlight in its open phase.
-    pub(crate) context_menu_lobby_team_player: Option<i32>,
-    /// Core lobby/runtime option row whose C4GUI::ComboBox owns the shared
-    /// context menu. The frontend retains this identity to render its open
-    /// arrow phase.
-    pub(crate) context_menu_lobby_option: Option<LobbyOptionKind>,
-    /// Client row whose popup owns the shared context menu. A synchronized
-    /// removal closes this menu before input can target a row that no longer
-    /// exists.
-    pub(crate) context_menu_lobby_kick_client: Option<i32>,
-    /// Player row whose root context menu is open. An authoritative update
-    /// that removes the row closes the stale popup before it can dispatch.
-    pub(crate) context_menu_lobby_player: Option<(i32, i32, bool)>,
-    /// C4GUI::ComboBox remembers the last menu index after Screen closes an
-    /// outside-clicked menu. Retain that owner for the remainder of the same
-    /// pointer-down so clicking the open combo closes instead of reopening it.
-    pub(crate) context_menu_pointer_dismissed_lobby_team_player: Option<i32>,
-    pub(crate) context_menu_pointer_dismissed_lobby_option: Option<LobbyOptionKind>,
-    /// A context action may close on pointer-down. Retain that button until
-    /// release so the underlying screen cannot receive a synthetic click.
-    pub(crate) context_menu_pointer_capture: Option<ContextMenuPointerButton>,
     /// A modal may close on key-down. Retain consumed physical keys until
     /// their matching key-up so the underlying screen cannot activate.
     pub(crate) message_dialog_consumed_keys: HashSet<VirtualKeyCode>,

@@ -3253,7 +3253,7 @@ fn player_typeahead_and_apps_route_through_selected_row() {
         .set_pointer_position(Some(GuiPoint::new(639.0, 479.0)));
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    let popup = app.context_menu.test_ref();
+    let popup = app.context_menus.open.test_ref();
     let panel = &popup.layout().panels[0];
     runtime_assert_eq!(
         panel.rows.len() => 2;
@@ -3264,7 +3264,7 @@ fn player_typeahead_and_apps_route_through_selected_row() {
 
     tap_runtime_key(&mut app, VirtualKeyCode::Tab);
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
-    assert!(app.context_menu.is_none());
+    assert!(app.context_menus.open.is_none());
 }
 
 #[test]
@@ -3952,7 +3952,7 @@ fn options_language_loads_real_de_and_selection_reloads_and_persists() {
         clonk_frontend::startup_options_dlg::OptionsDlgAction::OpenLanguageCombo,
     ])
     .test_value();
-    assert!(app.context_menu.is_some());
+    assert!(app.context_menus.open.is_some());
     app.process_context_menu_outcome(ContextMenuOutcome {
         captured: true,
         pass_through: false,
@@ -8332,7 +8332,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
         player_id: 7,
     }])
     .test_value();
-    let menu = app.context_menu.test_mut();
+    let menu = app.context_menus.open.test_mut();
     let first = menu.layout().panels[0].rows[0].rect;
     menu.handle_pointer_move(GuiPoint::new((first.x + 1) as f32, (first.y + 1) as f32));
     runtime_assert!(
@@ -8902,10 +8902,10 @@ fn runtime_f1_help_toggles_beneath_nonmatching_running_layers() {
             GuiPoint::new(24.0, 24.0),
         )
         .test_value();
-    assert!(context.context_menu.is_some());
+    assert!(context.context_menus.open.is_some());
     context.test_key(VirtualKeyCode::F1, ElementState::Pressed);
     assert!(context.dialogs.help_visible);
-    assert!(context.context_menu.is_some());
+    assert!(context.context_menus.open.is_some());
 
     let mut object = new_classic_running_sandbox_app();
     assert!(object.open_object_menu().expect("open object menu"));

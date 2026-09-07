@@ -104,7 +104,7 @@ impl GameApp {
             && self.startup.view == StartupView::MainMenu
             && !self.startup_dialog_fade_active()
             && self.dialogs.messages.is_empty()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && !self.startup_element_tooltip_pending()
             && self
                 .native_startup_fonts
@@ -762,7 +762,7 @@ impl GameApp {
             && self.startup.options_dialog.is_some()
             && self.startup.options_advanced_dialog.is_none()
             && self.dialogs.messages.is_empty()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.league_signup_dialog.is_none()
@@ -2998,7 +2998,7 @@ impl GameApp {
             || self.startup.player_properties_dialog.is_some()
             || self.game_option_input_dialog.is_some()
             || self.definition_selector.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -3088,7 +3088,7 @@ impl GameApp {
         };
         let opened = self.open_context_menu_at(entries, anchor)?;
         if keyboard_trigger && opened {
-            if let Some(menu) = self.context_menu.as_mut() {
+            if let Some(menu) = self.context_menus.open.as_mut() {
                 menu.note_non_pointer_input();
             }
         }
@@ -5522,7 +5522,7 @@ impl GameApp {
     ) -> Option<StartupTooltip> {
         if self.mode != AppMode::Menu
             || self.startup_network_transition_active()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || !self.dialogs.messages.is_empty()
             || self
                 .network_start_wait
@@ -5597,7 +5597,7 @@ impl GameApp {
             StartupView::NetworkLobby
                 if self.classic_host_lobby.is_none()
                     && self.dialogs.client_list.is_none()
-                    && self.context_menu.is_none()
+                    && self.context_menus.open.is_none()
                     && self.definition_selector.is_none()
                     && self.game_option_input_dialog.is_none()
                     && self.league_signup_dialog.is_none()

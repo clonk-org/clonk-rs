@@ -3305,14 +3305,16 @@ impl GameApp {
             pending_definition_selection: None,
             pending_lobby_player_selection: None,
             game_option_input_dialog: None,
-            context_menu: None,
-            context_menu_lobby_team_player: None,
-            context_menu_lobby_option: None,
-            context_menu_lobby_kick_client: None,
-            context_menu_lobby_player: None,
-            context_menu_pointer_dismissed_lobby_team_player: None,
-            context_menu_pointer_dismissed_lobby_option: None,
-            context_menu_pointer_capture: None,
+            context_menus: ContextMenuState {
+                open: None,
+                lobby_team_player: None,
+                lobby_option: None,
+                lobby_kick_client: None,
+                lobby_player: None,
+                pointer_dismissed_lobby_team_player: None,
+                pointer_dismissed_lobby_option: None,
+                pointer_capture: None,
+            },
             message_dialog_consumed_keys: HashSet::new(),
             league_signup_consumed_keys: HashSet::new(),
             league_signup_pointer_capture: false,
@@ -3456,7 +3458,7 @@ impl GameApp {
             && self.game_over_dialog.is_none()
             && self.game_option_input_dialog.is_none()
             && self.dialogs.messages.is_empty()
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && self
                 .native_startup_fonts
                 .as_ref()
@@ -3711,7 +3713,7 @@ impl GameApp {
         // must not acquire whichever control moves underneath it.
         self.startup_tooltip.pointer_left();
         self.release_message_dialog_pointer_elements();
-        self.context_menu_pointer_capture = None;
+        self.context_menus.pointer_capture = None;
         if let Some(dialog) = self.league_signup_dialog.as_mut() {
             dialog.controller.cancel_interaction();
             dialog.controller.reset_location();
@@ -4647,7 +4649,7 @@ impl GameApp {
     /// context menu's unrecognized Tab falls through to the lower priorities
     /// (C4KeyboardInput.h:343-353; C4GuiMenu.cpp:302-325).
     fn scoreboard_tab_has_higher_priority_route(&self) -> bool {
-        self.context_menu.is_none()
+        self.context_menus.open.is_none()
             && ((self.runtime_gui_has_keyboard_focus() && !self.dialogs.chart_elevated)
                 || self.runtime_top_default_dialog_is_exclusive())
     }
@@ -4668,7 +4670,7 @@ impl GameApp {
         // repeat state is forgotten below, so the first press after refocus is
         // not discarded as a repeat.
         self.close_context_menu_silently();
-        self.context_menu_pointer_capture = None;
+        self.context_menus.pointer_capture = None;
         for dialog in &mut self.dialogs.messages {
             dialog.state.cancel_interaction();
         }
@@ -5878,7 +5880,7 @@ impl GameApp {
         external_menu_shown
             || !self.dialogs.stack.is_empty()
             || !self.runtime_default_dialog_order_snapshot().is_empty()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || self.definition_selector.is_some()
             || self.game_option_input_dialog.is_some()
             || self.league_signup_dialog.is_some()
@@ -5966,7 +5968,7 @@ impl GameApp {
             || !self.dialogs.messages.is_empty()
             || self.startup.player_properties_dialog.is_some()
             || self.definition_selector.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
             || self.dialogs.chart_pointer_capture
@@ -8479,7 +8481,7 @@ impl GameApp {
                 "C4LeagueSignupDialog",
             )?;
         }
-        if self.context_menu.is_some() {
+        if self.context_menus.open.is_some() {
             check(
                 self.assets.context_menu_resources().map(|_| ()),
                 "C4GUI context menu",

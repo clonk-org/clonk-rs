@@ -380,7 +380,7 @@ impl GameApp {
         matches!(self.mode, AppMode::Running)
             && self.dialogs.chart.is_some()
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart)
-            && self.context_menu.is_none()
+            && self.context_menus.open.is_none()
             && !self.runtime_modal_above_network_chart()
             && (self.network_chart_elevated_owns_input()
                 || (self.dialogs.messages.is_empty() && self.game_option_input_dialog.is_none()))
@@ -573,7 +573,7 @@ impl GameApp {
     }
 
     pub(crate) fn game_over_dialog_is_active(&self) -> bool {
-        self.game_over_dialog_is_mouse_active() && self.context_menu.is_none()
+        self.game_over_dialog_is_mouse_active() && self.context_menus.open.is_none()
     }
 
     /// Menu commands on the key-input path share the control fail-safe:
@@ -3090,9 +3090,9 @@ impl GameApp {
         );
         self.startup_tooltip.pointer_left();
         self.note_classic_lobby_non_pointer_input();
-        self.context_menu = Some(menu);
-        self.context_menu_lobby_kick_client = None;
-        self.context_menu_lobby_player = None;
+        self.context_menus.open = Some(menu);
+        self.context_menus.lobby_kick_client = None;
+        self.context_menus.lobby_player = None;
         self.set_context_menu_lobby_option(None);
         self.set_context_menu_lobby_team_player(lobby_team_player);
         self.process_context_menu_outcome(outcome)?;
@@ -3107,7 +3107,7 @@ impl GameApp {
             || self.startup.view != StartupView::ScenarioBrowser
             || !self.dialogs.messages.is_empty()
             || self.game_over_dialog.is_some()
-            || self.context_menu.is_some()
+            || self.context_menus.open.is_some()
         {
             return Ok(false);
         }
@@ -3164,11 +3164,11 @@ impl GameApp {
                 ContextMenuEvent::Closed => {
                     self.startup_tooltip.pointer_left();
                     self.note_classic_lobby_non_pointer_input();
-                    self.context_menu = None;
+                    self.context_menus.open = None;
                     self.set_context_menu_lobby_team_player(None);
                     self.set_context_menu_lobby_option(None);
-                    self.context_menu_lobby_kick_client = None;
-                    self.context_menu_lobby_player = None;
+                    self.context_menus.lobby_kick_client = None;
+                    self.context_menus.lobby_player = None;
                 }
                 ContextMenuEvent::Activated(command) => match command {
                     AppContextMenuCommand::StartupPlayer(
@@ -3393,7 +3393,8 @@ impl GameApp {
                         }
                     };
                     if let Some(outcome) = self
-                        .context_menu
+                        .context_menus
+                        .open
                         .as_mut()
                         .map(|menu| menu.fill_requested_submenu(entries))
                     {
@@ -3406,13 +3407,13 @@ impl GameApp {
     }
 
     pub(crate) fn close_context_menu_silently(&mut self) {
-        let Some(mut menu) = self.context_menu.take() else {
+        let Some(mut menu) = self.context_menus.open.take() else {
             self.set_context_menu_lobby_team_player(None);
             self.set_context_menu_lobby_option(None);
-            self.context_menu_lobby_kick_client = None;
-            self.context_menu_lobby_player = None;
-            self.context_menu_pointer_dismissed_lobby_team_player = None;
-            self.context_menu_pointer_dismissed_lobby_option = None;
+            self.context_menus.lobby_kick_client = None;
+            self.context_menus.lobby_player = None;
+            self.context_menus.pointer_dismissed_lobby_team_player = None;
+            self.context_menus.pointer_dismissed_lobby_option = None;
             return;
         };
         let _ = menu.dismiss(false);
@@ -3420,11 +3421,11 @@ impl GameApp {
         self.note_classic_lobby_non_pointer_input();
         self.set_context_menu_lobby_team_player(None);
         self.set_context_menu_lobby_option(None);
-        self.context_menu_lobby_kick_client = None;
-        self.context_menu_lobby_player = None;
-        self.context_menu_pointer_dismissed_lobby_team_player = None;
-        self.context_menu_pointer_dismissed_lobby_option = None;
-        self.context_menu_pointer_capture = None;
+        self.context_menus.lobby_kick_client = None;
+        self.context_menus.lobby_player = None;
+        self.context_menus.pointer_dismissed_lobby_team_player = None;
+        self.context_menus.pointer_dismissed_lobby_option = None;
+        self.context_menus.pointer_capture = None;
     }
 
     pub(crate) fn process_player_dialog_actions(
@@ -4723,7 +4724,7 @@ impl GameApp {
         &self,
         point: GuiPoint,
     ) -> Option<StartupTooltip> {
-        if self.context_menu.is_some() {
+        if self.context_menus.open.is_some() {
             return None;
         }
         let scoreboard_owns_point = |app: &Self| {
