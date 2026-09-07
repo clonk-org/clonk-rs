@@ -4,6 +4,24 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-09-07
+
+### Bug fixes
+
+- Resolve lazy host-world objects through the checked index lookup (#1538)
+
+### Features
+
+- Log a netplay pacing summary every thirty seconds (#1537)
+
+### Performance
+
+- Serve unchanged directories the previous round's standalone on a preserved-session restart (#1540)
+- Bound line fragments in scene validation instead of walking them (#1534)
+- Share action libraries instead of copying them per callback (#1533)
+- Cut per-callback definition clones and landscape path scans (#1532)
+- Reuse a prepared scenario search index across keystrokes (#1530)
+
 ## [0.23.0] - 2026-09-06
 
 ### Features
