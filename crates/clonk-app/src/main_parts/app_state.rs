@@ -565,6 +565,96 @@ impl RenderingResources {
     }
 }
 
+impl SoundState {
+    pub(crate) fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
+        self.resume_frontend_after_fade = false;
+        let audio = self.context.as_ref().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup frontend-music option",
+                },
+            ))
+        })?;
+        self.frontend_attempted_for_entry = true;
+        let mut audio = audio.borrow_mut();
+        audio.options.menu_music_enabled = enabled;
+        if enabled {
+            match audio.play_frontend_music() {
+                Ok(true) => {}
+                Ok(false) => audio.stop_music(),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to start frontend music after option change");
+                    audio.stop_music();
+                }
+            }
+        } else {
+            audio.stop_music();
+        }
+        Ok(())
+    }
+    pub(crate) fn set_frontend_sound_option(&mut self, enabled: bool) -> Result<(), EngineError> {
+        let audio = self.context.as_ref().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup frontend-sound option",
+                },
+            ))
+        })?;
+        audio.borrow_mut().options.menu_sound_enabled = enabled;
+        Ok(())
+    }
+    pub(crate) fn fade_out_game_music(&mut self) -> bool {
+        let fading = self
+            .context
+            .as_ref()
+            .is_some_and(|audio| audio.borrow_mut().fade_out_music(GAME_MUSIC_FADE_OUT_MS));
+        self.resume_frontend_after_fade = fading;
+        fading
+    }
+    pub(crate) fn play_scenario_audio(&mut self, path: &Path) {
+        self.resume_frontend_after_fade = false;
+        let runtime_music_enabled = self.runtime_music_enabled;
+        if let Some(audio) = self.context.as_ref() {
+            let mut audio = audio.borrow_mut();
+            audio.configure_scenario(Some(path));
+            if !runtime_music_enabled {
+                audio.stop_music();
+                return;
+            }
+            // C4MusicSystem::PlayScenarioMusic calls Play() with its
+            // non-looping default. Do not repeat one asset forever.
+            match audio.play_default_music(false) {
+                Ok(true) => {}
+                Ok(false) => audio.stop_music(),
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "failed to load music"
+                    );
+                }
+            }
+        }
+    }
+    pub(crate) fn play_sandbox_audio(&mut self) {
+        self.resume_frontend_after_fade = false;
+        let runtime_music_enabled = self.runtime_music_enabled;
+        if let Some(audio) = self.context.as_ref() {
+            let mut audio = audio.borrow_mut();
+            audio.configure_scenario(None);
+            audio.set_music_playlist(None);
+            if !runtime_music_enabled {
+                audio.stop_music();
+                return;
+            }
+            if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
+                tracing::warn!(error = %err, "failed to start sandbox music");
+                audio.stop_music();
+            }
+        }
+    }
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every

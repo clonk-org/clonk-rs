@@ -1951,7 +1951,7 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
         main_assert!(!audio.music_is_playing());
     }
 
-    app.set_frontend_music_option(true).test_value();
+    app.sound.set_frontend_music_option(true).test_value();
     let first_generation = {
         let audio = app.test_audio_ref();
         let generation = lock_unpoisoned(&audio.music_control).generation;
@@ -1984,14 +1984,14 @@ fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
     main_assert!(app.sound.frontend_attempted_for_entry);
     main_assert!(wait_for_mixer_start(&app), "a new startup entry restarts frontend music");
 
-    app.set_frontend_music_option(false).test_value();
+    app.sound.set_frontend_music_option(false).test_value();
     main_assert!(!app.test_audio_ref().options.menu_music_enabled);
     main_assert!(!app.test_audio_ref().system.music_is_playing());
-    app.set_frontend_music_option(true).test_value();
+    app.sound.set_frontend_music_option(true).test_value();
     main_assert!(wait_for_mixer_start(&app), "FEMusic re-enable restarts the frontend playlist");
 
     app.sound.runtime_music_enabled = false;
-    app.play_sandbox_audio();
+    app.sound.play_sandbox_audio();
     main_assert_eq!(app.test_audio_ref().music_resolver.playlist => None, "game entry restores the default playlist");
 }
 

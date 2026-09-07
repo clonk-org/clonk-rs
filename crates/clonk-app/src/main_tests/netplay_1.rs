@@ -4224,7 +4224,7 @@ fn scenario_music_safe_random_does_not_advance_the_synchronized_lcg() {
     let synchronized_before = app.engine.snapshot().rng;
 
     app.sound.runtime_music_enabled = true;
-    app.play_scenario_audio(&scenario);
+    app.sound.play_scenario_audio(&scenario);
 
     main_assert_eq!(app.engine.snapshot().rng => synchronized_before, "the live scenario path must draw through libc SafeRandom, not Engine::LcgRng");
     app.test_audio_mut().stop_music();

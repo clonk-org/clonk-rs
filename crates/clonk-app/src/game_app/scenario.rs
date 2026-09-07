@@ -1362,7 +1362,7 @@ impl GameApp {
             }
         });
 
-        self.fade_out_game_music();
+        self.sound.fade_out_game_music();
         self.status_text.clear();
         let mut loading_state = ScenarioLoadingState::new(
             scenario,
@@ -2038,7 +2038,7 @@ impl GameApp {
             .as_ref()
             .is_some_and(|audio| audio.borrow().options.music_enabled);
         self.sound.runtime_music_enabled |= restored_music_enabled.unwrap_or(false);
-        self.play_scenario_audio(&path);
+        self.sound.play_scenario_audio(&path);
 
         let pending_offline_joins = if !network_game {
             if offline_startup_players.is_some() {
@@ -2794,7 +2794,7 @@ impl GameApp {
         self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario);
-        self.play_sandbox_audio();
+        self.sound.play_sandbox_audio();
         Ok(())
     }
 }

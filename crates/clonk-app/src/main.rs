@@ -9313,9 +9313,9 @@ impl GameApp {
             audio.borrow_mut().set_music_playlist(None);
         }
         if scenario_info.sandbox {
-            self.play_sandbox_audio();
+            self.sound.play_sandbox_audio();
         } else if let Some(path) = frontend.path.as_ref() {
-            self.play_scenario_audio(path);
+            self.sound.play_scenario_audio(path);
         }
         // C4Game::InitGameFinal starts scenario music before applying the
         // restored Game.iMusicLevel. Scenario configuration installs its
