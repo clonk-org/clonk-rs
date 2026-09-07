@@ -304,9 +304,9 @@ use clonk_app_menus::object_menu::{
 use clonk_app_netplay::control_message::{mentions_nick, ControlMessageState};
 use clonk_app_netplay::network::{
     ClientSettings, HostSettings, LeagueEndAttempt, LeagueEndFailurePhase,
-    LeagueRecordStreamStatus, NetworkControl, NetworkControlClock, NetworkEvent, NetworkEventWake,
-    NetworkEventWakeCallback, NetworkManager, NetworkMode, NetworkStartError,
-    NetworkStartupCancellation,
+    LeagueRecordStreamStatus, NetplayPacingWindow, NetworkControl, NetworkControlClock,
+    NetworkEvent, NetworkEventWake, NetworkEventWakeCallback, NetworkManager, NetworkMode,
+    NetworkStartError, NetworkStartupCancellation,
 };
 use clonk_app_netplay::network_host_preparation::NetworkHostPreparation;
 use clonk_app_netplay::prepared_host_bootstrap::{
@@ -3140,6 +3140,7 @@ impl GameApp {
             network_ticks: NetworkTickGate::default(),
             waiting_network_control: None,
             network_stall_since: None,
+            netplay_pacing: NetplayPacingWindow::default(),
             frames_since_redraw: 0,
             network_control_retry_pending: false,
             network_sync: NetworkSyncGate::default(),
@@ -7880,6 +7881,7 @@ impl GameApp {
         self.frames_per_second = std::mem::take(&mut self.frames_since_second);
         self.presentation_stats.sample_second();
         self.record_network_stats_second();
+        self.log_netplay_pacing_summary();
         let client_list_changed = self.refresh_runtime_client_list_on_sec1();
         if after != before {
             self.snapshot.game_time = after;

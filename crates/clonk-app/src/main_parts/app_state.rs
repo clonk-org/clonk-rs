@@ -963,6 +963,9 @@ pub(crate) struct GameApp {
     /// legacyclonk/LegacyClonk#28, "network games stop randomly". There is no
     /// C++ behaviour to preserve here, so the port says something.
     pub(crate) network_stall_since: Option<(Instant, bool)>,
+    /// Lockstep pacing figures since the last `netplay pacing` log line; see
+    /// `log_netplay_pacing_summary`.
+    pub(crate) netplay_pacing: NetplayPacingWindow,
     /// Simulation frames executed since anything was last drawn, so a long
     /// catch-up cannot leave the screen frozen. See `NETWORK_RENDER_FLOOR_FRAMES`.
     pub(crate) frames_since_redraw: u32,

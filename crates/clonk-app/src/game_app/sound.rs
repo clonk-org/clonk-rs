@@ -828,7 +828,9 @@ impl GameApp {
                             self.announce_network_stall(Instant::now())?;
                             return Ok(());
                         };
-                        self.network_stall_since = None;
+                        if let Some((stalled_since, _)) = self.network_stall_since.take() {
+                            self.netplay_pacing.record_stall(stalled_since.elapsed());
+                        }
                         // C++ CalcPerformance runs in GetControl, before the
                         // decoded controls execute. Freeze the receiver-local
                         // wait sample at the same consumption boundary.
@@ -843,6 +845,10 @@ impl GameApp {
                         };
                         let control_tick_cost =
                             network.control_tick_consumed(tick, active_client_ids);
+                        if let Some(cost) = control_tick_cost {
+                            self.netplay_pacing
+                                .record_control_tick(cost.lateness_ms, cost.wait_attribution);
+                        }
                         // C++ GetControl::CalcPerformance precedes decoded
                         // Control.Execute. Its flash therefore precedes (and
                         // may be replaced by) a SetPreSend flash in this batch.
