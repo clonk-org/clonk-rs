@@ -4591,7 +4591,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     let initial = app.rendering.graphics.active_viewport_projections()[0];
     assert_eq!(initial.owner, owner);
     assert!(initial.is_no_owner_viewport);
-    assert!(app.primary_physical_viewport_is_no_owner());
+    assert!(app.viewports.primary_physical_viewport_is_no_owner());
     let players_before = app.engine.snapshot().players;
 
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
@@ -4661,7 +4661,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
     let mut owned = new_running_sandbox_app();
     let mut owned_frame = vec![0_u8; 320 * 200 * 4];
     owned.test_render(&mut owned_frame);
-    assert!(!owned.primary_physical_viewport_is_no_owner());
+    assert!(!owned.viewports.primary_physical_viewport_is_no_owner());
     let owned_camera = owned.rendering.graphics.active_viewport_projections()[0];
     owned
         .engine
@@ -5288,7 +5288,7 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
     // refusal that `ScrollBarsByViewPosition` pins (`:272`) is about the view
     // not moving, so it still reports no scroll either way.
     assert!(
-        app.console_viewport_player_lock(owning),
+        app.viewports.console_viewport_player_lock(owning),
         "a fresh viewport starts locked (C4Viewport::Default)"
     );
     app.live_input.ingame_mouse_init_centered = false;
@@ -6073,7 +6073,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     // (`C4Viewport.cpp:272`), so unlocking is what puts them on screen.
     let identity = open_local_test_console_viewport(&mut app);
     let other = open_local_test_console_viewport(&mut app);
-    runtime_assert!(app.console_viewport_player_lock(identity));
+    runtime_assert!(app.viewports.console_viewport_player_lock(identity));
     runtime_assert!(!app.toggle_console_viewport_player_lock(identity));
     runtime_assert!(!app.toggle_console_viewport_player_lock(other));
     let extent = (400u32, 250u32);
@@ -6086,7 +6086,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
             app.rendering.graphics.detached_viewport_view(identity)?;
         let landscape = app.snapshot.landscape.as_ref()?;
         let ranges = scroll_ranges(
-            app.console_viewport_player_lock(identity),
+            app.viewports.console_viewport_player_lock(identity),
             view_x,
             view_y,
             view_width,
@@ -6154,7 +6154,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
 
     // Locked, there are no bars and nothing takes a press.
     runtime_assert!(app.toggle_console_viewport_player_lock(identity));
-    runtime_assert!(app.console_viewport_player_lock(identity));
+    runtime_assert!(app.viewports.console_viewport_player_lock(identity));
     runtime_assert!(
         bars(&app, identity).is_none(),
         "a locked viewport draws none"
@@ -7052,7 +7052,7 @@ fn console_viewport_draws_scroll_bars_only_while_unlocked() {
     };
 
     runtime_assert!(
-        app.console_viewport_player_lock(identity),
+        app.viewports.console_viewport_player_lock(identity),
         "a fresh viewport starts locked, which is what makes the next assertion meaningful"
     );
     let locked = app.render_console_viewport(identity, 320, 200).test_value();
@@ -7060,7 +7060,7 @@ fn console_viewport_draws_scroll_bars_only_while_unlocked() {
 
     app.toggle_console_viewport_player_lock(identity);
     runtime_assert!(
-        !app.console_viewport_player_lock(identity),
+        !app.viewports.console_viewport_player_lock(identity),
         "unlocking always succeeds"
     );
     let unlocked = app.render_console_viewport(identity, 320, 200).test_value();
@@ -7701,12 +7701,12 @@ fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     // `C4Viewport::Default` starts locked, so a scroll request is refused
     // outright — `ScrollBarsByViewPosition` returns false while locked
     // (`:272`).
-    assert!(app.console_viewport_player_lock(identity));
+    assert!(app.viewports.console_viewport_player_lock(identity));
     assert!(!app.scroll_console_viewport(identity, 3, 0));
 
     // Unlocking always succeeds and shows the bars again (`:253-259`).
     assert!(!app.toggle_console_viewport_player_lock(identity));
-    assert!(!app.console_viewport_player_lock(identity));
+    assert!(!app.viewports.console_viewport_player_lock(identity));
 
     let before = app.console_viewport_projections[&identity];
     assert!(app.scroll_console_viewport(identity, 3, 0));
@@ -10523,7 +10523,7 @@ fn observer_next_player_gamepad_override_keeps_its_free_view_scope() {
 
     let owned = bound();
     runtime_assert!(
-        !owned.primary_physical_viewport_is_no_owner(),
+        !owned.viewports.primary_physical_viewport_is_no_owner(),
         "the sandbox player owns the primary viewport"
     );
     runtime_assert_eq!(
@@ -10536,7 +10536,7 @@ fn observer_next_player_gamepad_override_keeps_its_free_view_scope() {
     let observer = observing.ownerless_physical_viewport_state();
     observing.viewports.physical_viewports.push(observer);
     observing.viewports.physical_viewports_authoritative = true;
-    runtime_assert!(observing.primary_physical_viewport_is_no_owner());
+    runtime_assert!(observing.viewports.primary_physical_viewport_is_no_owner());
     runtime_assert_eq!(
         observing.runtime_custom_gamepad_button_action(0, 0) =>
         Some(RuntimeCustomGamepadAction::ObserverNextPlayer)
@@ -10679,7 +10679,7 @@ fn runtime_gamepad_view_actions_stay_inside_their_keyboard_scope() {
         "a sandbox round is not a film replay"
     );
     runtime_assert!(
-        !app.primary_physical_viewport_is_no_owner(),
+        !app.viewports.primary_physical_viewport_is_no_owner(),
         "the sandbox player owns the primary viewport"
     );
     let before = runtime_global_ui_snapshot(&app);

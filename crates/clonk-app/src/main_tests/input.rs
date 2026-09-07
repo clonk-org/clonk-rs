@@ -6050,7 +6050,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
     main_assert!(app.create_physical_viewport(first, true, true, true));
     app.check_fullscreen_physical_viewports(true);
     main_assert_eq!(app.film_view_player => None, "replacing the physical observer viewport drops its temporary target");
-    main_assert!(!app.primary_physical_viewport_is_no_owner());
+    main_assert!(!app.viewports.primary_physical_viewport_is_no_owner());
 
     let mut owned = new_running_sandbox_app();
     owned.runtime_key_config_cache = OnceLock::new();
@@ -6436,7 +6436,7 @@ fn running_f4_only_stronger_escape_owns_keyboard_input() {
 fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
     // An unbound F11 is inert in the startup screens.
     let mut app = new_menu_app(320, 200);
-    app.set_display_mode(DisplayMode::Window);
+    app.rendering.set_display_mode(DisplayMode::Window);
     let view = app.startup.view;
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F11, ElementState::Released);
@@ -6445,7 +6445,7 @@ fn f11_reaches_classic_keyconfig_without_toggling_display_mode() {
 
     // ... and while running.
     let mut app = new_classic_running_sandbox_app();
-    app.set_display_mode(DisplayMode::Window);
+    app.rendering.set_display_mode(DisplayMode::Window);
     app.test_key(VirtualKeyCode::F11, ElementState::Pressed);
     app.test_key(VirtualKeyCode::F11, ElementState::Released);
     main_assert!(!app.rendering.display_flags.is_fullscreen);

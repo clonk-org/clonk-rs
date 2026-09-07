@@ -2235,7 +2235,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
 
     let mut app = new_running_sandbox_app();
     app.app_paths = Some(paths);
-    app.set_display_mode(DisplayMode::Window);
+    app.rendering.set_display_mode(DisplayMode::Window);
     app.clear_message_board_log();
     main_assert!(!app.rendering.display_flags.is_fullscreen, "C++ isFullScreen means non-console mode, so an OS window remains eligible");
     let presented = vec![
@@ -2348,7 +2348,7 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
     let mut app = new_running_sandbox_app();
     app.app_paths = Some(paths);
     app.reload_application_language_resources().test_value();
-    app.set_display_mode(DisplayMode::Window);
+    app.rendering.set_display_mode(DisplayMode::Window);
     let expected_path = install.path().join("Screenshots/Screenshot001.png");
 
     for (modifiers, kind) in [

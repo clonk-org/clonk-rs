@@ -2991,7 +2991,7 @@ impl GameApp {
                 key == VirtualKeyCode::ArrowRight && c4_modifiers.is_empty(),
             );
         let free_view_scroll_binding = !self.engine.film_replay()
-            && self.primary_physical_viewport_is_no_owner()
+            && self.viewports.primary_physical_viewport_is_no_owner()
             && self.viewport_cycle_scope_available()
             && [
                 ("FreeViewScrollLeft", VirtualKeyCode::ArrowLeft),
@@ -3007,7 +3007,7 @@ impl GameApp {
                     key == default_key && c4_modifiers.is_empty(),
                 )
             });
-        let ownerless_fullscreen = self.primary_physical_viewport_is_no_owner();
+        let ownerless_fullscreen = self.viewports.primary_physical_viewport_is_no_owner();
         let fullscreen_menu_binding = self.game_over_dialog.is_none()
             && self.running_chat_controller().is_none()
             && if self.ingame_menu_belongs_to(OWNER_NONE)
@@ -3302,7 +3302,7 @@ impl GameApp {
             }
             return Ok(false);
         }
-        if !self.primary_physical_viewport_is_no_owner()
+        if !self.viewports.primary_physical_viewport_is_no_owner()
             || !self.runtime_keyboard_binding_matches(
                 "FullscreenMenuOpen",
                 key,
@@ -3429,7 +3429,9 @@ impl GameApp {
                     return Some(RuntimeCustomGamepadAction::Menu(command));
                 }
             }
-        } else if self.primary_physical_viewport_is_no_owner() && matches("FullscreenMenuOpen") {
+        } else if self.viewports.primary_physical_viewport_is_no_owner()
+            && matches("FullscreenMenuOpen")
+        {
             return Some(RuntimeCustomGamepadAction::MenuOpen);
         }
         // KEYSCOPE_FilmView (C4Game.cpp:3415) — and `ViewportNextPlayer`
@@ -3453,7 +3455,7 @@ impl GameApp {
         // KEYSCOPE_FreeView (C4Game.cpp:3423-3426): only an ownerless primary
         // viewport is free to scroll, and film view owns these keys instead.
         if !self.engine.film_replay()
-            && self.primary_physical_viewport_is_no_owner()
+            && self.viewports.primary_physical_viewport_is_no_owner()
             && self.viewport_cycle_scope_available()
         {
             for (name, delta) in [
@@ -3503,7 +3505,7 @@ impl GameApp {
         // `ChartToggle`, which is why it is offered here rather than beside
         // them.
         if !self.engine.film_replay()
-            && self.primary_physical_viewport_is_no_owner()
+            && self.viewports.primary_physical_viewport_is_no_owner()
             && self.viewport_cycle_scope_available()
             && matches("NetObsNextPlayer")
         {
@@ -3684,7 +3686,7 @@ impl GameApp {
             }
             RuntimeCustomGamepadAction::Abort => {
                 if self.game_over_dialog.is_none() {
-                    let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
+                    let dialog_owner = if self.viewports.primary_physical_viewport_is_no_owner() {
                         OWNER_NONE
                     } else {
                         self.players.local_owner
@@ -4979,7 +4981,8 @@ impl GameApp {
                             CommandKind::Press,
                         )?;
                     } else {
-                        let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
+                        let dialog_owner = if self.viewports.primary_physical_viewport_is_no_owner()
+                        {
                             OWNER_NONE
                         } else {
                             self.players.local_owner
@@ -5078,7 +5081,8 @@ impl GameApp {
         if self.engine.film_replay() {
             return self.handle_film_view_key_for_mode(key, state, true);
         }
-        if state != ElementState::Pressed || !self.primary_physical_viewport_is_no_owner() {
+        if state != ElementState::Pressed || !self.viewports.primary_physical_viewport_is_no_owner()
+        {
             return false;
         }
         let c4_modifiers = self.live_input.modifiers

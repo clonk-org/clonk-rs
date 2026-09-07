@@ -131,47 +131,24 @@ impl GameApp {
         }
     }
 
-    /// Keep the in-game menu gates synchronized with the live window mode.
-    /// The process-wide display settings remain owned by the window loop;
-    /// `DisplayFlags` is their presentation projection for running menus.
-    pub(crate) fn set_display_mode(&mut self, mode: DisplayMode) {
-        self.rendering.display_flags.is_fullscreen = matches!(mode, DisplayMode::Fullscreen);
-    }
-
-    /// Rust creates the fullscreen physical observer viewport from the
-    /// absence of local player viewports. A temporary film target changes
-    /// only its displayed owner, not this classification.
-    pub(crate) fn primary_physical_viewport_is_no_owner(&self) -> bool {
-        self.viewports
-            .physical_viewports
-            .iter()
-            .any(|viewport| viewport.matches_close(OWNER_NONE))
-    }
-
     /// GUI keyboard focus and the ownerless fullscreen menu replace the
     /// FilmView/FreeView scope. Nonexclusive overlays (scoreboard, client
     /// list, and player-owned menus) deliberately do not participate.
     pub(crate) fn viewport_cycle_scope_available(&self) -> bool {
         (!self.runtime_gui_has_keyboard_focus() || self.dialogs.chart_elevated)
             && !self.runtime_top_default_dialog_is_exclusive()
-            && !(self.primary_physical_viewport_is_no_owner() && self.ingame_menu.is_some())
+            && !(self.viewports.primary_physical_viewport_is_no_owner()
+                && self.ingame_menu.is_some())
     }
 
     pub(crate) fn viewport_scope_excludes_player_control(&self) -> bool {
-        self.engine.film_replay() || self.primary_physical_viewport_is_no_owner()
-    }
-
-    fn primary_viewport_player(&self) -> Option<i32> {
-        self.viewports
-            .physical_viewports
-            .first()
-            .map(|viewport| viewport.displayed_player)
+        self.engine.film_replay() || self.viewports.primary_physical_viewport_is_no_owner()
     }
 
     /// C4Viewport::NextPlayer over the app-owned first physical viewport.
     /// `wrap` is true for film replay and false for an assigned observer key.
     pub(crate) fn cycle_primary_viewport_player(&mut self, wrap: bool) -> bool {
-        let Some(current) = self.primary_viewport_player() else {
+        let Some(current) = self.viewports.primary_viewport_player() else {
             return false;
         };
         let players = self
@@ -398,7 +375,7 @@ impl GameApp {
     /// alive; only startup/loading close requests enter ordinary teardown.
     pub(crate) fn handle_window_close_requested(&mut self) {
         if self.mode == AppMode::Running {
-            let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
+            let dialog_owner = if self.viewports.primary_physical_viewport_is_no_owner() {
                 OWNER_NONE
             } else {
                 self.players.local_owner
@@ -441,21 +418,12 @@ impl GameApp {
         });
     }
 
-    fn allocate_physical_viewport_identity(&mut self) -> u64 {
-        let identity = self.viewports.next_physical_viewport_identity;
-        self.viewports.next_physical_viewport_identity = self
-            .viewports
-            .next_physical_viewport_identity
-            .wrapping_add(1);
-        identity
-    }
-
     pub(crate) fn owned_physical_viewport_state(
         &mut self,
         player: i32,
         expand_player_slots: bool,
     ) -> PhysicalViewportState {
-        let identity = self.allocate_physical_viewport_identity();
+        let identity = self.viewports.allocate_physical_viewport_identity();
         let mut viewport = PhysicalViewportState::owned(player, expand_player_slots, identity);
         if let Some(player) = self.engine.player(player) {
             viewport.preserved_zoom = player
@@ -467,7 +435,7 @@ impl GameApp {
     }
 
     pub(crate) fn ownerless_physical_viewport_state(&mut self) -> PhysicalViewportState {
-        let identity = self.allocate_physical_viewport_identity();
+        let identity = self.viewports.allocate_physical_viewport_identity();
         PhysicalViewportState::ownerless(identity)
     }
 
@@ -620,18 +588,6 @@ impl GameApp {
             self.play_viewport_feedback_sound_for_game_state(game_running);
         }
         true
-    }
-
-    pub(crate) fn observer_viewport_index(&self) -> Option<usize> {
-        self.viewports
-            .physical_viewports
-            .iter()
-            .position(|viewport| viewport.is_no_owner_viewport)
-    }
-
-    pub(crate) fn observer_viewport_player(&self) -> Option<i32> {
-        self.observer_viewport_index()
-            .map(|index| self.viewports.physical_viewports[index].displayed_player)
     }
 
     /// Fold process-local replay requests at the same app seam as viewport
@@ -4764,15 +4720,6 @@ impl GameApp {
         )
     }
 
-    /// `C4Viewport::PlayerLock` for one console viewport window.
-    pub(crate) fn console_viewport_player_lock(&self, identity: u64) -> bool {
-        self.viewports
-            .physical_viewports
-            .iter()
-            .find(|viewport| viewport.physical_identity == identity)
-            .is_some_and(|viewport| viewport.player_lock)
-    }
-
     /// `C4Viewport::TogglePlayerLock` (`C4Viewport.cpp:250-267`), returning the
     /// lock the viewport now holds.
     ///
@@ -4823,7 +4770,7 @@ impl GameApp {
         // The refusal is the whole of `scroll_ranges`' role here: it returns
         // `None` exactly when `ScrollBarsByViewPosition` returns false.
         if scroll_ranges(
-            self.console_viewport_player_lock(identity),
+            self.viewports.console_viewport_player_lock(identity),
             view_x,
             view_y,
             view_width,
@@ -4884,7 +4831,7 @@ impl GameApp {
             self.rendering.graphics.detached_viewport_view(identity)?;
         let landscape = self.snapshot.landscape.as_ref()?;
         let ranges = scroll_ranges(
-            self.console_viewport_player_lock(identity),
+            self.viewports.console_viewport_player_lock(identity),
             view_x,
             view_y,
             view_width,
@@ -5460,7 +5407,7 @@ impl GameApp {
         if let Some((view_x, view_y, view_width, view_height)) =
             self.rendering.graphics.detached_viewport_view(identity)
         {
-            let locked = self.console_viewport_player_lock(identity);
+            let locked = self.viewports.console_viewport_player_lock(identity);
             let ranges = self.snapshot.landscape.as_ref().and_then(|landscape| {
                 clonk_engine::developer_viewport::scroll_ranges(
                     locked,

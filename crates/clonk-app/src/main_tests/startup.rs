@@ -2317,7 +2317,7 @@ fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
 #[test]
 fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() {
     let mut app = new_state_only_running_sandbox_app();
-    app.set_display_mode(DisplayMode::Window);
+    app.rendering.set_display_mode(DisplayMode::Window);
 
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
@@ -2343,7 +2343,7 @@ fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() 
         ]
     );
 
-    app.set_display_mode(DisplayMode::Fullscreen);
+    app.rendering.set_display_mode(DisplayMode::Fullscreen);
     let main =
         IngameMenuState::main_menu(&app.main_menu_conditions(), &IngameMenuLabels::default())
             .test_value();

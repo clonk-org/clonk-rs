@@ -745,7 +745,7 @@ pub(crate) fn run_headless_server(
     )
     .context("failed to initialise headless server state")?;
     app.headless = true;
-    app.set_display_mode(DisplayMode::Window);
+    app.rendering.set_display_mode(DisplayMode::Window);
     app.apply_classic_command_line_with_profile(classic, compat_profile)?;
     app.auto_start_sandbox = cli.sandbox;
     app.launch_classic_command_line_join()

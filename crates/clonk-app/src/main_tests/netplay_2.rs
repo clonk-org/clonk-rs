@@ -5882,7 +5882,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
             &IngameMenuLabels::default(),
         ),
     );
-    main_assert!(observer_menu.primary_physical_viewport_is_no_owner());
+    main_assert!(observer_menu.viewports.primary_physical_viewport_is_no_owner());
     main_assert!(!observer_menu.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed));
 
     let mut irc = configured("F8");
@@ -15169,7 +15169,7 @@ fn losing_the_last_local_viewport_flashes_the_native_observer_hint() {
     main_assert!(app.close_physical_viewports(owner, false, true));
     app.check_fullscreen_physical_viewports(true);
 
-    main_assert!(app.primary_physical_viewport_is_no_owner(), "the fullscreen fallback owns an ownerless observer viewport");
+    main_assert!(app.viewports.primary_physical_viewport_is_no_owner(), "the fullscreen fallback owns an ownerless observer viewport");
     main_assert_eq!(app.runtime_flash_message.as_ref().map(|message| message.text.clone()) => Some(expected));
 }
 fn netplay_player_info_data(

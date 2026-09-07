@@ -1132,7 +1132,7 @@ fn run() -> Result<()> {
             &load_native_config_bytes(app.app_paths.as_ref()),
             app.presentation.display_refresh_period_ms,
         );
-        app.set_display_mode(display_options.mode);
+        app.rendering.set_display_mode(display_options.mode);
         app.rendering
             .graphics
             .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
@@ -6978,7 +6978,7 @@ impl GameApp {
             ObserverTarget::Player(player) if self.engine.player(player).is_some() => player,
             ObserverTarget::Player(_) => return false,
         };
-        let Some(index) = self.observer_viewport_index() else {
+        let Some(index) = self.viewports.observer_viewport_index() else {
             return false;
         };
         self.set_physical_view_target(index, player)

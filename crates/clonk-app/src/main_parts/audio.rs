@@ -1524,7 +1524,7 @@ pub(crate) fn apply_options_display_requests(
                     DisplayMode::Fullscreen | DisplayMode::Window => {}
                 }
                 display_options.record_mode(mode);
-                app.set_display_mode(mode);
+                app.rendering.set_display_mode(mode);
             }
             OptionsDisplayRequest::SetScale { percent, persist } => {
                 anyhow::ensure!(percent > 0, "application scale must remain positive");
