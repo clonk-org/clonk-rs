@@ -790,6 +790,63 @@ fn scensel_enhanced_search_survives_catalog_rediscovery() {
     main_assert_eq!(state.enhanced_search_caption().as_deref() => Some("2 of 2 scenarios"));
 }
 
+// The enhanced search folds every searchable field of a non-folder entry
+// once per discovered catalog, so a keystroke runs substring tests only.
+// The index lists leaves in catalog order and carries the markup-stripped
+// folder trail the result row shows.
+#[test]
+fn scensel_search_index_lists_leaves_in_catalog_order_with_folder_context() {
+    scensel_fixture!(frontend_scenario: loose, "loose".to_string(), "Loose".to_string());
+    scensel_fixture!(frontend_scenario: nested, "pack/inner/nested".to_string(), "Nested".to_string());
+    scensel_fixture!(frontend_scenario: inner, "pack/inner".to_string(), "<c ff0000>Inner</c>".to_string());
+    inner.kind = ScenarioKind::Folder;
+    inner.is_playable = false;
+    inner.children = vec![nested];
+    scensel_fixture!(frontend_scenario: pack, "pack".to_string(), "Pack".to_string());
+    pack.kind = ScenarioKind::Folder;
+    pack.is_playable = false;
+    pack.children = vec![inner];
+
+    let index = ScenarioSearchIndex::build(&[loose, pack]);
+
+    main_assert_eq!(index.len() => 2);
+    let listed = index
+        .documents()
+        .map(|document| (document.entry().identifier.as_str(), document.context()))
+        .collect::<Vec<_>>();
+    main_assert_eq!(listed => vec![("loose", ""), ("pack/inner/nested", "Pack / Inner")]);
+}
+
+// Every keystroke rebuilds the visible list, and folding the catalog's
+// searchable fields is the expensive part of that. The index therefore
+// survives across keystrokes, and only discovery replacing the catalog
+// (F5, rename, delete) builds it again.
+#[test]
+fn scensel_enhanced_search_builds_its_index_once_per_catalog() {
+    let build_scenarios = || {
+        scensel_fixture!(frontend_scenario: crystal, "pack/crystal".to_string(), "Crystal Cavern".to_string());
+        scensel_fixture!(frontend_scenario: folder, "pack".to_string(), "Adventure Pack".to_string());
+        folder.kind = ScenarioKind::Folder;
+        folder.is_playable = false;
+        folder.children = vec![crystal];
+        vec![folder]
+    };
+    let scenarios = build_scenarios();
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
+    let mut state = MenuState::new(menu, scenarios);
+    state.set_include_back(false);
+
+    for query in ["c", "cr", "cry"] {
+        state.set_search_text(query);
+        state.apply_enhanced_search();
+    }
+    main_assert_eq!(state.enhanced_search_index_builds() => 1);
+
+    state.replace_discovered_entries(build_scenarios(), None, true, true);
+    main_assert_eq!(state.enhanced_search_index_builds() => 2);
+}
+
 // C++ lowercases only the markup-stripped display title
 // (src/C4StartupScenSelDlg.cpp:1513-1523). The enhanced product matcher
 // normalizes user-visible metadata and lets terms span safe fields.
@@ -1473,7 +1530,7 @@ fn scensel_search_routes_window_text_and_enter() {
     let (_guard, _user_data, mut app) = scensel_window_app("Search Tester");
 
     // The first *scenario*, not simply the first row. Enhanced search never
-    // matches a folder: `collect_enhanced_scenario_search_matches` pushes a
+    // matches a folder: `collect_scenario_search_documents` pushes a
     // folder's title onto the ancestor context and recurses into its children,
     // so searching a folder title returns the scenarios inside it rather than
     // the folder. Seeding the query from a folder row would therefore assert
@@ -1481,7 +1538,7 @@ fn scensel_search_routes_window_text_and_enter() {
     // once a folder sorted to the top of the list.
     // Seeded from a scenario, reached by descending, rather than from the first
     // row. Every top-level row is a folder, and enhanced search never matches
-    // one: `collect_enhanced_scenario_search_matches` pushes a folder's title
+    // one: `collect_scenario_search_documents` pushes a folder's title
     // onto the ancestor context and recurses into its children. Searching a
     // folder title therefore returns the scenarios *inside* it, so asserting the
     // row reselects itself only ever held because the top folder was "Tutorial"
@@ -3851,5 +3908,101 @@ fn scensel_enhanced_search_translation_reaches_the_rendered_frame() {
     main_assert_ne!(
         hinted => app.graphics.surface().pixels().to_vec(),
         "the translated clear hint is drawn, not the English one"
+    );
+}
+
+/// A catalog shaped like a large installed library: nested packs, prose
+/// descriptions, markup in some titles and accented author names.
+fn synthetic_search_catalog(packs: usize, scenarios_per_pack: usize) -> Vec<FrontendScenario> {
+    const WORDS: [&str; 16] = [
+        "Crystal", "Cavern", "Gold", "Rush", "Lake", "Fortress", "Desert", "Storm", "Island",
+        "Mine", "Tower", "Valley", "Frozen", "Volcano", "Ruins", "Harbor",
+    ];
+    let description = "Deep beneath the surface the miners uncovered a network of glittering \
+        tunnels. Bring your crew, gather enough gold to buy the elevator and hold the flag \
+        against the rival team while the weather turns. Café owners along the coast pay well \
+        for crystal. "
+        .repeat(4);
+    let scenario = |pack: usize, index: usize, prefix: &str| {
+        let first = WORDS[(pack * 7 + index) % WORDS.len()];
+        let second = WORDS[(pack * 3 + index * 5) % WORDS.len()];
+        let title = if index.is_multiple_of(5) {
+            format!("<c ff0000>{first}</c> {second}")
+        } else {
+            format!("{first} {second}")
+        };
+        scensel_fixture!(frontend_scenario: entry, format!("{prefix}Scenario{index:03}.c4s"), title);
+        entry.description = Some(description.clone());
+        entry.author = Some(format!("Zoë Müller {pack}"));
+        entry
+    };
+    (0..packs)
+        .map(|pack| {
+            let prefix = format!("Pack{pack:02}.c4f/");
+            let mut children = (0..scenarios_per_pack)
+                .map(|index| scenario(pack, index, &prefix))
+                .collect::<Vec<_>>();
+            scensel_fixture!(frontend_scenario: extras, format!("{prefix}Extras.c4f"), "Extras".to_string());
+            extras.kind = ScenarioKind::Folder;
+            extras.is_playable = false;
+            extras.children = (0..5)
+                .map(|index| {
+                    scenario(
+                        pack,
+                        index + scenarios_per_pack,
+                        &format!("{prefix}Extras.c4f/"),
+                    )
+                })
+                .collect();
+            children.push(extras);
+            scensel_fixture!(frontend_scenario: folder, format!("Pack{pack:02}.c4f"), format!("Adventure Pack {pack}"));
+            folder.kind = ScenarioKind::Folder;
+            folder.is_playable = false;
+            folder.children = children;
+            folder
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "manual scenario-search timing probe; reports per-keystroke search and list-rebuild timings"]
+fn scensel_enhanced_search_timing_report() {
+    let scenarios = synthetic_search_catalog(30, 50);
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
+    let mut state = MenuState::new(menu, scenarios);
+    state.set_include_back(false);
+    let typed = "crystal cavern";
+    let mut queries = (1..=typed.len())
+        .map(|len| typed[..len].to_string())
+        .collect::<Vec<_>>();
+    queries.extend(
+        [
+            "crytal caver",
+            "zoë müller 7",
+            "pack07 scenario",
+            "zzzz qqqq",
+        ]
+        .map(str::to_string),
+    );
+    let mut total = Duration::ZERO;
+    for query in &queries {
+        state.set_search_text(query.clone());
+        let started = Instant::now();
+        state.apply_enhanced_search();
+        let search = started.elapsed();
+        let hits = state.visible_entries().len();
+        let started = Instant::now();
+        let entries = build_menu_entries(state.visible_entries(), false);
+        state.menu().set_entries(entries).test_value();
+        let rebuild = started.elapsed();
+        total += search;
+        println!(
+            "{query:>18?}: {hits:5} hits  search {search:>10.3?}  of which list rebuild {rebuild:>10.3?}"
+        );
+    }
+    println!(
+        "total search time over {} keystrokes: {total:.3?}",
+        queries.len()
     );
 }
