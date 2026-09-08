@@ -781,7 +781,7 @@ fn network_too_few_warning_then_profile_ack_stages_and_enters_exact_lobby() {
     // path. The blocker is replaced with the existing socketless manager
     // stub immediately afterwards.
     let (blocker_sender, blocker_receiver) = mpsc::channel();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         blocker_receiver,
         None,
         StartupNetworkPurpose::StagedHost,
@@ -795,7 +795,7 @@ fn network_too_few_warning_then_profile_ack_stages_and_enters_exact_lobby() {
     main_assert_eq!(staged.frontend.identifier => scenario.identifier);
     main_assert_eq!(staged.frontend.title => scenario.title);
 
-    let blocker = app.startup_network_connection.take().test_value();
+    let blocker = app.startup_network.connection.take().test_value();
     drop(blocker);
     drop(blocker_sender);
     app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
@@ -2199,7 +2199,7 @@ fn prepared_host_rebind_leaves_the_classic_lobby_presentable() {
 
     app.poll_pending_network_host_preparation().test_value();
 
-    main_assert!(app.startup_network_connection.is_some());
+    main_assert!(app.startup_network.connection.is_some());
     main_assert!(app.pending_network_host_preparation.is_none());
     // DoLobby has already drawn C4GameLobby::MainDlg, and the transport swap
     // behind it has no classic presentation: a retained status would reach
@@ -5751,7 +5751,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     main_assert!(app.loader_screen.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network_ticks.ready.is_empty());
     main_assert!(app.network_sync.scheduled.is_empty());
     main_assert!(app.sync_checks.local.is_empty() && app.sync_checks.remote.is_empty());
@@ -6046,7 +6046,7 @@ fn connected_client_enters_exact_classic_lobby() {
             manager,
         )))
         .test_value();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
@@ -6432,12 +6432,12 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         new_menu_app_with_paths(640, 480, &client_paths)
     };
     client.open_network_game_dialog();
-    main_assert!(client.startup_game_search.is_some());
+    main_assert!(client.startup_network.game_search.is_some());
     let mut client_frame = vec![0x73; 640 * 480 * 4];
 
     host.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
     let host_deadline = Instant::now() + Duration::from_secs(30);
-    while host.startup_network_connection.is_some()
+    while host.startup_network.connection.is_some()
         || host.pending_network_host_preparation.is_some()
         || !host
             .advertised_game_reference
@@ -6459,11 +6459,11 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         .addresses
         .iter()
         .any(|address| address.protocol == clonk_network::NetworkProtocol::Tcp));
-    client.startup_game_references = vec![host_reference];
+    client.startup_network.game_references = vec![host_reference];
     client.sync_startup_network_game_rows();
-    let selected_reference = client.startup_game_references[0].clone();
+    let selected_reference = client.startup_network.game_references[0].clone();
     client.focus_startup_game_reference(&selected_reference);
-    main_assert_eq!(client.startup_network_dialog.test_ref().selected_game() => Some(0));
+    main_assert_eq!(client.startup_network.dialog.test_ref().selected_game() => Some(0));
 
     let started = Instant::now();
     client
@@ -6610,7 +6610,7 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         let status_acknowledged =
             client.pending_network_join_data.is_some() && !client.initial_lobby_status_ack_pending;
         let startup_connection_finished =
-            client.startup_network_connection.is_none() && client.network.is_some();
+            client.startup_network.connection.is_none() && client.network.is_some();
         let state_ready = [
             lobby_visible,
             scenario_identity,
@@ -6842,7 +6842,7 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     let lobby_rendered = app.test_render(&mut frame);
     main_assert!(lobby_rendered, "the queryable lobby must have rendered");
 
-    while app.startup_network_connection.is_some()
+    while app.startup_network.connection.is_some()
         || app.pending_network_host_preparation.is_some()
         || !app
             .advertised_game_reference
@@ -6938,7 +6938,7 @@ fn prepared_host_transport_swap_retains_automatic_preload_state() {
     main_assert!(app.lobby_preload_task.is_some() || app.lobby_preload_artifact.is_some());
 
     while app.pending_network_host_preparation.is_some()
-        || app.startup_network_connection.is_some()
+        || app.startup_network.connection.is_some()
         || !matches!(
             app.network_mode.as_ref(),
             Some(NetworkMode::Host(HostSettings {
@@ -7007,7 +7007,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         app.network.is_none(),
         "the preliminary host handoff must stay asynchronous"
     );
-    main_assert!(app.startup_network_connection.is_some());
+    main_assert!(app.startup_network.connection.is_some());
     // OpenScenario publishes 4 before InitNetworkHost begins, so the
     // loader installed around host preparation must retain that value
     // (src/C4Game.cpp:124-270,421-440).
@@ -7037,7 +7037,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     for _ in 0..3_000 {
         app.test_update();
         if app.pending_network_host_preparation.is_none()
-            && app.startup_network_connection.is_none()
+            && app.startup_network.connection.is_none()
             && matches!(
                 app.network_mode.as_ref(),
                 Some(NetworkMode::Host(HostSettings {
@@ -7056,7 +7056,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         app.status_text
     );
     main_assert!(
-        app.startup_network_connection.is_none(),
+        app.startup_network.connection.is_none(),
         "final prepared host did not replace the preliminary transport: {}",
         app.status_text
     );
@@ -9788,7 +9788,7 @@ fn client_host_disconnect_aborts_lobby_and_restores_network_dialog() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_dialog.is_some());
+    main_assert!(app.startup_network.dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_lobby.is_none());

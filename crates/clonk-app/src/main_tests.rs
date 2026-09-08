@@ -2679,8 +2679,8 @@ fn attach_l040_network_dialog(app: &mut GameApp) {
     dialog.set_text_font(&app.assets.clonk_fonts.as_deref().test_value().text);
     dialog.resize(800, 600);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(dialog);
-    app.startup_game_search = None;
+    app.startup_network.dialog = Some(dialog);
+    app.startup_network.game_search = None;
 }
 
 fn new_running_sandbox_app() -> GameApp {

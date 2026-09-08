@@ -1602,7 +1602,7 @@ fn network_create_selects_a_scenario_before_binding_a_host() {
 
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_game_advertiser.is_none());
 
@@ -2636,7 +2636,7 @@ fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_dialog.is_some());
+    main_assert!(app.startup_network.dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_lobby.is_none());
@@ -2919,7 +2919,7 @@ fn immediate_relaunch_retains_destination_without_background_discovery() {
 
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert_eq!(app.last_startup_dialog => StartupDialog::NetworkGame);
-    main_assert!(app.startup_game_search.is_none(), "restart must not leave startup discovery behind the new round");
+    main_assert!(app.startup_network.game_search.is_none(), "restart must not leave startup discovery behind the new round");
     confirm_abort_dialog(&mut app);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::NetworkGame);
@@ -2928,7 +2928,7 @@ fn immediate_relaunch_retains_destination_without_background_discovery() {
 #[test]
 fn refresh_generation_ignores_results_queued_before_worker_clear() {
     let mut app = new_classic_menu_app(800, 600);
-    app.startup_network_refresh_waiting_for_clear = true;
+    app.startup_network.refresh_waiting_for_clear = true;
     let stale = n2_fixture!(reference {
         title: "Stale queued result".to_string(),
     });
@@ -2937,12 +2937,12 @@ fn refresh_generation_ignores_results_queued_before_worker_clear() {
         vec![stale],
     ))
     .test_value();
-    main_assert!(app.startup_network_refresh_waiting_for_clear);
-    main_assert!(app.startup_game_references.is_empty());
+    main_assert!(app.startup_network.refresh_waiting_for_clear);
+    main_assert!(app.startup_network.game_references.is_empty());
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::Cleared)
         .test_value();
-    main_assert!(!app.startup_network_refresh_waiting_for_clear);
+    main_assert!(!app.startup_network.refresh_waiting_for_clear);
     main_assert!(app.status_text.is_empty());
 
     let fresh = n2_fixture!(reference {
@@ -2952,7 +2952,7 @@ fn refresh_generation_ignores_results_queued_before_worker_clear() {
         vec![fresh.clone()],
     ))
     .test_value();
-    main_assert_eq!(app.startup_game_references => [fresh]);
+    main_assert_eq!(app.startup_network.game_references => [fresh]);
     main_assert!(app.status_text.is_empty());
 }
 
@@ -2984,7 +2984,7 @@ fn network_search_results_render_only_in_native_rows() {
     .test_value();
 
     main_assert!(app.status_text.is_empty());
-    let dialog = app.startup_network_dialog.test_ref();
+    let dialog = app.startup_network.dialog.test_ref();
     main_assert_eq!(dialog.games().len() => 3);
     main_assert_eq!(dialog.masterserver_entry().details => "3 game(s) found.");
 
@@ -3047,7 +3047,7 @@ fn discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
     .test_value();
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
-    let masterserver = app.startup_network_dialog.test_ref().masterserver_entry();
+    let masterserver = app.startup_network.dialog.test_ref().masterserver_entry();
     main_assert_eq!(masterserver.details => "masterserver unavailable");
     main_assert_eq!(masterserver.row_icon => clonk_frontend::startup_netdlg::NetDlgRowIcon::Error);
     main_assert!(!app.take_exit_request());
@@ -3106,7 +3106,7 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
 
     let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
-    app.startup_network_dialog
+    app.startup_network.dialog
         .test_mut()
         .set_join_address("stale.example:11112");
     let (sender, receiver) = mpsc::channel();
@@ -3138,9 +3138,9 @@ fn join_progress_names_target_and_dismisses_on_resolution() {
         .test_value();
     app.poll_startup_network_connection().test_value();
 
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert_eq!(app.startup_network_dialog.as_ref().expect("fresh network dialog").join_address() => "");
+    main_assert_eq!(app.startup_network.dialog.as_ref().expect("fresh network dialog").join_address() => "");
     assert_startup_error_log(
         &app,
         "Unable to start network session: controlled connection failure",
@@ -3216,12 +3216,12 @@ fn escape_aborts_inflight_join_and_keeps_network_dialog() {
     .test_value();
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.pending_network_join.is_none());
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_dialog.is_some());
+    main_assert!(app.startup_network.dialog.is_some());
     main_assert!(app.dialogs.message_consumed_keys.contains(&VirtualKeyCode::Escape));
     main_assert!(sender.send(Err(NetworkStartError::Other("stale result".to_string()))).is_err());
 
@@ -3260,10 +3260,10 @@ fn cancel_button_aborts_inflight_join() {
 
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.startup_network_connection.is_some());
+    main_assert!(app.startup_network.connection.is_some());
     app.test_left_button(ElementState::Released);
 
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(sender.send(Err(NetworkStartError::Other("stale result".to_string()))).is_err());
@@ -3383,7 +3383,7 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
     );
     app.test_cursor(close_point);
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.startup_network_connection.is_some());
+    main_assert!(app.startup_network.connection.is_some());
     let cancellation_started = Instant::now();
     app.test_left_button(ElementState::Released);
     main_assert!(cancellation_started.elapsed() < Duration::from_secs(1), "transport cancellation must not wait for the stalled handshake");
@@ -3392,7 +3392,7 @@ fn network_connection_progress_cancel_interrupts_inflight_transport() {
         .recv_timeout(Duration::from_secs(1))
         .test_value();
     first_server_worker.join().test_value();
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.pending_network_join.is_none());
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
@@ -3490,12 +3490,12 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
     )
     .test_value();
-    main_assert_eq!(app.startup_discovery_reference_queries.len() => 1);
-    let row = &app.startup_network_dialog.as_ref().test_value().games()[0];
+    main_assert_eq!(app.startup_network.discovery_reference_queries.len() => 1);
+    let row = &app.startup_network.dialog.as_ref().test_value().games()[0];
     main_assert_eq!(row.title => "Local network on 127.0.0.1:30111");
     main_assert_eq!(row.row_icon => NetDlgRowIcon::Query);
 
-    app.startup_direct_reference_queries
+    app.startup_network.direct_reference_queries
         .push(StartupDirectReferenceQuery {
             id: 40,
             address: "direct.example".to_string(),
@@ -3505,7 +3505,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
     app.sync_startup_network_game_rows();
     main_assert!(matches!(app.startup_network_join_target(0), Some(StartupNetworkJoinTarget::DirectAddress(target)) if target == address.to_string()));
     main_assert!(matches!(app.startup_network_join_target(1), Some(StartupNetworkJoinTarget::DirectAddress(target)) if target == "direct.example"));
-    app.startup_direct_reference_queries.clear();
+    app.startup_network.direct_reference_queries.clear();
 
     app.apply_startup_game_search_event(
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryFailed {
@@ -3515,15 +3515,15 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
     )
     .test_value();
     main_assert!(app.dialogs.messages.is_empty());
-    let row = &app.startup_network_dialog.as_ref().test_value().games()[0];
+    let row = &app.startup_network.dialog.as_ref().test_value().games()[0];
     main_assert_eq!(row.details => "reference connection refused");
     main_assert_eq!(row.row_icon => NetDlgRowIcon::Error);
-    let expires_at = app.startup_discovery_reference_queries[0]
+    let expires_at = app.startup_network.discovery_reference_queries[0]
         .expires_at
         .test_value();
     app.tick_startup_network_query_rows_at(expires_at);
-    main_assert!(app.startup_discovery_reference_queries.is_empty());
-    main_assert!(app.startup_network_dialog.as_ref().unwrap().games().is_empty());
+    main_assert!(app.startup_network.discovery_reference_queries.is_empty());
+    main_assert!(app.startup_network.dialog.as_ref().unwrap().games().is_empty());
 
     app.apply_startup_game_search_event(
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
@@ -3534,7 +3534,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
     )
     .test_value();
-    main_assert_eq!(app.startup_discovery_reference_queries.len() => 1);
+    main_assert_eq!(app.startup_network.discovery_reference_queries.len() => 1);
     let reference = n2_fixture!(reference {
         icon: 12,
         title: "LAN game".to_string(),
@@ -3549,9 +3549,9 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         },
     )
     .test_value();
-    main_assert!(app.startup_discovery_reference_queries.is_empty());
-    main_assert_eq!(app.startup_game_references => [reference]);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().selected_game() => None, "game discovery must not explicitly select its returned reference");
+    main_assert!(app.startup_network.discovery_reference_queries.is_empty());
+    main_assert_eq!(app.startup_network.game_references => [reference]);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().selected_game() => None, "game discovery must not explicitly select its returned reference");
 
     app.apply_startup_game_search_event(
         clonk_network::StartupGameSearchEvent::GameDiscoveryQueryFailed {
@@ -3560,14 +3560,14 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         },
     )
     .test_value();
-    main_assert!(app.startup_discovery_reference_queries.is_empty());
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len() => 1);
+    main_assert!(app.startup_network.discovery_reference_queries.is_empty());
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games().len() => 1);
 
     let mut selection_app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut selection_app);
     selection_app.begin_startup_discovery_reference_query(address);
     selection_app
-        .startup_direct_reference_queries
+        .startup_network.direct_reference_queries
         .push(StartupDirectReferenceQuery {
             id: 41,
             address: "selected-direct.example".to_string(),
@@ -3576,12 +3576,12 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         });
     selection_app.sync_startup_network_game_rows();
     selection_app.focus_startup_direct_reference_query(41);
-    main_assert_eq!(selection_app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(1));
+    main_assert_eq!(selection_app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(1));
     let second_address: SocketAddr = "127.0.0.1:30112".parse().test_value();
     selection_app.begin_startup_discovery_reference_query(second_address);
     main_assert_eq!(
         selection_app
-            .startup_network_dialog
+            .startup_network.dialog
             .as_ref()
             .unwrap()
             .selected_game() =>
@@ -3597,7 +3597,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         })],
         true,
     );
-    main_assert_eq!(selection_app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(2), "resolving a LAN row retains selected direct-query identity");
+    main_assert_eq!(selection_app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(2), "resolving a LAN row retains selected direct-query identity");
     main_assert!(matches!(
         selection_app.startup_network_join_target(2),
         Some(StartupNetworkJoinTarget::DirectAddress(target))
@@ -3607,10 +3607,10 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
     let mut retry_app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut retry_app);
     retry_app.begin_startup_discovery_reference_query(address);
-    let failed_id = retry_app.startup_discovery_reference_queries[0].id;
+    let failed_id = retry_app.startup_network.discovery_reference_queries[0].id;
     retry_app.fail_startup_discovery_reference_query(address, "first request failed".to_string());
     retry_app.begin_startup_discovery_reference_query(address);
-    let retry_id = retry_app.startup_discovery_reference_queries[1].id;
+    let retry_id = retry_app.startup_network.discovery_reference_queries[1].id;
     main_assert_ne!(failed_id => retry_id);
     retry_app.focus_startup_discovery_reference_query(retry_id);
     retry_app
@@ -3624,7 +3624,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         .test_value();
     main_assert_eq!(
         retry_app
-            .startup_network_dialog
+            .startup_network.dialog
             .as_ref()
             .unwrap()
             .selected_game() =>
@@ -3653,16 +3653,16 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
     b_later.start_time = 2;
     let mut identity_app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut identity_app);
-    identity_app.startup_game_references = vec![b_later, b.clone()];
+    identity_app.startup_network.game_references = vec![b_later, b.clone()];
     identity_app.sync_startup_network_game_rows();
     identity_app.focus_startup_game_reference(&b);
-    main_assert_eq!(identity_app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(1), "exact reference identity precedes the host/address fallback");
+    main_assert_eq!(identity_app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(1), "exact reference identity precedes the host/address fallback");
 
     let mut app = new_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
-    app.startup_game_references = vec![a.clone(), b.clone()];
+    app.startup_network.game_references = vec![a.clone(), b.clone()];
     app.sync_startup_network_game_rows();
-    app.startup_network_dialog
+    app.startup_network.dialog
         .as_mut()
         .test_value()
         .focus_game(1);
@@ -3671,8 +3671,8 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
         vec![b.clone(), a.clone()],
     ))
     .test_value();
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(0));
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games()[0].title => "B on Host B");
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(0));
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games()[0].title => "B on Host B");
 
     let discovery_address: SocketAddr = "127.0.0.1:30113".parse().test_value();
     app.begin_startup_discovery_reference_query(discovery_address);
@@ -3681,9 +3681,9 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
         vec![a.clone(), b.clone(), c.clone()],
         true,
     );
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(1), "LAN resolution keeps the selected resolved game");
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(1), "LAN resolution keeps the selected resolved game");
 
-    app.startup_direct_reference_queries
+    app.startup_network.direct_reference_queries
         .push(StartupDirectReferenceQuery {
             id: 42,
             address: "direct-selection.example".to_string(),
@@ -3692,7 +3692,7 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
         });
     app.sync_startup_network_game_rows();
     app.finish_startup_direct_reference_query(42, vec![c, b, a], Some(0));
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(1), "an unselected direct query cannot hijack resolved-game selection");
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(1), "an unselected direct query cannot hijack resolved-game selection");
 
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::ReferencesUpdated(
         vec![
@@ -3702,11 +3702,11 @@ fn resolved_game_selection_tracks_host_and_address_identity() {
     ))
     .test_value();
     main_assert_eq!(
-        app.startup_network_dialog.as_ref().unwrap().selected_game() =>
+        app.startup_network.dialog.as_ref().unwrap().selected_game() =>
         Some(1),
         "removing a selected resolved reference selects its next native sibling"
     );
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games()[1].title => "C newer on Host C");
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games()[1].title => "C newer on Host C");
 }
 
 #[test]
@@ -3720,9 +3720,9 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
         version: clonk_network::CURRENT_GAME_VERSION,
         build: clonk_network::CURRENT_GAME_BUILD,
     });
-    app.startup_game_references = vec![nearly_expired_reference.clone()];
+    app.startup_network.game_references = vec![nearly_expired_reference.clone()];
     let expired_query_id = 70;
-    app.startup_direct_reference_queries
+    app.startup_network.direct_reference_queries
         .push(StartupDirectReferenceQuery {
             id: expired_query_id,
             address: "expired.example".to_string(),
@@ -3733,7 +3733,7 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
     // clonk-network's fake-time coverage proves that the worker emits this
     // removal at the native 42-second reference deadline. Inject the
     // resulting event here so modal/backlog behavior is deterministic.
-    app.startup_game_search_test_events.push_back(
+    app.startup_network.game_search_test_events.push_back(
         clonk_network::StartupGameSearchEvent::ReferencesUpdated(Vec::new()),
     );
 
@@ -3744,8 +3744,8 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
     let overdue_masterserver_query = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .test_value();
-    app.startup_network_last_refresh = Some(overdue_refresh);
-    app.startup_masterserver_next_query_at = Some(overdue_masterserver_query);
+    app.startup_network.last_refresh = Some(overdue_refresh);
+    app.startup_network.masterserver_next_query_at = Some(overdue_masterserver_query);
     app.request_network_reference_join(n2_fixture!(reference {
         game: "LegacyClonk".to_string(),
         version: clonk_network::CURRENT_GAME_VERSION,
@@ -3756,30 +3756,30 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
     main_assert_eq!(app.dialogs.messages.len() => 1);
 
     app.poll_startup_game_search().test_value();
-    main_assert_eq!(app.startup_game_search_test_events.len() => 1);
-    main_assert_eq!(app.startup_game_references.as_slice() => std::slice::from_ref(&nearly_expired_reference));
-    main_assert!(app.startup_direct_reference_queries.iter().any(|query| query.id == expired_query_id));
-    main_assert_eq!(app.startup_network_dialog.test_ref().games().len() => 2);
-    main_assert_eq!(app.startup_network_last_refresh => Some(overdue_refresh));
-    main_assert_eq!(app.startup_masterserver_next_query_at => Some(overdue_masterserver_query));
-    main_assert_eq!(app.startup_network_dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Error);
+    main_assert_eq!(app.startup_network.game_search_test_events.len() => 1);
+    main_assert_eq!(app.startup_network.game_references.as_slice() => std::slice::from_ref(&nearly_expired_reference));
+    main_assert!(app.startup_network.direct_reference_queries.iter().any(|query| query.id == expired_query_id));
+    main_assert_eq!(app.startup_network.dialog.test_ref().games().len() => 2);
+    main_assert_eq!(app.startup_network.last_refresh => Some(overdue_refresh));
+    main_assert_eq!(app.startup_network.masterserver_next_query_at => Some(overdue_masterserver_query));
+    main_assert_eq!(app.startup_network.dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Error);
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
     app.poll_startup_game_search().test_value();
-    main_assert!(app.startup_game_search_test_events.is_empty());
-    main_assert!(app.startup_game_references.is_empty());
-    main_assert!(app.startup_network_dialog.as_ref().expect("network dialog").games().is_empty());
-    main_assert!(!app.startup_direct_reference_queries.iter().any(|query| query.id == expired_query_id));
-    main_assert_eq!(app.startup_network_last_refresh => Some(overdue_refresh));
-    main_assert!(app.startup_masterserver_next_query_at.is_none());
-    main_assert_eq!(app.startup_network_dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Query);
+    main_assert!(app.startup_network.game_search_test_events.is_empty());
+    main_assert!(app.startup_network.game_references.is_empty());
+    main_assert!(app.startup_network.dialog.as_ref().expect("network dialog").games().is_empty());
+    main_assert!(!app.startup_network.direct_reference_queries.iter().any(|query| query.id == expired_query_id));
+    main_assert_eq!(app.startup_network.last_refresh => Some(overdue_refresh));
+    main_assert!(app.startup_network.masterserver_next_query_at.is_none());
+    main_assert_eq!(app.startup_network.dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Query);
 
     // A search event can create the covering modal itself. Later events
     // must remain in the receiver rather than being pre-drained or lost.
-    app.startup_game_references = vec![nearly_expired_reference.clone()];
+    app.startup_network.game_references = vec![nearly_expired_reference.clone()];
     app.sync_startup_network_game_rows();
-    app.startup_game_search_test_events.extend([
+    app.startup_network.game_search_test_events.extend([
         clonk_network::StartupGameSearchEvent::SearchError {
             source: Some(clonk_network::ReferenceQuerySource::GameDiscovery),
             message: "discovery failed".to_string(),
@@ -3788,14 +3788,14 @@ fn network_message_modal_freezes_search_events_and_expiry_until_close() {
     ]);
     app.poll_startup_game_search().test_value();
     main_assert_eq!(app.dialogs.messages.len() => 1);
-    main_assert_eq!(app.startup_game_search_test_events.len() => 1);
-    main_assert_eq!(app.startup_game_references => [nearly_expired_reference]);
+    main_assert_eq!(app.startup_network.game_search_test_events.len() => 1);
+    main_assert_eq!(app.startup_network.game_references => [nearly_expired_reference]);
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
     app.poll_startup_game_search().test_value();
-    main_assert!(app.startup_game_search_test_events.is_empty());
-    main_assert!(app.startup_game_references.is_empty());
+    main_assert!(app.startup_network.game_search_test_events.is_empty());
+    main_assert!(app.startup_network.game_references.is_empty());
 }
 
 #[test]
@@ -3820,10 +3820,10 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
     let mut app = new_classic_menu_app(800, 600);
     app.app_paths = Some(paths.clone());
     app.open_network_game_dialog();
-    main_assert!(app.startup_network_dialog.test_ref().config().masterserver_signup);
+    main_assert!(app.startup_network.dialog.test_ref().config().masterserver_signup);
 
     // The controller flips its own flag before emitting the action.
-    app.startup_network_dialog
+    app.startup_network.dialog
         .test_mut()
         .sync_masterserver_signup_from_config(false);
     app.process_network_dialog_actions(vec![
@@ -3834,10 +3834,10 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
     main_assert!(load_network_startup_settings(Some(&paths)).0, "the toggle is deliberately not written through, so the file still reads enabled");
 
     app.refresh_retained_network_dialog_internet();
-    main_assert!(!app.startup_network_dialog.test_ref().config().masterserver_signup, "re-showing the retained dialog must not resurrect the on-disk value");
+    main_assert!(!app.startup_network.dialog.test_ref().config().masterserver_signup, "re-showing the retained dialog must not resurrect the on-disk value");
 
     app.open_network_game_dialog();
-    main_assert!(!app.startup_network_dialog.test_ref().config().masterserver_signup, "rebuilding the dialog must not resurrect the on-disk value either");
+    main_assert!(!app.startup_network.dialog.test_ref().config().masterserver_signup, "rebuilding the dialog must not resurrect the on-disk value either");
 
     // The scenario selector's Internet checkbox is the same in-memory toggle —
     // no C++ game-option surface saves the file — so it replaces the netdlg's
@@ -3872,7 +3872,7 @@ fn the_periodic_masterserver_requery_keeps_the_reply_it_is_refreshing() {
     .test_value();
 
     let replied = app
-        .startup_network_dialog
+        .startup_network.dialog
         .test_ref()
         .masterserver_entry()
         .clone();
@@ -3880,18 +3880,18 @@ fn the_periodic_masterserver_requery_keeps_the_reply_it_is_refreshing() {
     main_assert_eq!(replied.row_icon => NetDlgRowIcon::QueryStatic);
     main_assert!(matches!(replied.extra_lines.as_slice(), [NetDlgTextLine::Plain(_), NetDlgTextLine::Hyperlink { .. }]));
 
-    let requery_at = app.startup_masterserver_next_query_at.test_value();
+    let requery_at = app.startup_network.masterserver_next_query_at.test_value();
     app.tick_startup_network_query_rows_at(requery_at);
 
-    let requerying = app.startup_network_dialog.test_ref().masterserver_entry();
+    let requerying = app.startup_network.dialog.test_ref().masterserver_entry();
     main_assert_eq!(requerying.row_icon => NetDlgRowIcon::Query, "the re-query animates the icon");
     main_assert_eq!(requerying.details => replied.details, "the re-query leaves the previous game count on screen");
     main_assert_eq!(requerying.extra_lines => replied.extra_lines, "the re-query keeps the message of the day and its hyperlink");
     main_assert_eq!(requerying.title => replied.title, "the re-query leaves sInfoText[0] alone");
     // `QueryReferences` re-arms iRequestTimeout and the branch clears iTimeout
     // (src/C4StartupNetDlg.cpp:182,203-204).
-    main_assert_eq!(app.startup_masterserver_request_timeout_at => Some(requery_at + clonk_network::REFERENCE_QUERY_TIMEOUT));
-    main_assert!(app.startup_masterserver_next_query_at.is_none());
+    main_assert_eq!(app.startup_network.masterserver_request_timeout_at => Some(requery_at + clonk_network::REFERENCE_QUERY_TIMEOUT));
+    main_assert!(app.startup_network.masterserver_next_query_at.is_none());
 }
 
 #[test]
@@ -3910,13 +3910,13 @@ fn masterserver_row_reports_a_reference_request_timeout_when_no_reply_arrives() 
     // arrive — the state the native watchdog exists to recover from.
     let armed_at = Instant::now();
     app.reset_startup_masterserver_entry_at(armed_at);
-    main_assert_eq!(app.startup_network_dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Query);
+    main_assert_eq!(app.startup_network.dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Query);
 
     app.tick_startup_network_query_rows_at(
         armed_at + clonk_network::REFERENCE_QUERY_TIMEOUT - Duration::from_secs(1),
     );
     main_assert_eq!(
-        app.startup_network_dialog
+        app.startup_network.dialog
             .test_ref()
             .masterserver_entry()
             .row_icon =>
@@ -3927,14 +3927,14 @@ fn masterserver_row_reports_a_reference_request_timeout_when_no_reply_arrives() 
     let timed_out_at = armed_at + clonk_network::REFERENCE_QUERY_TIMEOUT;
     app.tick_startup_network_query_rows_at(timed_out_at);
     let entry = app
-        .startup_network_dialog
+        .startup_network.dialog
         .test_ref()
         .masterserver_entry()
         .clone();
     main_assert_eq!(entry.row_icon => NetDlgRowIcon::Error);
     main_assert_eq!(entry.details => "Reference request timed out");
     main_assert_eq!(
-        app.startup_masterserver_next_query_at =>
+        app.startup_network.masterserver_next_query_at =>
         Some(timed_out_at + clonk_network::GAME_SEARCH_INTERVAL),
         "the timed-out row schedules the next masterserver query"
     );
@@ -3972,17 +3972,17 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
     );
     main_assert!(controller.list_max_scroll() > 60);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(controller);
-    app.startup_game_search = None;
+    app.startup_network.dialog = Some(controller);
+    app.startup_network.game_search = None;
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_viewport.x + 4),
         f64::from(layout.list_viewport.y + 4),
     ));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
-    main_assert_eq!(app.startup_network_dialog.test_ref().list_scroll_offset() => 60);
+    main_assert_eq!(app.startup_network.dialog.test_ref().list_scroll_offset() => 60);
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
-    main_assert_eq!(app.startup_network_dialog.test_ref().list_scroll_offset() => 0);
+    main_assert_eq!(app.startup_network.dialog.test_ref().list_scroll_offset() => 0);
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(layout.list_scrollbar.x + 8),
@@ -3991,16 +3991,16 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
     app.test_left_button(ElementState::Pressed);
     let mut frame = vec![0_u8; 640 * 480 * 4];
     app.test_render(&mut frame);
-    let first = app.startup_network_dialog.test_ref().list_scroll_offset();
+    let first = app.startup_network.dialog.test_ref().list_scroll_offset();
     app.test_render(&mut frame);
-    let second = app.startup_network_dialog.test_ref().list_scroll_offset();
+    let second = app.startup_network.dialog.test_ref().list_scroll_offset();
     main_assert!(first > 0 && second > first);
     app.test_left_button(ElementState::Released);
     app.test_render(&mut frame);
-    main_assert_eq!(app.startup_network_dialog.test_ref().list_scroll_offset() => second);
+    main_assert_eq!(app.startup_network.dialog.test_ref().list_scroll_offset() => second);
 
     app.test_left_button(ElementState::Pressed);
-    let before_transition = app.startup_network_dialog.test_ref().list_scroll_offset();
+    let before_transition = app.startup_network.dialog.test_ref().list_scroll_offset();
     let (_sender, receiver) = mpsc::channel();
     app.begin_startup_network_connection(
         receiver,
@@ -4009,14 +4009,14 @@ fn network_game_list_wheel_and_held_arrow_route_through_app() {
         Some(StartupJoinTarget::Addresses("127.0.0.1:11112".to_string())),
     )
     .test_value();
-    main_assert!(!app.startup_network_dialog.test_mut().tick_scrollbar(), "transition start must cancel the held arrow");
+    main_assert!(!app.startup_network.dialog.test_mut().tick_scrollbar(), "transition start must cancel the held arrow");
     app.status_text.clear();
     app.test_render(&mut frame);
-    main_assert_eq!(app.startup_network_dialog.test_ref().list_scroll_offset() => before_transition);
-    app.startup_network_connection = None;
+    main_assert_eq!(app.startup_network.dialog.test_ref().list_scroll_offset() => before_transition);
+    app.startup_network.connection = None;
     app.dismiss_startup_network_connect_progress();
     app.test_render(&mut frame);
-    main_assert_eq!(app.startup_network_dialog.test_ref().list_scroll_offset() => before_transition);
+    main_assert_eq!(app.startup_network.dialog.test_ref().list_scroll_offset() => before_transition);
 }
 
 #[test]
@@ -4051,7 +4051,7 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
 
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     let dialog = &app.dialogs.messages[0].state;
     main_assert_eq!(dialog.caption() => "Cannot join game");
@@ -4081,7 +4081,7 @@ fn network_join_without_reference_opens_the_classic_error_dialog() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     reset_cached_app_paths();
 }
 
@@ -4091,7 +4091,7 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
     app.open_network_game_dialog();
     let address = "127.0.0.1:9".to_string();
     let actions = {
-        let dialog = app.startup_network_dialog.test_mut();
+        let dialog = app.startup_network.dialog.test_mut();
         dialog.set_join_address(address.clone());
         main_assert_eq!(
             dialog.handle_key_down(KeyCode::Tab) =>
@@ -4115,27 +4115,27 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
 
     app.process_network_dialog_actions(actions).test_value();
 
-    let dialog = app.startup_network_dialog.as_ref().test_value();
+    let dialog = app.startup_network.dialog.as_ref().test_value();
     main_assert_eq!(dialog.focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::GameList);
     main_assert_eq!(dialog.selected_game() => Some(0));
     main_assert_eq!(dialog.games().len() => 1);
     main_assert_eq!(dialog.games()[0].address.as_deref() => Some(address.as_str()));
-    main_assert_eq!(app.startup_direct_reference_queries.len() => 1);
-    main_assert_eq!(app.startup_direct_reference_queries[0].state => StartupDirectReferenceQueryState::Pending);
+    main_assert_eq!(app.startup_network.direct_reference_queries.len() => 1);
+    main_assert_eq!(app.startup_network.direct_reference_queries[0].state => StartupDirectReferenceQueryState::Pending);
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network.is_none());
 
     // Cancel the deliberately unreachable reference query, then exercise
     // the unresolved row's second-Enter raw-join fallback.
-    app.startup_game_search = None;
+    app.startup_network.game_search = None;
     app.active_scenario = Some(FrontendScenario::fallback());
     app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: vec!["Stale.c4d".to_string()],
         definition_root: None,
     });
     let actions = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_mut()
         .test_value()
         .handle_key_down(KeyCode::Enter);
@@ -4154,18 +4154,18 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
 fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     let mut app = new_classic_menu_app(800, 600);
     app.open_network_game_dialog();
-    app.startup_network_dialog
+    app.startup_network.dialog
         .test_mut()
         .set_join_address("replace me");
 
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    main_assert_eq!(app.startup_network_dialog.test_ref().join_address_selection() => Some((0, "replace me".len())));
+    main_assert_eq!(app.startup_network.dialog.test_ref().join_address_selection() => Some((0, "replace me".len())));
 
     app.test_text_input('|');
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().join_address() => "\u{a6}");
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().join_address() => "\u{a6}");
 
-    app.startup_network_dialog
+    app.startup_network.dialog
         .as_mut()
         .test_value()
         .set_join_address("alpha beta");
@@ -4174,7 +4174,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.test_modifiers(ModifiersState::CONTROL);
     app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ArrowRight, ElementState::Released);
-    main_assert_eq!(app.startup_network_dialog.test_ref().join_address_caret() => 6);
+    main_assert_eq!(app.startup_network.dialog.test_ref().join_address_caret() => 6);
 
     app.test_modifiers(ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::ArrowRight, ElementState::Pressed);
@@ -4182,9 +4182,9 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.test_key(VirtualKeyCode::Delete, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Delete, ElementState::Released);
     app.test_modifiers(ModifiersState::empty());
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().join_address() => "alpha eta");
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().join_address() => "alpha eta");
 
-    app.startup_network_dialog
+    app.startup_network.dialog
         .as_mut()
         .test_value()
         .set_join_address("alpha beta");
@@ -4203,7 +4203,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     app.test_left_button(ElementState::Pressed);
-    let dialog = app.startup_network_dialog.as_ref().test_value();
+    let dialog = app.startup_network.dialog.as_ref().test_value();
     let selection = dialog.join_address_selection().test_value();
     main_assert_eq!(&dialog.join_address()[selection.0..selection.1] => "beta");
     main_assert!(app.netdlg_last_click.is_none());
@@ -4213,7 +4213,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.test_right_button(ElementState::Pressed);
     let popup = app.context_menus.open.test_ref();
     main_assert_eq!(popup.layout().panels[0].rows.len() => 4 + usize::from(clipboard_text_available()));
-    main_assert_eq!(app.startup_network_dialog.test_ref().join_address_selection() => Some(selection), "right click preserves the Edit selection");
+    main_assert_eq!(app.startup_network.dialog.test_ref().join_address_selection() => Some(selection), "right click preserves the Edit selection");
     app.test_right_button(ElementState::Released);
     app.close_context_menu_silently();
 
@@ -4225,7 +4225,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
 
     app.netdlg_join_edit_last_click = Some(Instant::now() - Duration::from_millis(450));
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.startup_network_dialog.test_ref().join_address_selection() => None);
+    main_assert_eq!(app.startup_network.dialog.test_ref().join_address_selection() => None);
     app.test_left_button(ElementState::Released);
 
     app.test_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed);
@@ -4239,7 +4239,7 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     app.test_cursor(list);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_network_dialog.test_ref().focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::GameList);
+    main_assert_eq!(app.startup_network.dialog.test_ref().focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::GameList);
     for (modifiers, key) in [
         (ModifiersState::CONTROL, VirtualKeyCode::ArrowLeft),
         (ModifiersState::SHIFT, VirtualKeyCode::ArrowLeft),
@@ -4261,8 +4261,8 @@ fn network_direct_query_ids_preserve_selection_across_out_of_order_results() {
     let mut app = new_classic_menu_app(800, 600);
     let dialog = n2_netdlg(800, 600);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(dialog);
-    app.startup_direct_reference_queries = vec![
+    app.startup_network.dialog = Some(dialog);
+    app.startup_network.direct_reference_queries = vec![
         StartupDirectReferenceQuery {
             id: 10,
             address: "first.invalid".to_string(),
@@ -4286,9 +4286,9 @@ fn network_direct_query_ids_preserve_selection_across_out_of_order_results() {
         build: clonk_network::CURRENT_GAME_BUILD,
     });
     app.finish_startup_direct_reference_query(20, vec![second.clone()], Some(0));
-    main_assert_eq!(app.startup_direct_reference_queries.iter().map(|query| query.id).collect::<Vec<_>>() => [10]);
+    main_assert_eq!(app.startup_network.direct_reference_queries.iter().map(|query| query.id).collect::<Vec<_>>() => [10]);
     main_assert_eq!(
-        app.startup_network_dialog.as_ref().unwrap().selected_game() =>
+        app.startup_network.dialog.as_ref().unwrap().selected_game() =>
         Some(1),
         "the still-pending first query must stay selected after the second resolves"
     );
@@ -4300,8 +4300,8 @@ fn network_direct_query_ids_preserve_selection_across_out_of_order_results() {
         build: clonk_network::CURRENT_GAME_BUILD,
     });
     app.finish_startup_direct_reference_query(10, vec![second, first.clone()], Some(1));
-    main_assert!(app.startup_direct_reference_queries.is_empty());
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(1));
+    main_assert!(app.startup_network.direct_reference_queries.is_empty());
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(1));
     match app.startup_network_join_target(1) {
         Some(StartupNetworkJoinTarget::Reference(reference)) => {
             main_assert_eq!(reference => first)
@@ -4328,8 +4328,8 @@ fn network_version_mismatch_defers_to_runtime_join_policy() {
     main_assert!(dialog.handle_key_down(KeyCode::Down).is_empty());
     let actions = dialog.handle_key_down(KeyCode::Enter);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(dialog);
-    app.startup_game_references = vec![reference];
+    app.startup_network.dialog = Some(dialog);
+    app.startup_network.game_references = vec![reference];
 
     app.process_network_dialog_actions(actions).test_value();
 
@@ -4340,7 +4340,7 @@ fn network_version_mismatch_defers_to_runtime_join_policy() {
     main_assert_eq!(modal.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_NO);
     main_assert_eq!(modal.icon() => clonk_frontend::message_dialog::MessageDialogIcon::ERROR);
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network.is_none());
 }
 
@@ -4373,8 +4373,8 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     main_assert!(dialog.handle_key_down(KeyCode::Down).is_empty());
     let actions = dialog.handle_key_down(KeyCode::Enter);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(dialog);
-    app.startup_game_references = vec![reference];
+    app.startup_network.dialog = Some(dialog);
+    app.startup_network.game_references = vec![reference];
 
     app.process_network_dialog_actions(actions.clone())
         .test_value();
@@ -4387,10 +4387,10 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 
     app.process_network_dialog_actions(actions).test_value();
-    app.startup_game_references.clear();
+    app.startup_network.game_references.clear();
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
 
@@ -4400,7 +4400,7 @@ fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
     main_assert_eq!(settings.netpuncher_game_ids.ipv4 => 0x1122_3344);
     main_assert_eq!(settings.netpuncher_game_ids.ipv6 => 0x5566_7788);
     main_assert!(app.dialogs.game_option_input.is_some());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 }
 
 #[test]
@@ -4421,9 +4421,9 @@ fn network_row_double_click_joins_another_cpp_build() {
     let mut dialog = n2_netdlg(640, 480);
     dialog.set_games(vec![GameApp::startup_network_reference_row(&reference)]);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(dialog);
-    app.startup_game_references = vec![reference];
-    app.startup_game_search = None;
+    app.startup_network.dialog = Some(dialog);
+    app.startup_network.game_references = vec![reference];
+    app.startup_network.game_search = None;
     let point = PhysicalPosition::new(
         f64::from(layout.list_entry.x + layout.list_entry.w / 2),
         f64::from(layout.list_entry.y + layout.list_entry.h / 2),
@@ -4446,7 +4446,7 @@ fn network_row_double_click_joins_another_cpp_build() {
         clonk_network::CURRENT_GAME_BUILD + 1
     );
     main_assert!(app.dialogs.game_option_input.is_some());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 }
 
 #[test]
@@ -4487,8 +4487,8 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     main_assert!(network_dialog.handle_key_down(KeyCode::Down).is_empty());
     let actions = network_dialog.handle_key_down(KeyCode::Enter);
     main_assert_eq!(actions => [clonk_frontend::startup_netdlg::NetDlgAction::JoinGame { address: None }]);
-    app.startup_network_dialog = Some(network_dialog);
-    app.startup_game_references = vec![reference];
+    app.startup_network.dialog = Some(network_dialog);
+    app.startup_network.game_references = vec![reference];
     app.active_scenario = Some(FrontendScenario::fallback());
     app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: vec!["Stale.c4d".to_string()],
@@ -4535,8 +4535,8 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
     let mut app = new_classic_menu_app(800, 600);
     let network_dialog = n2_netdlg(800, 600);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(network_dialog);
-    app.startup_game_search = Some(
+    app.startup_network.dialog = Some(network_dialog);
+    app.startup_network.game_search = Some(
         clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
             internet_enabled: false,
             use_alternate_server: false,
@@ -4559,7 +4559,7 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
         .test_value();
 
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.startup_game_search.is_some(), "a cancelled password prompt must leave the dialog's search running");
+    main_assert!(app.startup_network.game_search.is_some(), "a cancelled password prompt must leave the dialog's search running");
     app.request_startup_network_refresh().test_value();
     main_assert!(app.dialogs.messages.is_empty(), "refresh must not report a search that was never stopped");
 
@@ -4569,8 +4569,8 @@ fn abandoned_join_password_prompt_keeps_the_netdlg_search_running() {
         .test_value();
 
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.startup_network_connection.is_none());
-    main_assert!(app.startup_game_search.is_some(), "an empty password must leave the dialog's search running");
+    main_assert!(app.startup_network.connection.is_none());
+    main_assert!(app.startup_network.game_search.is_some(), "an empty password must leave the dialog's search running");
 }
 
 #[test]
@@ -4587,8 +4587,8 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
     let mut app = new_classic_menu_app(800, 600);
     let network_dialog = n2_netdlg(800, 600);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(network_dialog);
-    app.startup_game_search = Some(
+    app.startup_network.dialog = Some(network_dialog);
+    app.startup_network.game_search = Some(
         clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
             internet_enabled: false,
             use_alternate_server: false,
@@ -4603,18 +4603,18 @@ fn cancelling_a_launched_join_restores_the_netdlg_search() {
         source_address: "127.0.0.1:1".parse().test_value(),
     }))
     .test_value();
-    main_assert!(app.startup_game_search.is_none(), "a join that actually launches stops the search");
+    main_assert!(app.startup_network.game_search.is_none(), "a join that actually launches stops the search");
     main_assert!(matches!(app.dialogs.messages.last().map(|dialog| &dialog.continuation), Some(MessageDialogContinuation::StartupNetworkConnectProgress)));
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
 
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.startup_game_search.is_some(), "the netdlg must never be left on screen without its search");
+    main_assert!(app.startup_network.game_search.is_some(), "the netdlg must never be left on screen without its search");
     app.request_startup_network_refresh().test_value();
     main_assert!(app.dialogs.messages.is_empty(), "refresh must not report a search that was restored");
-    main_assert_eq!(app.startup_network_dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Query);
+    main_assert_eq!(app.startup_network.dialog.test_ref().masterserver_entry().row_icon => NetDlgRowIcon::Query);
 }
 
 #[test]
@@ -4644,7 +4644,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
                 .test_value(),
         }))
         .test_value();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
@@ -4652,7 +4652,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
 
     app.poll_startup_network_connection().test_value();
 
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert_eq!(app.pending_network_join.as_ref().expect("same join remains pending").server_addresses => attempts);
     let prompt = app.dialogs.game_option_input.test_ref();
     main_assert_eq!(prompt.purpose => PendingInputDialogPurpose::NetworkJoinPassword);
@@ -4661,7 +4661,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(String::new())])
         .test_value();
     main_assert!(app.pending_network_join.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 
     app.pending_network_join =
         Some(ClientSettings::new(attempts[0].endpoint, "Player").with_join_attempts(attempts));
@@ -4669,7 +4669,7 @@ fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
     sender
         .send(Err(NetworkStartError::Other("join denied".to_string())))
         .test_value();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
@@ -4698,15 +4698,15 @@ fn client_join_flow_submitted_password_is_frozen_for_the_worker() {
     .test_value();
 
     main_assert_eq!(app.pending_network_join.as_ref().expect("settings stay frozen while the worker starts").password.as_bytes() => b"typed secret");
-    main_assert!(app.startup_network_connection.is_some());
+    main_assert!(app.startup_network.connection.is_some());
     for _ in 0..100 {
         app.poll_startup_network_connection().test_value();
-        if app.startup_network_connection.is_none() {
+        if app.startup_network.connection.is_none() {
             break;
         }
         thread::sleep(Duration::from_millis(10));
     }
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.pending_network_join.is_none());
 }
 
@@ -7656,7 +7656,7 @@ fn startup_host_auth_players_stay_with_their_connection_and_cancel_cleanly() {
     app.poll_league_player_auth().test_value();
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    let first_connection = app.startup_network_connection.take().test_value();
+    let first_connection = app.startup_network.connection.take().test_value();
     let first_players = first_connection.authenticated_league_players.test_ref();
     main_assert_eq!(first_players[0].name.as_bytes() => b"First Host");
     main_assert_eq!(first_players[0].auth_id.as_bytes() => b"first-token");
@@ -7685,7 +7685,7 @@ fn startup_host_auth_players_stay_with_their_connection_and_cancel_cleanly() {
     main_assert_eq!(abandoned.player.name.as_bytes() => b"Second Host");
     app.show_main_menu();
     main_assert!(app.pending_league_player_auth.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(!app.dialogs.messages.iter().any(|dialog| matches!(
         dialog.continuation,
         MessageDialogContinuation::LeaguePlayerAuthWait
@@ -10170,7 +10170,7 @@ fn client_follows_an_announced_host_restart_back_to_the_lobby() {
     main_assert!(app.network.is_none());
     main_assert!(app.pending_host_rejoin.is_some(), "the rejoin stays armed until the connection resolves");
     main_assert_eq!(
-        app.startup_network_connection
+        app.startup_network.connection
             .as_ref()
             .map(|connection| connection.purpose) =>
         Some(StartupNetworkPurpose::Join),
@@ -10217,7 +10217,7 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
 
     main_assert_eq!(app.mode => AppMode::Menu, "the round the host restarted is torn down");
     main_assert!(app.network.is_some(), "the session the host kept up is the one this client keeps");
-    main_assert!(app.startup_network_connection.is_none(), "the restart must not launch a new client admission");
+    main_assert!(app.startup_network.connection.is_none(), "the restart must not launch a new client admission");
     main_assert!(app.pending_host_rejoin.is_none(), "a preserved session has no reconnect to arm");
     main_assert!(app.network_lobby.is_some(), "the client lands in the lobby rather than the game list");
     main_assert_eq!(app.network_lobby.test_ref().selected_identifier() => Some(restarted_scenario.identifier.as_str()), "the retained lobby must still identify the round's scenario");
@@ -10339,7 +10339,7 @@ fn cancelling_the_reconnect_dialog_abandons_the_rejoin() {
         None,
     ));
     let (_sender, receiver) = mpsc::channel();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
@@ -10357,11 +10357,11 @@ fn cancelling_the_reconnect_dialog_abandons_the_rejoin() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
 
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.pending_host_rejoin.is_none(), "Cancel must end the rejoin, not just the attempt in flight");
 
     app.poll_startup_network_connection().test_value();
-    main_assert!(app.startup_network_connection.is_none(), "the cancelled rejoin must not reopen its dialog");
+    main_assert!(app.startup_network.connection.is_none(), "the cancelled rejoin must not reopen its dialog");
 }
 
 #[test]
@@ -10380,7 +10380,7 @@ fn a_window_that_closes_mid_attempt_reports_one_failure() {
             "connection refused".to_string(),
         )))
         .test_value();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
@@ -10411,7 +10411,7 @@ fn an_armed_rejoin_survives_the_hosts_rebind_window_and_then_gives_up() {
             "connection refused".to_string(),
         )))
         .test_value();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
@@ -10419,7 +10419,7 @@ fn an_armed_rejoin_survives_the_hosts_rebind_window_and_then_gives_up() {
 
     app.poll_startup_network_connection().test_value();
 
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     let scheduled = app.pending_host_rejoin.test_ref();
     main_assert!(scheduled.next_attempt_at.is_some(), "the next attempt waits for the host to finish re-binding");
     main_assert!(app.startup_restart_diagnostics == StartupRestartDiagnostics::default(), "a retryable reconnect must not present a startup failure");
@@ -10493,7 +10493,7 @@ fn dropping_to_local_control_abandons_an_armed_rejoin() {
     main_assert_eq!(app.mode => AppMode::Running, "the round continues locally");
     main_assert!(app.network.is_none());
     main_assert!(app.pending_host_rejoin.is_none(), "a round that dropped to local control is no longer following the host");
-    main_assert!(app.startup_network_connection.is_none(), "no reconnect dialog may open over a live round");
+    main_assert!(app.startup_network.connection.is_none(), "no reconnect dialog may open over a live round");
 }
 
 #[test]
@@ -10516,7 +10516,7 @@ fn an_announced_restart_alone_does_not_disturb_the_running_round() {
     app.poll_startup_network_connection().test_value();
 
     main_assert!(app.pending_host_rejoin.is_some(), "the intent is recorded");
-    main_assert!(app.startup_network_connection.is_none(), "no reconnect may start while the session it would replace is still live");
+    main_assert!(app.startup_network.connection.is_none(), "no reconnect may start while the session it would replace is still live");
     main_assert!(app.network.is_some());
     main_assert_eq!(app.mode => AppMode::Running);
 }
@@ -10550,7 +10550,7 @@ fn a_client_waiting_in_the_lobby_also_follows_an_announced_restart() {
     app.test_network_events();
 
     main_assert_eq!(
-        app.startup_network_connection
+        app.startup_network.connection
             .as_ref()
             .map(|connection| connection.purpose) =>
         Some(StartupNetworkPurpose::Join),
@@ -10578,7 +10578,7 @@ fn a_rejoin_disarms_when_it_resolves_or_the_player_leaves() {
     sender
         .send(Ok((NetworkMode::Client(n2_client_settings()), manager)))
         .test_value();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,

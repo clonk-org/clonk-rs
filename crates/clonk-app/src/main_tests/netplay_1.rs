@@ -245,7 +245,7 @@ fn n1_select_empty_startup_view(app: &mut GameApp, view: StartupView) {
         }
         StartupView::NetworkGame => {
             app.startup.view = StartupView::NetworkGame;
-            app.startup_network_dialog = None;
+            app.startup_network.dialog = None;
         }
         StartupView::Options => {
             app.startup.view = StartupView::Options;
@@ -581,7 +581,7 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
     app.poll_classic_direct_reference_query().test_value();
 
     main_assert!(app.classic_direct_reference_query.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert_eq!(app.pending_network_join.as_ref().expect("resolved join remains pending").server_addresses => attempts);
     main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("password prompt").purpose => PendingInputDialogPurpose::NetworkJoinPassword);
 
@@ -1954,7 +1954,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.definition_selector.is_none());
     main_assert!(app.staged_network_host_scenario.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network.is_none());
     let dialog = &app.dialogs.messages[0].state;
     main_assert_eq!(dialog.caption() => "Cannot start scenario.");
@@ -2089,7 +2089,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.definition_selector.is_some());
     main_assert_eq!(app.pending_definition_selection.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 }
 
 #[test]
@@ -2474,7 +2474,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     app.menu_state = MenuState::new(menu, scenarios.clone());
     app.scensel.catalog = build_scenario_catalog(&scenarios);
     app.open_network_game_dialog();
-    app.startup_network_dialog
+    app.startup_network.dialog
         .test_mut()
         .set_join_address("remembered.example:11112");
 
@@ -2488,7 +2488,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_lobby.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 
     main_assert_eq!(app.menu_state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("outer"));
     app.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))
@@ -2528,8 +2528,8 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     app.scensel_do_back().test_value();
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert_eq!(n1_expect(&app.startup_network_dialog, "same retained NetDlg").join_address() => "remembered.example:11112");
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert_eq!(n1_expect(&app.startup_network.dialog, "same retained NetDlg").join_address() => "remembered.example:11112");
+    main_assert!(app.startup_network.connection.is_none());
 
     // A pathless stage failure returns through QuitGame to the host selector,
     // never a bound socket (src/C4Application.cpp:373-405,438-450).
@@ -2544,7 +2544,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     .test_value();
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_lobby.is_none());
 }
@@ -2572,7 +2572,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     .test_value();
     wait_for_menu(&mut app);
     app.open_network_game_dialog();
-    app.startup_network_dialog
+    app.startup_network.dialog
         .test_mut()
         .set_join_address("remembered.example:11112");
     let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
@@ -2589,7 +2589,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert!(
-        n1_expect(&app.startup_network_dialog, "live NetDlg")
+        n1_expect(&app.startup_network.dialog, "live NetDlg")
             .config()
             .masterserver_signup
     );
@@ -2606,7 +2606,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert!(
-        !n1_expect(&app.startup_network_dialog, "live NetDlg")
+        !n1_expect(&app.startup_network.dialog, "live NetDlg")
             .config()
             .masterserver_signup
     );
@@ -2617,7 +2617,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     );
     let fonts = app.assets.clonk_fonts.clone().test_value();
     {
-        let dialog = app.startup_network_dialog.test_mut();
+        let dialog = app.startup_network.dialog.test_mut();
         let _ = dialog.handle_pointer_down(chat_point, &fonts.text);
         let _ = dialog.handle_pointer_up(chat_point, &fonts.text);
         let _ = dialog.handle_key_down(KeyCode::Tab);
@@ -2636,7 +2636,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     ])
     .test_value();
     app.close_scenario_browser();
-    let retained = app.startup_network_dialog.test_ref();
+    let retained = app.startup_network.dialog.test_ref();
     main_assert!(retained.config().masterserver_signup);
     main_assert!(
         !retained.config().record,
@@ -2684,7 +2684,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network_transition_active());
     let join_before = app
-        .startup_network_dialog
+        .startup_network.dialog
         .test_ref()
         .join_address()
         .to_string();
@@ -2695,7 +2695,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     ])
     .test_value();
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert_eq!(n1_expect(&app.startup_network_dialog, "same transition NetDlg").join_address() => join_before);
+    main_assert_eq!(n1_expect(&app.startup_network.dialog, "same transition NetDlg").join_address() => join_before);
     let reported_host_error = "host preparation failed: initial host resources could not be published: failed to publish System resource /missing/planet/System.c4g: host C4Group could not be read: No such file or directory (os error 2)";
     sender
         .send(Err(NetworkStartError::Other(
@@ -2734,7 +2734,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     )
     .test_value();
     main_assert!(app.staged_network_host_scenario.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 }
 
 #[test]
@@ -2753,7 +2753,7 @@ fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
             manager,
         )))
         .test_value();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::StagedHost,
@@ -2806,7 +2806,7 @@ fn failed_host_staging_returns_to_host_selector_with_error_log() {
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost));
     main_assert!(app.staged_network_host_scenario.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     assert_startup_error_log(&app, &format!("Cannot host {title}: {staging_error}"));
@@ -2908,7 +2908,7 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     main_assert_eq!(staged.lobby.local_name => "<i<i>>");
     main_assert_eq!(staged.lobby.nick => "Unknown");
     main_assert!(app.network.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 
     persist_config_value(&paths, "Network", "LocalName", "Changed Host").test_value();
     persist_config_value(&paths, "Network", "Nick", "Changed Nick").test_value();
@@ -2943,7 +2943,7 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     app.prepare_network_host_scenario(make_frontend(), definition_load())
         .test_value();
     main_assert!(app.network.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 }
 
 #[test]
@@ -3593,7 +3593,7 @@ fn client_host_timeout_during_final_init_aborts_startup() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_dialog.is_some());
+    main_assert!(app.startup_network.dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_start_wait.is_none());
@@ -4373,7 +4373,7 @@ fn startup_network_dialog_seeds_irc_login_from_config() {
 
     app.open_network_game_dialog();
     main_assert_eq!(
-        n1_expect(&app.startup_network_dialog, "network dialog").chat_login() =>
+        n1_expect(&app.startup_network.dialog, "network dialog").chat_login() =>
         clonk_frontend::startup_netdlg::NetDlgChatLogin {
             server: "irc.seeded.test".into(),
             nick: "NetworkFallback".into(),
@@ -4397,25 +4397,25 @@ fn network_tab_and_shift_tab_are_inverse_and_wrap() {
         NetDlgFontMetrics::from_fonts(fonts),
     );
     dialog.resize(640, 480);
-    app.startup_network_dialog = Some(dialog);
+    app.startup_network.dialog = Some(dialog);
     app.replace_startup_view(StartupView::NetworkGame);
 
     n1_press_and_release_key(&mut app, VirtualKeyCode::Tab);
-    main_assert_eq!(n1_expect(&app.startup_network_dialog, "network dialog").focused_control() => NetDlgControl::JoinAddress);
+    main_assert_eq!(n1_expect(&app.startup_network.dialog, "network dialog").focused_control() => NetDlgControl::JoinAddress);
 
     app.test_modifiers(ModifiersState::SHIFT);
     n1_press_and_release_key(&mut app, VirtualKeyCode::Tab);
-    main_assert_eq!(n1_expect(&app.startup_network_dialog, "network dialog").focused_control() => NetDlgControl::GameList);
+    main_assert_eq!(n1_expect(&app.startup_network.dialog, "network dialog").focused_control() => NetDlgControl::GameList);
     n1_press_and_release_key(&mut app, VirtualKeyCode::Tab);
-    main_assert_eq!(n1_expect(&app.startup_network_dialog, "network dialog").focused_control() => NetDlgControl::ChatButton);
+    main_assert_eq!(n1_expect(&app.startup_network.dialog, "network dialog").focused_control() => NetDlgControl::ChatButton);
 
     app.test_modifiers(ModifiersState::empty());
     n1_press_and_release_key(&mut app, VirtualKeyCode::Tab);
-    main_assert_eq!(n1_expect(&app.startup_network_dialog, "network dialog").focused_control() => NetDlgControl::GameList);
+    main_assert_eq!(n1_expect(&app.startup_network.dialog, "network dialog").focused_control() => NetDlgControl::GameList);
 
     app.test_modifiers(ModifiersState::CONTROL);
     n1_press_and_release_key(&mut app, VirtualKeyCode::Tab);
-    main_assert_eq!(n1_expect(&app.startup_network_dialog, "network dialog").focused_control() => NetDlgControl::GameList);
+    main_assert_eq!(n1_expect(&app.startup_network.dialog, "network dialog").focused_control() => NetDlgControl::GameList);
 }
 
 #[test]

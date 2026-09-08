@@ -159,12 +159,13 @@ impl GameApp {
 
     pub(crate) fn startup_network_transition_active(&self) -> bool {
         self.mode != AppMode::Running
-            && (self.startup_network_connection.is_some()
+            && (self.startup_network.connection.is_some()
                 || self.pending_network_host_preparation.is_some())
     }
 
     fn startup_network_join_progress_active(&self) -> bool {
-        self.startup_network_connection
+        self.startup_network
+            .connection
             .as_ref()
             .is_some_and(|connection| connection.purpose == StartupNetworkPurpose::Join)
             && self.dialogs.messages.iter().any(|dialog| {
@@ -376,7 +377,8 @@ impl GameApp {
         match self.startup.view {
             StartupView::NetworkGame => {
                 let actions = self
-                    .startup_network_dialog
+                    .startup_network
+                    .dialog
                     .as_mut()
                     .map(|dialog| match state {
                         ElementState::Pressed => dialog.handle_key_down(key),
@@ -450,13 +452,14 @@ impl GameApp {
         if self.startup.view == StartupView::NetworkGame
             && (modifiers == ModifiersState::CONTROL
                 || modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
-            && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+            && self.startup_network.dialog.as_ref().is_some_and(|dialog| {
                 dialog.mode() == clonk_frontend::startup_netdlg::NetDlgMode::Chat
                     && dialog.chat_page() == clonk_frontend::startup_netdlg::NetDlgChatPage::Chats
             })
         {
             let actions = if state == ElementState::Pressed {
-                self.startup_network_dialog
+                self.startup_network
+                    .dialog
                     .as_mut()
                     .map(|dialog| {
                         dialog.cycle_chat_sheet(modifiers.contains(ModifiersState::SHIFT))
@@ -483,7 +486,8 @@ impl GameApp {
         match self.startup.view {
             StartupView::NetworkGame => {
                 let actions = self
-                    .startup_network_dialog
+                    .startup_network
+                    .dialog
                     .as_mut()
                     .map(|dialog| {
                         dialog.handle_key_down_with_tab_direction(KeyCode::Tab, backwards)
@@ -609,7 +613,8 @@ impl GameApp {
             }
             StartupView::NetworkGame => {
                 let Some(actions) = self
-                    .startup_network_dialog
+                    .startup_network
+                    .dialog
                     .as_mut()
                     .and_then(|dialog| dialog.handle_hotkey(character))
                 else {
@@ -1310,13 +1315,14 @@ impl GameApp {
         );
         // UpdateMasterserver only keeps the row — and therefore its request
         // deadline — while MasterServerSignUp is set (src/C4StartupNetDlg.cpp:851-866).
-        self.startup_masterserver_request_timeout_at = self
-            .startup_network_dialog
+        self.startup_network.masterserver_request_timeout_at = self
+            .startup_network
+            .dialog
             .as_ref()
             .is_some_and(|dialog| dialog.config().masterserver_signup)
             .then(|| now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT))
             .flatten();
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.set_masterserver_entry(entry);
         }
     }
@@ -1328,9 +1334,9 @@ impl GameApp {
     /// still arms `iRequestTimeout` through `QueryReferences`
     /// (src/C4StartupNetDlg.cpp:182,191-207).
     pub(crate) fn begin_startup_masterserver_requery_at(&mut self, now: Instant) {
-        self.startup_masterserver_request_timeout_at =
+        self.startup_network.masterserver_request_timeout_at =
             now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT);
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.set_masterserver_row_icon(clonk_frontend::startup_netdlg::NetDlgRowIcon::Query);
         }
     }
@@ -1340,9 +1346,9 @@ impl GameApp {
     }
 
     pub(crate) fn set_startup_masterserver_error_at(&mut self, now: Instant, message: String) {
-        self.startup_masterserver_next_query_at =
+        self.startup_network.masterserver_next_query_at =
             now.checked_add(clonk_network::GAME_SEARCH_INTERVAL);
-        self.startup_masterserver_request_timeout_at = None;
+        self.startup_network.masterserver_request_timeout_at = None;
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let mut entry = Self::startup_masterserver_query_entry(
             &self.startup_tooltip_resources,
@@ -1350,7 +1356,7 @@ impl GameApp {
         );
         entry.details = message;
         entry.row_icon = clonk_frontend::startup_netdlg::NetDlgRowIcon::Error;
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.set_masterserver_entry(entry);
         }
     }
@@ -1359,21 +1365,21 @@ impl GameApp {
         &mut self,
         reply: clonk_network::MasterserverReplyInfo,
     ) -> Result<(), EngineError> {
-        self.startup_masterserver_next_query_at =
+        self.startup_network.masterserver_next_query_at =
             Instant::now().checked_add(clonk_network::GAME_SEARCH_INTERVAL);
-        self.startup_masterserver_request_timeout_at = None;
+        self.startup_network.masterserver_request_timeout_at = None;
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let entry = Self::startup_masterserver_reply_entry(
             &self.startup_tooltip_resources,
             &settings.master_server_url,
             &reply,
         );
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.set_masterserver_entry(entry);
         }
 
-        if self.startup_network_dialog.is_none()
-            || self.startup_network_ignore_redirect
+        if self.startup_network.dialog.is_none()
+            || self.startup_network.ignore_redirect
             || reply.league_server_redirect.trim().is_empty()
             || self.dialogs.messages.iter().any(|dialog| {
                 matches!(
@@ -1433,7 +1439,8 @@ impl GameApp {
         let use_alternate_server =
             load_network_search_settings(self.app_paths.as_ref()).use_alternate_server;
         let mut games = self
-            .startup_game_references
+            .startup_network
+            .game_references
             .iter()
             .map(|reference| {
                 Self::startup_network_reference_row_with_config(
@@ -1444,33 +1451,36 @@ impl GameApp {
             })
             .collect::<Vec<_>>();
         games.extend(
-            self.startup_discovery_reference_queries
+            self.startup_network
+                .discovery_reference_queries
                 .iter()
                 .map(|query| self.startup_discovery_reference_query_row(query)),
         );
         games.extend(
-            self.startup_direct_reference_queries
+            self.startup_network
+                .direct_reference_queries
                 .iter()
                 .map(|query| self.startup_direct_reference_query_row(query)),
         );
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.set_games(games);
         }
     }
 
     fn selected_startup_direct_reference_query_id(&self) -> Option<u64> {
-        let selected = self.startup_network_dialog.as_ref()?.selected_game()?;
+        let selected = self.startup_network.dialog.as_ref()?.selected_game()?;
         let query_index = selected
-            .checked_sub(self.startup_game_references.len())?
-            .checked_sub(self.startup_discovery_reference_queries.len())?;
-        self.startup_direct_reference_queries
+            .checked_sub(self.startup_network.game_references.len())?
+            .checked_sub(self.startup_network.discovery_reference_queries.len())?;
+        self.startup_network
+            .direct_reference_queries
             .get(query_index)
             .map(|query| query.id)
     }
 
     fn selected_startup_game_reference(&self) -> Option<clonk_network::NetworkGameReference> {
-        let selected = self.startup_network_dialog.as_ref()?.selected_game()?;
-        self.startup_game_references.get(selected).cloned()
+        let selected = self.startup_network.dialog.as_ref()?.selected_game()?;
+        self.startup_network.game_references.get(selected).cloned()
     }
 
     pub(crate) fn focus_startup_game_reference(
@@ -1478,15 +1488,19 @@ impl GameApp {
         reference: &clonk_network::NetworkGameReference,
     ) {
         let index = self
-            .startup_game_references
+            .startup_network
+            .game_references
             .iter()
             .position(|candidate| candidate == reference)
             .or_else(|| {
-                self.startup_game_references.iter().position(|candidate| {
-                    Self::startup_network_reference_identity_eq(candidate, reference)
-                })
+                self.startup_network
+                    .game_references
+                    .iter()
+                    .position(|candidate| {
+                        Self::startup_network_reference_identity_eq(candidate, reference)
+                    })
             });
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             if let Some(index) = index {
                 let _ = dialog.focus_game(index);
             }
@@ -1494,23 +1508,25 @@ impl GameApp {
     }
 
     pub(crate) fn selected_startup_discovery_reference_query_id(&self) -> Option<u64> {
-        let selected = self.startup_network_dialog.as_ref()?.selected_game()?;
-        let query_index = selected.checked_sub(self.startup_game_references.len())?;
-        self.startup_discovery_reference_queries
+        let selected = self.startup_network.dialog.as_ref()?.selected_game()?;
+        let query_index = selected.checked_sub(self.startup_network.game_references.len())?;
+        self.startup_network
+            .discovery_reference_queries
             .get(query_index)
             .map(|query| query.id)
     }
 
     pub(crate) fn focus_startup_discovery_reference_query(&mut self, id: u64) -> bool {
         let Some(query_index) = self
-            .startup_discovery_reference_queries
+            .startup_network
+            .discovery_reference_queries
             .iter()
             .position(|query| query.id == id)
         else {
             return false;
         };
-        let row = self.startup_game_references.len() + query_index;
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        let row = self.startup_network.game_references.len() + query_index;
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             let _ = dialog.focus_game(row);
         }
         true
@@ -1518,16 +1534,17 @@ impl GameApp {
 
     pub(crate) fn focus_startup_direct_reference_query(&mut self, id: u64) -> bool {
         let Some(query_index) = self
-            .startup_direct_reference_queries
+            .startup_network
+            .direct_reference_queries
             .iter()
             .position(|query| query.id == id)
         else {
             return false;
         };
-        let row = self.startup_game_references.len()
-            + self.startup_discovery_reference_queries.len()
+        let row = self.startup_network.game_references.len()
+            + self.startup_network.discovery_reference_queries.len()
             + query_index;
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             let _ = dialog.focus_game(row);
         }
         true
@@ -1535,7 +1552,8 @@ impl GameApp {
 
     pub(crate) fn begin_startup_direct_reference_query(&mut self, address: String) {
         if let Some(existing) = self
-            .startup_direct_reference_queries
+            .startup_network
+            .direct_reference_queries
             .iter()
             .find(|query| {
                 !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
@@ -1547,10 +1565,13 @@ impl GameApp {
             return;
         }
 
-        self.next_startup_direct_reference_query_id =
-            self.next_startup_direct_reference_query_id.wrapping_add(1);
-        let id = self.next_startup_direct_reference_query_id;
-        self.startup_direct_reference_queries
+        self.startup_network.next_direct_reference_query_id = self
+            .startup_network
+            .next_direct_reference_query_id
+            .wrapping_add(1);
+        let id = self.startup_network.next_direct_reference_query_id;
+        self.startup_network
+            .direct_reference_queries
             .push(StartupDirectReferenceQuery {
                 id,
                 address: address.clone(),
@@ -1559,12 +1580,14 @@ impl GameApp {
             });
         let default_port = load_network_reference_port(self.app_paths.as_ref());
         let submitted = self
-            .startup_game_search
+            .startup_network
+            .game_search
             .as_ref()
             .is_some_and(|search| search.query_direct(id, address, default_port).is_ok());
         if !submitted {
             if let Some(query) = self
-                .startup_direct_reference_queries
+                .startup_network
+                .direct_reference_queries
                 .iter_mut()
                 .find(|query| query.id == id)
             {
@@ -1582,11 +1605,15 @@ impl GameApp {
         &self,
         index: usize,
     ) -> Option<StartupNetworkJoinTarget> {
-        if let Some(reference) = self.startup_game_references.get(index) {
+        if let Some(reference) = self.startup_network.game_references.get(index) {
             return Some(StartupNetworkJoinTarget::Reference(reference.clone()));
         }
-        let query_index = index.checked_sub(self.startup_game_references.len())?;
-        if let Some(query) = self.startup_discovery_reference_queries.get(query_index) {
+        let query_index = index.checked_sub(self.startup_network.game_references.len())?;
+        if let Some(query) = self
+            .startup_network
+            .discovery_reference_queries
+            .get(query_index)
+        {
             return Some(match &query.state {
                 StartupDirectReferenceQueryState::Failed(error) => {
                     StartupNetworkJoinTarget::QueryError(error.clone())
@@ -1597,9 +1624,9 @@ impl GameApp {
                 }
             });
         }
-        let query = self
-            .startup_direct_reference_queries
-            .get(query_index.checked_sub(self.startup_discovery_reference_queries.len())?)?;
+        let query = self.startup_network.direct_reference_queries.get(
+            query_index.checked_sub(self.startup_network.discovery_reference_queries.len())?,
+        )?;
         Some(match &query.state {
             StartupDirectReferenceQueryState::Failed(error) => {
                 StartupNetworkJoinTarget::QueryError(error.clone())
@@ -1612,7 +1639,8 @@ impl GameApp {
 
     pub(crate) fn begin_startup_discovery_reference_query(&mut self, address: SocketAddr) {
         if self
-            .startup_discovery_reference_queries
+            .startup_network
+            .discovery_reference_queries
             .iter()
             .any(|query| {
                 query.address == address
@@ -1622,10 +1650,13 @@ impl GameApp {
             return;
         }
         let selected_direct_query = self.selected_startup_direct_reference_query_id();
-        self.next_startup_direct_reference_query_id =
-            self.next_startup_direct_reference_query_id.wrapping_add(1);
-        let id = self.next_startup_direct_reference_query_id;
-        self.startup_discovery_reference_queries
+        self.startup_network.next_direct_reference_query_id = self
+            .startup_network
+            .next_direct_reference_query_id
+            .wrapping_add(1);
+        let id = self.startup_network.next_direct_reference_query_id;
+        self.startup_network
+            .discovery_reference_queries
             .push(StartupDiscoveryReferenceQuery {
                 id,
                 address,
@@ -1647,24 +1678,27 @@ impl GameApp {
         let selected_reference = self.selected_startup_game_reference();
         let selected_direct_query = self.selected_startup_direct_reference_query_id();
         let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
-        let Some(query_index) =
-            self.startup_discovery_reference_queries
-                .iter()
-                .rposition(|query| {
-                    query.address == address
-                        && !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
-                })
+        let Some(query_index) = self
+            .startup_network
+            .discovery_reference_queries
+            .iter()
+            .rposition(|query| {
+                query.address == address
+                    && !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
+            })
         else {
             return;
         };
-        let query_id = self.startup_discovery_reference_queries[query_index].id;
-        self.startup_game_references = references;
+        let query_id = self.startup_network.discovery_reference_queries[query_index].id;
+        self.startup_network.game_references = references;
         if resolved_reference {
-            self.startup_discovery_reference_queries.remove(query_index);
+            self.startup_network
+                .discovery_reference_queries
+                .remove(query_index);
         } else {
-            self.startup_discovery_reference_queries[query_index].state =
+            self.startup_network.discovery_reference_queries[query_index].state =
                 StartupDirectReferenceQueryState::Empty;
-            self.startup_discovery_reference_queries[query_index].expires_at =
+            self.startup_network.discovery_reference_queries[query_index].expires_at =
                 Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
         }
         // Unlike NRQT_DirectJoin, NRQT_GameDiscovery never explicitly selects
@@ -1688,7 +1722,8 @@ impl GameApp {
     ) {
         let expires_at = Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
         if let Some(query) = self
-            .startup_discovery_reference_queries
+            .startup_network
+            .discovery_reference_queries
             .iter_mut()
             .rev()
             .find(|query| {
@@ -1717,19 +1752,22 @@ impl GameApp {
         let selected_query = self.selected_startup_direct_reference_query_id();
         let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
         let Some(query_index) = self
-            .startup_direct_reference_queries
+            .startup_network
+            .direct_reference_queries
             .iter()
             .position(|query| query.id == request_id)
         else {
             return;
         };
-        self.startup_game_references = references;
+        self.startup_network.game_references = references;
         if let Some(selected_index) = selected_index {
-            self.startup_direct_reference_queries.remove(query_index);
+            self.startup_network
+                .direct_reference_queries
+                .remove(query_index);
             self.sync_startup_network_game_rows();
             match selected_query {
                 Some(id) if id == request_id => {
-                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                    if let Some(dialog) = self.startup_network.dialog.as_mut() {
                         let _ = dialog.focus_game(selected_index);
                     }
                 }
@@ -1739,9 +1777,9 @@ impl GameApp {
                 None => {}
             }
         } else {
-            self.startup_direct_reference_queries[query_index].state =
+            self.startup_network.direct_reference_queries[query_index].state =
                 StartupDirectReferenceQueryState::Empty;
-            self.startup_direct_reference_queries[query_index].expires_at =
+            self.startup_network.direct_reference_queries[query_index].expires_at =
                 Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
             self.sync_startup_network_game_rows();
             if let Some(id) = selected_query {
@@ -1760,7 +1798,8 @@ impl GameApp {
     fn fail_startup_direct_reference_query(&mut self, request_id: u64, message: String) {
         let selected_query = self.selected_startup_direct_reference_query_id();
         let Some(query) = self
-            .startup_direct_reference_queries
+            .startup_network
+            .direct_reference_queries
             .iter_mut()
             .find(|query| query.id == request_id)
         else {
@@ -1777,14 +1816,16 @@ impl GameApp {
     pub(crate) fn tick_startup_network_query_rows_at(&mut self, now: Instant) {
         let selected_query = self.selected_startup_direct_reference_query_id();
         let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
-        let query_count = self.startup_discovery_reference_queries.len()
-            + self.startup_direct_reference_queries.len();
-        self.startup_discovery_reference_queries
+        let query_count = self.startup_network.discovery_reference_queries.len()
+            + self.startup_network.direct_reference_queries.len();
+        self.startup_network
+            .discovery_reference_queries
             .retain(|query| query.expires_at.is_none_or(|expires_at| now < expires_at));
-        self.startup_direct_reference_queries
+        self.startup_network
+            .direct_reference_queries
             .retain(|query| query.expires_at.is_none_or(|expires_at| now < expires_at));
-        if self.startup_discovery_reference_queries.len()
-            + self.startup_direct_reference_queries.len()
+        if self.startup_network.discovery_reference_queries.len()
+            + self.startup_network.direct_reference_queries.len()
             != query_count
         {
             self.sync_startup_network_game_rows();
@@ -1796,23 +1837,26 @@ impl GameApp {
         }
 
         let masterserver_enabled = self
-            .startup_network_dialog
+            .startup_network
+            .dialog
             .as_ref()
             .is_some_and(|dialog| dialog.config().masterserver_signup);
         if !masterserver_enabled {
             return;
         }
         if self
-            .startup_masterserver_next_query_at
+            .startup_network
+            .masterserver_next_query_at
             .is_some_and(|next_query_at| now >= next_query_at)
         {
             // C4StartupNetListEntry::Execute clears iTimeout, re-queries and
             // returns before the iRequestTimeout check, so the fresh request
             // gets its full deadline (src/C4StartupNetDlg.cpp:191-207).
-            self.startup_masterserver_next_query_at = None;
+            self.startup_network.masterserver_next_query_at = None;
             self.begin_startup_masterserver_requery_at(now);
         } else if self
-            .startup_masterserver_request_timeout_at
+            .startup_network
+            .masterserver_request_timeout_at
             .is_some_and(|timeout_at| now >= timeout_at)
         {
             // A request still outstanding after C4NetRefRequestTimeout is
@@ -1851,26 +1895,27 @@ impl GameApp {
         &mut self,
         now: Instant,
     ) -> Result<(), EngineError> {
-        if self.startup_network_last_refresh.is_some_and(|last| {
+        if self.startup_network.last_refresh.is_some_and(|last| {
             now.saturating_duration_since(last) < STARTUP_NETWORK_MIN_REFRESH_INTERVAL
         }) {
             self.play_ui_sound("Error");
             return Ok(());
         }
 
-        self.startup_network_last_refresh = Some(now);
+        self.startup_network.last_refresh = Some(now);
         let masterserver_enabled = self
-            .startup_network_dialog
+            .startup_network
+            .dialog
             .as_ref()
             .is_some_and(|dialog| dialog.config().masterserver_signup);
-        self.startup_masterserver_next_query_at = if masterserver_enabled {
+        self.startup_network.masterserver_next_query_at = if masterserver_enabled {
             now.checked_add(clonk_network::GAME_SEARCH_INTERVAL)
         } else {
             None
         };
-        self.startup_game_references.clear();
-        self.startup_discovery_reference_queries.clear();
-        self.startup_direct_reference_queries.clear();
+        self.startup_network.game_references.clear();
+        self.startup_network.discovery_reference_queries.clear();
+        self.startup_network.direct_reference_queries.clear();
         self.netdlg_last_click = None;
         self.netdlg_join_edit_last_click = None;
         self.netdlg_edit_consumed_keys.clear();
@@ -1878,8 +1923,8 @@ impl GameApp {
         self.reset_startup_masterserver_entry();
         self.status_text.clear();
 
-        self.startup_network_refresh_waiting_for_clear = true;
-        let refresh_error = match self.startup_game_search.as_ref() {
+        self.startup_network.refresh_waiting_for_clear = true;
+        let refresh_error = match self.startup_network.game_search.as_ref() {
             Some(search) => {
                 // The old generation may already have results queued. C++
                 // deletes those clients synchronously; discard their queued
@@ -1890,7 +1935,7 @@ impl GameApp {
             None => Some("network game search is not running".to_string()),
         };
         if let Some(error) = refresh_error {
-            self.startup_network_refresh_waiting_for_clear = false;
+            self.startup_network.refresh_waiting_for_clear = false;
             self.show_startup_discovery_error(&error)?;
         }
         Ok(())
@@ -1900,7 +1945,7 @@ impl GameApp {
         &mut self,
         snapshot: clonk_frontend::startup_netdlg::NetDlgChatSnapshot,
     ) {
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.sync_chat_snapshot(snapshot.clone());
         }
         if let Some(dialog) = self.chat.external_dialog.as_mut() {
@@ -1919,7 +1964,7 @@ impl GameApp {
         self.chat.external_dialog_visible
             || (self.mode == AppMode::Menu
                 && self.startup.view == StartupView::NetworkGame
-                && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+                && self.startup_network.dialog.as_ref().is_some_and(|dialog| {
                     dialog.mode() == clonk_frontend::startup_netdlg::NetDlgMode::Chat
                 }))
     }
@@ -2212,7 +2257,7 @@ impl GameApp {
         join_target: Option<StartupJoinTarget>,
     ) -> Result<(), EngineError> {
         let purpose = connection.purpose;
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             // Transition guards suppress subsequent input, so release every
             // net-dialog press/capture before installing that guard.
             dialog.cancel_interaction();
@@ -2237,7 +2282,7 @@ impl GameApp {
                 MessageDialogContinuation::StartupNetworkConnectProgress,
             )?;
         }
-        self.startup_network_connection = Some(connection);
+        self.startup_network.connection = Some(connection);
         if purpose == StartupNetworkPurpose::StagedHost {
             let initial_fonts = self
                 .staged_network_host_scenario
@@ -2437,11 +2482,11 @@ impl GameApp {
 
         match purpose {
             StartupNetworkPurpose::StagedHost => {
-                self.startup_game_search = None;
-                self.startup_network_last_refresh = None;
-                self.startup_masterserver_next_query_at = None;
-                self.startup_masterserver_request_timeout_at = None;
-                self.startup_network_dialog = None;
+                self.startup_network.game_search = None;
+                self.startup_network.last_refresh = None;
+                self.startup_network.masterserver_next_query_at = None;
+                self.startup_network.masterserver_request_timeout_at = None;
+                self.startup_network.dialog = None;
                 self.restore_startup_dialog(StartupDialog::ScenarioBrowser(
                     ScenarioSelectorMode::NetworkHost,
                 ));
@@ -2507,7 +2552,7 @@ impl GameApp {
     }
 
     pub(crate) fn poll_startup_network_connection(&mut self) -> Result<(), EngineError> {
-        let Some(connection) = self.startup_network_connection.as_ref() else {
+        let Some(connection) = self.startup_network.connection.as_ref() else {
             return self.poll_pending_host_rejoin();
         };
         let selected_scenario = connection.selected_scenario.clone();
@@ -2523,7 +2568,8 @@ impl GameApp {
             Err(TryRecvError::Disconnected) => None,
         };
         let mut connection = self
-            .startup_network_connection
+            .startup_network
+            .connection
             .take()
             .expect("completed startup network connection remains installed");
         let mut authenticated_league_players = connection.authenticated_league_players.take();
@@ -3192,24 +3238,25 @@ impl GameApp {
         &mut self,
         event: clonk_network::StartupGameSearchEvent,
     ) -> Result<(), EngineError> {
-        if self.startup_network_refresh_waiting_for_clear {
+        if self.startup_network.refresh_waiting_for_clear {
             if !matches!(&event, clonk_network::StartupGameSearchEvent::Cleared) {
                 return Ok(());
             }
-            self.startup_network_refresh_waiting_for_clear = false;
+            self.startup_network.refresh_waiting_for_clear = false;
         }
         match event {
             clonk_network::StartupGameSearchEvent::Cleared => {
                 let selected_query = self.selected_startup_direct_reference_query_id();
                 let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
-                self.startup_game_references.clear();
+                self.startup_network.game_references.clear();
                 self.sync_startup_network_game_rows();
                 self.reset_startup_masterserver_entry();
                 let masterserver_enabled = self
-                    .startup_network_dialog
+                    .startup_network
+                    .dialog
                     .as_ref()
                     .is_some_and(|dialog| dialog.config().masterserver_signup);
-                self.startup_masterserver_next_query_at = if masterserver_enabled {
+                self.startup_network.masterserver_next_query_at = if masterserver_enabled {
                     Instant::now().checked_add(clonk_network::GAME_SEARCH_INTERVAL)
                 } else {
                     None
@@ -3224,7 +3271,7 @@ impl GameApp {
                 let selected_reference = self.selected_startup_game_reference();
                 let selected_query = self.selected_startup_direct_reference_query_id();
                 let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
-                self.startup_game_references = references;
+                self.startup_network.game_references = references;
                 self.sync_startup_network_game_rows();
                 if let Some(reference) = selected_reference.as_ref() {
                     self.focus_startup_game_reference(reference);
@@ -3286,16 +3333,17 @@ impl GameApp {
 
     fn startup_network_dialog_is_covered_by_message(&self) -> bool {
         self.startup.view == StartupView::NetworkGame
-            && self.startup_network_dialog.is_some()
+            && self.startup_network.dialog.is_some()
             && !self.dialogs.messages.is_empty()
     }
 
     fn next_startup_game_search_event(&mut self) -> Option<clonk_network::StartupGameSearchEvent> {
         #[cfg(test)]
-        if let Some(event) = self.startup_game_search_test_events.pop_front() {
+        if let Some(event) = self.startup_network.game_search_test_events.pop_front() {
             return Some(event);
         }
-        self.startup_game_search
+        self.startup_network
+            .game_search
             .as_ref()
             .and_then(|search| search.events().try_recv().ok())
     }
@@ -4887,7 +4935,7 @@ impl GameApp {
             &mut self.menu_state,
             &self.scensel.entry_enabled,
             scenario_loading_label.as_deref(),
-            self.startup_network_dialog.as_ref(),
+            self.startup_network.dialog.as_ref(),
             self.startup.player_dialog.as_ref(),
             &self.startup.player_models,
             &self.startup.crew_models,
@@ -5151,16 +5199,16 @@ impl GameApp {
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
         self.clear_pending_league_player_auth();
-        self.startup_network_connection = None;
+        self.startup_network.connection = None;
         self.pending_network_host_preparation = None;
-        self.startup_game_search = None;
-        self.startup_network_last_refresh = None;
-        self.startup_masterserver_next_query_at = None;
-        self.startup_masterserver_request_timeout_at = None;
-        self.startup_network_refresh_waiting_for_clear = false;
-        self.startup_game_references.clear();
-        self.startup_discovery_reference_queries.clear();
-        self.startup_direct_reference_queries.clear();
+        self.startup_network.game_search = None;
+        self.startup_network.last_refresh = None;
+        self.startup_network.masterserver_next_query_at = None;
+        self.startup_network.masterserver_request_timeout_at = None;
+        self.startup_network.refresh_waiting_for_clear = false;
+        self.startup_network.game_references.clear();
+        self.startup_network.discovery_reference_queries.clear();
+        self.startup_network.direct_reference_queries.clear();
         self.netdlg_last_click = None;
         self.netdlg_join_edit_last_click = None;
         self.netdlg_edit_consumed_keys.clear();
@@ -5242,7 +5290,7 @@ impl GameApp {
         self.refresh_participants_label();
         self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.pointer_left();
         }
         if let Some(dialog) = self.startup.player_dialog.as_mut() {
@@ -5355,7 +5403,7 @@ impl GameApp {
                     return;
                 }
                 if failed
-                    || (self.startup_network_connection.is_none() && self.loading_state.is_none())
+                    || (self.startup_network.connection.is_none() && self.loading_state.is_none())
                 {
                     self.mode = AppMode::Menu;
                     self.show_main_menu();
@@ -5369,7 +5417,7 @@ impl GameApp {
             // loading, so doing so would strand the in-flight load forever. Stay
             // in `Loading` and let `poll_loading` carry the scenario to `Running`.
             if self.loading_state.is_none()
-                && self.startup_network_connection.is_none()
+                && self.startup_network.connection.is_none()
                 && self.classic_direct_reference_query.is_none()
             {
                 self.mode = AppMode::Menu;
@@ -5789,7 +5837,7 @@ impl GameApp {
 
     fn reject_missing_startup_model(&self) -> Result<()> {
         let missing = match self.startup.view {
-            StartupView::NetworkGame if self.startup_network_dialog.is_none() => {
+            StartupView::NetworkGame if self.startup_network.dialog.is_none() => {
                 Some("C4StartupNetDlg")
             }
             StartupView::PlayerSelection if self.startup.player_dialog.is_none() => {

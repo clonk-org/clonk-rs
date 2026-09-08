@@ -15,7 +15,7 @@ impl GameApp {
         if self.network_mode.is_some() {
             return Ok(());
         }
-        if self.startup_network_connection.is_some()
+        if self.startup_network.connection.is_some()
             || self.classic_direct_reference_query.is_some()
         {
             self.status_text = "A network connection is already in progress".to_string();
@@ -26,7 +26,7 @@ impl GameApp {
             return Ok(());
         }
         self.prepare_network_join_game_state();
-        self.startup_game_search = None;
+        self.startup_network.game_search = None;
 
         let (sender, receiver) = mpsc::channel();
         let player_name = self.players.local_name.clone();
@@ -490,7 +490,7 @@ impl GameApp {
                 let mut connection =
                     StartupNetworkConnection::new(receiver, selected_scenario, purpose);
                 connection.authenticated_league_players = Some(players);
-                self.startup_network_connection = Some(connection);
+                self.startup_network.connection = Some(connection);
                 LeaguePlayerAuthStatus::Completed(true)
             }
             LeaguePlayerAuthContinuation::RuntimePlayer {
@@ -5350,7 +5350,7 @@ impl GameApp {
         scenario: FrontendScenario,
         bind_addr: SocketAddr,
     ) {
-        if self.startup_network_connection.is_some()
+        if self.startup_network.connection.is_some()
             || self.pending_network_host_preparation.is_some()
         {
             self.status_text = "A network connection is already in progress".to_string();
@@ -5399,7 +5399,7 @@ impl GameApp {
         let global_system_scripts = self.global_scripts_for_session();
         self.staged_network_host_scenario = Some(staged);
         let selected_scenario = Some((scenario.identifier.clone(), scenario.title.clone()));
-        self.startup_game_search = None;
+        self.startup_network.game_search = None;
         let (sender, receiver) = mpsc::channel();
         let (preparation_sender, preparation_receiver) = mpsc::channel();
         let local_owner = self.players.local_owner;
@@ -5512,7 +5512,7 @@ impl GameApp {
                 // Deliberately bypass `install_startup_network_connection`:
                 // OpenScenario has already reached DoLobby, so the final
                 // rebind must not put the loader back over that lobby.
-                self.startup_network_connection = Some(StartupNetworkConnection::new(
+                self.startup_network.connection = Some(StartupNetworkConnection::new(
                     receiver,
                     selected_scenario,
                     StartupNetworkPurpose::StagedHost,
@@ -5533,7 +5533,7 @@ impl GameApp {
     }
 
     pub(crate) fn activate_network_join(&mut self, address: String) -> Result<(), EngineError> {
-        if self.startup_network_connection.is_some() {
+        if self.startup_network.connection.is_some() {
             self.status_text = "A network connection is already in progress".to_string();
             return Ok(());
         }
@@ -5542,7 +5542,7 @@ impl GameApp {
             return Ok(());
         }
         self.prepare_network_join_game_state();
-        self.startup_game_search = None;
+        self.startup_network.game_search = None;
         let local_owner = self.players.local_owner;
         let voice_enabled = self.voice_chat_enabled();
         let player_name = self.players.local_name.clone();
@@ -5677,7 +5677,7 @@ impl GameApp {
         &mut self,
         reference: clonk_network::NetworkGameReference,
     ) -> Result<(), EngineError> {
-        if self.startup_network_connection.is_some() {
+        if self.startup_network.connection.is_some() {
             self.status_text = "A network connection is already in progress".to_string();
             return Ok(());
         }
@@ -5789,7 +5789,7 @@ impl GameApp {
                 // the search: a password prompt the user cancels, or a worker
                 // that never spawns, leaves the netdlg discovering
                 // (src/C4StartupNetDlg.cpp:737-738,752).
-                self.startup_game_search = None;
+                self.startup_network.game_search = None;
             }
             Err(error) => {
                 self.pending_network_join = None;
@@ -9767,7 +9767,7 @@ impl GameApp {
     }
 
     pub(crate) fn network_game_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
-        let dialog = self.startup_network_dialog.as_ref()?;
+        let dialog = self.startup_network.dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.rendering.graphics.surface();
         let layout = clonk_frontend::startup_netdlg::net_dlg_layout(
@@ -9933,7 +9933,7 @@ impl GameApp {
             .tcp_port
             .unwrap_or(configured_port);
         self.activate_prepared_network_host(selected, SocketAddr::from(([0, 0, 0, 0], port)));
-        if self.startup_network_connection.is_none() {
+        if self.startup_network.connection.is_none() {
             self.staged_network_host_scenario = None;
             // No transition was installed, so the activation reported why in
             // `status_text` instead. That is the fatal error C4Game::Init

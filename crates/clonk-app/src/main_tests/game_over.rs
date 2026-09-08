@@ -344,7 +344,7 @@ fn disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
     let (sender, receiver) =
         mpsc::channel::<std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>>();
     drop(sender);
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         receiver,
         None,
         StartupNetworkPurpose::Join,
@@ -378,7 +378,7 @@ fn disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
 fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     let mut app = new_real_classic_menu_app(800, 600);
     attach_l040_network_dialog(&mut app);
-    app.startup_network_dialog
+    app.startup_network.dialog
         .test_mut()
         .set_join_address("remembered.example:11112");
     app.status_text = "stale generic status".to_string();
@@ -396,7 +396,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_dialog.is_some());
+    main_assert!(app.startup_network.dialog.is_some());
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.status_text.is_empty());
     let info = app.dialogs.client_list.test_ref();
@@ -440,7 +440,7 @@ fn restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(app.dialogs.client_list.is_none());
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert!(app.startup_network_dialog.is_some());
+    main_assert!(app.startup_network.dialog.is_some());
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert_eq!(app.startup_restart_diagnostics => StartupRestartDiagnostics::default());
@@ -1055,7 +1055,7 @@ fn rejected_live_round_restart_falls_back_to_announced_rehosting() {
         "the compatibility fallback must announce the reconnect before dropping the old session"
     );
     main_assert!(app.network.is_none(), "the rejected retained session must not survive as the next host");
-    main_assert!(app.startup_network_connection.is_some(), "the same scenario must immediately begin re-hosting");
+    main_assert!(app.startup_network.connection.is_some(), "the same scenario must immediately begin re-hosting");
 }
 
 #[test]
@@ -1494,7 +1494,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         SocketAddr::from(([127, 0, 0, 1], 0)),
     );
     let host_deadline = Instant::now() + Duration::from_secs(30);
-    while host.startup_network_connection.is_some()
+    while host.startup_network.connection.is_some()
         || host.pending_network_host_preparation.is_some()
         || !host
             .advertised_game_reference
@@ -1623,8 +1623,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     main_assert_eq!(host.network.test_ref().local_client_id() => host_local_id);
     main_assert_eq!(client.network.test_ref().local_client_id() => client_local_id);
     main_assert_eq!(host.network.test_ref().local_addresses() => host_addresses);
-    main_assert!(host.startup_network_connection.is_none());
-    main_assert!(client.startup_network_connection.is_none(), "the retained peer must not re-dial the host");
+    main_assert!(host.startup_network.connection.is_none());
+    main_assert!(client.startup_network.connection.is_none(), "the retained peer must not re-dial the host");
     main_assert!(client.pending_host_rejoin.is_none());
     let host_routes_after = route_keys(&host);
     let client_routes_after = route_keys(&client);
@@ -1804,8 +1804,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     main_assert_eq!(route_keys(&host) => round_two_host_routes, "starting round two must preserve every retained and newly admitted host route");
     main_assert_eq!(route_keys(&client) => round_two_client_routes, "starting round two must preserve the retained client's route");
     main_assert_eq!(route_keys(&joining_client) => round_two_joining_client_routes, "starting round two must preserve the newly admitted client's route");
-    main_assert!(host.startup_network_connection.is_none());
-    main_assert!(client.startup_network_connection.is_none(), "round two must still use the retained worker instead of dialing again");
+    main_assert!(host.startup_network.connection.is_none());
+    main_assert!(client.startup_network.connection.is_none(), "round two must still use the retained worker instead of dialing again");
     main_assert!(client.pending_host_rejoin.is_none());
     let round_two_host_scenario = host.active_scenario.test_ref();
     let round_two_client_scenario = client.active_scenario.test_ref();
@@ -2331,8 +2331,8 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
         );
         dialog.resize(800, 600);
         app.startup.view = StartupView::NetworkGame;
-        app.startup_network_dialog = Some(dialog);
-        app.startup_game_search = Some(
+        app.startup_network.dialog = Some(dialog);
+        app.startup_network.game_search = Some(
             clonk_network::StartupGameSearch::start(clonk_network::NetworkGameSearchConfig {
                 internet_enabled: true,
                 use_alternate_server: false,
@@ -2341,11 +2341,11 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
             })
             .test_value(),
         );
-        app.startup_game_references = vec![clonk_network::NetworkGameReference {
+        app.startup_network.game_references = vec![clonk_network::NetworkGameReference {
             title: "Stale game".to_string(),
             ..Default::default()
         }];
-        app.startup_direct_reference_queries = vec![StartupDirectReferenceQuery {
+        app.startup_network.direct_reference_queries = vec![StartupDirectReferenceQuery {
             id: 27,
             address: "stale.invalid".to_string(),
             state: StartupDirectReferenceQueryState::Pending,
@@ -2353,8 +2353,8 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
         }];
         app.sync_startup_network_game_rows();
         app.netdlg_last_click = Some((0, Instant::now()));
-        app.startup_network_last_refresh = Some(Instant::now() - Duration::from_secs(2));
-        main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len() => 2);
+        app.startup_network.last_refresh = Some(Instant::now() - Duration::from_secs(2));
+        main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games().len() => 2);
 
         // Start the bounded server clock only after the expensive classic
         // app fixture is ready. Under a parallel full-suite run, starting
@@ -2414,16 +2414,16 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
         // after the refresh command has been delivered to the worker.
         let server = start_server();
 
-        main_assert!(app.startup_game_references.is_empty());
-        main_assert!(app.startup_direct_reference_queries.is_empty());
-        main_assert!(app.startup_network_dialog.as_ref().unwrap().games().is_empty());
+        main_assert!(app.startup_network.game_references.is_empty());
+        main_assert!(app.startup_network.direct_reference_queries.is_empty());
+        main_assert!(app.startup_network.dialog.as_ref().unwrap().games().is_empty());
         main_assert!(app.netdlg_last_click.is_none());
         main_assert!(app.status_text.is_empty(), "query presentation belongs to the native masterserver row");
         main_assert!(!app.take_exit_request());
 
         let deadline = Instant::now() + Duration::from_secs(14);
         while !app
-            .startup_game_references
+            .startup_network.game_references
             .iter()
             .any(|reference| reference.title == title)
             && Instant::now() < deadline
@@ -2445,8 +2445,8 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
             thread::sleep(Duration::from_millis(10));
         }
         main_assert!(server.join().expect("masterserver fixture thread"));
-        main_assert_eq!(app.startup_game_references.iter().map(|reference| reference.title.as_str()).collect::<Vec<_>>() => [title]);
-        main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len() => 1);
+        main_assert_eq!(app.startup_network.game_references.iter().map(|reference| reference.title.as_str()).collect::<Vec<_>>() => [title]);
+        main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games().len() => 1);
         main_assert!(app.status_text.is_empty(), "result presentation belongs to the native query/game rows");
         main_assert_eq!(app.startup.view => StartupView::NetworkGame);
         main_assert!(!app.take_exit_request());
@@ -2473,13 +2473,13 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     );
     dialog.resize(800, 600);
     app.startup.view = StartupView::NetworkGame;
-    app.startup_network_dialog = Some(dialog);
-    app.startup_game_search = None;
-    app.startup_game_references = vec![clonk_network::NetworkGameReference {
+    app.startup_network.dialog = Some(dialog);
+    app.startup_network.game_search = None;
+    app.startup_network.game_references = vec![clonk_network::NetworkGameReference {
         title: "Retained game".to_string(),
         ..Default::default()
     }];
-    app.startup_direct_reference_queries = vec![StartupDirectReferenceQuery {
+    app.startup_network.direct_reference_queries = vec![StartupDirectReferenceQuery {
         id: 28,
         address: "retained.invalid".to_string(),
         state: StartupDirectReferenceQueryState::Pending,
@@ -2488,12 +2488,12 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     app.sync_startup_network_game_rows();
     app.status_text = "Retained status".to_string();
     let now = Instant::now();
-    app.startup_network_last_refresh = Some(now);
+    app.startup_network.last_refresh = Some(now);
     app.netdlg_last_click = Some((0, now));
-    let expected_references = app.startup_game_references.clone();
-    let expected_queries = app.startup_direct_reference_queries.clone();
+    let expected_references = app.startup_network.game_references.clone();
+    let expected_queries = app.startup_network.direct_reference_queries.clone();
     let expected_games = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_ref()
         .test_value()
         .games()
@@ -2508,10 +2508,10 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     app.request_startup_network_refresh_at(now + Duration::from_millis(999))
         .test_value();
 
-    main_assert_eq!(app.startup_network_last_refresh => Some(now));
-    main_assert_eq!(app.startup_game_references => expected_references);
-    main_assert_eq!(app.startup_direct_reference_queries => expected_queries);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games() => expected_games);
+    main_assert_eq!(app.startup_network.last_refresh => Some(now));
+    main_assert_eq!(app.startup_network.game_references => expected_references);
+    main_assert_eq!(app.startup_network.direct_reference_queries => expected_queries);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games() => expected_games);
     main_assert_eq!(app.status_text => "Retained status");
     main_assert_eq!(app.netdlg_last_click => Some((0, now)));
     main_assert!(app.dialogs.messages.is_empty());
@@ -3503,7 +3503,7 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
         clonk_frontend::startup_options_dlg::OptionsSheet::Graphics
     );
     main_assert_eq!(app.startup.about_dialog.as_ref().expect("retained About model").current_page() => clonk_frontend::startup_about_dlg::AboutPage::Licenses);
-    main_assert_eq!(app.startup_network_dialog.as_ref().expect("retained Network model").mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
+    main_assert_eq!(app.startup_network.dialog.as_ref().expect("retained Network model").mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
     main_assert!(app.startup.player_dialog.is_some());
     app.handle_game_over().test_value();
     app.assets

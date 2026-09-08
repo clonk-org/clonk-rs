@@ -1366,12 +1366,12 @@ fn stage_layout_checkpoint(
                 && fixture.references.is_empty(),
             "startup-network-browser requires the canonical completed-empty reference fixture"
         );
-        app.startup_game_search = None;
+        app.startup_network.game_search = None;
         app.apply_startup_game_search_event(
             clonk_network::StartupGameSearchEvent::ReferencesUpdated(Vec::new()),
         )?;
         anyhow::ensure!(
-            app.startup_network_dialog.is_some(),
+            app.startup_network.dialog.is_some(),
             "startup-network-browser has no live network dialog controller"
         );
     }
@@ -1472,7 +1472,7 @@ fn render_layout_capture(
                 )?
             }
             LayoutCaptureCase::NetworkBrowser => {
-                let controller = app.startup_network_dialog.as_ref().ok_or_else(|| {
+                let controller = app.startup_network.dialog.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("startup-network-browser has no live controller")
                 })?;
                 crate::presentation_layout_producers::startup_network_browser_trace(

@@ -285,7 +285,8 @@ impl GameApp {
         let actions = fonts
             .as_deref()
             .and_then(|fonts| {
-                self.startup_network_dialog
+                self.startup_network
+                    .dialog
                     .as_mut()
                     .map(|dialog| dialog.handle_text_input(text, &fonts.text))
             })
@@ -748,7 +749,8 @@ impl GameApp {
                 return Ok(());
             }
             let actions = self
-                .startup_network_dialog
+                .startup_network
+                .dialog
                 .as_mut()
                 .and_then(|dialog| {
                     dialog
@@ -875,7 +877,7 @@ impl GameApp {
         if self.chat.external_dialog_visible {
             self.chat.external_dialog.as_ref()
         } else {
-            self.startup_network_dialog.as_ref()
+            self.startup_network.dialog.as_ref()
         }
     }
 
@@ -885,7 +887,7 @@ impl GameApp {
         if self.chat.external_dialog_visible {
             self.chat.external_dialog.as_mut()
         } else {
-            self.startup_network_dialog.as_mut()
+            self.startup_network.dialog.as_mut()
         }
     }
 
@@ -4070,13 +4072,14 @@ impl GameApp {
             && self.startup.view == StartupView::NetworkGame
             && key == VirtualKeyCode::F4
             && self.input_routing.live.modifiers == ModifiersState::CONTROL
-            && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+            && self.startup_network.dialog.as_ref().is_some_and(|dialog| {
                 dialog.mode() == clonk_frontend::startup_netdlg::NetDlgMode::Chat
                     && dialog.chat_page() == clonk_frontend::startup_netdlg::NetDlgChatPage::Chats
             })
         {
             let actions = if state == ElementState::Pressed {
-                self.startup_network_dialog
+                self.startup_network
+                    .dialog
                     .as_mut()
                     .map(clonk_frontend::startup_netdlg::NetDlgController::close_active_chat_sheet)
                     .unwrap_or_default()
@@ -5275,7 +5278,7 @@ impl GameApp {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.set_chat_history(history.clone());
         }
         if let Some(dialog) = self.chat.external_dialog.as_mut() {
@@ -6845,7 +6848,8 @@ impl GameApp {
                 match self.startup.view {
                     StartupView::NetworkGame => {
                         let actions = self
-                            .startup_network_dialog
+                            .startup_network
+                            .dialog
                             .as_mut()
                             .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
                             .unwrap_or_default();
@@ -7732,7 +7736,8 @@ impl GameApp {
                         let actions = fonts
                             .as_deref()
                             .and_then(|fonts| {
-                                self.startup_network_dialog
+                                self.startup_network
+                                    .dialog
                                     .as_mut()
                                     .map(|dialog| dialog.handle_pointer_move(point, &fonts.text))
                             })
@@ -9687,7 +9692,8 @@ impl GameApp {
                         }
                         StartupView::NetworkGame => {
                             let outcome = self
-                                .startup_network_dialog
+                                .startup_network
+                                .dialog
                                 .as_mut()
                                 .and_then(|dialog| {
                                     dialog.pointer_position().map(|point| {
@@ -9971,7 +9977,7 @@ impl GameApp {
                 let outcome = fonts
                     .as_deref()
                     .and_then(|fonts| {
-                        self.startup_network_dialog.as_mut().and_then(|dialog| {
+                        self.startup_network.dialog.as_mut().and_then(|dialog| {
                             dialog.pointer_position().map(|point| {
                                 dialog.handle_pointer_middle_down(
                                     point,
@@ -11296,16 +11302,19 @@ impl GameApp {
                             return Ok(());
                         };
                         let point = self
-                            .startup_network_dialog
+                            .startup_network
+                            .dialog
                             .as_ref()
                             .and_then(|dialog| dialog.pointer_position());
                         let clicked_row = point.and_then(|point| {
-                            self.startup_network_dialog
+                            self.startup_network
+                                .dialog
                                 .as_ref()
                                 .and_then(|dialog| dialog.game_index_at(point))
                         });
                         let clicked_edit = point.is_some_and(|point| {
-                            self.startup_network_dialog
+                            self.startup_network
+                                .dialog
                                 .as_ref()
                                 .is_some_and(|dialog| dialog.join_address_contains(point))
                         });
@@ -11337,7 +11346,8 @@ impl GameApp {
                             false
                         };
                         let mut actions = if edit_double {
-                            self.startup_network_dialog
+                            self.startup_network
+                                .dialog
                                 .as_mut()
                                 .and_then(|dialog| {
                                     point.map(|point| {
@@ -11346,7 +11356,8 @@ impl GameApp {
                                 })
                                 .unwrap_or_default()
                         } else {
-                            self.startup_network_dialog
+                            self.startup_network
+                                .dialog
                                 .as_mut()
                                 .and_then(|dialog| {
                                     point.map(|point| match button_state {
@@ -11362,7 +11373,8 @@ impl GameApp {
                         };
                         if row_double {
                             actions.extend(
-                                self.startup_network_dialog
+                                self.startup_network
+                                    .dialog
                                     .as_mut()
                                     .and_then(|dialog| {
                                         point.map(|point| {
@@ -11374,7 +11386,7 @@ impl GameApp {
                             self.netdlg_last_click = None;
                         }
                         let chat_double = button_state == ElementState::Released
-                            && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+                            && self.startup_network.dialog.as_ref().is_some_and(|dialog| {
                                 dialog.mode() == clonk_frontend::startup_netdlg::NetDlgMode::Chat
                             })
                             && point.is_some_and(|point| {
@@ -11391,7 +11403,8 @@ impl GameApp {
                             });
                         if chat_double {
                             actions.extend(
-                                self.startup_network_dialog
+                                self.startup_network
+                                    .dialog
                                     .as_mut()
                                     .and_then(|dialog| {
                                         point.map(|point| {
@@ -12407,7 +12420,8 @@ impl GameApp {
                 let actions = fonts
                     .as_deref()
                     .and_then(|fonts| {
-                        self.startup_network_dialog
+                        self.startup_network
+                            .dialog
                             .as_mut()
                             .map(|dialog| match phase {
                                 TouchPhase::Started => {
@@ -12823,7 +12837,7 @@ impl GameApp {
         match self.mode {
             AppMode::Menu => match self.startup.view {
                 StartupView::NetworkGame => {
-                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                    if let Some(dialog) = self.startup_network.dialog.as_mut() {
                         dialog.pointer_left();
                     }
                     self.netdlg_last_click = None;

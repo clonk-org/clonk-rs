@@ -798,6 +798,43 @@ pub(crate) struct InputRouting {
     pub(crate) scoreboard_tab_raw_pressed: bool,
 }
 
+/// The startup network half of the app: what `C4StartupNetDlg` and its
+/// `C4StartupNetListEntry` rows hold between shows, plus the connection
+/// a join starts. `GameApp` composes it as `startup_network`.
+pub(crate) struct StartupNetworkState {
+    pub(crate) dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
+    pub(crate) game_search: Option<clonk_network::StartupGameSearch>,
+    #[cfg(test)]
+    pub(crate) game_search_test_events: VecDeque<clonk_network::StartupGameSearchEvent>,
+    /// C4StartupNetDlg::tLastRefresh. OnShown seeds the one-second guard,
+    /// and accepted Reload/F5 requests advance it before restarting search.
+    pub(crate) last_refresh: Option<Instant>,
+    /// C4StartupNetListEntry::iTimeout for the masterserver row. Unlike
+    /// tLastRefresh, this response-relative deadline must not throttle F5.
+    pub(crate) masterserver_next_query_at: Option<Instant>,
+    /// C4StartupNetListEntry::iRequestTimeout for the masterserver row. The
+    /// worker owns the transport deadline, but native also bounds how long the
+    /// row may display IDS_NET_INFOQUERY, so a query whose outcome never
+    /// reaches the dialog still resolves (src/C4StartupNetDlg.cpp:182,216-223).
+    pub(crate) masterserver_request_timeout_at: Option<Instant>,
+    /// Reject pre-refresh events until the worker acknowledges the new
+    /// generation with Cleared, so deleted rows cannot flash back into view.
+    pub(crate) refresh_waiting_for_clear: bool,
+    /// `C4StartupNetDlg::fIgnoreUpdate`: declining one league-server redirect
+    /// suppresses further prompts for the lifetime of this dialog instance.
+    pub(crate) ignore_redirect: bool,
+    /// Complete references retained in the same order as the visible game
+    /// list. The frontend row projects only a display address.
+    pub(crate) game_references: Vec<clonk_network::NetworkGameReference>,
+    /// Per-host reference requests created from LAN discovery datagrams.
+    pub(crate) discovery_reference_queries: Vec<StartupDiscoveryReferenceQuery>,
+    /// User-entered reference requests remain visible until they resolve,
+    /// fail, or are replaced by their returned reference rows.
+    pub(crate) direct_reference_queries: Vec<StartupDirectReferenceQuery>,
+    pub(crate) next_direct_reference_query_id: u64,
+    pub(crate) connection: Option<StartupNetworkConnection>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -877,6 +914,11 @@ pub(crate) struct GameApp {
     /// key-route latches and the per-game KeyConfig ownership
     /// (clonk-org/clonk-rs#1237).
     pub(crate) input_routing: InputRouting,
+    /// The startup network dialog (`C4StartupNetDlg`) and its list entries:
+    /// the controller, the game search, the refresh and masterserver
+    /// deadlines, the retained references and reference queries, and the
+    /// connection being joined (clonk-org/clonk-rs#1238).
+    pub(crate) startup_network: StartupNetworkState,
     #[cfg(test)]
     #[cfg(test)]
     pub(crate) sec1_timer_call_count: usize,
@@ -897,41 +939,11 @@ pub(crate) struct GameApp {
     pub(crate) startup_tooltip: ClassicTooltipTracker,
     /// Which startup screen is showing and what built it.
     pub(crate) startup: StartupDialogState,
-    pub(crate) startup_network_dialog: Option<clonk_frontend::startup_netdlg::NetDlgController>,
     /// IRC and every chat surface, which share one transport lifetime.
     pub(crate) chat: ChatState,
     /// `Application.launchEditor`: set by `SwitchToEditor`, consumed by
     /// `~C4Application` after subsystem cleanup (C4Application.cpp:58-74).
     pub(crate) pending_editor_launch: Option<PathBuf>,
-    pub(crate) startup_game_search: Option<clonk_network::StartupGameSearch>,
-    #[cfg(test)]
-    pub(crate) startup_game_search_test_events: VecDeque<clonk_network::StartupGameSearchEvent>,
-    /// C4StartupNetDlg::tLastRefresh. OnShown seeds the one-second guard,
-    /// and accepted Reload/F5 requests advance it before restarting search.
-    pub(crate) startup_network_last_refresh: Option<Instant>,
-    /// C4StartupNetListEntry::iTimeout for the masterserver row. Unlike
-    /// tLastRefresh, this response-relative deadline must not throttle F5.
-    pub(crate) startup_masterserver_next_query_at: Option<Instant>,
-    /// C4StartupNetListEntry::iRequestTimeout for the masterserver row. The
-    /// worker owns the transport deadline, but native also bounds how long the
-    /// row may display IDS_NET_INFOQUERY, so a query whose outcome never
-    /// reaches the dialog still resolves (src/C4StartupNetDlg.cpp:182,216-223).
-    pub(crate) startup_masterserver_request_timeout_at: Option<Instant>,
-    /// Reject pre-refresh events until the worker acknowledges the new
-    /// generation with Cleared, so deleted rows cannot flash back into view.
-    pub(crate) startup_network_refresh_waiting_for_clear: bool,
-    /// `C4StartupNetDlg::fIgnoreUpdate`: declining one league-server redirect
-    /// suppresses further prompts for the lifetime of this dialog instance.
-    pub(crate) startup_network_ignore_redirect: bool,
-    /// Complete references retained in the same order as the visible game
-    /// list. The frontend row projects only a display address.
-    pub(crate) startup_game_references: Vec<clonk_network::NetworkGameReference>,
-    /// Per-host reference requests created from LAN discovery datagrams.
-    pub(crate) startup_discovery_reference_queries: Vec<StartupDiscoveryReferenceQuery>,
-    /// User-entered reference requests remain visible until they resolve,
-    /// fail, or are replaced by their returned reference rows.
-    pub(crate) startup_direct_reference_queries: Vec<StartupDirectReferenceQuery>,
-    pub(crate) next_startup_direct_reference_query_id: u64,
     pub(crate) network_game_advertiser: Option<clonk_network::NetworkGameAdvertiser>,
     /// Last validated exact host reference. This state advances independently
     /// of optional listener I/O and is retained as the next InitLocal rebuild
@@ -1278,7 +1290,6 @@ pub(crate) struct GameApp {
     pub(crate) ready_check_toast_backend: crate::ready_check_backend::ReadyCheckToastBackend,
     pub(crate) control_messages: ControlMessageState,
     pub(crate) league_votes: LeagueVoteState,
-    pub(crate) startup_network_connection: Option<StartupNetworkConnection>,
     /// Exact resource publication which continues after a host has entered its
     /// closed-admission lobby. Once complete, the ordinary final host startup
     /// path replaces the discoverable, closed-admission preliminary transport.

@@ -262,7 +262,7 @@ fn staged_host_prebind_accepts_league_signup_and_rejects_missing_resource() {
         .test_value();
     main_assert!(staged.options.league_server_signup);
     main_assert!(app.network.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 
     app.scenario_game_options = GameOptionButtons::new(
         GameOptionContext::NetworkHostSelector,
@@ -292,7 +292,7 @@ fn staged_host_prebind_accepts_league_signup_and_rejects_missing_resource() {
             if detail.contains("GUIContext.png")
     ));
     main_assert!(app.network.is_none());
-    main_assert!(app.startup_network_connection.is_none());
+    main_assert!(app.startup_network.connection.is_none());
 }
 
 #[test]
@@ -845,7 +845,7 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::Cleared)
         .test_value();
     let master = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_ref()
         .test_value()
         .masterserver_entry();
@@ -859,7 +859,7 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
     })
     .test_value();
     let master = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_ref()
         .test_value()
         .masterserver_entry();
@@ -876,7 +876,7 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
     ))
     .test_value();
     let master = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_ref()
         .test_value()
         .masterserver_entry();
@@ -887,12 +887,12 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
 
     app.set_startup_masterserver_error("masterserver timed out".to_string());
 
-    let next_query_at = app.startup_masterserver_next_query_at.test_value();
+    let next_query_at = app.startup_network.masterserver_next_query_at.test_value();
     app.tick_startup_network_query_rows_at(next_query_at - Duration::from_millis(1));
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().masterserver_entry().row_icon => NetDlgRowIcon::Error);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().masterserver_entry().row_icon => NetDlgRowIcon::Error);
     app.tick_startup_network_query_rows_at(next_query_at);
     let master = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_ref()
         .test_value()
         .masterserver_entry();
@@ -902,10 +902,10 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
     // overwrites it (C4StartupNetDlg.cpp:191-207,267).
     main_assert_eq!(master.details => "masterserver timed out");
     main_assert_eq!(master.row_icon => NetDlgRowIcon::Query);
-    main_assert!(app.startup_masterserver_next_query_at.is_none());
+    main_assert!(app.startup_network.masterserver_next_query_at.is_none());
 
     app.set_startup_masterserver_error("stale disabled error".to_string());
-    if let Some(dialog) = app.startup_network_dialog.as_mut() {
+    if let Some(dialog) = app.startup_network.dialog.as_mut() {
         dialog.sync_masterserver_signup_from_config(false);
         // The controller performs this toggle before emitting the action.
         dialog.sync_masterserver_signup_from_config(true);
@@ -915,7 +915,7 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
     ])
     .test_value();
     let master = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_ref()
         .test_value()
         .masterserver_entry();
@@ -925,18 +925,18 @@ fn masterserver_row_projects_counts_motd_and_query_error_states() {
     let unchanged_refresh = Instant::now()
         .checked_sub(Duration::from_secs(5))
         .test_value();
-    app.startup_network_last_refresh = Some(unchanged_refresh);
+    app.startup_network.last_refresh = Some(unchanged_refresh);
     app.refresh_retained_network_dialog_internet();
-    main_assert_eq!(app.startup_network_last_refresh => Some(unchanged_refresh), "showing an already-enabled retained dialog starts no new query");
+    main_assert_eq!(app.startup_network.last_refresh => Some(unchanged_refresh), "showing an already-enabled retained dialog starts no new query");
     app.set_startup_masterserver_error("stale disabled error".to_string());
-    app.startup_network_dialog
+    app.startup_network.dialog
         .as_mut()
         .test_value()
         .sync_masterserver_signup_from_config(false);
     app.refresh_retained_network_dialog_internet();
-    main_assert!(app.startup_network_last_refresh.is_some_and(|refresh| refresh > unchanged_refresh));
+    main_assert!(app.startup_network.last_refresh.is_some_and(|refresh| refresh > unchanged_refresh));
     let master = app
-        .startup_network_dialog
+        .startup_network.dialog
         .as_ref()
         .test_value()
         .masterserver_entry();
@@ -961,14 +961,14 @@ fn masterserver_results_do_not_throttle_manual_reload() {
         let prior_reload = reload_at
             .checked_sub(STARTUP_NETWORK_MIN_REFRESH_INTERVAL + Duration::from_secs(1))
             .test_value();
-        app.startup_network_last_refresh = Some(prior_reload);
+        app.startup_network.last_refresh = Some(prior_reload);
 
         app.apply_startup_game_search_event(event).test_value();
-        main_assert_eq!(app.startup_network_last_refresh => Some(prior_reload));
+        main_assert_eq!(app.startup_network.last_refresh => Some(prior_reload));
 
         app.request_startup_network_refresh_at(reload_at)
             .test_value();
-        main_assert_eq!(app.startup_network_last_refresh => Some(reload_at));
+        main_assert_eq!(app.startup_network.last_refresh => Some(reload_at));
     }
 }
 
@@ -978,7 +978,7 @@ fn direct_empty_and_error_rows_expire_after_ten_seconds() {
     attach_l040_network_dialog(&mut app);
     let now = Instant::now();
     let expires_at = now + STARTUP_NETWORK_QUERY_ERROR_LIFETIME;
-    app.startup_direct_reference_queries = vec![
+    app.startup_network.direct_reference_queries = vec![
         StartupDirectReferenceQuery {
             id: 1,
             address: "empty.example".to_string(),
@@ -999,18 +999,18 @@ fn direct_empty_and_error_rows_expire_after_ten_seconds() {
         },
     ];
     app.sync_startup_network_game_rows();
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games()[0].row_icon => clonk_frontend::startup_netdlg::NetDlgRowIcon::QueryStatic);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games()[1].row_icon => clonk_frontend::startup_netdlg::NetDlgRowIcon::Error);
-    app.startup_network_dialog
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games()[0].row_icon => clonk_frontend::startup_netdlg::NetDlgRowIcon::QueryStatic);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games()[1].row_icon => clonk_frontend::startup_netdlg::NetDlgRowIcon::Error);
+    app.startup_network.dialog
         .as_mut()
         .test_value()
         .focus_game(0);
 
     app.tick_startup_network_query_rows_at(expires_at - Duration::from_millis(1));
-    main_assert_eq!(app.startup_direct_reference_queries.len() => 3);
+    main_assert_eq!(app.startup_network.direct_reference_queries.len() => 3);
     app.tick_startup_network_query_rows_at(expires_at);
     main_assert_eq!(
-        app.startup_direct_reference_queries =>
+        app.startup_network.direct_reference_queries =>
         [StartupDirectReferenceQuery {
             id: 3,
             address: "pending.example".to_string(),
@@ -1018,8 +1018,8 @@ fn direct_empty_and_error_rows_expire_after_ten_seconds() {
             expires_at: None,
         }]
     );
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len() => 1);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().selected_game() => Some(0), "expiring a selected query row selects its next native sibling");
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games().len() => 1);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(0), "expiring a selected query row selects its next native sibling");
 }
 
 #[test]
@@ -1080,7 +1080,7 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
     main_assert_eq!(modal.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Standard(44));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::No)
         .test_value();
-    main_assert!(app.startup_network_ignore_redirect);
+    main_assert!(app.startup_network.ignore_redirect);
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::MasterserverReply(
         redirect.clone(),
     ))
@@ -1093,10 +1093,10 @@ fn masterserver_redirect_decline_latches_and_accept_persists() {
         Some("https://old.example")
     );
 
-    app.startup_network_ignore_redirect = true;
+    app.startup_network.ignore_redirect = true;
     app.open_network_game_dialog();
-    app.startup_game_search = None;
-    main_assert!(!app.startup_network_ignore_redirect);
+    app.startup_network.game_search = None;
+    main_assert!(!app.startup_network.ignore_redirect);
     app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::MasterserverReply(
         redirect,
     ))
@@ -3323,7 +3323,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     app.process_league_signup_actions(vec![submission])
         .test_value();
     poll_league_auth_until(&mut app, "staged-host completion", |app| {
-        app.startup_network_connection.is_some()
+        app.startup_network.connection.is_some()
     });
     let (auth_heads, auth_players) = observer.test_join();
     main_assert_eq!(auth_heads.len() => 1);
@@ -3331,7 +3331,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     main_assert_eq!(auth_heads[0].account.as_bytes() => b"host-account");
     main_assert_eq!(auth_players[0].name.as_bytes() => b"Exact Player");
     main_assert_eq!(
-        app.startup_network_connection
+        app.startup_network.connection
             .as_ref()
             .and_then(|connection| connection.authenticated_league_players.as_ref())
             .expect("authenticated staged-host players")[0]
@@ -3339,7 +3339,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
             .as_bytes() =>
         b"host-token"
     );
-    main_assert!(app.startup_network_connection.is_some());
+    main_assert!(app.startup_network.connection.is_some());
 }
 
 #[test]

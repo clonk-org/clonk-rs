@@ -1167,7 +1167,7 @@ fn hidden_startup_irc_warning_connects_immediately() {
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     install_classic_test_assets(&mut app);
     app.open_network_game_dialog();
-    let mut login = app.startup_network_dialog.test_ref().chat_login();
+    let mut login = app.startup_network.dialog.test_ref().chat_login();
     main_assert_eq!(login.server => address);
     main_assert_eq!(login.nick => "HiddenNick");
     main_assert_eq!(login.real_name => "Hidden Name");
@@ -1235,8 +1235,8 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
     };
 
     let mut app = new_real_classic_menu_app(640, 480);
-    app.startup_network_dialog = Some(app.new_network_dialog_controller());
-    let embedded_controller_ptr = app.startup_network_dialog.as_ref().map(std::ptr::from_ref);
+    app.startup_network.dialog = Some(app.new_network_dialog_controller());
+    let embedded_controller_ptr = app.startup_network.dialog.as_ref().map(std::ptr::from_ref);
     app.show_external_irc_dialog().test_value();
     main_assert_ne!(
         app.chat.external_dialog.as_ref().map(std::ptr::from_ref) =>
@@ -1283,7 +1283,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         .test_value();
     main_assert!(!app.chat.external_dialog_visible);
     main_assert!(app.chat.external_dialog.is_none());
-    main_assert_eq!(app.startup_network_dialog.as_ref().map(std::ptr::from_ref) => embedded_controller_ptr);
+    main_assert_eq!(app.startup_network.dialog.as_ref().map(std::ptr::from_ref) => embedded_controller_ptr);
 
     app.show_external_irc_dialog().test_value();
     app.chat.external_dialog
@@ -1316,7 +1316,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         .and_then(|dialog| dialog.chat_bounds_override())
         .test_value();
     let embedded_pointer = GuiPoint::new(17.0, 19.0);
-    app.startup_network_dialog
+    app.startup_network.dialog
         .as_mut()
         .test_value()
         .set_pointer_position(Some(embedded_pointer));
@@ -1338,7 +1338,7 @@ fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_owner
         "touch cancellation clears the standalone caption capture"
     );
     main_assert_eq!(
-        app.startup_network_dialog
+        app.startup_network.dialog
             .as_ref()
             .and_then(|dialog| dialog.pointer_position()) =>
         Some(embedded_pointer),

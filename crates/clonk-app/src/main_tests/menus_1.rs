@@ -2613,26 +2613,26 @@ fn netdlg_alt_mnemonics_activate_visible_buttons() {
     let mut app = new_real_classic_menu_app(640, 480);
     app.open_network_game_dialog();
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    let signup = app.startup_network_dialog.test_ref().masterserver_signup();
+    let signup = app.startup_network.dialog.test_ref().masterserver_signup();
 
     // Alt+I toggles Internet; Alt+Shift+R toggles Record.
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyI, ElementState::Pressed);
-    main_assert_eq!(app.startup_network_dialog.as_ref().expect("network dialog").masterserver_signup() => !signup);
+    main_assert_eq!(app.startup_network.dialog.as_ref().expect("network dialog").masterserver_signup() => !signup);
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SHIFT);
     app.test_key(VirtualKeyCode::KeyI, ElementState::Pressed);
-    main_assert_eq!(app.startup_network_dialog.as_ref().expect("network dialog").masterserver_signup() => signup);
+    main_assert_eq!(app.startup_network.dialog.as_ref().expect("network dialog").masterserver_signup() => signup);
 
     // Alt+C reaches the Chat tab; there Refresh and Join are not drawn, so
     // their mnemonics are inert while New game still activates.
     app.test_modifiers(ModifiersState::ALT);
     app.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
-    main_assert!(app.startup_network_dialog.as_ref().expect("network dialog").is_chat_mode());
+    main_assert!(app.startup_network.dialog.as_ref().expect("network dialog").is_chat_mode());
     app.test_key(VirtualKeyCode::KeyD, ElementState::Pressed);
     app.test_key(VirtualKeyCode::KeyJ, ElementState::Pressed);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     app.test_key(VirtualKeyCode::KeyG, ElementState::Pressed);
-    main_assert!(!app.startup_network_dialog.as_ref().expect("network dialog").is_chat_mode());
+    main_assert!(!app.startup_network.dialog.as_ref().expect("network dialog").is_chat_mode());
 
     // A covering modal owns the keyboard, so the dialog beneath is inert.
     app.handle_game_over().test_value();

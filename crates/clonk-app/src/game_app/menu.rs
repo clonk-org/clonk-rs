@@ -2945,7 +2945,8 @@ impl GameApp {
                 }
                 NetDlgAction::JoinGame { .. } => {
                     let selected_index = self
-                        .startup_network_dialog
+                        .startup_network
+                        .dialog
                         .as_ref()
                         .and_then(|dialog| dialog.selected_game());
                     let target =
@@ -3009,18 +3010,18 @@ impl GameApp {
                     // to enable, so the icon can never read "on" with nothing
                     // behind it (src/C4StartupNetDlg.cpp:851-866).
                     self.restore_startup_game_search();
-                    if let Some(search) = self.startup_game_search.as_ref() {
+                    if let Some(search) = self.startup_network.game_search.as_ref() {
                         let _ = search.set_internet_enabled(enabled);
                     }
                     if enabled {
                         let now = Instant::now();
-                        self.startup_network_last_refresh = Some(now);
-                        self.startup_masterserver_next_query_at =
+                        self.startup_network.last_refresh = Some(now);
+                        self.startup_network.masterserver_next_query_at =
                             now.checked_add(clonk_network::GAME_SEARCH_INTERVAL);
                         self.reset_startup_masterserver_entry_at(now);
                     } else {
-                        self.startup_masterserver_next_query_at = None;
-                        self.startup_masterserver_request_timeout_at = None;
+                        self.startup_network.masterserver_next_query_at = None;
+                        self.startup_network.masterserver_request_timeout_at = None;
                     }
                     // `OnBtnInternet` flips the flag in memory only; the file
                     // is written once at shutdown (C4StartupNetDlg.cpp:840-845).
@@ -3050,7 +3051,7 @@ impl GameApp {
             self.assets.input_dialog_resources().map(|_| ()),
         )?;
         self.close_context_menu_silently();
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.cancel_interaction();
         }
         let controller = InputDialogController::new(
@@ -3665,7 +3666,7 @@ impl GameApp {
     /// (src/C4StartupNetDlg.cpp:737-738,864-865).
     fn start_startup_game_search(&mut self, search_config: clonk_network::NetworkGameSearchConfig) {
         let reference_config = load_reference_query_settings(self.app_paths.as_ref());
-        self.startup_game_search =
+        self.startup_network.game_search =
             match clonk_network::StartupGameSearch::start_with_reference_config(
                 search_config,
                 reference_config,
@@ -3692,13 +3693,14 @@ impl GameApp {
     /// keeps the dialog has to bring the worker back with it.
     pub(crate) fn restore_startup_game_search(&mut self) {
         let Some(masterserver_enabled) = self
-            .startup_network_dialog
+            .startup_network
+            .dialog
             .as_ref()
             .map(|dialog| dialog.config().masterserver_signup)
         else {
             return;
         };
-        if self.startup_game_search.is_some() {
+        if self.startup_network.game_search.is_some() {
             return;
         }
         // The dialog's own flag is the in-memory `Config.Network.MasterServerSignUp`
@@ -3706,11 +3708,11 @@ impl GameApp {
         // (src/C4StartupNetDlg.cpp:838-845).
         let mut search_config = load_network_search_settings(self.app_paths.as_ref());
         search_config.internet_enabled = masterserver_enabled;
-        self.startup_network_refresh_waiting_for_clear = false;
+        self.startup_network.refresh_waiting_for_clear = false;
         self.start_startup_game_search(search_config);
         let now = Instant::now();
-        self.startup_network_last_refresh = Some(now);
-        self.startup_masterserver_next_query_at = masterserver_enabled
+        self.startup_network.last_refresh = Some(now);
+        self.startup_network.masterserver_next_query_at = masterserver_enabled
             .then(|| now.checked_add(clonk_network::GAME_SEARCH_INTERVAL))
             .flatten();
         self.reset_startup_masterserver_entry_at(now);
@@ -3724,11 +3726,11 @@ impl GameApp {
         self.chat.external_pointer_capture = false;
         self.close_context_menu_silently();
         self.status_text.clear();
-        self.startup_network_refresh_waiting_for_clear = false;
-        self.startup_network_ignore_redirect = false;
-        self.startup_game_references.clear();
-        self.startup_discovery_reference_queries.clear();
-        self.startup_direct_reference_queries.clear();
+        self.startup_network.refresh_waiting_for_clear = false;
+        self.startup_network.ignore_redirect = false;
+        self.startup_network.game_references.clear();
+        self.startup_network.discovery_reference_queries.clear();
+        self.startup_network.direct_reference_queries.clear();
         self.netdlg_last_click = None;
         self.netdlg_join_edit_last_click = None;
         self.netdlg_edit_consumed_keys.clear();
@@ -3742,17 +3744,17 @@ impl GameApp {
             &search_config.master_server_url,
         ));
         self.start_startup_game_search(search_config);
-        self.startup_network_dialog = Some(dialog);
+        self.startup_network.dialog = Some(dialog);
         self.replace_startup_dialog(StartupView::NetworkGame, StartupDialog::NetworkGame);
         self.sync_startup_irc_snapshot();
         let now = Instant::now();
-        self.startup_network_last_refresh = Some(now);
-        self.startup_masterserver_next_query_at = if masterserver_enabled {
+        self.startup_network.last_refresh = Some(now);
+        self.startup_network.masterserver_next_query_at = if masterserver_enabled {
             now.checked_add(clonk_network::GAME_SEARCH_INTERVAL)
         } else {
             None
         };
-        self.startup_masterserver_request_timeout_at = masterserver_enabled
+        self.startup_network.masterserver_request_timeout_at = masterserver_enabled
             .then(|| now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT))
             .flatten();
     }
@@ -3765,22 +3767,22 @@ impl GameApp {
         // re-shown dialog always searches (src/C4StartupNetDlg.cpp:771-777).
         self.restore_startup_game_search();
         let masterserver_signup = self.masterserver_signup_setting();
-        let recreate_masterserver = self.startup_network_dialog.as_mut().is_some_and(|dialog| {
+        let recreate_masterserver = self.startup_network.dialog.as_mut().is_some_and(|dialog| {
             let recreate = !dialog.config().masterserver_signup && masterserver_signup;
             dialog.sync_masterserver_signup_from_config(masterserver_signup);
             recreate
         });
-        if let Some(search) = self.startup_game_search.as_ref() {
+        if let Some(search) = self.startup_network.game_search.as_ref() {
             let _ = search.set_internet_enabled(masterserver_signup);
         }
         if !masterserver_signup {
-            self.startup_masterserver_next_query_at = None;
-            self.startup_masterserver_request_timeout_at = None;
+            self.startup_network.masterserver_next_query_at = None;
+            self.startup_network.masterserver_request_timeout_at = None;
         }
         if recreate_masterserver {
             let now = Instant::now();
-            self.startup_network_last_refresh = Some(now);
-            self.startup_masterserver_next_query_at =
+            self.startup_network.last_refresh = Some(now);
+            self.startup_network.masterserver_next_query_at =
                 now.checked_add(clonk_network::GAME_SEARCH_INTERVAL);
             self.reset_startup_masterserver_entry_at(now);
         }
@@ -4323,7 +4325,8 @@ impl GameApp {
             MessageDialogContinuation::SavegamePlayerTakeoverWarning => {}
             MessageDialogContinuation::StartupNetworkConnectProgress => {
                 if self
-                    .startup_network_connection
+                    .startup_network
+                    .connection
                     .as_ref()
                     .is_some_and(|connection| connection.purpose == StartupNetworkPurpose::Join)
                 {
@@ -4331,7 +4334,7 @@ impl GameApp {
                     // Drop it before restoring NetDlg so its receiver closes,
                     // every pending transport is interrupted, and both the
                     // network worker and launcher have joined synchronously.
-                    let connection = self.startup_network_connection.take();
+                    let connection = self.startup_network.connection.take();
                     drop(connection);
                     self.pending_network_join = None;
                     // Cancelling a reconnect to a restarting host abandons the
@@ -4416,7 +4419,7 @@ impl GameApp {
                 }
             }
             MessageDialogContinuation::NetworkServerRedirect { .. } => {
-                self.startup_network_ignore_redirect = true;
+                self.startup_network.ignore_redirect = true;
             }
             MessageDialogContinuation::ClassicLobbyStart { countdown_seconds } => {
                 // `C4GameLobby` hands `Config.Startup.HideMsgPlrNoTakeOver` to
