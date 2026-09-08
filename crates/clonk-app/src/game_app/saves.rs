@@ -732,7 +732,8 @@ impl GameApp {
                 self.developer_console_savegame_description(&title, &description_definition_modules)
             });
             let component_mutations = developer_console_save::component_save_mutations(
-                self.developer_component_hosts
+                self.developer
+                    .component_hosts
                     .iter()
                     .map(clonk_engine::developer_components::ComponentHost::save_action),
             );
@@ -940,7 +941,8 @@ impl GameApp {
             // rather than writing zero bytes (`C4ComponentHost.cpp:231-236`),
             // both of which `component_save_mutations` already decides.
             for mutation in developer_console_save::component_save_mutations(
-                self.developer_component_hosts
+                self.developer
+                    .component_hosts
                     .iter()
                     .map(clonk_engine::developer_components::ComponentHost::save_action),
             ) {
@@ -1005,7 +1007,7 @@ impl GameApp {
                     self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.")
                 }
             };
-            self.developer_console.out(&success);
+            self.developer.console.out(&success);
         }
         Ok(NativeSaveOutcome::Persisted)
     }

@@ -87,9 +87,9 @@ impl GameApp {
         // clear them — `Game.Script`/`Title`/`Info` are cleared with the whole
         // `C4Game` — but here they are `GameApp` fields, and an edit left
         // behind would be written into the *next* scenario's save.
-        self.developer_component_editor = None;
-        self.developer_component_hosts.clear();
-        self.developer_object_list_open = false;
+        self.developer.component_editor = None;
+        self.developer.component_hosts.clear();
+        self.developer.object_list_open = false;
         self.return_to_menu();
         if boot_still_loading {
             self.mode = AppMode::Loading;
@@ -97,7 +97,7 @@ impl GameApp {
     }
 
     pub(crate) fn developer_console_editing(&self) -> bool {
-        self.console_mode && self.developer_console_editing_enabled
+        self.console_mode && self.developer.console_editing_enabled
     }
 
     fn developer_console_strings(&self) -> ConsoleStrings {
@@ -205,7 +205,7 @@ impl GameApp {
             players,
             clients,
             completions,
-            edit_mode: self.developer_console_edit_mode,
+            edit_mode: self.developer.console_edit_mode,
             cursor_text: self.status_text.clone(),
             frame: self.engine.frame(),
             script_counter: self.engine.scenario_script_counter(),
@@ -219,10 +219,10 @@ impl GameApp {
             return false;
         }
         if self.records.playback.is_some() {
-            self.developer_console_editing_enabled = false;
+            self.developer.console_editing_enabled = false;
         }
         let view = self.developer_console_view_model();
-        self.developer_console.set_view_model(view)
+        self.developer.console.set_view_model(view)
     }
 
     pub(crate) fn drain_console_log_capture(&mut self) {
@@ -231,7 +231,7 @@ impl GameApp {
         };
         let output = capture.take();
         if !output.is_empty() {
-            self.developer_console.out(&output);
+            self.developer.console.out(&output);
         }
     }
 
@@ -258,7 +258,7 @@ impl GameApp {
     ) -> Result<()> {
         // C4Console::OpenGame calls Console::Default before any game
         // initialization and therefore resets only the edit cursor mode.
-        self.developer_console_edit_mode = ConsoleEditMode::Play;
+        self.developer.console_edit_mode = ConsoleEditMode::Play;
         if self.console_game_active() {
             self.close_console_game();
         }
@@ -304,7 +304,8 @@ impl GameApp {
                 DeveloperConsoleAction::RequestPath(request) => {
                     let paths = Self::choose_developer_console_paths(&request);
                     let follow_up = self
-                        .developer_console
+                        .developer
+                        .console
                         .respond_path_request(request.token, paths);
                     actions.extend(follow_up.into_iter().rev());
                 }
@@ -362,7 +363,7 @@ impl GameApp {
                 }
                 DeveloperConsoleAction::RequestRuntimeRecord => {
                     if let Err(error) = self.developer_console_request_runtime_record() {
-                        self.developer_console.out(&error);
+                        self.developer.console.out(&error);
                     }
                 }
                 DeveloperConsoleAction::CloseGame => self.close_console_game(),
@@ -374,7 +375,7 @@ impl GameApp {
                 DeveloperConsoleAction::TogglePause => self.toggle_runtime_pause(),
                 DeveloperConsoleAction::SetEditMode(mode) => {
                     let previous = self.console_cursor_mode();
-                    self.developer_console_edit_mode = mode;
+                    self.developer.console_edit_mode = mode;
                     self.apply_developer_cursor_mode_change(previous);
                 }
                 DeveloperConsoleAction::SubmitInput(input) => {
@@ -384,18 +385,18 @@ impl GameApp {
                 DeveloperConsoleAction::JoinPlayers(paths) => {
                     let editing = self.developer_console_editing();
                     if let Err(error) = self.developer_console_join_players(&paths, editing) {
-                        self.developer_console.out(&error);
+                        self.developer.console.out(&error);
                     }
                 }
                 DeveloperConsoleAction::EliminatePlayer(player) => {
                     let editing = self.developer_console_editing();
                     if let Err(error) = self.developer_console_quit_player(player, editing) {
-                        self.developer_console.out(&error);
+                        self.developer.console.out(&error);
                     }
                 }
                 DeveloperConsoleAction::KickClient(client) => {
                     if let Err(error) = self.developer_console_kick_client(client) {
-                        self.developer_console.out(&error);
+                        self.developer.console.out(&error);
                     }
                 }
                 DeveloperConsoleAction::NewViewport(player) => {
@@ -697,7 +698,7 @@ impl GameApp {
     /// produces the private message control used by the developer console.
     fn process_developer_console_command(&mut self, text: &str) -> Result<(), EngineError> {
         if text == "/clear" {
-            self.developer_console.clear_log();
+            self.developer.console.clear_log();
             return Ok(());
         }
         if self.process_control_message_local_command(text) {

@@ -33,10 +33,10 @@ pub(crate) fn reconcile_developer_toolbox_window(
     use crate::developer_windows::HostPurpose;
     use crate::toolbox_window_host::build_toolbox_window;
 
-    if app.developer_toolbox_effects.is_empty() {
+    if app.developer.toolbox_effects.is_empty() {
         return;
     }
-    for effect in std::mem::take(&mut app.developer_toolbox_effects) {
+    for effect in std::mem::take(&mut app.developer.toolbox_effects) {
         let key = toolbox_window_key(windows);
         match effect {
             // Creation is deferred to the first `Show`: `AddPage` builds the
@@ -93,8 +93,8 @@ pub(crate) fn reconcile_developer_toolbox_window(
                             // would answer every later `switch_page` with a
                             // bare retitle, and the toolbox could never be
                             // opened again in this session.
-                            let effect = app.developer_toolbox.close(None);
-                            app.developer_toolbox_effects.extend(effect);
+                            let effect = app.developer.toolbox.close(None);
+                            app.developer.toolbox_effects.extend(effect);
                         }
                     }
                 }
@@ -146,7 +146,7 @@ pub(crate) fn reconcile_developer_object_list_window(
     use crate::object_list_window_host::build_object_list_window;
 
     let key = object_list_window_key(windows);
-    match (app.developer_object_list_open, key) {
+    match (app.developer.object_list_open, key) {
         (true, None) => match build_object_list_window(target) {
             Ok(host) => {
                 let key = WindowId(*next_key);
@@ -774,10 +774,11 @@ pub(crate) fn reconcile_developer_component_editor_window(
     use crate::developer_windows::HostPurpose;
 
     let key = component_editor_window_key(windows);
-    match (app.developer_component_editor.is_some(), key) {
+    match (app.developer.component_editor.is_some(), key) {
         (true, None) => {
             let title = app
-                .developer_component_editor
+                .developer
+                .component_editor
                 .as_ref()
                 .map(|edit| edit.host.filename().to_owned())
                 .unwrap_or_default();
@@ -861,7 +862,7 @@ pub(crate) fn handle_developer_component_editor_event(
             // shared field would find whatever the last *other* window left
             // there — which is what made the newline unreachable.
             let commit = editor_modifiers.control_key() || editor_modifiers.super_key();
-            let Some(edit) = app.developer_component_editor.as_mut() else {
+            let Some(edit) = app.developer.component_editor.as_mut() else {
                 return;
             };
             // Enter is a **newline**, not OK. The Win32 dialog's edit
@@ -1016,7 +1017,7 @@ pub(crate) fn handle_developer_toolbox_event(
             };
             toolbox.surface.last_pointer = (position.x as i32, position.y as i32);
             let (point, extent) = (toolbox.surface.last_pointer, toolbox.surface_extent());
-            if app.developer_toolbox.current_page() == Some(ToolboxPage::Property)
+            if app.developer.toolbox.current_page() == Some(ToolboxPage::Property)
                 && app.developer_pane_scroll_drag(DeveloperPane::PropertyOutput, point, extent)
             {
                 windows.request_redraw(key);
@@ -1035,7 +1036,7 @@ pub(crate) fn handle_developer_toolbox_event(
             ..
         } => {
             if *state != winit::event::ElementState::Pressed
-                || app.developer_toolbox.current_page() != Some(ToolboxPage::Property)
+                || app.developer.toolbox.current_page() != Some(ToolboxPage::Property)
             {
                 return;
             }
@@ -1076,7 +1077,7 @@ pub(crate) fn handle_developer_toolbox_event(
         } => {
             use clonk_engine::developer_viewport::{wheel_scroll_step, WheelDelta};
 
-            if app.developer_toolbox.current_page() != Some(ToolboxPage::Property) {
+            if app.developer.toolbox.current_page() != Some(ToolboxPage::Property) {
                 return;
             }
             let Some(toolbox) = windows
@@ -1131,7 +1132,7 @@ pub(crate) fn handle_developer_toolbox_event(
                 return;
             };
             let (point, extent) = (toolbox.surface.last_pointer, toolbox.surface_extent());
-            if app.developer_toolbox.current_page() == Some(ToolboxPage::Property)
+            if app.developer.toolbox.current_page() == Some(ToolboxPage::Property)
                 && app.developer_pane_scroll_press(DeveloperPane::PropertyOutput, point, extent)
             {
                 windows.request_redraw(key);
