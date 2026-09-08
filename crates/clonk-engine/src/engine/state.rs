@@ -361,36 +361,51 @@ impl Engine {
         timings.players = timings.players.saturating_add(section.elapsed());
 
         let section = std::time::Instant::now();
-        let definition_categories = self
-            .definitions
-            .iter()
-            .map(|(id, definition)| (id.clone(), definition.category()))
-            .collect();
-        let definition_closed_containers = if has_fog_player {
-            self.definitions
+        let mut metadata = self.definition_order.snapshot_metadata.borrow_mut();
+        let metadata = metadata.get_or_insert_with(|| {
+            let definition_categories = self
+                .definitions
+                .iter()
+                .map(|(id, definition)| (id.clone(), definition.category()))
+                .collect();
+            let definition_closed_containers = self
+                .definitions
                 .iter()
                 .filter_map(|(id, definition)| {
                     let closed = definition.closed_container();
                     (closed != 0).then(|| (id.clone(), closed))
                 })
-                .collect()
+                .collect();
+            let definition_lines = self
+                .definitions
+                .iter()
+                .filter(|(_, definition)| {
+                    definition.line() != 0 || definition.line_intersect() != 0
+                })
+                .map(|(id, definition)| {
+                    (
+                        id.clone(),
+                        DefinitionLineMetadata {
+                            line: definition.line(),
+                            line_intersect: definition.line_intersect(),
+                        },
+                    )
+                })
+                .collect();
+            DefinitionSnapshotMetadata {
+                categories: Arc::new(definition_categories),
+                closed_containers: Arc::new(definition_closed_containers),
+                lines: Arc::new(definition_lines),
+                no_closed_containers: Arc::default(),
+            }
+        });
+        let definition_categories = Arc::clone(&metadata.categories);
+        let definition_closed_containers = Arc::clone(if has_fog_player {
+            &metadata.closed_containers
         } else {
-            BTreeMap::new()
-        };
-        let definition_lines = self
-            .definitions
-            .iter()
-            .filter(|(_, definition)| definition.line() != 0 || definition.line_intersect() != 0)
-            .map(|(id, definition)| {
-                (
-                    id.clone(),
-                    DefinitionLineMetadata {
-                        line: definition.line(),
-                        line_intersect: definition.line_intersect(),
-                    },
-                )
-            })
-            .collect();
+            &metadata.no_closed_containers
+        });
+        let definition_lines = Arc::clone(&metadata.lines);
         timings.definitions = section.elapsed();
 
         let section = std::time::Instant::now();

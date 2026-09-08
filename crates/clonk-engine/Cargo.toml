@@ -38,7 +38,7 @@ clonk-resources = { path = "../clonk-resources" }
 # a seedless hasher is strictly more reproducible and skips SipHash per probe.
 rustc-hash = "2"
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

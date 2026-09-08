@@ -1980,7 +1980,7 @@ fn line_object_sound_uses_rendered_endpoints() {
         clonk_engine::ObjectVertex::new(350, 100),
     ];
     let mut snapshot = make_snapshot(vec![line.clone()], Vec::new());
-    snapshot.definition_lines.insert(
+    std::sync::Arc::make_mut(&mut snapshot.definition_lines).insert(
         line.definition_id.clone(),
         clonk_engine::DefinitionLineMetadata {
             line: 1,
@@ -2030,7 +2030,7 @@ fn line_object_sound_uses_rendered_endpoints() {
         "reversing the endpoints proves native call order rather than max-volume mixing",
     );
 
-    snapshot.definition_lines.clear();
+    std::sync::Arc::make_mut(&mut snapshot.definition_lines).clear();
     main_assert_eq!(
         compute_mix_values_for_with_rendered_audibility(
             100,
@@ -2188,7 +2188,7 @@ fn post_render_attached_mix_releases_then_restores_channel_capacity() {
     let first = make_object(1, "SND1", Vector2::ZERO);
     let second = make_object(2, "SND2", Vector2::new(2_000, 0));
     let mut snapshot = make_snapshot(vec![first.clone(), second.clone()], Vec::new());
-    snapshot.definition_lines.insert(
+    std::sync::Arc::make_mut(&mut snapshot.definition_lines).insert(
         second.definition_id.clone(),
         clonk_engine::DefinitionLineMetadata {
             line: 1,
@@ -2265,7 +2265,7 @@ fn post_render_attached_mix_releases_then_restores_channel_capacity() {
         )
         .test_value();
     let blocker_key = SoundInstanceKey::new("Second", None);
-    snapshot.definition_lines.insert(
+    std::sync::Arc::make_mut(&mut snapshot.definition_lines).insert(
         first.definition_id.clone(),
         clonk_engine::DefinitionLineMetadata {
             line: 1,
