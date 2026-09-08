@@ -38,7 +38,7 @@ impl GameApp {
         if let Some(network) = self.network.as_ref() {
             network.refresh_current_frame(self.current_network_input_frame());
         }
-        if self.mode == AppMode::Loading && self.loading_state.is_some() {
+        if self.mode == AppMode::Loading && self.scenario_lifecycle.loading.is_some() {
             self.poll_loading()?;
             self.guard_classic_global_gui_bootstrap()?;
             if self.mode != AppMode::Loading {

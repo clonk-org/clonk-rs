@@ -407,8 +407,9 @@ impl GameApp {
         if record_stream.is_some() {
             self.records.classic_stream_activation_pending = true;
         }
-        if self.boot_loading.is_some() {
-            self.auto_start_classic_command_line_scenario = true;
+        if self.scenario_lifecycle.boot_loading.is_some() {
+            self.scenario_lifecycle
+                .auto_start_classic_command_line_scenario = true;
             return Ok(());
         }
         let path = if let Some(stream_path) = record_stream {
@@ -678,11 +679,11 @@ impl GameApp {
         if self.network.is_some() {
             return self.restart_current_network_scenario();
         }
-        let Some(scenario) = self.active_scenario.clone() else {
+        let Some(scenario) = self.scenario_lifecycle.active.clone() else {
             self.return_to_menu();
             return Ok(());
         };
-        let definition_load = self.active_definition_load.clone();
+        let definition_load = self.scenario_lifecycle.definition_load.clone();
         self.retain_restart_restore_mask_for_restart();
         self.return_to_menu_for_relaunch();
         let start_result = match definition_load {
@@ -870,7 +871,7 @@ impl GameApp {
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.status_text = message;
-        self.loading_state = None;
+        self.scenario_lifecycle.loading = None;
         self.network_start_wait = None;
         self.mode = AppMode::Menu;
         self.restore_startup_fonts();
@@ -1028,7 +1029,11 @@ impl GameApp {
     }
 
     pub(crate) fn scenario_seed_definition_load(&self) -> ScenarioDefinitionLoad {
-        let mut modules = self.initial_definition_seed.clone().unwrap_or_default();
+        let mut modules = self
+            .scenario_lifecycle
+            .initial_definition_seed
+            .clone()
+            .unwrap_or_default();
         // The unchecked scenario-selector branch appends Objects.c4d to the
         // vector ParseCommandLine seeded once for the first game init.
         modules.push("Objects.c4d".to_string());
@@ -1053,7 +1058,7 @@ impl GameApp {
 
     pub(crate) fn take_scenario_seed_definition_load(&mut self) -> ScenarioDefinitionLoad {
         let definition_load = self.scenario_seed_definition_load();
-        self.initial_definition_seed = None;
+        self.scenario_lifecycle.initial_definition_seed = None;
         definition_load
     }
 
@@ -1083,11 +1088,11 @@ impl GameApp {
         scenario: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) -> Result<(), EngineError> {
-        self.initial_definition_seed = None;
+        self.scenario_lifecycle.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
         self.close_context_menu_silently();
         self.definition_selection.dialog = None;
-        self.pending_definition_selection = None;
+        self.definition_selection.pending = None;
         self.pending_lobby_player_selection = None;
         self.definition_selection.last_click = None;
         self.dialogs.game_over = None;
@@ -1385,7 +1390,7 @@ impl GameApp {
         // (C4Game.cpp:351-352); `Finished` alone leaves it saturated at 100 and
         // swallows the next load's 4%..93% (clonk-org/clonk-rs#1115).
         self.taskbar_progress.begin_load();
-        self.loading_state = Some(loading_state);
+        self.scenario_lifecycle.loading = Some(loading_state);
         self.mode = AppMode::Loading;
         Ok(())
     }
@@ -1460,12 +1465,14 @@ impl GameApp {
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
         let prepared_go = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .is_some();
         let retained_definition_modules = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .and_then(|prepared| prepared.definition_modules.clone());
@@ -1532,31 +1539,37 @@ impl GameApp {
         );
 
         let mut prepared_random_seed = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.random_seed);
         let offline_random_seed = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.offline_random_seed);
         let prepared_team_configuration = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.team_configuration);
         let prepared_team_registry = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.team_registry.clone());
         let prepared_initial_game_data = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .and_then(|prepared| prepared.initial_game_data.clone());
         let prepared_fair_crew = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| {
@@ -1568,7 +1581,8 @@ impl GameApp {
                 )
             });
         let synchronized_auto_frame_skip = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.auto_frame_skip);
@@ -1582,11 +1596,13 @@ impl GameApp {
             synchronized_auto_frame_skip,
         );
         let offline_startup_players = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_mut()
             .and_then(|loading| loading.offline_startup_players.take());
         let offline_savegame = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_mut()
             .and_then(|loading| loading.offline_savegame.take());
         // `RestoreSavegameInfos` logs every assignment made past `PML_PlrName`
@@ -2002,7 +2018,8 @@ impl GameApp {
         // (C4Game.cpp:4056-4076). PreparedGo retains those exact host-snapshot
         // or client-JoinData lists across asynchronous scenario activation.
         let synchronized_rule_goal_lists = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| &prepared.synchronized_rule_goal_lists);
@@ -2557,7 +2574,9 @@ impl GameApp {
             let (authoritative_external_groups, reuse_preloaded_materials) =
                 network_material_load_plan(
                     self.network_mode.as_ref(),
-                    self.network_material_resource_groups.as_deref(),
+                    self.scenario_lifecycle
+                        .network_material_resource_groups
+                        .as_deref(),
                 );
             if let Some((texture_images, render_info)) =
                 preloaded_materials.filter(|_| reuse_preloaded_materials)
@@ -2646,12 +2665,13 @@ impl GameApp {
             .apply_gamma_now(&self.snapshot.environment.gamma);
         self.refresh_object_menu();
         self.refresh_focus();
-        self.active_scenario = Some(scenario.clone());
-        self.active_definition_load = Some(activated_definition_load(
+        self.scenario_lifecycle.active = Some(scenario.clone());
+        self.scenario_lifecycle.definition_load = Some(activated_definition_load(
             retained_definition_modules,
             effective_definition_load,
         ));
-        self.active_description_definition_modules = effective_description_definition_modules;
+        self.scenario_lifecycle.description_definition_modules =
+            effective_description_definition_modules;
         self.records.playback = control_playback;
         if initial_game_data.is_some() {
             let restored_music_level = self.engine.music_level();
@@ -2673,7 +2693,10 @@ impl GameApp {
         scenario: FrontendScenario,
     ) -> Result<(), EngineError> {
         let catalog_paths = self.app_paths.clone();
-        let crew_paths = self.sandbox_crew_definition_paths.clone();
+        let crew_paths = self
+            .scenario_lifecycle
+            .sandbox_crew_definition_paths
+            .clone();
         let definition_load = match (catalog_paths.as_ref(), crew_paths.as_ref()) {
             (Some(paths), _) => SandboxDefinitionLoad::InstallCatalog(paths),
             (None, Some(paths)) => SandboxDefinitionLoad::InstallCrew(paths),
@@ -2687,7 +2710,7 @@ impl GameApp {
         scenario: FrontendScenario,
         definition_load: SandboxDefinitionLoad<'_>,
     ) -> Result<(), EngineError> {
-        self.sandbox_crew_definition_paths = match definition_load {
+        self.scenario_lifecycle.sandbox_crew_definition_paths = match definition_load {
             SandboxDefinitionLoad::InstallCrew(paths) => Some(paths.clone()),
             SandboxDefinitionLoad::None | SandboxDefinitionLoad::InstallCatalog(_) => None,
         };
@@ -2710,7 +2733,7 @@ impl GameApp {
         self.records.playback = None;
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
-        self.loading_state = None;
+        self.scenario_lifecycle.loading = None;
         self.engine = Engine::new();
         reconnect_audio_context(&mut self.engine, self.sound.context.as_ref());
         self.film_view_player = None;
@@ -2749,8 +2772,10 @@ impl GameApp {
         self.ingame_mouse.dragged_objects.clear();
         self.ingame_mouse.control_allowed = true;
         self.ingame_mouse.control = true;
-        self.active_definition_load = None;
-        self.active_description_definition_modules.clear();
+        self.scenario_lifecycle.definition_load = None;
+        self.scenario_lifecycle
+            .description_definition_modules
+            .clear();
         self.rendering.sky = None;
 
         arm_configured_engine_debug_mode(
@@ -2801,7 +2826,7 @@ impl GameApp {
         self.arm_initial_scoreboard_reconcile();
         self.refresh_object_menu();
         self.refresh_focus();
-        self.active_scenario = Some(scenario);
+        self.scenario_lifecycle.active = Some(scenario);
         self.sound.play_sandbox_audio();
         Ok(())
     }

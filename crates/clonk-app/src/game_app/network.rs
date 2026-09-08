@@ -88,7 +88,7 @@ impl GameApp {
         // The query can finish before async boot resources. Keep its result
         // queued until boot relinquishes `Loading`; opening a password prompt
         // or an error dialog earlier would strand the boot worker forever.
-        if self.boot_loading.is_some() {
+        if self.scenario_lifecycle.boot_loading.is_some() {
             return Ok(());
         }
         let Some(query) = self.classic_direct_reference_query.as_ref() else {
@@ -2870,7 +2870,7 @@ impl GameApp {
             self.client_combined_preload_file.clear();
             self.client_combined_scenario_path = Some(combined_path);
         }
-        if self.loading_state.is_some() {
+        if self.scenario_lifecycle.loading.is_some() {
             return Ok(());
         }
         let combined_path = self
@@ -3104,7 +3104,7 @@ impl GameApp {
             .validate_runtime_application()
             .map_err(|error| format!("invalid network Game.txt: {error}"))?;
         if let Some(material_groups) = material_groups {
-            self.network_material_resource_groups = Some(material_groups);
+            self.scenario_lifecycle.network_material_resource_groups = Some(material_groups);
         }
         self.sound.fade_out_game_music();
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
@@ -3201,7 +3201,7 @@ impl GameApp {
         // (C4Game.cpp:351-352); `Finished` alone leaves it saturated at 100 and
         // swallows the next load's 4%..93% (clonk-org/clonk-rs#1115).
         self.taskbar_progress.begin_load();
-        self.loading_state = Some(loading_state);
+        self.scenario_lifecycle.loading = Some(loading_state);
         if preloaded_first_part {
             // Successful client preloading makes InitGameFirstPart return
             // before its RetrieveScenario 6/7 branch. InitGame then resumes
@@ -3234,7 +3234,8 @@ impl GameApp {
         }
         validate_client_network_scenario(scenario_data)?;
         if let Some(initial_game_state) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .and_then(|prepared| prepared.initial_game_data.as_ref())
@@ -3244,7 +3245,8 @@ impl GameApp {
                 .map_err(|error| format!("invalid network Game.txt: {error}"))?;
         }
         let Some(runtime_join) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .and_then(|prepared| prepared.pending_client_runtime_join.clone())
@@ -3299,7 +3301,8 @@ impl GameApp {
             Vec::new()
         };
         if let Some(prepared) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_mut()
             .and_then(|loading| loading.prepared_go.as_mut())
         {
@@ -3876,27 +3879,31 @@ impl GameApp {
                 // committed (src/C4Network2.cpp:1982-1991;
                 // src/C4GameControlNetwork.cpp:558-588).
                 let frozen_loading_pause = self.mode == AppMode::Loading
-                    && self.loading_state.as_ref().is_some_and(|loading| {
-                        loading.prepared_go.as_ref().is_some_and(|prepared| {
-                            prepared.local_reached
-                                && self
-                                    .runtime_network_committed_status
-                                    .is_some_and(|committed| {
-                                        committed.state == clonk_network::NETWORK_STATE_PAUSE
-                                            && if matches!(
-                                                self.network_mode,
-                                                Some(NetworkMode::Client(_))
-                                            ) {
-                                                same_runtime_network_status_barrier(
-                                                    prepared.status,
-                                                    committed,
-                                                )
-                                            } else {
-                                                prepared.status == committed
-                                            }
-                                    })
-                        })
-                    });
+                    && self
+                        .scenario_lifecycle
+                        .loading
+                        .as_ref()
+                        .is_some_and(|loading| {
+                            loading.prepared_go.as_ref().is_some_and(|prepared| {
+                                prepared.local_reached
+                                    && self.runtime_network_committed_status.is_some_and(
+                                        |committed| {
+                                            committed.state == clonk_network::NETWORK_STATE_PAUSE
+                                                && if matches!(
+                                                    self.network_mode,
+                                                    Some(NetworkMode::Client(_))
+                                                ) {
+                                                    same_runtime_network_status_barrier(
+                                                        prepared.status,
+                                                        committed,
+                                                    )
+                                                } else {
+                                                    prepared.status == committed
+                                                }
+                                        },
+                                    )
+                            })
+                        });
                 let frozen_lobby = self.joined_network_lobby_active()
                     || self.classic_host_lobby_active()
                     || frozen_loading_pause;
@@ -4130,7 +4137,8 @@ impl GameApp {
                     NetworkEvent::HostPingMeasured { .. } => {}
                     NetworkEvent::HostStatusChanged(status) => {
                         if self
-                            .loading_state
+                            .scenario_lifecycle
+                            .loading
                             .as_ref()
                             .is_some_and(|loading| loading.prepared_go.is_some())
                         {
@@ -4144,7 +4152,8 @@ impl GameApp {
                             clock.set_target_tick(Some(status.target_tick));
                         }
                         let rereach_prepared_host = self
-                            .loading_state
+                            .scenario_lifecycle
+                            .loading
                             .as_mut()
                             .and_then(|loading| loading.prepared_go.as_mut())
                             .is_some_and(|pending| {
@@ -4162,7 +4171,8 @@ impl GameApp {
                             {
                                 Some(Ok(())) => {
                                     if let Some(pending) = self
-                                        .loading_state
+                                        .scenario_lifecycle
+                                        .loading
                                         .as_mut()
                                         .and_then(|loading| loading.prepared_go.as_mut())
                                     {
@@ -4177,7 +4187,8 @@ impl GameApp {
                                 None => {}
                             }
                         } else if let Some(pending) = self
-                            .loading_state
+                            .scenario_lifecycle
+                            .loading
                             .as_mut()
                             .and_then(|loading| loading.prepared_go.as_mut())
                         {
@@ -4479,7 +4490,8 @@ impl GameApp {
                                     self.runtime_network_committed_status = None;
                                     self.pending_client_start_status = Some(requested);
                                     let reopened_reached_barrier = self
-                                        .loading_state
+                                        .scenario_lifecycle
+                                        .loading
                                         .as_mut()
                                         .and_then(|loading| loading.prepared_go.as_mut())
                                         .is_some_and(|prepared| {
@@ -4739,7 +4751,8 @@ impl GameApp {
                                                 .map(|info_id| (wait.resource_id, info_id))
                                         });
                                     let network_savegame = self
-                                        .loading_state
+                                        .scenario_lifecycle
+                                        .loading
                                         .as_ref()
                                         .and_then(|loading| loading.prepared_go.as_ref())
                                         .is_some_and(|prepared| prepared.save_game);
@@ -4876,7 +4889,8 @@ impl GameApp {
                                 && self.startup.view == StartupView::NetworkLobby;
                             let host_lost_during_final_init = self.mode == AppMode::Loading
                                 && (self
-                                    .loading_state
+                                    .scenario_lifecycle
+                                    .loading
                                     .as_ref()
                                     .and_then(|loading| loading.prepared_go.as_ref())
                                     .is_some_and(|prepared| prepared.local_reached)
@@ -5738,10 +5752,12 @@ impl GameApp {
     fn prepare_network_join_game_state(&mut self) {
         self.startup_restart_diagnostics.begin_game_init();
         self.clear_lobby_preload();
-        self.active_scenario = None;
+        self.scenario_lifecycle.active = None;
         let definition_load = self.take_scenario_seed_definition_load();
-        self.active_definition_load = Some(definition_load);
-        self.active_description_definition_modules.clear();
+        self.scenario_lifecycle.definition_load = Some(definition_load);
+        self.scenario_lifecycle
+            .description_definition_modules
+            .clear();
     }
 
     pub(crate) fn launch_pending_network_join(&mut self) -> Result<(), EngineError> {
@@ -6120,7 +6136,8 @@ impl GameApp {
         &mut self,
         prepared: &PreparedHostBootstrap,
     ) {
-        self.network_material_resource_groups = Some(prepared.material_resource_groups().to_vec());
+        self.scenario_lifecycle.network_material_resource_groups =
+            Some(prepared.material_resource_groups().to_vec());
     }
 
     pub(crate) fn start_network_game_now(&mut self) -> Result<(), EngineError> {
@@ -6335,7 +6352,7 @@ impl GameApp {
             // (C4Game.cpp:351-352); `Finished` alone leaves it saturated at 100 and
             // swallows the next load's 4%..93% (clonk-org/clonk-rs#1115).
             self.taskbar_progress.begin_load();
-            self.loading_state = Some(loading);
+            self.scenario_lifecycle.loading = Some(loading);
             // InitNetworkHost returns from DoLobby at 7, immediately before
             // InitGame begins its staged work (src/C4Game.cpp:438-457).
             self.apply_scenario_loader_frame(7, None);
@@ -6505,7 +6522,8 @@ impl GameApp {
                 }
             }
             if let Some(pending) = self
-                .loading_state
+                .scenario_lifecycle
+                .loading
                 .as_mut()
                 .and_then(|loading| loading.prepared_go.as_mut())
             {
@@ -6735,7 +6753,8 @@ impl GameApp {
         // armed from an earlier notice is now the wrong answer.
         self.pending_host_rejoin = None;
         let restarted_scenario = self
-            .active_scenario
+            .scenario_lifecycle
+            .active
             .as_ref()
             .map(|scenario| (scenario.identifier.clone(), scenario.title.clone()));
         let clients = self.control_clients.snapshot();
@@ -6807,7 +6826,7 @@ impl GameApp {
         if !self.network_round_restart_preserves_session() {
             return Ok(false);
         }
-        let Some(scenario) = self.active_scenario.clone() else {
+        let Some(scenario) = self.scenario_lifecycle.active.clone() else {
             return Ok(false);
         };
         let Some(NetworkMode::Host(old_settings)) = self.network_mode.as_ref() else {
@@ -6825,7 +6844,8 @@ impl GameApp {
             .map(|prepared| prepared.reusable_standalones().to_vec())
             .unwrap_or_default();
         let definition_load = self
-            .active_definition_load
+            .scenario_lifecycle
+            .definition_load
             .clone()
             .unwrap_or_else(|| self.scenario_seed_definition_load());
         let mut staged = match self.prepare_network_host_scenario(scenario, definition_load) {
@@ -7160,7 +7180,7 @@ impl GameApp {
         self.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
         self.scensel.mode = ScenarioSelectorMode::NetworkHost;
-        self.initial_definition_seed = None;
+        self.scenario_lifecycle.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
 
         // The staged scenario carries the round's fonts and loader. A fresh
@@ -7284,12 +7304,13 @@ impl GameApp {
         // (src/C4Network2.cpp:748-796,1826-1832). Announce the intent while
         // there is still a session to announce it on.
         self.announce_network_round_restart();
-        let Some(scenario) = self.active_scenario.clone() else {
+        let Some(scenario) = self.scenario_lifecycle.active.clone() else {
             self.return_to_menu();
             return Ok(());
         };
         let definition_load = self
-            .active_definition_load
+            .scenario_lifecycle
+            .definition_load
             .clone()
             .unwrap_or_else(|| self.scenario_seed_definition_load());
         let mut values = self.scenario_game_options.values().clone();
@@ -7341,7 +7362,7 @@ impl GameApp {
     pub(crate) fn clear_client_preload_projection(&mut self) {
         self.client_combined_preload_file.clear();
         self.client_combined_scenario_path = None;
-        self.network_material_resource_groups = None;
+        self.scenario_lifecycle.network_material_resource_groups = None;
     }
 
     pub(crate) fn open_network_host_scenario_browser(&mut self) {
@@ -7561,7 +7582,7 @@ impl GameApp {
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
-        self.network_material_resource_groups = None;
+        self.scenario_lifecycle.network_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
         self.network_client_activity.clear();
         if let Some(local_client) = local_client {
@@ -7692,7 +7713,7 @@ impl GameApp {
                 return Err("runtime JoinData capture requires the network host".to_string());
             }
         };
-        let definition_modules = match self.active_definition_load.as_ref() {
+        let definition_modules = match self.scenario_lifecycle.definition_load.as_ref() {
             Some(ScenarioDefinitionLoad::Seed { modules, .. })
             | Some(ScenarioDefinitionLoad::Fixed { modules, .. }) => modules.clone(),
             None => {
@@ -9147,7 +9168,8 @@ impl GameApp {
                 }
             }
             let title = self
-                .active_scenario
+                .scenario_lifecycle
+                .active
                 .as_ref()
                 .map_or("Scenario", |scenario| scenario.title.as_str())
                 .to_owned();
@@ -9188,7 +9210,8 @@ impl GameApp {
         let unfulfilled_goal_tooltip =
             self.runtime_resource_text("IDS_DESC_GOALNOTFULFILLED", "Goal %s not fulfilled: %s");
         let scenario_title = self
-            .active_scenario
+            .scenario_lifecycle
+            .active
             .as_ref()
             .map(|scenario| scenario.title.clone())
             .unwrap_or_else(|| "Scenario".to_string());
@@ -9908,7 +9931,7 @@ impl GameApp {
         frontend: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) -> Result<(), EngineError> {
-        self.initial_definition_seed = None;
+        self.scenario_lifecycle.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
         self.staged_network_host_scenario = None;
         self.clear_lobby_preload();
@@ -10305,7 +10328,8 @@ impl GameApp {
 
     fn stage_ordinary_network_recreated_script_files(&mut self) {
         let Some(scenario_path) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.scenario.path.as_deref())
         else {
@@ -10356,7 +10380,8 @@ impl GameApp {
             return Ok(true);
         }
         let scenario_path = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.scenario.path.clone())
             .ok_or_else(|| {
@@ -10536,7 +10561,8 @@ impl GameApp {
 
     fn recreate_runtime_join_players(&mut self, save_game: bool) -> Result<(), EngineError> {
         let (network_runtime_join, runtime_join_sources) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| {
@@ -10595,7 +10621,8 @@ impl GameApp {
             return Ok(());
         }
         let scenario_path = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.scenario.path.clone())
             .ok_or_else(|| {
@@ -10871,7 +10898,8 @@ impl GameApp {
         // (pristine 9ffa0a5d src/C4Game.cpp:455-482;
         // src/C4Network2.cpp:558-615, src/C4Game.cpp:2699-2736).
         let network_runtime_join = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .is_some_and(|prepared| prepared.network_runtime_join);
@@ -10948,11 +10976,11 @@ impl GameApp {
         core: &clonk_engine::NetworkResourceCore,
     ) -> Result<(), EngineError> {
         if core.resource_type != clonk_network::HostResourceType::Definitions as u8
-            || self.loading_state.is_some()
+            || self.scenario_lifecycle.loading.is_some()
         {
             return Ok(());
         }
-        let Some(frontend) = self.active_scenario.clone() else {
+        let Some(frontend) = self.scenario_lifecycle.active.clone() else {
             return Ok(());
         };
         let resolution = match self.resolve_network_overloaded_gui_resolution(&frontend) {

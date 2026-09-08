@@ -1795,7 +1795,8 @@ impl GameApp {
             let snapshot = clonk_network::join_team_list_snapshot(metadata);
             self.engine.set_teams(runtime_teams.clone());
             if let Some(prepared) = self
-                .loading_state
+                .scenario_lifecycle
+                .loading
                 .as_mut()
                 .and_then(|loading| loading.prepared_go.as_mut())
             {
@@ -1815,7 +1816,8 @@ impl GameApp {
         }
 
         if let Some(prepared) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_mut()
             .and_then(|loading| loading.prepared_go.as_mut())
         {

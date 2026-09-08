@@ -119,7 +119,7 @@ fn n1_joined_client_app_with_commands() -> (GameApp, network::TestNetworkCommand
 fn n1_install_loading_state(app: &mut GameApp) {
     let resources = app.loader.screen.test_ref().resources().clone();
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState::new(
+    app.scenario_lifecycle.loading = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
         resources,
         HashMap::new(),
@@ -563,7 +563,7 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
     app.classic_direct_reference_query = Some(ClassicDirectReferenceQuery { receiver });
     app.mode = AppMode::Loading;
     let (boot_sender, boot_receiver) = mpsc::channel();
-    app.boot_loading = Some(BootLoadingState::new(boot_receiver));
+    app.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(boot_receiver));
 
     app.poll_classic_direct_reference_query().test_value();
     main_assert!(app.classic_direct_reference_query.is_some());
@@ -574,7 +574,7 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
         .send(BootLoadingEvent::Finished(None))
         .test_value();
     app.poll_boot_loading();
-    main_assert!(app.boot_loading.is_none());
+    main_assert!(app.scenario_lifecycle.boot_loading.is_none());
     main_assert_eq!(app.mode => AppMode::Loading);
     main_assert!(app.classic_direct_reference_query.is_some());
 
@@ -1036,7 +1036,7 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
 
     let expected_definition = def_dir.to_string_lossy();
     main_assert!(matches!(
-        app.active_definition_load.as_ref(),
+        app.scenario_lifecycle.definition_load.as_ref(),
         Some(ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root: None,
@@ -1063,9 +1063,9 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
 
     app.restart_current_scenario().test_value();
     wait_for_running(&mut app);
-    main_assert_eq!(app.active_scenario.as_ref().map(|scenario| (&scenario.identifier, &scenario.path)) => Some((&frontend.identifier, &frontend.path)));
+    main_assert_eq!(app.scenario_lifecycle.active.as_ref().map(|scenario| (&scenario.identifier, &scenario.path)) => Some((&frontend.identifier, &frontend.path)));
     main_assert!(matches!(
-        app.active_definition_load.as_ref(),
+        app.scenario_lifecycle.definition_load.as_ref(),
         Some(ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root: None,
@@ -1141,7 +1141,7 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     while app
-        .loading_state
+        .scenario_lifecycle.loading
         .as_ref()
         .is_some_and(|loading| !loading.finished)
     {
@@ -2088,7 +2088,7 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     app.handle_menu_input(|_| start()).test_value();
     main_assert!(app.dialogs.messages.is_empty());
     main_assert!(app.definition_selection.dialog.is_some());
-    main_assert_eq!(app.pending_definition_selection.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
+    main_assert_eq!(app.definition_selection.pending.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
     main_assert!(app.startup_network.connection.is_none());
 }
 
@@ -2248,7 +2248,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     app.open_definition_selector(scenario.clone()).test_value();
 
     let controller = app.definition_selection.dialog.test_ref();
-    main_assert_eq!(app.pending_definition_selection.as_ref().and_then(|pending| pending.custom_definition_root.as_deref()) => Some(definition_root.as_path()));
+    main_assert_eq!(app.definition_selection.pending.as_ref().and_then(|pending| pending.custom_definition_root.as_deref()) => Some(definition_root.as_path()));
     main_assert_eq!(controller.root_path() => format!("{}{sep}", definition_root.display(), sep = std::path::MAIN_SEPARATOR));
     main_assert!(controller
         .rows()
@@ -2303,7 +2303,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.definition_selection.dialog.is_none());
-    main_assert!(app.pending_definition_selection.is_none());
+    main_assert!(app.definition_selection.pending.is_none());
     main_assert!(
         app.definition_selection.consumed_keys
             .contains(&VirtualKeyCode::Escape),
@@ -2415,7 +2415,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         original_objects.to_string_lossy().into_owned(),
     ];
     main_assert!(matches!(
-        app.active_definition_load.as_ref(),
+        app.scenario_lifecycle.definition_load.as_ref(),
         Some(ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root: None,
@@ -2424,17 +2424,17 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     app.restart_current_scenario().test_value();
     wait_for_running(&mut app);
     main_assert!(matches!(
-        app.active_definition_load.as_ref(),
+        app.scenario_lifecycle.definition_load.as_ref(),
         Some(ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root: None,
         }) if modules == &expected_effective
     ));
     app.quick_save().test_value();
-    app.active_definition_load = None;
+    app.scenario_lifecycle.definition_load = None;
     app.quick_load().test_value();
     main_assert!(matches!(
-        app.active_definition_load.as_ref(),
+        app.scenario_lifecycle.definition_load.as_ref(),
         Some(ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root: None,
@@ -2510,12 +2510,12 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.open_definition_selector(target.clone()).test_value();
-    main_assert_eq!(app.pending_definition_selection.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
+    main_assert_eq!(app.definition_selection.pending.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::RefreshRequested,
     ])
     .test_value();
-    main_assert_eq!(app.pending_definition_selection.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
+    main_assert_eq!(app.definition_selection.pending.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
@@ -3580,7 +3580,7 @@ fn client_host_timeout_during_final_init_aborts_startup() {
         Vec::new(),
     );
     loading.prepared_go.test_mut().local_reached = true;
-    app.loading_state = Some(loading);
+    app.scenario_lifecycle.loading = Some(loading);
     app.show_reached_network_start_wait().test_value();
     events
         .send(NetworkEvent::PeerDisconnected {
@@ -5028,7 +5028,7 @@ fn network_join_applies_active_scenario_gui_overrides() {
     app.lobby_preload_artifact = Some(artifact);
     app.try_prepare_client_network_scenario().test_value();
 
-    let loading = app.loading_state.test_ref();
+    let loading = app.scenario_lifecycle.loading.test_ref();
     main_assert!(
         loading.refresh_requested,
         "the client GO must stage a GraphicsResource refresh"
@@ -5099,12 +5099,12 @@ fn network_join_applies_active_scenario_gui_overrides() {
     app.admission_resources.ensure_by_core(&corrupt_core);
     app.admission_resources
         .mark_complete(corrupt_core.id, corrupt_pack.clone());
-    app.loading_state = None;
+    app.scenario_lifecycle.loading = None;
     app.pending_network_join_data = Some(corrupt_join_data);
     app.lobby_preload_artifact = Some(corrupt_artifact);
     app.try_prepare_client_network_scenario().test_value();
     let failures = app
-        .loading_state
+        .scenario_lifecycle.loading
         .as_ref()
         .test_value()
         .refreshed_global_gui_failures

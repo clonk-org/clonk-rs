@@ -1143,7 +1143,7 @@ fn run() -> Result<()> {
         // Retained for the event loop's inactive-draw gate (C4Config.cpp:481).
         let render_inactive_mask =
             load_render_inactive_mask(app.app_paths.as_ref(), app.config.compat_profile);
-        app.auto_start_sandbox = cli.sandbox;
+        app.scenario_lifecycle.auto_start_sandbox = cli.sandbox;
         app.launch_classic_command_line_join()
             .context("failed to start command-line network join")?;
         app.launch_classic_command_line_scenario()
@@ -3028,9 +3028,22 @@ impl GameApp {
                 mode: ScenarioSelectorMode::Local,
                 ..ScenarioSelectorState::default()
             },
-            active_scenario: None,
-            active_definition_load: None,
-            active_description_definition_modules: Vec::new(),
+            scenario_lifecycle: ScenarioLifecycleState {
+                active: None,
+                definition_load: None,
+                description_definition_modules: Vec::new(),
+                loading: None,
+                boot_loading,
+                network_material_resource_groups: None,
+                abort_restart_pending: false,
+                auto_start_sandbox: false,
+                auto_start_classic_command_line_scenario: false,
+                sandbox_crew_definition_paths: None,
+                initial_definition_seed: Some(classic_command_line_definition_modules(
+                    &load_native_config_bytes(paths),
+                    &[],
+                )),
+            },
             sound: SoundState {
                 // Only the device is supplied here; every music latch starts
                 // clear and is armed by the first playback decision.
@@ -3045,10 +3058,6 @@ impl GameApp {
             native_startup_fonts: None,
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
-            initial_definition_seed: Some(classic_command_line_definition_modules(
-                &load_native_config_bytes(paths),
-                &[],
-            )),
             console_session: ConsoleSessionState {
                 enabled: false,
                 restored_startup_dialog: false,
@@ -3060,7 +3069,6 @@ impl GameApp {
             file_monitor: None,
             game_log_capture: None,
             script_created_objects: false,
-            sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,
             pending_lobby_internet_signup: None,
             pending_league_player_auth: None,
@@ -3138,7 +3146,6 @@ impl GameApp {
                 team_assignment: network_team_assignment,
                 generated_team_name_template,
             },
-            abort_restart_pending: false,
             pending_host_rejoin: None,
             admission_resources: AdmissionResourceStore::default(),
             blocking_resource_wait: None,
@@ -3153,7 +3160,6 @@ impl GameApp {
             pending_client_start_status: None,
             client_combined_scenario_path: None,
             client_combined_preload_file: ClientCombinedPreloadFile::default(),
-            network_material_resource_groups: None,
             executing_ready_tick: None,
             records: RecordingState {
                 enabled: runtime.record_enabled && paths.is_some(),
@@ -3167,10 +3173,6 @@ impl GameApp {
             },
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
-            loading_state: None,
-            boot_loading,
-            auto_start_sandbox: false,
-            auto_start_classic_command_line_scenario: false,
             incoming_update: None,
             update_check_requested: false,
             update_check: None,
@@ -3228,7 +3230,6 @@ impl GameApp {
             runtime_flash_message: None,
             film_view_player: None,
             next_running_message_stack_id: 1,
-            pending_definition_selection: None,
             pending_lobby_player_selection: None,
             context_menus: ContextMenuState {
                 open: None,
@@ -3320,6 +3321,7 @@ impl GameApp {
                 consumed_keys: HashSet::new(),
                 pointer_capture: false,
                 last_click: None,
+                pending: None,
             },
             edit_cursor: EditCursorState {
                 last_world: None,
@@ -3391,10 +3393,11 @@ impl GameApp {
     ) -> Result<()> {
         self.classic_command_line = classic.clone();
         self.records.classic_stream_activation_pending = false;
-        self.initial_definition_seed = Some(classic_command_line_definition_modules(
-            &load_native_config_bytes(self.app_paths.as_ref()),
-            &classic.definition_files,
-        ));
+        self.scenario_lifecycle.initial_definition_seed =
+            Some(classic_command_line_definition_modules(
+                &load_native_config_bytes(self.app_paths.as_ref()),
+                &classic.definition_files,
+            ));
         if !classic.player_files.is_empty() {
             self.configured_client_player_selection = self
                 .app_paths
@@ -3420,7 +3423,11 @@ impl GameApp {
     }
 
     fn classic_command_line_definition_load(&self) -> ScenarioDefinitionLoad {
-        let modules = self.initial_definition_seed.clone().unwrap_or_default();
+        let modules = self
+            .scenario_lifecycle
+            .initial_definition_seed
+            .clone()
+            .unwrap_or_default();
         let definition_root =
             self.app_paths
                 .as_ref()
@@ -4915,7 +4922,7 @@ impl GameApp {
             .engine
             .abort_players_without_callbacks(local_client_id)?;
         self.snapshot = self.engine.snapshot();
-        if !self.abort_restart_pending && self.network.is_some() {
+        if !self.scenario_lifecycle.abort_restart_pending && self.network.is_some() {
             self.change_network_control_to_local(local_client_id);
         }
         self.return_to_menu();
@@ -5220,7 +5227,7 @@ impl GameApp {
         }
         self.advance_scenario_loader(100, "Scenario activation complete");
         self.arm_terminal_loader_frame_presentation();
-        self.loading_state = None;
+        self.scenario_lifecycle.loading = None;
         self.pending_client_start_status = None;
         self.input_routing.live.gui_mouse_owned = false;
         self.input_routing.live.world_mouse_owned = true;
@@ -5270,24 +5277,32 @@ impl GameApp {
         let client = matches!(self.network_mode, Some(NetworkMode::Client(_)));
         let ready = self.mode == AppMode::Loading
             && committed_status.is_some()
-            && self.loading_state.as_ref().is_some_and(|loading| {
-                loading.finished
-                    && loading.prepared_go.as_ref().is_some_and(|prepared| {
-                        prepared.local_reached
-                            && committed_status.is_some_and(|committed| {
-                                if client {
-                                    same_runtime_network_status_barrier(prepared.status, committed)
-                                } else {
-                                    prepared.status == committed
-                                }
-                            })
-                    })
-            });
+            && self
+                .scenario_lifecycle
+                .loading
+                .as_ref()
+                .is_some_and(|loading| {
+                    loading.finished
+                        && loading.prepared_go.as_ref().is_some_and(|prepared| {
+                            prepared.local_reached
+                                && committed_status.is_some_and(|committed| {
+                                    if client {
+                                        same_runtime_network_status_barrier(
+                                            prepared.status,
+                                            committed,
+                                        )
+                                    } else {
+                                        prepared.status == committed
+                                    }
+                                })
+                        })
+                });
         if !ready {
             return Ok(());
         }
         let network_savegame = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .is_some_and(|prepared| prepared.save_game);
@@ -5335,7 +5350,8 @@ impl GameApp {
         }
         self.network_control_running = false;
         let prepared_go = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|pending| (pending.status, pending.local_reached, pending.save_game));
@@ -7172,7 +7188,8 @@ impl GameApp {
                         .set_debug_draw_flags(clonk_frontend::DebugDrawFlags::default());
                 }
                 if let Some(prepared) = self
-                    .loading_state
+                    .scenario_lifecycle
+                    .loading
                     .as_mut()
                     .and_then(|loading| loading.prepared_go.as_mut())
                 {
@@ -7231,7 +7248,8 @@ impl GameApp {
                     return;
                 }
                 if let Some(prepared) = self
-                    .loading_state
+                    .scenario_lifecycle
+                    .loading
                     .as_mut()
                     .and_then(|loading| loading.prepared_go.as_mut())
                 {
@@ -7245,7 +7263,8 @@ impl GameApp {
                     let team_snapshot = clonk_network::join_team_list_snapshot(metadata);
                     self.engine.set_teams(runtime_teams.clone());
                     if let Some(prepared) = self
-                        .loading_state
+                        .scenario_lifecycle
+                        .loading
                         .as_mut()
                         .and_then(|loading| loading.prepared_go.as_mut())
                     {
@@ -7326,7 +7345,8 @@ impl GameApp {
                 };
                 self.engine.set_team_colors(enabled);
                 if let Some(prepared) = self
-                    .loading_state
+                    .scenario_lifecycle
+                    .loading
                     .as_mut()
                     .and_then(|loading| loading.prepared_go.as_mut())
                 {
@@ -7340,7 +7360,8 @@ impl GameApp {
                     let team_snapshot = clonk_network::join_team_list_snapshot(metadata);
                     self.engine.set_teams(runtime_teams.clone());
                     if let Some(prepared) = self
-                        .loading_state
+                        .scenario_lifecycle
+                        .loading
                         .as_mut()
                         .and_then(|loading| loading.prepared_go.as_mut())
                     {
@@ -7371,7 +7392,8 @@ impl GameApp {
             // are unchanged.
             5 => {
                 let prepared_forced = self
-                    .loading_state
+                    .scenario_lifecycle
+                    .loading
                     .as_ref()
                     .and_then(|loading| loading.prepared_go.as_ref())
                     .is_some_and(|prepared| prepared.fair_crew_forced);
@@ -7401,7 +7423,8 @@ impl GameApp {
                     self.engine.clear_fair_crew_physicals();
                 }
                 if let Some(prepared) = self
-                    .loading_state
+                    .scenario_lifecycle
+                    .loading
                     .as_mut()
                     .and_then(|loading| loading.prepared_go.as_mut())
                 {
@@ -8047,7 +8070,7 @@ impl GameApp {
             }
             GameOverAction::NextMission => {
                 let path = self.engine.next_mission().path.clone();
-                let definition_load = self.active_definition_load.clone();
+                let definition_load = self.scenario_lifecycle.definition_load.clone();
                 // C4GameOverDlg preserves restart infos only for Restart;
                 // actual Next Mission clears them as soon as it closes.
                 self.players.restart_restore_infos = RestartRestoreInfos::default();
@@ -8123,7 +8146,8 @@ impl GameApp {
 
     fn apply_pending_loading_resource_refresh(&mut self) -> Result<(), EngineError> {
         let Some(failures) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .filter(|state| state.refresh_requested)
             .and_then(|state| state.refreshed_global_gui_failures.as_ref())
@@ -8136,7 +8160,7 @@ impl GameApp {
             .map_err(report_classic_parity_boundary)
             .map_err(classic_parity_engine_error)?;
 
-        let Some(state) = self.loading_state.as_mut() else {
+        let Some(state) = self.scenario_lifecycle.loading.as_mut() else {
             return Ok(());
         };
         let resources = state.refreshed_resources.take();
@@ -8164,13 +8188,17 @@ impl GameApp {
 
     fn try_reach_loaded_network_go_barrier(&mut self) -> Result<(), EngineError> {
         let ready_to_reach = self.mode == AppMode::Loading
-            && self.loading_state.as_ref().is_some_and(|loading| {
-                loading.finished
-                    && loading
-                        .prepared_go
-                        .as_ref()
-                        .is_some_and(|prepared| !prepared.local_reached)
-            });
+            && self
+                .scenario_lifecycle
+                .loading
+                .as_ref()
+                .is_some_and(|loading| {
+                    loading.finished
+                        && loading
+                            .prepared_go
+                            .as_ref()
+                            .is_some_and(|prepared| !prepared.local_reached)
+                });
         if !ready_to_reach {
             return Ok(());
         }
@@ -8185,7 +8213,8 @@ impl GameApp {
             None
         };
         let prepared_status = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.status);
@@ -8203,7 +8232,8 @@ impl GameApp {
             });
         if let Some(status) = client_chase_status {
             let network_savegame = self
-                .loading_state
+                .scenario_lifecycle
+                .loading
                 .as_ref()
                 .and_then(|loading| loading.prepared_go.as_ref())
                 .is_some_and(|prepared| prepared.save_game);
@@ -8244,7 +8274,8 @@ impl GameApp {
         match reached {
             Some(Ok(())) => {
                 if let Some(pending) = self
-                    .loading_state
+                    .scenario_lifecycle
+                    .loading
                     .as_mut()
                     .and_then(|loading| loading.prepared_go.as_mut())
                 {
@@ -8269,7 +8300,8 @@ impl GameApp {
         self.apply_pending_loading_resource_refresh()?;
         let mut completion: Option<(FrontendScenario, Result<Scenario, String>, bool)> = None;
         while let Some(event) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .filter(|state| !state.finished)
             .map(|state| state.receiver.try_recv())
@@ -8279,21 +8311,23 @@ impl GameApp {
                     self.apply_scenario_loader_frame(progress, log);
                 }
                 Ok(ScenarioLoadingEvent::RefreshResources) => {
-                    if let Some(state) = self.loading_state.as_mut() {
+                    if let Some(state) = self.scenario_lifecycle.loading.as_mut() {
                         state.refresh_requested = true;
                     }
                     self.apply_pending_loading_resource_refresh()?;
                 }
                 Ok(ScenarioLoadingEvent::AcceptedRandomSeed(random_seed)) => {
                     let state = self
-                        .loading_state
+                        .scenario_lifecycle
+                        .loading
                         .as_mut()
                         .expect("loading state exists while draining its receiver");
                     state.offline_random_seed = Some(random_seed);
                 }
                 Ok(ScenarioLoadingEvent::Finished(result)) => {
                     let state = self
-                        .loading_state
+                        .scenario_lifecycle
+                        .loading
                         .as_mut()
                         .expect("loading state exists while draining its receiver");
                     state.finished = true;
@@ -8311,7 +8345,8 @@ impl GameApp {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     let state = self
-                        .loading_state
+                        .scenario_lifecycle
+                        .loading
                         .as_mut()
                         .expect("loading state exists while draining its receiver");
                     state.finished = true;
@@ -8329,7 +8364,8 @@ impl GameApp {
             match result {
                 Ok(data) => {
                     if let Some(pending) = self
-                        .loading_state
+                        .scenario_lifecycle
+                        .loading
                         .as_mut()
                         .and_then(|loading| loading.prepared_go.as_mut())
                     {
@@ -8356,7 +8392,7 @@ impl GameApp {
                     } else {
                         self.advance_scenario_loader(100, "Scenario activation complete");
                         self.arm_terminal_loader_frame_presentation();
-                        self.loading_state = None;
+                        self.scenario_lifecycle.loading = None;
                     }
                 }
                 Err(message) => {
@@ -8367,13 +8403,17 @@ impl GameApp {
         }
 
         let reaching_network_start = self.mode == AppMode::Loading
-            && self.loading_state.as_ref().is_some_and(|loading| {
-                loading.finished
-                    && loading
-                        .prepared_go
-                        .as_ref()
-                        .is_some_and(|prepared| !prepared.local_reached)
-            });
+            && self
+                .scenario_lifecycle
+                .loading
+                .as_ref()
+                .is_some_and(|loading| {
+                    loading.finished
+                        && loading
+                            .prepared_go
+                            .as_ref()
+                            .is_some_and(|prepared| !prepared.local_reached)
+                });
         if reaching_network_start {
             // RetrieveScenario's blocking message pump installs any queued
             // PID_Status before FinalInit checks the barrier. Preserve that
@@ -8611,7 +8651,8 @@ impl GameApp {
     }
 
     fn effective_global_gui_failures(&self) -> &HashMap<&'static str, String> {
-        self.loading_state
+        self.scenario_lifecycle
+            .loading
             .as_ref()
             .filter(|state| state.refresh_requested)
             .and_then(|state| state.refreshed_global_gui_failures.as_ref())
@@ -8939,13 +8980,18 @@ impl GameApp {
         self.ingame_mouse.dragged_objects.clear();
         self.ingame_mouse.control_allowed = true;
         self.ingame_mouse.control = true;
-        self.active_definition_load = None;
-        self.active_description_definition_modules.clear();
+        self.scenario_lifecycle.definition_load = None;
+        self.scenario_lifecycle
+            .description_definition_modules
+            .clear();
         let mut recording_scenario_data = None;
 
         if scenario_info.sandbox {
             let catalog_paths = self.app_paths.clone();
-            let crew_paths = self.sandbox_crew_definition_paths.clone();
+            let crew_paths = self
+                .scenario_lifecycle
+                .sandbox_crew_definition_paths
+                .clone();
             let definition_load = match (catalog_paths.as_ref(), crew_paths.as_ref()) {
                 (Some(paths), _) => SandboxDefinitionLoad::InstallCatalog(paths),
                 (None, Some(paths)) => SandboxDefinitionLoad::InstallCrew(paths),
@@ -9045,9 +9091,9 @@ impl GameApp {
                     path.display()
                 )
             })?;
-            self.active_description_definition_modules =
+            self.scenario_lifecycle.description_definition_modules =
                 raw_definition_description_modules(scenario_data.definition_resource_paths());
-            self.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+            self.scenario_lifecycle.definition_load = Some(ScenarioDefinitionLoad::Fixed {
                 modules: scenario_data
                     .definition_resource_paths()
                     .iter()
@@ -9352,7 +9398,7 @@ impl GameApp {
         // PlayScenarioMusic one-way enables Game.IsMusicEnabled when RXMusic
         // is on; a configured-off client does not erase a restored true.
         self.sound.runtime_music_enabled |= restored_music_enabled;
-        self.active_scenario = Some(frontend.clone());
+        self.scenario_lifecycle.active = Some(frontend.clone());
         if let Some(audio) = self.sound.context.as_ref() {
             // CompileRuntimeData temporarily applied Game.PlayList, but
             // PlayScenarioMusic always installs its physical DEFAULT filter
@@ -9415,7 +9461,8 @@ impl GameApp {
         let retain_prepared_client_queues =
             matches!(self.network_mode, Some(NetworkMode::Client(_)))
                 && self
-                    .loading_state
+                    .scenario_lifecycle
+                    .loading
                     .as_ref()
                     .is_some_and(|loading| loading.prepared_go.is_some());
         self.input_routing.live.ingame_mouse_help = false;

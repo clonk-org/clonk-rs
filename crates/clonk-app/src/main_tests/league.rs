@@ -3977,7 +3977,7 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
         team: 2,
     });
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState {
+    app.scenario_lifecycle.loading = Some(ScenarioLoadingState {
         scenario: FrontendScenario::fallback(),
         refreshed_resources: None,
         refreshed_tooltip_font: None,
@@ -4206,18 +4206,18 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     );
     let restart_vote = league_fixture!(vote: clonk_engine::VOTE_TYPE_CANCEL, true, 0, 0);
     main_assert_eq!(restart_commands.take_submitted_votes() => vec![restart_vote]);
-    main_assert!(restart_host.abort_restart_pending);
+    main_assert!(restart_host.scenario_lifecycle.abort_restart_pending);
     restart_host.league_votes.add(restart_vote);
     restart_host.execute_league_vote_end(clonk_engine::VoteControlData {
         approve: false,
         ..restart_vote
     });
     main_assert!(matches!(restart_host.mode, AppMode::Running));
-    main_assert!(restart_host.abort_restart_pending, "a rejected vote leaves Application.NextMission scheduled");
+    main_assert!(restart_host.scenario_lifecycle.abort_restart_pending, "a rejected vote leaves Application.NextMission scheduled");
     main_assert!(restart_host.dialogs.messages.iter().any(|dialog| matches!(dialog.continuation, MessageDialogContinuation::LeagueSurrender)));
     restart_host.loader.render_error = Some("test restart blocker".to_string());
     restart_host.hard_abort_running_game().test_value();
-    main_assert!(!restart_host.abort_restart_pending);
+    main_assert!(!restart_host.scenario_lifecycle.abort_restart_pending);
     main_assert_eq!(restart_host.scensel.mode => ScenarioSelectorMode::NetworkHost);
 
     let mut client = new_running_sandbox_app();
@@ -4246,7 +4246,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     );
     main_assert!(observer_commands.take_submitted_votes().is_empty());
     main_assert!(matches!(observer.mode, AppMode::Menu));
-    main_assert!(observer.active_scenario.is_none());
+    main_assert!(observer.scenario_lifecycle.active.is_none());
 }
 
 // Surrender ends a local round with evaluation (C4MainMenu.cpp:791-795:
@@ -4354,7 +4354,7 @@ fn non_league_network_part_continues_the_running_round_locally() {
     let frame_before = app.engine.frame();
     let control_tick_before = app.engine.sync_check(local_client).control_tick;
     let scenario_before = app
-        .active_scenario
+        .scenario_lifecycle.active
         .as_ref()
         .map(|scenario| scenario.identifier.clone());
     let graceful_write = thread::spawn(move || commands.complete_graceful_part());
@@ -4366,7 +4366,7 @@ fn non_league_network_part_continues_the_running_round_locally() {
     main_assert_eq!(app.engine.frame() => frame_before);
     main_assert_eq!(app.engine.sync_check(local_client).control_tick => control_tick_before);
     main_assert_eq!(app.engine.control_rate => 1);
-    main_assert_eq!(app.active_scenario.as_ref().map(|scenario| scenario.identifier.clone()) => scenario_before);
+    main_assert_eq!(app.scenario_lifecycle.active.as_ref().map(|scenario| scenario.identifier.clone()) => scenario_before);
     main_assert_eq!(app.ingame_menus.players.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());

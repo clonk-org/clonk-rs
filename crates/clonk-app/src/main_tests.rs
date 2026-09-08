@@ -935,7 +935,7 @@ fn wait_for_menu_impl(app: &mut GameApp, dismiss_first_player_dialog: bool) {
     // Production stays in Loading and reports the typed loader boundary;
     // only this test helper bypasses startup presentation explicitly.
     if app.app_paths.is_none() && app.loader.error.is_some() {
-        app.boot_loading = None;
+        app.scenario_lifecycle.boot_loading = None;
         app.mode = AppMode::Menu;
         app.startup.dialog_fade = None;
         return;
@@ -3323,7 +3323,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         .test_value();
     app.process_network_events().test_value();
     assert_eq!(app.pending_client_start_status, Some(go));
-    assert!(app.loading_state.is_none());
+    assert!(app.scenario_lifecycle.loading.is_none());
     let (removed_tx, removed_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let removal_observer = thread::spawn(move || {
@@ -3376,7 +3376,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     );
     app.poll_lobby_preload().test_value();
     assert!(app.lobby_preload_task.is_some());
-    assert!(app.loading_state.is_none());
+    assert!(app.scenario_lifecycle.loading.is_none());
 
     release_tx.send(()).test_value();
     let mut commands = removal_observer.test_join();
@@ -3386,11 +3386,12 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         thread::yield_now();
     }
     assert!(
-        app.loading_state.is_some(),
+        app.scenario_lifecycle.loading.is_some(),
         "pending GO resumes immediately"
     );
     assert_eq!(
-        app.loading_state
+        app.scenario_lifecycle
+            .loading
             .as_ref()
             .expect("preloaded client loading state")
             .last_progress,
@@ -3789,7 +3790,8 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     // InitScriptEngine/InitGame phases begin
     // (src/C4Game.cpp:2575-2598).
     assert_eq!(
-        app.loading_state
+        app.scenario_lifecycle
+            .loading
             .as_ref()
             .expect("client loading state after resource retrieval")
             .last_progress,
@@ -3936,7 +3938,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
         })
     );
     assert!(app.network_control_running);
-    assert!(app.loading_state.is_none());
+    assert!(app.scenario_lifecycle.loading.is_none());
 
     let catch_up_frame = app.engine.frame();
     app.update().test_value();
@@ -3982,7 +3984,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
             .progress(),
         100
     );
-    assert!(app.loading_state.is_none());
+    assert!(app.scenario_lifecycle.loading.is_none());
     assert!(app.network_control_running);
     assert_eq!(app.expected_network_control_tick(), 25);
     assert!(app.network_ticks.ready.contains_key(&25));

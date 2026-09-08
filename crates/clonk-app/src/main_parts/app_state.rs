@@ -1873,6 +1873,8 @@ pub(crate) struct DefinitionSelectionState {
     /// Last definition-list label click for multi-selection double-click
     /// toggling (C4FileSelDlg::OnSelDblClick).
     pub(crate) last_click: Option<(usize, Instant)>,
+    /// Scenario/root retained until the selector accepts or cancels.
+    pub(crate) pending: Option<PendingDefinitionSelection>,
 }
 
 impl ConfigState {
@@ -2123,6 +2125,50 @@ impl ConsoleSessionState {
     }
 }
 
+/// The app-side scenario lifecycle: the active scenario with its definition
+/// load and description modules, the boot and scenario loaders, the
+/// host-ordered material groups a network round publishes, the restart and
+/// auto-start latches, the sandbox crew source, and the definition seed a
+/// command line hands the next game. `GameApp` composes it as
+/// `scenario_lifecycle`.
+pub(crate) struct ScenarioLifecycleState {
+    pub(crate) active: Option<FrontendScenario>,
+    /// Effective definition vector from the active game. C++ backs this up
+    /// across Restart/Next Mission and restores it as FixedDefinitions.
+    pub(crate) definition_load: Option<ScenarioDefinitionLoad>,
+    /// Byte-exact `Game.DefinitionFilenames` projection used only by
+    /// C4GameSave::WriteDescDefinitions. The String-based load vector cannot
+    /// retain native Unix path bytes that are not valid UTF-8.
+    pub(crate) description_definition_modules: Vec<Vec<u8>>,
+    pub(crate) loading: Option<ScenarioLoadingState>,
+    pub(crate) boot_loading: Option<BootLoadingState>,
+    /// Exact host-ordered NRT_Material groups from final resource publication
+    /// or JoinData. `Some([])` is authoritative: neither side may fall back to
+    /// a process-local global Material.c4g.
+    pub(crate) network_material_resource_groups: Option<Vec<Group>>,
+    /// `Application.NextMission` set by C4AbortGameDialog's Restart button.
+    /// It deliberately survives a rejected/ignored league vote and is
+    /// consumed by the next hard `QuitGame` route.
+    pub(crate) abort_restart_pending: bool,
+    /// When set, boot straight into the sandbox scenario once boot loading
+    /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared
+    /// after the first auto-start so returning to the menu behaves normally.
+    pub(crate) auto_start_sandbox: bool,
+    /// A direct scenario waits for process boot resources before it starts
+    /// either its local loader or prepared host, avoiding a race between the
+    /// independent workers.
+    pub(crate) auto_start_classic_command_line_scenario: bool,
+    /// Optional targeted crew-definition source for pathless sandbox
+    /// fixtures. This is deliberately separate from `app_paths`: it must not
+    /// make unrelated app subsystems appear install-initialized, but it does
+    /// need to survive sandbox restart and saved-game restoration.
+    pub(crate) sandbox_crew_definition_paths: Option<AppPaths>,
+    /// ParseCommandLine snapshots the config/`.c4d` definition vector once
+    /// for the next game init. Later startup rounds begin from an empty Game
+    /// and the unchecked selector appends only Objects.c4d.
+    pub(crate) initial_definition_seed: Option<Vec<String>>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -2269,14 +2315,8 @@ pub(crate) struct GameApp {
     pub(crate) mode: AppMode,
     /// The scenario selector's own state.
     pub(crate) scensel: ScenarioSelectorState,
-    pub(crate) active_scenario: Option<FrontendScenario>,
-    /// Effective definition vector from the active game. C++ backs this up
-    /// across Restart/Next Mission and restores it as FixedDefinitions.
-    pub(crate) active_definition_load: Option<ScenarioDefinitionLoad>,
-    /// Byte-exact `Game.DefinitionFilenames` projection used only by
-    /// C4GameSave::WriteDescDefinitions. The String-based load vector cannot
-    /// retain native Unix path bytes that are not valid UTF-8.
-    pub(crate) active_description_definition_modules: Vec<Vec<u8>>,
+    /// The app-side scenario lifecycle (clonk-org/clonk-rs#1244).
+    pub(crate) scenario_lifecycle: ScenarioLifecycleState,
     /// The audio device and its music lifetime.
     pub(crate) sound: SoundState,
     /// Presentation-only proximity voice state; never serialized or passed to
@@ -2308,10 +2348,6 @@ pub(crate) struct GameApp {
     /// Process-local compatibility arguments applied after configuration is
     /// loaded. They must never be written back to the selected config file.
     pub(crate) classic_command_line: ClassicCommandLine,
-    /// ParseCommandLine snapshots the config/`.c4d` definition vector once
-    /// for the next game init. Later startup rounds begin from an empty Game
-    /// and the unchecked selector appends only Objects.c4d.
-    pub(crate) initial_definition_seed: Option<Vec<String>>,
     /// The `/console` session (clonk-org/clonk-rs#1242).
     pub(crate) console_session: ConsoleSessionState,
     /// Dedicated-server policy selected by `--headless`: no window, no render
@@ -2351,11 +2387,6 @@ pub(crate) struct GameApp {
     /// changed the live object count and cleared after the scenario-save
     /// double-object warning.
     pub(crate) script_created_objects: bool,
-    /// Optional targeted crew-definition source for pathless sandbox
-    /// fixtures. This is deliberately separate from `app_paths`: it must not
-    /// make unrelated app subsystems appear install-initialized, but it does
-    /// need to survive sandbox restart and saved-game restoration.
-    pub(crate) sandbox_crew_definition_paths: Option<AppPaths>,
     pub(crate) configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
     // Fields drop in declaration order. Cancel an in-flight league request
     // before NetworkManager joins its worker so shutdown cannot wait for the
@@ -2524,10 +2555,6 @@ pub(crate) struct GameApp {
     /// a legacy presentation path, so retain the resolved path separately for
     /// `C4PlayerList::SynchronizeLocalFiles`.
     pub(crate) local_player_profile_paths: HashMap<i32, PathBuf>,
-    /// `Application.NextMission` set by C4AbortGameDialog's Restart button.
-    /// It deliberately survives a rejected/ignored league vote and is
-    /// consumed by the next hard `QuitGame` route.
-    pub(crate) abort_restart_pending: bool,
     /// The local profile and the rosters assembled around it.
     pub(crate) players: PlayerState,
     /// Armed on this client by the host's restart notice
@@ -2558,25 +2585,11 @@ pub(crate) struct GameApp {
     pub(crate) pending_client_start_status: Option<clonk_network::NetworkStatus>,
     pub(crate) client_combined_scenario_path: Option<PathBuf>,
     pub(crate) client_combined_preload_file: ClientCombinedPreloadFile,
-    /// Exact host-ordered NRT_Material groups from final resource publication
-    /// or JoinData. `Some([])` is authoritative: neither side may fall back to
-    /// a process-local global Material.c4g.
-    pub(crate) network_material_resource_groups: Option<Vec<Group>>,
     pub(crate) executing_ready_tick: Option<Tick>,
     /// Control recording and playback.
     pub(crate) records: RecordingState,
     pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
     pub(crate) sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
-    pub(crate) loading_state: Option<ScenarioLoadingState>,
-    pub(crate) boot_loading: Option<BootLoadingState>,
-    /// When set, boot straight into the sandbox scenario once boot loading
-    /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared
-    /// after the first auto-start so returning to the menu behaves normally.
-    pub(crate) auto_start_sandbox: bool,
-    /// A direct scenario waits for process boot resources before it starts
-    /// either its local loader or prepared host, avoiding a race between the
-    /// independent workers.
-    pub(crate) auto_start_classic_command_line_scenario: bool,
     /// A `.c4u` package handed to the process on the command line.
     ///
     /// Kept apart from [`Self::update_check_requested`] because C++ applies an
@@ -2635,8 +2648,6 @@ pub(crate) struct GameApp {
     /// The runtime dialogs and the stack that orders them.
     pub(crate) dialogs: RuntimeDialogState,
     pub(crate) next_running_message_stack_id: u64,
-    /// Scenario/root retained until the selector accepts or cancels.
-    pub(crate) pending_definition_selection: Option<PendingDefinitionSelection>,
     /// Local-client target and path/wire-name map for C4PlayerSelDlg.
     pub(crate) pending_lobby_player_selection: Option<PendingLobbyPlayerSelection>,
     pub(crate) menu_backdrop_cache: StartupBackdropCache,

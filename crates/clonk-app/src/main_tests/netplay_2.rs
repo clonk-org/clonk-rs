@@ -386,7 +386,7 @@ fn n2_saved_game(
             &app.scenario_label,
             app.fallback_ground,
         ),
-        definition_load: app.active_definition_load.clone(),
+        definition_load: app.scenario_lifecycle.definition_load.clone(),
         focus_id: app.focus_id,
         user_label: Some(user_label.to_string()),
         runtime_music_enabled: Some(app.sound.runtime_music_enabled),
@@ -2200,7 +2200,7 @@ fn packed_material_alias_removes_the_host_material_projection() {
     ));
     let (authoritative_materials, reuse_preloaded) = network_material_load_plan(
         app.network_mode.as_ref(),
-        app.network_material_resource_groups.as_deref(),
+        app.scenario_lifecycle.network_material_resource_groups.as_deref(),
     );
     main_assert_eq!(authoritative_materials.map(<[Group]>::len) => Some(0));
     main_assert!(!reuse_preloaded, "an authoritative empty host material vector bypasses staged local preload data");
@@ -2699,7 +2699,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
     let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(manager);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState::new(
+    app.scenario_lifecycle.loading = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
         app.assets.loader_resources().test_value(),
         HashMap::new(),
@@ -2718,7 +2718,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.network_lobby.is_none());
-    main_assert!(app.loading_state.is_none(), "the failed load ticket must not suppress a later client start");
+    main_assert!(app.scenario_lifecycle.loading.is_none(), "the failed load ticket must not suppress a later client start");
     assert_startup_error_log(&app, "Unable to activate synchronized scenario");
 }
 
@@ -4129,8 +4129,8 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
     // Cancel the deliberately unreachable reference query, then exercise
     // the unresolved row's second-Enter raw-join fallback.
     app.startup_network.game_search = None;
-    app.active_scenario = Some(FrontendScenario::fallback());
-    app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+    app.scenario_lifecycle.active = Some(FrontendScenario::fallback());
+    app.scenario_lifecycle.definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: vec!["Stale.c4d".to_string()],
         definition_root: None,
     });
@@ -4141,8 +4141,8 @@ fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining(
         .handle_key_down(KeyCode::Enter);
     main_assert_eq!(actions => [clonk_frontend::startup_netdlg::NetDlgAction::JoinGame {address: Some(address),}]);
     app.process_network_dialog_actions(actions).test_value();
-    main_assert!(app.active_scenario.is_none());
-    match app.active_definition_load.as_ref() {
+    main_assert!(app.scenario_lifecycle.active.is_none());
+    match app.scenario_lifecycle.definition_load.as_ref() {
         Some(ScenarioDefinitionLoad::Seed { modules, .. }) => {
             main_assert_eq!(modules => &["Objects.c4d".to_string()]);
         }
@@ -4489,8 +4489,8 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     main_assert_eq!(actions => [clonk_frontend::startup_netdlg::NetDlgAction::JoinGame { address: None }]);
     app.startup_network.dialog = Some(network_dialog);
     app.startup_network.game_references = vec![reference];
-    app.active_scenario = Some(FrontendScenario::fallback());
-    app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+    app.scenario_lifecycle.active = Some(FrontendScenario::fallback());
+    app.scenario_lifecycle.definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: vec!["Stale.c4d".to_string()],
         definition_root: None,
     });
@@ -4498,8 +4498,8 @@ fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
     app.process_network_dialog_actions(actions).test_value();
 
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.active_scenario.is_none());
-    match app.active_definition_load.as_ref() {
+    main_assert!(app.scenario_lifecycle.active.is_none());
+    match app.scenario_lifecycle.definition_load.as_ref() {
         Some(ScenarioDefinitionLoad::Seed { modules, .. }) => {
             main_assert_eq!(modules => &["Objects.c4d".to_string()]);
         }
@@ -9125,7 +9125,7 @@ fn client_player_info_rechecks_prepared_team_memberships_before_activation() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         FrontendScenario::fallback(),
         receiver,
         false,
@@ -9153,7 +9153,7 @@ fn client_player_info_rechecks_prepared_team_memberships_before_activation() {
     app.process_network_events().test_value();
 
     let teams = &app
-        .loading_state
+        .scenario_lifecycle.loading
         .as_ref()
         .unwrap()
         .prepared_go
@@ -10191,7 +10191,7 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     app.network_control_clock = Some(NetworkControlClock::new(31, 4));
-    let restarted_scenario = app.active_scenario.clone().test_value();
+    let restarted_scenario = app.scenario_lifecycle.active.clone().test_value();
     let native = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).test_value();
     app.players.local_name = "Player".to_string();
     app.control_clients.replace_snapshot([
@@ -11456,7 +11456,7 @@ fn saved_game_reapplies_current_player_info_identity_and_preferences() {
         })],
     ));
     let scenario = app
-        .active_scenario
+        .scenario_lifecycle.active
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
     let mut engine_state = app.engine.capture_state();
@@ -11502,7 +11502,7 @@ fn saved_game_promotes_unjoined_takeover_info_before_recreation_filter() {
         })],
     ));
     let scenario = app
-        .active_scenario
+        .scenario_lifecycle.active
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
     let mut engine_state = app.engine.capture_state();
@@ -11661,7 +11661,7 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     let (_sender, receiver) = mpsc::channel();
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_path);
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         scenario,
         receiver,
         true,
@@ -11695,7 +11695,7 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     app.try_reach_loaded_network_go_barrier().test_value();
 
     main_assert_eq!(commands.take_status_reached() => 1);
-    main_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.prepared_go.as_ref()).map(|prepared| prepared.local_reached) => Some(true));
+    main_assert_eq!(app.scenario_lifecycle.loading.as_ref().and_then(|loading| loading.prepared_go.as_ref()).map(|prepared| prepared.local_reached) => Some(true));
     main_assert!(app.blocking_resource_wait.is_none());
 
     app.handle_status_committed(n2_fixture!(status: clonk_network::NETWORK_STATE_GO, 0, 0))
@@ -11975,7 +11975,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(packed_scenario_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         scenario,
         receiver,
         false,
@@ -12099,7 +12099,7 @@ fn regular_network_scenario_recreates_fileless_script_player_without_runtime_dat
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         scenario,
         receiver,
         false,
@@ -12183,7 +12183,7 @@ fn dragon_rock_network_restore_makes_script_npcs_hostile_to_joined_users() {
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         scenario,
         receiver,
         false,
@@ -12266,7 +12266,7 @@ fn runtime_join_into_committed_pause_finishes_initialization_without_starting_co
     let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
     prepared.status = pause;
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         FrontendScenario::fallback(),
         receiver,
         true,
@@ -12284,7 +12284,7 @@ fn runtime_join_into_committed_pause_finishes_initialization_without_starting_co
     app.handle_status_committed(pause).test_value();
 
     main_assert_eq!(app.mode => AppMode::Running);
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     main_assert!(app.pending_client_start_status.is_none());
     main_assert!(app.host_reference_paused);
     main_assert!(!app.network_control_running);
@@ -12311,7 +12311,7 @@ fn deferred_paused_runtime_join_finishes_after_player_resources_arrive() {
     let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
     prepared.status = pause;
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         FrontendScenario::fallback(),
         receiver,
         true,
@@ -12323,7 +12323,7 @@ fn deferred_paused_runtime_join_finishes_after_player_resources_arrive() {
     app.try_finish_deferred_prepared_network_go().test_value();
 
     main_assert_eq!(app.mode => AppMode::Running);
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     main_assert!(!app.network_control_running);
 }
 
@@ -12370,7 +12370,7 @@ fn deferred_runtime_join_waits_for_the_commit_matching_its_latest_status() {
             test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
         prepared.status = n2_fixture!(status: prepared_state, 2, prepared_tick);
         let (_sender, receiver) = mpsc::channel();
-        app.loading_state = Some(test_loading_state(
+        app.scenario_lifecycle.loading = Some(test_loading_state(
             FrontendScenario::fallback(),
             receiver,
             true,
@@ -12381,7 +12381,7 @@ fn deferred_runtime_join_waits_for_the_commit_matching_its_latest_status() {
         app.try_finish_deferred_prepared_network_go().test_value();
 
         main_assert_eq!(app.mode => AppMode::Loading);
-        main_assert!(app.loading_state.is_some());
+        main_assert!(app.scenario_lifecycle.loading.is_some());
         events
             .send(NetworkEvent::ScheduledSync {
                 tick: 1,
@@ -12413,7 +12413,7 @@ fn replacement_status_with_same_target_requires_a_fresh_runtime_join_commit() {
     let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
     prepared.status = committed;
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         FrontendScenario::fallback(),
         receiver,
         true,
@@ -12428,7 +12428,7 @@ fn replacement_status_with_same_target_requires_a_fresh_runtime_join_commit() {
 
     main_assert!(app.runtime_network_committed_status.is_none());
     let prepared = app
-        .loading_state
+        .scenario_lifecycle.loading
         .as_mut()
         .and_then(|loading| loading.prepared_go.as_mut())
         .test_value();
@@ -12455,7 +12455,7 @@ fn host_replacement_status_invalidates_a_deferred_matching_commit() {
     let mut prepared = test_prepared_go(2, true, false, true, Vec::new(), Vec::new(), Vec::new());
     prepared.status = committed;
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         FrontendScenario::fallback(),
         receiver,
         true,
@@ -12470,7 +12470,7 @@ fn host_replacement_status_invalidates_a_deferred_matching_commit() {
 
     main_assert!(app.runtime_network_committed_status.is_none());
     let prepared = app
-        .loading_state
+        .scenario_lifecycle.loading
         .as_ref()
         .and_then(|loading| loading.prepared_go.as_ref())
         .test_value();
@@ -12501,7 +12501,7 @@ fn runtime_join_chase_retarget_reopens_a_reached_loading_barrier() {
     prepared.status = reached;
     prepared.local_reached = true;
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         FrontendScenario::fallback(),
         receiver,
         true,
@@ -12518,7 +12518,7 @@ fn runtime_join_chase_retarget_reopens_a_reached_loading_barrier() {
     app.process_network_events().test_value();
 
     let prepared = app
-        .loading_state
+        .scenario_lifecycle.loading
         .as_ref()
         .and_then(|loading| loading.prepared_go.as_ref())
         .test_value();
@@ -12563,7 +12563,7 @@ fn runtime_join_drains_a_queued_chase_target_before_finishing_loading() {
     let mut prepared = test_prepared_go(2, false, false, true, Vec::new(), Vec::new(), Vec::new());
     prepared.status = reference;
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         FrontendScenario::fallback(),
         receiver,
         true,
@@ -12792,9 +12792,9 @@ fn runtime_network_client_join_loading_reaches_running_render() {
         thread::yield_now();
     }
     main_assert!(matches!(app.mode, AppMode::Loading));
-    main_assert!(app.loading_state.as_ref().is_some_and(|loading| loading.finished));
+    main_assert!(app.scenario_lifecycle.loading.as_ref().is_some_and(|loading| loading.finished));
     let prepared = app
-        .loading_state
+        .scenario_lifecycle.loading
         .as_ref()
         .and_then(|loading| loading.prepared_go.as_ref())
         .test_value();
@@ -12993,7 +12993,7 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(combined_path);
     let (_sender, receiver) = mpsc::channel();
-    app.loading_state = Some(test_loading_state(
+    app.scenario_lifecycle.loading = Some(test_loading_state(
         scenario,
         receiver,
         false,
@@ -13047,7 +13047,7 @@ fn saved_raw_mouse_control_survives_a_failed_restore_preference_gate() {
     let mut app = new_running_sandbox_app();
     let owner = app.players.local_owner;
     let scenario = app
-        .active_scenario
+        .scenario_lifecycle.active
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
     app.local_controls.toggle_mouse(owner).test_value();
@@ -14279,7 +14279,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
             .test_value();
     let mut app = new_state_only_running_sandbox_app();
     app.app_paths = Some(paths.clone());
-    app.active_scenario = Some(frontend.clone());
+    app.scenario_lifecycle.active = Some(frontend.clone());
     let player_info_id = app.engine.test_player(app.players.local_owner).player_info_id();
     app.control_player_infos.apply(netplay_player_info_data(
         0,
@@ -14383,7 +14383,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
     main_assert_eq!(fs::read(save_root.join("Title.txt")).expect("read root save title") => b"US:Savegames");
     main_assert_eq!(fs::read(save_root.join("Missions.c4f/Title.txt")).expect("read scenario save title") => b"US:H\xc3\xb6hlen\xc3\xbcbung");
     main_assert_eq!(
-        app.active_scenario
+        app.scenario_lifecycle.active
             .as_ref()
             .and_then(|scenario| scenario.path.as_deref()) =>
         Some(scenario_path.as_path()),
@@ -14498,7 +14498,7 @@ fn network_quicksave_latency_report() {
             .test_value();
     let mut host = new_running_sandbox_app();
     host.app_paths = Some(paths);
-    host.active_scenario = Some(frontend.clone());
+    host.scenario_lifecycle.active = Some(frontend.clone());
     let player_info_id = host.engine.test_player(host.players.local_owner).player_info_id();
     host.control_player_infos.apply(netplay_player_info_data(
         0,
@@ -14616,7 +14616,7 @@ fn native_save_rejects_a_joined_player_without_a_runtime_section() {
         Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
             .test_value();
     let mut app = new_state_only_running_sandbox_app();
-    app.active_scenario = Some(frontend.clone());
+    app.scenario_lifecycle.active = Some(frontend.clone());
     app.prepare_recording_for(&frontend, &scenario_data, None, None, None)
         .test_value();
     let mut landscape = clonk_engine::Landscape::flat(1, 1);

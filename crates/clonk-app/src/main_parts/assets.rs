@@ -747,7 +747,7 @@ pub(crate) fn run_headless_server(
     app.headless = true;
     app.rendering.set_display_mode(DisplayMode::Window);
     app.apply_classic_command_line_with_profile(classic, compat_profile)?;
-    app.auto_start_sandbox = cli.sandbox;
+    app.scenario_lifecycle.auto_start_sandbox = cli.sandbox;
     app.launch_classic_command_line_join()
         .context("failed to start command-line network join")?;
     app.launch_classic_command_line_scenario()
@@ -8350,7 +8350,7 @@ pub(crate) fn run_sandbox_dump(
 
     let mut app = build_capture_app(classic, app_paths, runtime)
         .context("failed to initialise app for frame dump")?;
-    app.auto_start_sandbox = true;
+    app.scenario_lifecycle.auto_start_sandbox = true;
 
     // Pump update() until async boot finishes and the sandbox auto-starts (Running).
     let mut booted = false;

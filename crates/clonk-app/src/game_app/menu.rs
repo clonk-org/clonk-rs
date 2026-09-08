@@ -4304,7 +4304,7 @@ impl GameApp {
                 }
                 clonk_frontend::message_dialog::MessageDialogResult::Restart => {
                     self.retain_restart_restore_mask_for_restart();
-                    self.abort_restart_pending = true;
+                    self.scenario_lifecycle.abort_restart_pending = true;
                     self.route_abort_confirmation()?;
                 }
                 clonk_frontend::message_dialog::MessageDialogResult::Ok
@@ -4931,7 +4931,7 @@ impl GameApp {
 
     pub(crate) fn return_to_menu(&mut self) {
         self.stop_scenario_loading_worker();
-        if std::mem::take(&mut self.abort_restart_pending) {
+        if std::mem::take(&mut self.scenario_lifecycle.abort_restart_pending) {
             if let Err(error) = self.restart_current_scenario() {
                 tracing::error!(%error, "failed to consume scheduled abort-dialog restart");
             }
@@ -4958,7 +4958,7 @@ impl GameApp {
     }
 
     fn stop_scenario_loading_worker(&mut self) {
-        if let Some(loading) = self.loading_state.as_mut() {
+        if let Some(loading) = self.scenario_lifecycle.loading.as_mut() {
             loading.stop_worker();
         }
         // A load stopped before its Finished event (for example, the
@@ -4980,7 +4980,7 @@ impl GameApp {
         self.finish_background_save_jobs();
         self.finish_pending_native_save_thumbnails(None);
         let last_startup_dialog = self.last_startup_dialog;
-        self.abort_restart_pending = false;
+        self.scenario_lifecycle.abort_restart_pending = false;
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         self.players.restart_restore_roster_items.clear();
@@ -5032,7 +5032,7 @@ impl GameApp {
         self.input_routing.live.primary_left_down = false;
         self.dialogs.message_consumed_keys.clear();
         self.definition_selection.dialog = None;
-        self.pending_definition_selection = None;
+        self.definition_selection.pending = None;
         self.pending_lobby_player_selection = None;
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();
@@ -5151,17 +5151,19 @@ impl GameApp {
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
-        self.network_material_resource_groups = None;
+        self.scenario_lifecycle.network_material_resource_groups = None;
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
-        self.active_scenario = None;
-        self.active_definition_load = None;
-        self.active_description_definition_modules.clear();
-        self.loading_state = None;
+        self.scenario_lifecycle.active = None;
+        self.scenario_lifecycle.definition_load = None;
+        self.scenario_lifecycle
+            .description_definition_modules
+            .clear();
+        self.scenario_lifecycle.loading = None;
         self.sound.runtime_music_enabled = false;
         self.reconstruct_music_system_at_preinit();
         if let Some(audio) = self.sound.context.as_ref() {

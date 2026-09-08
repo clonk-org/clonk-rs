@@ -3509,7 +3509,7 @@ fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
 fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
     let mut app = test_game_app(320, 200, AudioOptions::default(), None).test_value();
     install_classic_test_assets(&mut app);
-    main_assert!(app.boot_loading.is_none(), "pathless app skips boot worker");
+    main_assert!(app.scenario_lifecycle.boot_loading.is_none(), "pathless app skips boot worker");
     app.test_update();
     main_assert_eq!(app.mode => AppMode::Loading);
     let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -3871,7 +3871,7 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     let resources = app.loader.screen.test_ref().resources().clone();
     let (sender, receiver) = mpsc::channel();
-    app.loading_state = Some(ScenarioLoadingState::new(
+    app.scenario_lifecycle.loading = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
         resources,
         HashMap::new(),

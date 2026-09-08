@@ -3534,11 +3534,13 @@ impl GameApp {
     /// from and written back to. Both the running round and one still loading
     /// answer, as the console's own caption does.
     fn developer_component_scenario_path(&self) -> Option<std::path::PathBuf> {
-        self.active_scenario
+        self.scenario_lifecycle
+            .active
             .as_ref()
             .and_then(|scenario| scenario.path.clone())
             .or_else(|| {
-                self.loading_state
+                self.scenario_lifecycle
+                    .loading
                     .as_ref()
                     .and_then(|loading| loading.scenario.path.clone())
             })
@@ -7335,7 +7337,7 @@ impl GameApp {
             .app_paths
             .as_ref()
             .context("application paths are unavailable for the network GUI overloading")?;
-        let definition_load = self.active_definition_load.as_ref();
+        let definition_load = self.scenario_lifecycle.definition_load.as_ref();
         let (head, catalog, mut graphics_registrations) =
             if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
                 // A client's Extra.Init ran before the join with the pre-join

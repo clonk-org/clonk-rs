@@ -3226,7 +3226,7 @@ fn window_close_confirms_running_round_and_nonrunning_close_exits() {
     let mut app = new_running_sandbox_app();
     app.test_update();
     let running_frame = app.engine.frame();
-    let running_scenario = app.active_scenario.test_ref().identifier.clone();
+    let running_scenario = app.scenario_lifecycle.active.test_ref().identifier.clone();
 
     app.handle_window_close_requested();
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
@@ -3237,7 +3237,7 @@ fn window_close_confirms_running_round_and_nonrunning_close_exits() {
     );
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert_eq!(app.engine.frame() => running_frame);
-    main_assert_eq!(app.active_scenario.as_ref().map(|scenario| scenario.identifier.as_str()) => Some(running_scenario.as_str()));
+    main_assert_eq!(app.scenario_lifecycle.active.as_ref().map(|scenario| scenario.identifier.as_str()) => Some(running_scenario.as_str()));
 
     app.handle_window_close_requested();
     finish_abort_dialog(
@@ -3245,7 +3245,7 @@ fn window_close_confirms_running_round_and_nonrunning_close_exits() {
         clonk_frontend::message_dialog::MessageDialogResult::Yes,
     );
     main_assert!(matches!(app.mode, AppMode::Menu));
-    main_assert!(app.active_scenario.is_none());
+    main_assert!(app.scenario_lifecycle.active.is_none());
     main_assert!(!app.take_exit_request(), "Yes ends the round, not the process");
 
     app.handle_window_close_requested();
