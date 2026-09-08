@@ -398,6 +398,27 @@ pub(crate) struct RuntimeDialogState {
     pub(crate) game_option_pointer_capture: bool,
 }
 
+impl RuntimeDialogState {
+    pub(crate) fn top_message_dialog_is_exclusive(&self) -> bool {
+        self.messages.last().is_some_and(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::AbortGame { .. }
+                    | MessageDialogContinuation::LeagueVote { .. }
+                    | MessageDialogContinuation::LeagueSurrender
+            )
+        })
+    }
+
+    pub(crate) fn captured_message_dialog_index(&self) -> Option<usize> {
+        self.message_pointer_capture_index.filter(|index| {
+            self.messages
+                .get(*index)
+                .is_some_and(|dialog| dialog.state.has_pointer_capture())
+        })
+    }
+}
+
 /// Live keyboard and pointer state: what the platform last told us, and
 /// what `C4MouseControl` made of it.
 ///
@@ -1807,6 +1828,23 @@ pub(crate) struct IngameMenus {
     /// a C4MouseControl construction drag only after the menu sensitivity is
     /// crossed, so it cannot share the world-origin button state above.
     pub(crate) construction_drag: Option<ConstructionMenuDrag>,
+}
+
+impl IngameMenus {
+    pub(crate) fn ingame_menu_belongs_to(&self, owner: i32) -> bool {
+        self.players.contains(owner)
+    }
+
+    pub(crate) fn ingame_menu_selection(&self, player: i32) -> usize {
+        self.players
+            .get(player)
+            .map(IngameMenuState::selection)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn construction_menu_drag_captured(&self) -> bool {
+        self.construction_drag.is_some()
+    }
 }
 
 /// The in-game mouse half of the app, the `C4MouseControl` analogue: the

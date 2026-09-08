@@ -517,7 +517,7 @@ impl GameApp {
         if self.chat.running.is_some()
             || self.dialogs.game_option_input.is_some()
             || self.dialogs.game_over.is_some()
-            || self.top_message_dialog_is_exclusive()
+            || self.dialogs.top_message_dialog_is_exclusive()
             || self.chat.external_dialog_visible
             || self.context_menus.open.is_some()
             || self

@@ -165,14 +165,14 @@ fn help_suppresses_open_ingame_menu_and_right_up_exits() {
         ModifiersState::empty(),
     );
     main_assert!(app.input_routing.live.ingame_mouse_help);
-    main_assert!(app.ingame_menu_belongs_to(owner), "Help suppresses already-open player-menu controls");
+    main_assert!(app.ingame_menus.ingame_menu_belongs_to(owner), "Help suppresses already-open player-menu controls");
     main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()));
 
     app.test_right_button(ElementState::Pressed);
     main_assert!(app.input_routing.live.ingame_mouse_help);
     app.test_right_button(ElementState::Released);
     main_assert!(!app.input_routing.live.ingame_mouse_help);
-    main_assert!(app.ingame_menu_belongs_to(owner));
+    main_assert!(app.ingame_menus.ingame_menu_belongs_to(owner));
     main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "Help menu interception queues no controls");
 }
 
@@ -242,14 +242,14 @@ fn viewport_buttons_dispatch_help_and_player_menu_locally() {
     main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "COM_Help remains process-local");
 
     app.input_routing.live.ingame_mouse_help = false;
-    main_assert!(!app.ingame_menu_belongs_to(owner));
+    main_assert!(!app.ingame_menus.ingame_menu_belongs_to(owner));
     physical_left_click_with_modifiers(
         &mut app,
         menu,
         ModifiersState::empty(),
         ModifiersState::empty(),
     );
-    main_assert!(app.ingame_menu_belongs_to(owner));
+    main_assert!(app.ingame_menus.ingame_menu_belongs_to(owner));
     main_assert_eq!(network_commands.take_submitted_player_inputs() => (Vec::new(), Vec::new(), Vec::new()), "mouse COM_PlayerMenu is consumed by the local menu");
 
     app.ingame_menus.players.get_mut(owner).test_value().set_selection(2);
@@ -329,7 +329,7 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     app.test_left_button(ElementState::Pressed);
     main_assert!(app.ingame_menus.players.is_none(), "passive buttons wait for LeftUp");
     app.test_left_button(ElementState::Released);
-    main_assert!(app.ingame_menu_belongs_to(OWNER_NONE));
+    main_assert!(app.ingame_menus.ingame_menu_belongs_to(OWNER_NONE));
     main_assert_eq!(app.ingame_menus.players.get(OWNER_NONE).expect("observer fullscreen menu").page() => ingame_menu::MenuPage::Main);
 
     render_mouse_test_app(&mut app);

@@ -627,7 +627,7 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
         ModifiersState::empty(),
     );
     main_assert!(app.input_routing.live.ingame_mouse_help, "region clicks keep Help active");
-    main_assert!(!app.ingame_menu_belongs_to(owner), "Help suppresses the PlayerMenu region's local side effect");
+    main_assert!(!app.ingame_menus.ingame_menu_belongs_to(owner), "Help suppresses the PlayerMenu region's local side effect");
     main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "Help suppresses synchronized region controls too");
 
     physical_left_click_with_modifiers(

@@ -4925,7 +4925,7 @@ fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
     main_assert!(app.ingame_menus.players.is_none());
-    main_assert!(!app.ingame_menu_belongs_to(app.players.local_owner));
+    main_assert!(!app.ingame_menus.ingame_menu_belongs_to(app.players.local_owner));
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(!app.take_exit_request());
 }
