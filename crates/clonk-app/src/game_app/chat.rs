@@ -684,7 +684,7 @@ impl GameApp {
         chat.history_index += if older { 1 } else { -1 };
         let text = usize::try_from(chat.history_index)
             .ok()
-            .and_then(|index| self.message_input_history.get(index))
+            .and_then(|index| self.chat.input_history.get(index))
             .cloned();
         let text = match text {
             Some(text) => text,
@@ -1170,7 +1170,7 @@ impl GameApp {
         let bounds =
             clonk_frontend::startup_netdlg::NetDlgController::standalone_chat_bounds(width, height);
         let active = self.startup_irc_client_active();
-        let history = self.message_input_history.iter().cloned().collect();
+        let history = self.chat.input_history.iter().cloned().collect();
         let mut dialog = self.new_network_dialog_controller();
         dialog.resize(width, height);
         dialog.set_chat_bounds_override(Some(bounds));
@@ -1437,13 +1437,13 @@ impl GameApp {
 
     /// The C4MessageBoard line selected by its live LogBuffer cursor.
     pub(crate) fn message_board_line(&self) -> Option<String> {
-        self.message_board.current_line()
+        self.chat.message_board.current_line()
     }
 
     pub(crate) fn advance_message_board_overlay(&mut self) -> MessageBoardOverlay {
         let line_height = self.rendering.graphics.message_board_line_height();
         let type_in = self.running_chat_active();
-        self.message_board.advance_frame(line_height, type_in)
+        self.chat.message_board.advance_frame(line_height, type_in)
     }
 
     pub(crate) fn enqueue_control_message_board_line(&mut self, line: String) {
@@ -1453,7 +1453,7 @@ impl GameApp {
             game_time_seconds,
         );
         for physical_line in self.rendering.graphics.prepare_message_board_lines(&line) {
-            self.message_board.enqueue(physical_line);
+            self.chat.message_board.enqueue(physical_line);
         }
     }
 
@@ -1483,16 +1483,19 @@ impl GameApp {
     }
 
     pub(crate) fn scroll_message_board(&mut self, older: bool) {
-        self.message_board.scroll(older);
+        self.chat.message_board.scroll(older);
     }
 
     pub(crate) fn clear_message_board_log(&mut self) {
-        self.message_board.clear_log();
+        self.chat.message_board.clear_log();
     }
 
     pub(crate) fn set_message_board_line_count(&mut self, line_count: i32) {
         let line_height = self.rendering.graphics.message_board_line_height();
-        let enabled = self.message_board.set_line_count(line_count, line_height);
+        let enabled = self
+            .chat
+            .message_board
+            .set_line_count(line_count, line_height);
         // `C4MessageBoard::ChangeMode` assigns `Config.Graphics.MsgBoard` for
         // each of its three modes and saves nothing (C4MessageBoard.cpp:65-118),
         // so the mode a session ends on reaches the file at shutdown.
@@ -1504,6 +1507,6 @@ impl GameApp {
     pub(crate) fn message_board_overlay(&mut self) -> MessageBoardOverlay {
         let line_height = self.rendering.graphics.message_board_line_height();
         let type_in = self.running_chat_active();
-        self.message_board.overlay(line_height, type_in)
+        self.chat.message_board.overlay(line_height, type_in)
     }
 }

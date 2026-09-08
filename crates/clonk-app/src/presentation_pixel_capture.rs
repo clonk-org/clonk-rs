@@ -3456,7 +3456,7 @@ mod tests {
         stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Hud)?;
 
         assert_eq!(
-            app.message_board.current_line(),
+            app.chat.message_board.current_line(),
             None,
             "the player-join line must age through the pre-checkpoint graphics passes"
         );

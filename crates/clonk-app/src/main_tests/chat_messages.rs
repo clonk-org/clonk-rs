@@ -1354,7 +1354,7 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
     let spoofed =
         app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"spoofed", 8));
     main_assert!(spoofed.rejected);
-    main_assert!(app.message_board.log_history.is_empty());
+    main_assert!(app.chat.message_board.log_history.is_empty());
 
     let normal =
         app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"hello", 7));
@@ -1365,7 +1365,7 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
         app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"second", 7));
     main_assert!(queued.displayed);
     main_assert_eq!(app.message_board_line().as_deref() => Some("<c 123456><Sender> second"));
-    main_assert_eq!(app.message_board.log_history.iter().map(String::as_str).collect::<Vec<_>>() => vec!["<c 123456><Sender> hello", "<c 123456><Sender> second"]);
+    main_assert_eq!(app.chat.message_board.log_history.iter().map(String::as_str).collect::<Vec<_>>() => vec!["<c 123456><Sender> hello", "<c 123456><Sender> second"]);
     app.scroll_message_board(true);
     main_assert_eq!(app.message_board_line().as_deref() => Some("<c 123456><Sender> hello"));
     app.scroll_message_board(false);
@@ -1389,7 +1389,7 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
     let hostile_team =
         app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"hidden", 7));
     main_assert!(!hostile_team.displayed);
-    main_assert!(app.message_board.log_history.is_empty());
+    main_assert!(app.chat.message_board.log_history.is_empty());
     app.engine
         .set_hostility(7, app.players.local_owner, false)
         .test_value();
@@ -1399,7 +1399,7 @@ fn message_control_authenticates_players_and_applies_running_visibility() {
     main_assert!(app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, app.players.local_owner, b"local", 7,)).displayed);
     app.clear_message_board_log();
     main_assert!(!app.execute_message_control(message_control(MESSAGE_TYPE_PRIVATE, 7, 99, b"hidden", 7,)).displayed);
-    main_assert!(app.message_board.log_history.is_empty());
+    main_assert!(app.chat.message_board.log_history.is_empty());
 }
 
 #[test]
@@ -1473,8 +1473,8 @@ fn running_help_clear_and_case_sensitive_unknown() {
     main_assert!(help_entries.iter().all(|line| !line.contains("Unknown command")));
 
     app.process_running_chat_text("/clear");
-    main_assert!(app.message_board.log_history.is_empty());
-    main_assert!(app.message_board.current_line().is_none());
+    main_assert!(app.chat.message_board.log_history.is_empty());
+    main_assert!(app.chat.message_board.current_line().is_none());
 
     app.process_running_chat_text("/Clear");
     main_assert!(latest_message_board_logical_entry(&app).as_deref().is_some_and(|line| line.contains("Unknown command") && line.contains("Clear")));
@@ -1628,7 +1628,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
             by_client: 0,
         }]
     );
-    main_assert_eq!(app.message_input_history.front().map(String::as_str) => Some("first"));
+    main_assert_eq!(app.chat.input_history.front().map(String::as_str) => Some("first"));
 
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(app.chat.running.is_none());
@@ -1648,7 +1648,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
 #[test]
 fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() {
     let mut app = new_running_sandbox_app();
-    app.message_input_history.push_front("history".to_string());
+    app.chat.input_history.push_front("history".to_string());
     app.start_running_chat(RunningChatMode::All);
     for character in "long text ".repeat(100).chars() {
         app.test_text_input(character);
@@ -1913,27 +1913,27 @@ fn message_board_history_keeps_append_time_width_across_upper_board_modes() {
     let mut app = new_classic_running_sandbox_app();
     let full_message = "X".repeat(200);
     app.enqueue_control_message_board_line(full_message.clone());
-    let full_lines = app.message_board.log_history.len();
+    let full_lines = app.chat.message_board.log_history.len();
     main_assert!(full_lines > 1, "Full mode stores wrapped physical lines");
     main_assert_ne!(app.message_board_line().as_deref() => Some(full_message.as_str()));
     let visible_len =
         clonk_script::c4_string_byte_len(app.message_board_line().as_deref().test_value());
-    app.message_board.empty = false;
-    app.message_board.fader = 0;
-    app.message_board.delay = -1;
+    app.chat.message_board.empty = false;
+    app.chat.message_board.fader = 0;
+    app.chat.message_board.delay = -1;
     app.advance_message_board_overlay();
-    main_assert_eq!(app.message_board.delay => visible_len as i32 - 1, "the native delay uses the selected physical line's C4 byte length");
-    let full_history = app.message_board.log_history.clone();
+    main_assert_eq!(app.chat.message_board.delay => visible_len as i32 - 1, "the native delay uses the selected physical line's C4 byte length");
+    let full_history = app.chat.message_board.log_history.clone();
 
     app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
         .test_value();
     app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
         .test_value();
-    main_assert_eq!(app.message_board.log_history => full_history, "reinitializing LBWidth does not reflow existing native log lines");
+    main_assert_eq!(app.chat.message_board.log_history => full_history, "reinitializing LBWidth does not reflow existing native log lines");
 
-    let before_mini = app.message_board.log_history.len();
+    let before_mini = app.chat.message_board.log_history.len();
     app.enqueue_control_message_board_line("Y".repeat(200));
-    let mini_lines = app.message_board.log_history.len() - before_mini;
+    let mini_lines = app.chat.message_board.log_history.len() - before_mini;
     main_assert!(mini_lines > full_lines, "future Mini messages use the newly shortened log-buffer width");
 }
 
@@ -2024,9 +2024,9 @@ fn c4script_log_lines_reach_the_running_message_board() {
     menu.game_log_capture = Some(capture.clone());
     write_line("The goal has been chosen: Alienhunt");
     menu.drain_game_log_capture();
-    main_assert!(menu.message_board.log_history.is_empty());
+    main_assert!(menu.chat.message_board.log_history.is_empty());
 
     // The drained line is consumed, not replayed into the next game.
     app.drain_game_log_capture();
-    main_assert_eq!(app.message_board.log_history.iter().map(String::as_str).collect::<Vec<_>>() => vec!["Player join: Player", "Beta is dead."]);
+    main_assert_eq!(app.chat.message_board.log_history.iter().map(String::as_str).collect::<Vec<_>>() => vec!["Player join: Player", "Beta is dead."]);
 }

@@ -5363,12 +5363,12 @@ fn runtime_host_commit_executes_sync_at_the_actual_overshoot_tick() {
     );
     app.test_network_events();
     main_assert!(app.netplay.sync.scheduled.contains_key(&3));
-    main_assert!(app.message_board.log_history.iter().all(|line| !line.contains("overshoot-sync")));
+    main_assert!(app.chat.message_board.log_history.iter().all(|line| !line.contains("overshoot-sync")));
     n2_send_event(&events, NetworkEvent::StatusCommitted(pause));
     app.test_network_events();
 
     main_assert!(app.netplay.sync.scheduled.is_empty());
-    main_assert!(app.message_board.log_history.iter().any(|line| line.contains("overshoot-sync")));
+    main_assert!(app.chat.message_board.log_history.iter().any(|line| line.contains("overshoot-sync")));
     main_assert!(!app.netplay.control_running);
 }
 
@@ -5525,8 +5525,8 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
     let line_height = app.rendering.graphics.message_board_line_height();
 
     app.process_running_chat_text("/msgboard 4");
-    main_assert_eq!(app.message_board.mode => MessageBoardMode::Continuous);
-    main_assert_eq!(app.message_board.line_count => 4);
+    main_assert_eq!(app.chat.message_board.mode => MessageBoardMode::Continuous);
+    main_assert_eq!(app.chat.message_board.line_count => 4);
     for line in ["one", "two", "three", "four"] {
         app.enqueue_control_message_board_line(line.to_string());
     }
@@ -5547,7 +5547,7 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
     main_assert_eq!(reloaded.line_count => 1);
 
     app.process_running_chat_text("/msgboard 0");
-    main_assert_eq!(app.message_board.mode => MessageBoardMode::Hidden);
+    main_assert_eq!(app.chat.message_board.mode => MessageBoardMode::Hidden);
     app.flush_deferred_config();
     let config = Config::load(paths.config_file()).test_value();
     main_assert_eq!(config.get_in(Some("Graphics"), "MsgBoard") => Some("0"));
@@ -5557,10 +5557,10 @@ fn msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
     main_assert_eq!(hidden_reloaded.line_count => 0);
 
     app.process_running_chat_text("/msgboard 21tail");
-    main_assert_eq!(app.message_board.mode => MessageBoardMode::Continuous);
-    main_assert_eq!(app.message_board.line_count => 20);
+    main_assert_eq!(app.chat.message_board.mode => MessageBoardMode::Continuous);
+    main_assert_eq!(app.chat.message_board.line_count => 20);
     app.process_running_chat_text("/msgboard 1");
-    main_assert_eq!(app.message_board.mode => MessageBoardMode::SingleLine);
+    main_assert_eq!(app.chat.message_board.mode => MessageBoardMode::SingleLine);
 }
 
 #[test]
@@ -5683,12 +5683,12 @@ fn running_dispatches_controls_modes_and_custom_commands() {
     main_assert_eq!(custom.player => app.players.local_owner);
 
     app.process_running_chat_text("/msgboard 12");
-    main_assert_eq!(app.message_board.mode => MessageBoardMode::Continuous);
-    main_assert_eq!(app.message_board.line_count => 12);
+    main_assert_eq!(app.chat.message_board.mode => MessageBoardMode::Continuous);
+    main_assert_eq!(app.chat.message_board.line_count => 12);
     app.process_running_chat_text("/msgboard 1");
-    main_assert_eq!(app.message_board.mode => MessageBoardMode::SingleLine);
+    main_assert_eq!(app.chat.message_board.mode => MessageBoardMode::SingleLine);
     app.process_running_chat_text("/msgboard 0");
-    main_assert_eq!(app.message_board.mode => MessageBoardMode::Hidden);
+    main_assert_eq!(app.chat.message_board.mode => MessageBoardMode::Hidden);
     app.process_running_chat_text("/chart");
     main_assert!(app.dialogs.chart.is_some());
     app.process_running_chat_text("/chart");

@@ -2252,7 +2252,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     let first = first_outcome.path.clone();
     main_assert_eq!(app.report_screenshot_result(Some(first_outcome)).as_deref() => Some("Saved screenshot Screenshots/Screenshot001.png."));
     main_assert_eq!(
-        app.message_board
+        app.chat.message_board
             .log_history
             .iter()
             .cloned()
@@ -2305,7 +2305,7 @@ fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
     let second = second_outcome.path.clone();
     main_assert_eq!(app.report_screenshot_result(Some(second_outcome)).as_deref() => Some("Saved screenshot Screenshots/Screenshot002.png."));
     main_assert_eq!(
-        app.message_board
+        app.chat.message_board
             .log_history
             .iter()
             .cloned()
@@ -2364,7 +2364,7 @@ fn screenshot_failures_keep_localized_path_for_both_capture_kinds() {
         app.clear_message_board_log();
         main_assert_eq!(app.report_screenshot_result(Some(outcome)).as_deref() => Some("Localized failure: Screenshots/Screenshot001.png"));
         main_assert_eq!(
-            app.message_board
+            app.chat.message_board
                 .log_history
                 .iter()
                 .cloned()
@@ -3829,11 +3829,11 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         set_test_scenario_head_flags(&mut app, replay, film);
         app.snapshot.hud.messages.clear();
 
-        let message_board = app.message_board.clone();
+        let message_board = app.chat.message_board.clone();
         let mut without_menu = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut without_menu);
         install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
-        app.message_board = message_board;
+        app.chat.message_board = message_board;
         let mut with_menu = vec![0_u8; 320 * 200 * 4];
         app.test_render(&mut with_menu);
         main_assert_eq!(with_menu != without_menu => overlays_visible, "Replay={replay}, Film={film}");
@@ -3844,7 +3844,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         .test_value();
     set_test_scenario_head_flags(&mut app, 1, 1);
     app.snapshot.hud.messages.clear();
-    let message_board = app.message_board.clone();
+    let message_board = app.chat.message_board.clone();
     let mut without_message = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut without_message);
 
@@ -3862,7 +3862,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         frame_decoration: None,
         portrait: None,
     }];
-    app.message_board = message_board.clone();
+    app.chat.message_board = message_board.clone();
     let mut with_message = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut with_message);
     main_assert_ne!(with_message => without_message, "the clean film viewport must retain Game.Messages");
@@ -3891,7 +3891,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         text: "Hidden mouse caption".to_string(),
         keep_moves: 1,
     });
-    app.message_board = message_board;
+    app.chat.message_board = message_board;
     let mut with_hidden_menus = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut with_hidden_menus);
     main_assert_eq!(with_hidden_menus => with_message, "script and player menus contribute no film-replay pixels");

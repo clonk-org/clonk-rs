@@ -5192,7 +5192,7 @@ impl GameApp {
         self.dialogs.running_active = None;
         self.dialogs.client_list_consumed_keys.clear();
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
-        self.message_input_history.clear();
+        self.chat.input_history.clear();
         self.close_context_menu_silently();
         self.abort_startup_crew_rename();
         self.startup.player_properties_dialog = None;

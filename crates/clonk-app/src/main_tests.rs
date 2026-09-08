@@ -2804,12 +2804,12 @@ fn hold_message_board_for_frame_comparison(app: &mut GameApp) {
     // seeded join line in C4MessageBoard's stable single-line delay phase;
     // the message-board fader regressions exercise the animated transitions
     // explicitly.
-    app.message_board.back_scroll = 0;
-    app.message_board.empty = false;
-    app.message_board.fader = 0;
-    app.message_board.delay = i32::MAX;
-    app.message_board.speed = 1;
-    app.message_board.screen_fader = -100;
+    app.chat.message_board.back_scroll = 0;
+    app.chat.message_board.empty = false;
+    app.chat.message_board.fader = 0;
+    app.chat.message_board.delay = i32::MAX;
+    app.chat.message_board.speed = 1;
+    app.chat.message_board.screen_fader = -100;
 }
 
 fn new_running_sandbox_app_with_definitions_and_assets(
@@ -2998,7 +2998,7 @@ fn message_client(client_id: i32, nick: &[u8]) -> clonk_engine::ClientCoreContro
 
 fn message_board_logical_entries(app: &GameApp) -> Vec<String> {
     let mut entries: Vec<String> = Vec::new();
-    for physical_line in &app.message_board.log_history {
+    for physical_line in &app.chat.message_board.log_history {
         if let Some(continuation) = physical_line.strip_prefix("  ") {
             if let Some(entry) = entries.last_mut() {
                 entry.push(' ');
@@ -3034,8 +3034,8 @@ fn install_message_fixture(app: &mut GameApp) {
         .set_at_client(clonk_engine::PlayerAtClient::new(7));
     app.engine.set_local_players([app.players.local_owner]);
     let line_height = app.rendering.graphics.message_board_line_height();
-    app.message_board.initialize(true, line_height);
-    let _ = app.message_board.advance_frame(line_height, false);
+    app.chat.message_board.initialize(true, line_height);
+    let _ = app.chat.message_board.advance_frame(line_height, false);
 }
 
 fn add_secondary_local_player_for_mouse_option_test(app: &mut GameApp) -> i32 {
