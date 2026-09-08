@@ -3838,7 +3838,8 @@ impl GameApp {
         // auto-repeat and `C4Game::LocalControlKey`'s AutoStopControl arm
         // (`C4Game.cpp:3566-3570`) drops it without ever reaching
         // `C4Player::InCom`.
-        self.input_routing.engine_key_repeated = self.note_physical_engine_key(key, state);
+        self.input_routing.engine_key_repeated =
+            self.input_routing.note_physical_engine_key(key, state);
         if self.handle_voice_key(key, state) {
             self.input_routing.key_event_suppresses_text = true;
             return Ok(());
@@ -5059,20 +5060,6 @@ impl GameApp {
             }
             AppMode::Loading => Ok(()),
         }
-    }
-
-    /// Fold one physical key edge into the held-key set and answer C++'s
-    /// `fRepeated` for it. Call once per event, at the entry of the key
-    /// chain, mirroring where `C4Game::DoKeyboardInput` writes `PressedKeys`.
-    fn note_physical_engine_key(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
-        let already_pressed = match state {
-            ElementState::Pressed => !self.input_routing.live.pressed_engine_keys.insert(key),
-            ElementState::Released => {
-                self.input_routing.live.pressed_engine_keys.remove(&key);
-                false
-            }
-        };
-        engine_key_repeated(already_pressed, BACKEND_SYNTHESIZES_KEY_REPEAT)
     }
 
     fn handle_engine_key(
@@ -8791,19 +8778,8 @@ impl GameApp {
         self.ingame_mouse.help_caption = Some(IngameMouseHelpCaption { text, keep_moves });
     }
 
-    /// Top-of-`C4MouseControl::Move` caption lifetime update. A countdown
-    /// reaching zero remains visible through that move and clears on the
-    /// following one.
-    fn advance_ingame_mouse_help_caption(&mut self) {
-        match self.ingame_mouse.help_caption.as_mut() {
-            Some(caption) if caption.keep_moves != 0 => caption.keep_moves -= 1,
-            Some(_) => self.ingame_mouse.help_caption = None,
-            None => {}
-        }
-    }
-
     pub(crate) fn advance_ingame_mouse_caption_lifetime(&mut self) {
-        self.advance_ingame_mouse_help_caption();
+        self.ingame_mouse.advance_ingame_mouse_help_caption();
         self.input_routing.live.ingame_mouse_caption.begin_move();
     }
 

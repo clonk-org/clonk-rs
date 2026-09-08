@@ -1870,6 +1870,19 @@ pub(crate) struct IngameMouse {
     pub(crate) help_caption: Option<IngameMouseHelpCaption>,
 }
 
+impl IngameMouse {
+    /// Top-of-`C4MouseControl::Move` caption lifetime update. A countdown
+    /// reaching zero remains visible through that move and clears on the
+    /// following one.
+    pub(crate) fn advance_ingame_mouse_help_caption(&mut self) {
+        match self.help_caption.as_mut() {
+            Some(caption) if caption.keep_moves != 0 => caption.keep_moves -= 1,
+            Some(_) => self.help_caption = None,
+            None => {}
+        }
+    }
+}
+
 /// The keyboard and gamepad half of the app: the binding dispatcher and the
 /// live device state it routes from, the gamepad bindings and poll count,
 /// the latches `C4Game::DoKeyboardInput` resolves once per event, the raw
@@ -1901,6 +1914,29 @@ pub(crate) struct InputRouting {
     /// Raw Tab state is tracked before modifier/dialog scope lookup because a
     /// held key can cross into or out of a PRIO_PlrControl binding.
     pub(crate) scoreboard_tab_raw_pressed: bool,
+}
+
+impl InputRouting {
+    /// Fold one physical key edge into the held-key set and answer C++'s
+    /// `fRepeated` for it. Call once per event, at the entry of the key
+    /// chain, mirroring where `C4Game::DoKeyboardInput` writes `PressedKeys`.
+    pub(crate) fn note_physical_engine_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        let already_pressed = match state {
+            ElementState::Pressed => !self.live.pressed_engine_keys.insert(key),
+            ElementState::Released => {
+                self.live.pressed_engine_keys.remove(&key);
+                false
+            }
+        };
+        crate::game_app_input::engine_key_repeated(
+            already_pressed,
+            crate::game_app_input::BACKEND_SYNTHESIZES_KEY_REPEAT,
+        )
+    }
 }
 
 /// The startup network half of the app: what `C4StartupNetDlg` and its
