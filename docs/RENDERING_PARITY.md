@@ -155,9 +155,33 @@ generation and the next self-contained scene repopulates device resources.
 Repeated loss while no frame can present follows the normal graphics cadence
 rather than requesting redraws without bound.
 
-The deterministic parts of this policy have unit and GPU-readback coverage. A
-real platform device-loss run remains tracked by clonk-org/clonk-rs#1241; unit
-injection is not reported as platform qualification.
+The deterministic parts of this policy have unit and GPU-readback coverage.
+The live run is the device-loss probe (clonk-org/clonk-rs#1241): started with
+`--device-loss-probe <REPORT.json>` and exactly one `WGPU_BACKEND`, it lets
+`--device-loss-probe-after-frames` (default 30) retained presentations through,
+then destroys the live `wgpu::Device` inside the shipped event loop. That is a
+backend-authoritative loss, reported to the device-lost callback as
+`Destroyed`, and nothing else in the loop is special-cased: the next present
+fails into the ordinary recovery path, which drops the configured surface,
+rebuilds the device and surface, recreates the renderer at a new generation,
+and presents again. The probe passes after three presentations on the
+replacement generation and fails on a presentation that still lands on the
+destroyed generation, on a software presenter taking over, on a failed
+rebuild, or after 15 s without recovery; the exit code is 0, 2 or 1 (report
+unwritable), and the report carries the OS, backend, adapter, driver, both
+generations, the callback diagnosis, the rebuild outcome and the recovery
+time. Run it on a scenario that presents continuously, for example:
+
+```sh
+WGPU_BACKEND=metal target/release/clonk-app --config <config.ini> \
+  --device-loss-probe device-loss-metal.json \
+  content/Collection.c4f/Magus.c4f/SkyBridge.c4s <player.c4p>
+```
+
+The window must be visible: an occluded or locked display presents nothing,
+and the probe then reports zero presentations before the loss rather than a
+recovery. Unit injection is still not reported as platform qualification;
+`docs/COMPAT_PROFILE.md` records which backends have a probe report.
 
 ## Software composition and presentation
 

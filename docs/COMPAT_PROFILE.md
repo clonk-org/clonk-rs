@@ -200,7 +200,11 @@ screen is dropped, a mask hides pixels without a stated reason, or the software
 tolerance stops being exact.
 
 Pending: clonk-org/clonk-rs#1241, live platform qualification of complete
-retained-GPU device-loss recovery through the shipped event loop.
+retained-GPU device-loss recovery through the shipped event loop. The probe
+exists (`clonk-app --device-loss-probe <REPORT.json>` with one explicit
+`WGPU_BACKEND`, described in `docs/RENDERING_PARITY.md`); what is pending is a
+report from a visible window on each backend that can inject a loss, and the
+backends that cannot are to be named rather than counted.
 
 ### Save and replay
 
