@@ -135,23 +135,6 @@ impl GameApp {
             .native_loader_text = true;
     }
 
-    fn classic_loader_render_preconditions_ready(&self) -> bool {
-        if self.loader.error.is_some()
-            || self.loader.render_error.is_some()
-            || self.loader.screen.is_none()
-        {
-            return false;
-        }
-        let Some(config) = self.loader.render_config else {
-            return false;
-        };
-        config.application_scale() == 1.0
-            || self
-                .native_startup_fonts
-                .as_ref()
-                .is_some_and(|fonts| fonts.scale() == config.application_scale())
-    }
-
     pub(crate) fn startup_network_transition_active(&self) -> bool {
         self.mode != AppMode::Running
             && (self.startup_network.connection.is_some()
@@ -287,38 +270,6 @@ impl GameApp {
             if let Some(rename) = self.startup.crew_rename.as_mut() {
                 rename.edit.drag_pointer_selection(position);
             }
-        }
-        true
-    }
-
-    pub(crate) fn handle_startup_crew_rename_pointer_up(&mut self, point: GuiPoint) -> bool {
-        if self
-            .startup
-            .crew_rename
-            .as_mut()
-            .is_some_and(|rename| std::mem::take(&mut rename.ignore_pointer_up))
-        {
-            return true;
-        }
-        if !self
-            .startup
-            .crew_rename
-            .as_ref()
-            .is_some_and(|rename| rename.edit.is_dragging())
-        {
-            return false;
-        }
-        let position = self
-            .startup_crew_rename_char_pos(point, false)
-            .or_else(|| {
-                self.startup
-                    .crew_rename
-                    .as_ref()
-                    .map(|rename| rename.edit.caret())
-            })
-            .unwrap_or(0);
-        if let Some(rename) = self.startup.crew_rename.as_mut() {
-            rename.edit.end_pointer_selection(position);
         }
         true
     }
@@ -5264,7 +5215,9 @@ impl GameApp {
             if !self.console_session.enabled
                 && !self.headless
                 && self.scenario_lifecycle.loading.is_none()
-                && !self.classic_loader_render_preconditions_ready()
+                && !self
+                    .loader
+                    .classic_render_preconditions_ready(self.native_startup_fonts.as_deref())
             {
                 // A fast boot worker must not bypass a failed loader before
                 // the first redraw. Stay in Loading so render reports the
@@ -5577,35 +5530,28 @@ impl GameApp {
         Ok(rendered)
     }
 
-    pub(crate) fn startup_active_gamma(&self) -> clonk_graphics::GammaRamp {
-        if self
-            .rendering
-            .graphics
-            .advanced_renderer_config()
-            .disable_gamma
-        {
-            startup_identity_gamma().clone()
-        } else {
-            self.loader
-                .gamma
-                .clone()
-                .unwrap_or_else(|| startup_gamma().clone())
-        }
-    }
-
     pub(crate) fn startup_fragment_gamma(&self) -> clonk_graphics::GammaRamp {
         if self.rendering.graphics.fragment_gamma_enabled() {
-            self.startup_active_gamma()
+            self.loader.active_gamma(
+                self.rendering
+                    .graphics
+                    .advanced_renderer_config()
+                    .disable_gamma,
+            )
         } else {
             startup_identity_gamma().clone()
         }
     }
 
     pub(crate) fn startup_monitor_gamma(&self) -> Option<clonk_graphics::GammaRamp> {
-        self.rendering
-            .graphics
-            .monitor_gamma_enabled()
-            .then(|| self.startup_active_gamma())
+        self.rendering.graphics.monitor_gamma_enabled().then(|| {
+            self.loader.active_gamma(
+                self.rendering
+                    .graphics
+                    .advanced_renderer_config()
+                    .disable_gamma,
+            )
+        })
     }
 
     pub(crate) fn render_native_main_menu_text(
@@ -5689,7 +5635,8 @@ impl GameApp {
         self.reject_classic_global_gui_bootstrap()?;
         self.reject_classic_startup_bootstrap()?;
         self.reject_generic_startup_view()?;
-        self.reject_missing_startup_model()?;
+        self.startup
+            .reject_missing_model(self.startup_network.dialog.is_some())?;
         self.reject_unported_startup_subscreen()?;
         self.reject_generic_startup_status()
     }
@@ -5738,31 +5685,6 @@ impl GameApp {
                 ClassicParityBoundary::StartupBootstrapResources { issues },
             )))
         }
-    }
-
-    fn reject_missing_startup_model(&self) -> Result<()> {
-        let missing = match self.startup.view {
-            StartupView::NetworkGame if self.startup_network.dialog.is_none() => {
-                Some("C4StartupNetDlg")
-            }
-            StartupView::PlayerSelection if self.startup.player_dialog.is_none() => {
-                Some("C4StartupPlrSelDlg")
-            }
-            StartupView::Options if self.startup.options_dialog.is_none() => {
-                Some("C4StartupOptionsDlg")
-            }
-            StartupView::About if self.startup.about_dialog.is_none() => Some("C4StartupAboutDlg"),
-            _ => None,
-        };
-        let Some(missing) = missing else {
-            return Ok(());
-        };
-        Err(anyhow::Error::new(report_classic_parity_boundary(
-            ClassicParityBoundary::StartupModel {
-                view: self.startup.view,
-                missing,
-            },
-        )))
     }
 
     fn reject_unported_startup_subscreen(&self) -> Result<()> {

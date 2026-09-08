@@ -2429,7 +2429,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
     let reset_world_pointer = app.input_routing.live.ingame_pointer.test_value();
     main_assert!(app.classic_gui_cursor_request().is_some(), "GUI cursor remains independently drawable after the reset");
     app.dialogs.help_visible = true;
-    app.close_ingame_menu_for_player(app.players.local_owner);
+    app.ingame_menus.close_for_player(app.players.local_owner, &mut app.dialogs);
     main_assert!(app.input_routing.live.gui_mouse_owned, "Dialog::Close leaves ownership for C4GraphicsSystem::Execute");
     app.reconcile_running_mouse_after_last_gui_close(false)
         .test_value();
@@ -2459,7 +2459,7 @@ fn running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
         two_item_script_menu(non_cursor_menu_object),
     );
     main_assert_ne!(app.engine.crew_cursor(app.players.local_owner) => Some(non_cursor_menu_object));
-    app.close_ingame_menu_for_player(app.players.local_owner);
+    app.ingame_menus.close_for_player(app.players.local_owner, &mut app.dialogs);
     app.test_render(&mut frame);
     main_assert!(app.input_routing.live.gui_mouse_owned);
     main_assert!(!app.input_routing.live.world_mouse_owned);
@@ -2817,7 +2817,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     app.startup.crew_rename.test_mut().last_click = Some(Instant::now());
     main_assert!(app.handle_startup_crew_rename_pointer_down(edit_point));
     main_assert!(!app.startup.crew_rename.as_ref().expect("double-clicked inline rename").edit.is_dragging());
-    main_assert!(app.handle_startup_crew_rename_pointer_up(edit_point));
+    main_assert!(app.startup.handle_crew_rename_pointer_up(app.startup_crew_rename_char_pos(edit_point, false)));
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     app.startup.player_dialog
         .test_mut()

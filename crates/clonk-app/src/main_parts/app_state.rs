@@ -366,6 +366,53 @@ impl StartupDialogState {
             }
         }
     }
+
+    /// End a crew-rename pointer selection at `char_pos`, the caret the
+    /// pointer rests on, or the current caret off the text.
+    pub(crate) fn handle_crew_rename_pointer_up(&mut self, char_pos: Option<usize>) -> bool {
+        if self
+            .crew_rename
+            .as_mut()
+            .is_some_and(|rename| std::mem::take(&mut rename.ignore_pointer_up))
+        {
+            return true;
+        }
+        if !self
+            .crew_rename
+            .as_ref()
+            .is_some_and(|rename| rename.edit.is_dragging())
+        {
+            return false;
+        }
+        let position = char_pos
+            .or_else(|| self.crew_rename.as_ref().map(|rename| rename.edit.caret()))
+            .unwrap_or(0);
+        if let Some(rename) = self.crew_rename.as_mut() {
+            rename.edit.end_pointer_selection(position);
+        }
+        true
+    }
+
+    pub(crate) fn reject_missing_model(&self, network_dialog_present: bool) -> Result<()> {
+        let missing = match self.view {
+            StartupView::NetworkGame if !network_dialog_present => Some("C4StartupNetDlg"),
+            StartupView::PlayerSelection if self.player_dialog.is_none() => {
+                Some("C4StartupPlrSelDlg")
+            }
+            StartupView::Options if self.options_dialog.is_none() => Some("C4StartupOptionsDlg"),
+            StartupView::About if self.about_dialog.is_none() => Some("C4StartupAboutDlg"),
+            _ => None,
+        };
+        let Some(missing) = missing else {
+            return Ok(());
+        };
+        Err(anyhow::Error::new(report_classic_parity_boundary(
+            ClassicParityBoundary::StartupModel {
+                view: self.view,
+                missing,
+            },
+        )))
+    }
 }
 
 /// The dialogs a running game can put on screen, and the stack that orders
@@ -1915,6 +1962,91 @@ impl IngameMenus {
     pub(crate) fn construction_menu_drag_captured(&self) -> bool {
         self.construction_drag.is_some()
     }
+
+    /// Close every player menu; a title drag on one of them ends with it.
+    pub(crate) fn close(&mut self, dialogs: &mut RuntimeDialogState) {
+        self.players.clear();
+        self.close_pointer_capture = None;
+        if matches!(dialogs.menu_title_drag, Some(MenuTitleDrag::Ingame { .. })) {
+            dialogs.menu_title_drag = None;
+        }
+    }
+
+    pub(crate) fn close_for_player(&mut self, player: i32, dialogs: &mut RuntimeDialogState) {
+        self.players.remove(player);
+        if self.close_pointer_capture == Some(player) {
+            self.close_pointer_capture = None;
+        }
+        if matches!(
+            dialogs.menu_title_drag,
+            Some(MenuTitleDrag::Ingame {
+                player: dragged,
+                ..
+            }) if dragged == player
+        ) {
+            dialogs.menu_title_drag = None;
+        }
+    }
+
+    /// `Element::DoDragging`: retain the original title-local pointer and
+    /// apply its screen-space delta one-for-one, even outside the dialog.
+    pub(crate) fn update_title_drag(
+        &mut self,
+        point: GuiPoint,
+        dialogs: &mut RuntimeDialogState,
+        engine: &Engine,
+    ) -> bool {
+        let Some(drag) = dialogs.menu_title_drag else {
+            return false;
+        };
+        let moved = |start_pointer: GuiPoint, start_location: (i32, i32)| {
+            (
+                start_location
+                    .0
+                    .saturating_add((point.x - start_pointer.x).round() as i32),
+                start_location
+                    .1
+                    .saturating_add((point.y - start_pointer.y).round() as i32),
+            )
+        };
+        match drag {
+            MenuTitleDrag::Ingame {
+                player,
+                start_pointer,
+                start_location,
+            } => {
+                let Some(menu) = self.players.get_mut(player) else {
+                    dialogs.menu_title_drag = None;
+                    return false;
+                };
+                menu.set_location(moved(start_pointer, start_location));
+            }
+            MenuTitleDrag::Script {
+                owner,
+                target,
+                start_pointer,
+                start_location,
+            } => {
+                let valid = engine
+                    .cursor_object_menu(owner)
+                    .is_some_and(|(current, menu)| {
+                        current == target
+                            && self.script_presentations.get(&owner).is_some_and(|state| {
+                                same_script_menu_presentation(state, target, menu)
+                            })
+                    });
+                if !valid {
+                    dialogs.menu_title_drag = None;
+                    return false;
+                }
+                if let Some(state) = self.script_presentations.get_mut(&owner) {
+                    state.location = Some(moved(start_pointer, start_location));
+                    state.location_needs_initialization = false;
+                }
+            }
+        }
+        true
+    }
 }
 
 /// The in-game mouse half of the app, the `C4MouseControl` analogue: the
@@ -2169,6 +2301,30 @@ impl LoaderScreenState {
 
     pub(crate) fn discard_terminal_loader_frame_for_headless_render(&mut self) -> bool {
         std::mem::take(&mut self.terminal_frame_pending)
+    }
+
+    pub(crate) fn classic_render_preconditions_ready(
+        &self,
+        native_startup_fonts: Option<&clonk_frontend::clonk_fonts::NativeClonkFontSet>,
+    ) -> bool {
+        if self.error.is_some() || self.render_error.is_some() || self.screen.is_none() {
+            return false;
+        }
+        let Some(config) = self.render_config else {
+            return false;
+        };
+        config.application_scale() == 1.0
+            || native_startup_fonts.is_some_and(|fonts| fonts.scale() == config.application_scale())
+    }
+
+    pub(crate) fn active_gamma(&self, disable_gamma: bool) -> clonk_graphics::GammaRamp {
+        if disable_gamma {
+            startup_identity_gamma().clone()
+        } else {
+            self.gamma
+                .clone()
+                .unwrap_or_else(|| startup_gamma().clone())
+        }
     }
 }
 

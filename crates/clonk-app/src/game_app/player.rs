@@ -820,7 +820,7 @@ impl GameApp {
             .get(owner)
             .is_some_and(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection)
         {
-            self.close_ingame_menu_for_player(owner);
+            self.ingame_menus.close_for_player(owner, &mut self.dialogs);
         }
         self.engine.mark_team_selection_pending(owner)?;
         if self.netplay.manager.is_some() {

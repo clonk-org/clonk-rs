@@ -4694,7 +4694,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     app.synchronize_advanced_options_runtime();
     main_assert!(app.rendering.graphics.advanced_renderer_config().disable_gamma);
     main_assert_eq!(app.loader.gamma => None);
-    main_assert_eq!(app.startup_active_gamma() => clonk_graphics::GammaRamp::identity());
+    main_assert_eq!(app.loader.active_gamma(app.rendering.graphics.advanced_renderer_config().disable_gamma) => clonk_graphics::GammaRamp::identity());
     main_assert!(app.menu_backdrop_cache.key.is_none());
     main_assert!(app.menu_backdrop_cache.pixels.is_empty());
     main_assert!(app.startup.dialog_fade.is_none());
@@ -4707,7 +4707,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     app.synchronize_advanced_options_runtime();
     main_assert!(!app.rendering.graphics.advanced_renderer_config().disable_gamma);
     main_assert_eq!(app.loader.gamma => Some(clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,])));
-    main_assert_eq!(app.startup_active_gamma() => clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,]));
+    main_assert_eq!(app.loader.active_gamma(app.rendering.graphics.advanced_renderer_config().disable_gamma) => clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,]));
 }
 
 #[test]

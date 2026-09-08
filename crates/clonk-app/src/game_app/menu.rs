@@ -799,7 +799,8 @@ impl GameApp {
         let labels = self.ingame_menu_labels();
         for player in players {
             let Some(entries) = self.hostility_entries_for_player(player) else {
-                self.close_ingame_menu_for_player(player);
+                self.ingame_menus
+                    .close_for_player(player, &mut self.dialogs);
                 continue;
             };
             if let Some(menu) = self.ingame_menus.players.get_mut(player) {
@@ -856,33 +857,6 @@ impl GameApp {
         true
     }
 
-    pub(crate) fn close_ingame_menu(&mut self) {
-        self.ingame_menus.players.clear();
-        self.ingame_menus.close_pointer_capture = None;
-        if matches!(
-            self.dialogs.menu_title_drag,
-            Some(MenuTitleDrag::Ingame { .. })
-        ) {
-            self.dialogs.menu_title_drag = None;
-        }
-    }
-
-    pub(crate) fn close_ingame_menu_for_player(&mut self, player: i32) {
-        self.ingame_menus.players.remove(player);
-        if self.ingame_menus.close_pointer_capture == Some(player) {
-            self.ingame_menus.close_pointer_capture = None;
-        }
-        if matches!(
-            self.dialogs.menu_title_drag,
-            Some(MenuTitleDrag::Ingame {
-                player: dragged,
-                ..
-            }) if dragged == player
-        ) {
-            self.dialogs.menu_title_drag = None;
-        }
-    }
-
     pub(crate) fn close_ingame_menu_by_user(&mut self) -> Result<(), EngineError> {
         self.close_ingame_menu_by_user_for_player(self.players.local_owner)
     }
@@ -924,7 +898,8 @@ impl GameApp {
             Some(menu) => {
                 self.clear_local_control(self.players.local_owner)?;
                 self.ingame_menus.object = Some(menu);
-                self.close_ingame_menu_for_player(self.players.local_owner);
+                self.ingame_menus
+                    .close_for_player(self.players.local_owner, &mut self.dialogs);
                 if self.status_text.is_empty() {
                     self.status_text = "Inventory open".to_string();
                 }
@@ -1895,72 +1870,13 @@ impl GameApp {
         Ok(())
     }
 
-    /// `Element::DoDragging`: retain the original title-local pointer and
-    /// apply its screen-space delta one-for-one, even outside the dialog.
-    pub(crate) fn update_menu_title_drag(&mut self, point: GuiPoint) -> bool {
-        let Some(drag) = self.dialogs.menu_title_drag else {
-            return false;
-        };
-        let moved = |start_pointer: GuiPoint, start_location: (i32, i32)| {
-            (
-                start_location
-                    .0
-                    .saturating_add((point.x - start_pointer.x).round() as i32),
-                start_location
-                    .1
-                    .saturating_add((point.y - start_pointer.y).round() as i32),
-            )
-        };
-        match drag {
-            MenuTitleDrag::Ingame {
-                player,
-                start_pointer,
-                start_location,
-            } => {
-                let Some(menu) = self.ingame_menus.players.get_mut(player) else {
-                    self.dialogs.menu_title_drag = None;
-                    return false;
-                };
-                menu.set_location(moved(start_pointer, start_location));
-            }
-            MenuTitleDrag::Script {
-                owner,
-                target,
-                start_pointer,
-                start_location,
-            } => {
-                let valid = self
-                    .engine
-                    .cursor_object_menu(owner)
-                    .is_some_and(|(current, menu)| {
-                        current == target
-                            && self
-                                .ingame_menus
-                                .script_presentations
-                                .get(&owner)
-                                .is_some_and(|state| {
-                                    same_script_menu_presentation(state, target, menu)
-                                })
-                    });
-                if !valid {
-                    self.dialogs.menu_title_drag = None;
-                    return false;
-                }
-                if let Some(state) = self.ingame_menus.script_presentations.get_mut(&owner) {
-                    state.location = Some(moved(start_pointer, start_location));
-                    state.location_needs_initialization = false;
-                }
-            }
-        }
-        true
-    }
-
     pub(crate) fn finish_menu_title_drag(&mut self, point: Option<GuiPoint>) -> bool {
         if self.dialogs.menu_title_drag.is_none() {
             return false;
         }
         if let Some(point) = point {
-            self.update_menu_title_drag(point);
+            self.ingame_menus
+                .update_title_drag(point, &mut self.dialogs, &self.engine);
         }
         self.dialogs.menu_title_drag = None;
         self.cancel_ingame_mouse_gestures();
@@ -5016,7 +4932,7 @@ impl GameApp {
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();
         self.definition_selection.pointer_capture = false;
-        self.close_ingame_menu();
+        self.ingame_menus.close(&mut self.dialogs);
         self.ingame_menus.object = None;
         self.ingame_menus.script_presentations.clear();
         self.dialogs.game_over = None;

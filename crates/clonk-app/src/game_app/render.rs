@@ -2540,10 +2540,20 @@ impl GameApp {
 
     fn retained_gpu_frame_gamma(&self) -> clonk_graphics::GammaRamp {
         if self.loader_presentation_active() {
-            return self.startup_active_gamma();
+            return self.loader.active_gamma(
+                self.rendering
+                    .graphics
+                    .advanced_renderer_config()
+                    .disable_gamma,
+            );
         }
         match self.mode {
-            AppMode::Menu | AppMode::Loading => self.startup_active_gamma(),
+            AppMode::Menu | AppMode::Loading => self.loader.active_gamma(
+                self.rendering
+                    .graphics
+                    .advanced_renderer_config()
+                    .disable_gamma,
+            ),
             AppMode::Running => self
                 .rendering
                 .graphics
