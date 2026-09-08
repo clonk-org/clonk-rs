@@ -971,7 +971,7 @@ fn observer_menu_lists_players_and_live_previews_selection() {
     );
 
     app.clear_physical_viewport_states();
-    let observer = app.ownerless_physical_viewport_state();
+    let observer = app.viewports.ownerless_physical_viewport_state();
     let physical_identity = observer.physical_identity;
     app.viewports.physical_viewports.push(observer);
     app.viewports.physical_viewports_authoritative = true;

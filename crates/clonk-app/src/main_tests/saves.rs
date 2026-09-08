@@ -3765,7 +3765,7 @@ fn viewport_player_cycle_matches_film_and_observer_end_states() {
             .test_value();
     }
     app.clear_physical_viewport_states();
-    let observer = app.ownerless_physical_viewport_state();
+    let observer = app.viewports.ownerless_physical_viewport_state();
     app.viewports.physical_viewports.push(observer);
     app.viewports.physical_viewports_authoritative = true;
 

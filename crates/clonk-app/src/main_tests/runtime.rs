@@ -10533,7 +10533,7 @@ fn observer_next_player_gamepad_override_keeps_its_free_view_scope() {
 
     let mut observing = bound();
     observing.clear_physical_viewport_states();
-    let observer = observing.ownerless_physical_viewport_state();
+    let observer = observing.viewports.ownerless_physical_viewport_state();
     observing.viewports.physical_viewports.push(observer);
     observing.viewports.physical_viewports_authoritative = true;
     runtime_assert!(observing.viewports.primary_physical_viewport_is_no_owner());

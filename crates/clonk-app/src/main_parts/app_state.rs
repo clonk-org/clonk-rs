@@ -1626,6 +1626,11 @@ impl ViewportState {
             .find(|viewport| viewport.physical_identity == identity)
             .is_some_and(|viewport| viewport.player_lock)
     }
+
+    pub(crate) fn ownerless_physical_viewport_state(&mut self) -> PhysicalViewportState {
+        let identity = self.allocate_physical_viewport_identity();
+        PhysicalViewportState::ownerless(identity)
+    }
 }
 
 impl RenderingResources {

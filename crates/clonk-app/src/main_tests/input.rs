@@ -5986,7 +5986,7 @@ fn assigned_observer_key_uses_production_dispatch_and_physical_gate() {
         .register_player(PlayerConfig::new(second, "Second observer target"))
         .test_value();
     app.clear_physical_viewport_states();
-    let observer = app.ownerless_physical_viewport_state();
+    let observer = app.viewports.ownerless_physical_viewport_state();
     app.viewports.physical_viewports.push(observer);
     app.viewports.physical_viewports_authoritative = true;
     main_assert!(app.set_physical_film_view(OWNER_NONE));
