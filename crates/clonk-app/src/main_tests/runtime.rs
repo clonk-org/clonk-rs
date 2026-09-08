@@ -135,7 +135,7 @@ fn runtime_console_network_fixture(
 ) {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = mode;
+    app.developer.console_edit_mode = mode;
     let (events, commands) = install_running_network_stub(&mut app, 7, 0, 2);
     let identity = open_test_console_viewport(&mut app, None);
     (app, events, commands, identity)
@@ -4990,7 +4990,7 @@ fn console_shell_render_applies_the_live_pxs_graphics_flag() {
 fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     // An owned viewport follows the player, so the crew object it follows
     // is inside the view — an ownerless one is centred on the map and the
     // mark would legitimately fall outside it.
@@ -5011,7 +5011,7 @@ fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
         })
         .map(|object| object.id)
         .test_value();
-    app.developer_selection.replace(
+    app.developer.selection.replace(
         clonk_engine::developer_selection::SelectionWriter::EditCursor,
         object,
     );
@@ -5021,7 +5021,7 @@ fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
 
     // And it goes away again, so the difference is the mark and not some
     // unrelated per-frame drift.
-    app.developer_selection
+    app.developer.selection
         .clear(clonk_engine::developer_selection::SelectionWriter::EditCursor);
     let cleared = app.render_console_viewport(identity, 320, 200).test_value();
     runtime_assert_eq!(cleared.pixels() => unmarked.pixels(), "clearing the selection restores the unmarked frame");
@@ -5101,20 +5101,20 @@ fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Draw;
+    app.developer.console_edit_mode = ConsoleEditMode::Draw;
     let identity = open_test_console_viewport(&mut app, None);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let local = (40, 30);
 
-    app.developer_tools.set_tool(Tool::Brush, false);
-    app.developer_tools.press(10, 10);
-    runtime_assert!(app.developer_tools.holding(), "the stroke is held");
+    app.developer.tools.set_tool(Tool::Brush, false);
+    app.developer.tools.press(10, 10);
+    runtime_assert!(app.developer.tools.holding(), "the stroke is held");
     runtime_assert!(
         !app.console_viewport_middle_release(identity, local, 1.0),
         "a middle release during a held stroke picks nothing"
     );
 
-    app.developer_tools.release(10, 10);
+    app.developer.tools.release(10, 10);
     runtime_assert!(
         app.console_viewport_middle_release(identity, local, 1.0),
         "an unheld middle release reaches the picker"
@@ -5122,7 +5122,7 @@ fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
 
     // The edit cursor's own hold gates it too: `MiddleButtonUp` reads the one
     // `Hold` both arms of the cursor share.
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     app.edit_cursor.hold = true;
     runtime_assert!(
         !app.console_viewport_middle_release(identity, local, 1.0),
@@ -5146,7 +5146,7 @@ fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
 fn a_detached_viewport_can_be_the_mouse_control_viewport() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
@@ -5171,7 +5171,7 @@ fn a_detached_viewport_can_be_the_mouse_control_viewport() {
 fn detached_play_mode_motion_drives_the_gameplay_mouse() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     app.input_routing.live.ingame_viewport_mouse = None;
@@ -5200,7 +5200,7 @@ fn detached_play_mode_motion_drives_the_gameplay_mouse() {
 fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
@@ -5237,7 +5237,7 @@ fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
 fn detached_play_mode_right_button_is_a_gameplay_click() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
@@ -5273,7 +5273,7 @@ fn detached_play_mode_right_button_is_a_gameplay_click() {
 fn detached_middle_and_wheel_follow_their_native_arms() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
     let owning = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(owning, 320, 200).is_some());
 
@@ -5303,7 +5303,7 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
 
     // Edit mode falls to the editor arm for the very same window, and the
     // picker and scroll bars come back with it.
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     assert!(
         app.console_viewport_middle_release(owning, (48, 36), 1.0),
         "the editor arm still invokes the picker"
@@ -5322,7 +5322,7 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
 fn the_detached_double_click_stamp_is_shared_across_windows() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
     let owning = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(owning, 320, 200).is_some());
 
@@ -5347,7 +5347,7 @@ fn the_detached_double_click_stamp_is_shared_across_windows() {
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let identity = open_test_console_viewport(&mut app, None);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -5474,7 +5474,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     );
 
     // Play mode is ordinary mouse control, not the editor sink.
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
     runtime_assert!(app
         .console_viewport_press(identity, local, 1.0, false, false)
         .is_none());
@@ -5635,7 +5635,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     // Title opens on the component's own bytes.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
         .test_value();
-    let edit = app.developer_component_editor.test_ref();
+    let edit = app.developer.component_editor.test_ref();
     assert_eq!(edit.component, EditableComponent::Title);
     assert_eq!(edit.host.filename(), "Title.txt");
     assert_eq!(edit.text.lines(), ["Round", ""]);
@@ -5643,21 +5643,21 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     // Cancel mutates nothing — not the bytes and not the modified flag —
     // so the component contributes nothing to a save.
     app.cancel_developer_component_editor();
-    assert!(app.developer_component_editor.is_none());
-    assert!(app.developer_component_hosts.is_empty());
+    assert!(app.developer.component_editor.is_none());
+    assert!(app.developer.component_hosts.is_empty());
 
     // A component that does not exist yet opens empty rather than
     // refusing: that is how a scenario grows one.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
         .test_value();
-    let edit = app.developer_component_editor.test_mut();
+    let edit = app.developer.component_editor.test_mut();
     assert_eq!(edit.text.lines(), [""]);
     for character in "hello".chars() {
         edit.text.insert(character);
     }
     app.commit_developer_component_editor();
-    assert!(app.developer_component_editor.is_none());
-    let [host] = app.developer_component_hosts.as_slice() else {
+    assert!(app.developer.component_editor.is_none());
+    let [host] = app.developer.component_hosts.as_slice() else {
         panic!("expected one committed host");
     };
     runtime_assert_eq!(host.save_action() => ComponentSaveAction::Write { filename: "Info.txt".to_owned(), data: b"hello".to_vec(), });
@@ -5665,13 +5665,13 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     // Emptying a component deletes it rather than writing zero bytes.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
         .test_value();
-    let edit = app.developer_component_editor.test_mut();
+    let edit = app.developer.component_editor.test_mut();
     for _ in 0..16 {
         edit.text
             .key(crate::developer_component_editor::ComponentEditorKey::Delete);
     }
     app.commit_developer_component_editor();
-    runtime_assert_eq!(app.developer_component_hosts.last().expect("the emptied host").save_action() => ComponentSaveAction::Delete { filename: "Title.txt".to_owned(), });
+    runtime_assert_eq!(app.developer.component_hosts.last().expect("the emptied host").save_action() => ComponentSaveAction::Delete { filename: "Title.txt".to_owned(), });
 
     // Reopening a component edited earlier this round shows **its** bytes,
     // not the stale ones still on disk — C++ never has to think about
@@ -5680,15 +5680,15 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     // the same filename.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
         .test_value();
-    let edit = app.developer_component_editor.test_mut();
+    let edit = app.developer.component_editor.test_mut();
     assert_eq!(edit.text.lines(), ["hello"], "the committed bytes reopen");
     edit.text
         .key(crate::developer_component_editor::ComponentEditorKey::End);
     edit.text.insert('!');
     app.commit_developer_component_editor();
-    runtime_assert_eq!(app.developer_component_hosts.iter().filter(|host| host.filename() == "Info.txt").count() => 1, "one host per component, however many times it was edited");
+    runtime_assert_eq!(app.developer.component_hosts.iter().filter(|host| host.filename() == "Info.txt").count() => 1, "one host per component, however many times it was edited");
     runtime_assert_eq!(
-        app.developer_component_hosts.iter().find(|host| host.filename() == "Info.txt").expect("the info host").save_action() =>
+        app.developer.component_hosts.iter().find(|host| host.filename() == "Info.txt").expect("the info host").save_action() =>
             ComponentSaveAction::Write { filename: "Info.txt".to_owned(), data: b"hello!".to_vec(), };
     );
 
@@ -5696,15 +5696,15 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     // and letting one would discard whatever was being typed.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])
         .test_value();
-    let open = app.developer_component_editor.test_ref().component;
+    let open = app.developer.component_editor.test_ref().component;
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
         .test_value();
-    runtime_assert_eq!(app.developer_component_editor.as_ref().expect("the first editor survives").component => open, "the open editor is not replaced");
+    runtime_assert_eq!(app.developer.component_editor.as_ref().expect("the first editor survives").component => open, "the open editor is not replaced");
     app.cancel_developer_component_editor();
 
     // A network game refuses all three outright.
     let (_events, _commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.developer_console.clear_log();
+    app.developer.console.clear_log();
     for action in [
         DeveloperConsoleAction::EditScript,
         DeveloperConsoleAction::EditTitle,
@@ -5713,11 +5713,11 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
         app.dispatch_developer_console_actions(vec![action])
             .test_value();
         runtime_assert!(
-            app.developer_component_editor.is_none(),
+            app.developer.component_editor.is_none(),
             "a network game opens no component editor"
         );
     }
-    assert!(!app.developer_console.log().text().is_empty());
+    assert!(!app.developer.console.log().text().is_empty());
 
     // Closing the round drops both the open editor and every committed
     // host: they belong to the scenario that was open, and carrying them
@@ -5725,13 +5725,13 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     app.network = None;
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
         .test_value();
-    assert!(app.developer_component_editor.is_some());
+    assert!(app.developer.component_editor.is_some());
     app.open_developer_object_list();
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::CloseGame])
         .test_value();
-    assert!(app.developer_component_editor.is_none());
-    assert!(app.developer_component_hosts.is_empty());
-    assert!(!app.developer_object_list_open);
+    assert!(app.developer.component_editor.is_none());
+    assert!(app.developer.component_hosts.is_empty());
+    assert!(!app.developer.object_list_open);
 }
 
 /// Press and release one key, the way the console shell delivers it.
@@ -5760,7 +5760,7 @@ fn press_console_key(app: &mut GameApp, key: VirtualKeyCode, modifiers: Modifier
 fn console_edit_cursor_keys_cycle_the_mode_and_delete_the_selection() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Play;
+    app.developer.console_edit_mode = ConsoleEditMode::Play;
 
     for expected in [
         ConsoleEditMode::Edit,
@@ -5768,27 +5768,27 @@ fn console_edit_cursor_keys_cycle_the_mode_and_delete_the_selection() {
         ConsoleEditMode::Play,
     ] {
         press_console_key(&mut app, VirtualKeyCode::Space, ModifiersState::empty());
-        runtime_assert_eq!(app.developer_console_edit_mode => expected);
+        runtime_assert_eq!(app.developer.console_edit_mode => expected);
     }
 
     // `EditingOK` is the gate on both: a replay edits nothing.
-    app.developer_console_editing_enabled = false;
+    app.developer.console_editing_enabled = false;
     press_console_key(&mut app, VirtualKeyCode::Space, ModifiersState::empty());
     runtime_assert_eq!(
-        app.developer_console_edit_mode => ConsoleEditMode::Play,
+        app.developer.console_edit_mode => ConsoleEditMode::Play,
         "ToggleMode refuses without Console.Editing",
     );
 
     // Fullscreen is not KEYSCOPE_Console: neither key acts there.
     let mut fullscreen = new_lightweight_running_sandbox_app();
-    fullscreen.developer_console_edit_mode = ConsoleEditMode::Play;
+    fullscreen.developer.console_edit_mode = ConsoleEditMode::Play;
     press_console_key(
         &mut fullscreen,
         VirtualKeyCode::Space,
         ModifiersState::empty(),
     );
     runtime_assert_eq!(
-        fullscreen.developer_console_edit_mode => ConsoleEditMode::Play,
+        fullscreen.developer.console_edit_mode => ConsoleEditMode::Play,
         "KEYSCOPE_Console actions are inert outside the console",
     );
 }
@@ -5822,21 +5822,21 @@ fn console_scope_gamepad_overrides_reach_the_edit_cursor_and_tools() {
 
     // `ToggleIFT` is the simplest C4ToolsDlg callback to observe.
     let mut ift = bound("ToolsDlgIFTToggle", true);
-    let before = ift.developer_tools.ift();
+    let before = ift.developer.tools.ift();
     press(&mut ift);
-    runtime_assert_eq!(ift.developer_tools.ift() => !before);
+    runtime_assert_eq!(ift.developer.tools.ift() => !before);
 
     // `ToggleMode` steps the cursor mode.
     let mut mode = bound("EditCursorModeToggle", true);
-    mode.developer_console_edit_mode = ConsoleEditMode::Play;
+    mode.developer.console_edit_mode = ConsoleEditMode::Play;
     press(&mut mode);
-    runtime_assert_eq!(mode.developer_console_edit_mode => ConsoleEditMode::Edit);
+    runtime_assert_eq!(mode.developer.console_edit_mode => ConsoleEditMode::Edit);
 
     // And the scope still holds: none of them act in fullscreen.
     let mut fullscreen = bound("ToolsDlgIFTToggle", false);
-    let untouched = fullscreen.developer_tools.ift();
+    let untouched = fullscreen.developer.tools.ift();
     press(&mut fullscreen);
-    runtime_assert_eq!(fullscreen.developer_tools.ift() => untouched);
+    runtime_assert_eq!(fullscreen.developer.tools.ift() => untouched);
 }
 
 /// `C4Game.cpp:3433-3439` registers the C4ToolsDlg actions at
@@ -5850,12 +5850,12 @@ fn console_tool_keys_drive_the_retained_tools_dialog_state() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
 
-    let grade = app.developer_tools.grade();
+    let grade = app.developer.tools.grade();
     press_console_key(&mut app, VirtualKeyCode::NumpadAdd, ModifiersState::empty());
     runtime_assert_eq!(
-        app.developer_tools.grade() => (grade + 5).min(GRADE_MAX),
+        app.developer.tools.grade() => (grade + 5).min(GRADE_MAX),
         "the keyboard step is five grades, clamped at the maximum",
     );
     press_console_key(
@@ -5863,7 +5863,7 @@ fn console_tool_keys_drive_the_retained_tools_dialog_state() {
         VirtualKeyCode::NumpadSubtract,
         ModifiersState::empty(),
     );
-    runtime_assert_eq!(app.developer_tools.grade() => grade);
+    runtime_assert_eq!(app.developer.tools.grade() => grade);
 
     // The clamp is C++'s BoundBy, not a wrap.
     for _ in 0..40 {
@@ -5873,34 +5873,34 @@ fn console_tool_keys_drive_the_retained_tools_dialog_state() {
             ModifiersState::empty(),
         );
     }
-    runtime_assert_eq!(app.developer_tools.grade() => GRADE_MIN);
+    runtime_assert_eq!(app.developer.tools.grade() => GRADE_MIN);
 
-    let ift = app.developer_tools.ift();
+    let ift = app.developer.tools.ift();
     press_console_key(&mut app, VirtualKeyCode::KeyI, ModifiersState::CONTROL);
-    runtime_assert_eq!(app.developer_tools.ift() => !ift);
+    runtime_assert_eq!(app.developer.tools.ift() => !ift);
 
     // Four tools, cycling, never Picker.
     let mut seen = Vec::new();
     for _ in 0..4 {
         press_console_key(&mut app, VirtualKeyCode::KeyW, ModifiersState::CONTROL);
-        seen.push(app.developer_tools.tool());
+        seen.push(app.developer.tools.tool());
     }
     runtime_assert!(
         !seen.contains(&Tool::Picker),
         "(Tool + 1) % 4 never reaches Picker, got {seen:?}"
     );
-    runtime_assert_eq!(seen.last().copied() => Some(app.developer_tools.tool()));
+    runtime_assert_eq!(seen.last().copied() => Some(app.developer.tools.tool()));
 
     // Fullscreen must not see any of them: these are KEYSCOPE_Console.
     let mut fullscreen = new_lightweight_running_sandbox_app();
-    let untouched = fullscreen.developer_tools.grade();
+    let untouched = fullscreen.developer.tools.grade();
     press_console_key(
         &mut fullscreen,
         VirtualKeyCode::NumpadAdd,
         ModifiersState::empty(),
     );
     runtime_assert_eq!(
-        fullscreen.developer_tools.grade() => untouched,
+        fullscreen.developer.tools.grade() => untouched,
         "KEYSCOPE_Console actions are inert outside the console",
     );
 }
@@ -5916,22 +5916,22 @@ fn console_pop_keys_need_the_tools_page_the_way_cpp_needs_its_dialog() {
     app.console_mode = true;
     // Draw mode is what opens the Tools page; `open_developer_prop_tools`
     // lands on Property in any other mode.
-    app.developer_console_edit_mode = ConsoleEditMode::Draw;
+    app.developer.console_edit_mode = ConsoleEditMode::Draw;
 
     // No toolbox page: C++ would return false without touching anything.
     press_console_key(&mut app, VirtualKeyCode::KeyM, ModifiersState::CONTROL);
     runtime_assert!(
-        app.developer_tools_open_combo.is_none(),
+        app.developer.tools_open_combo.is_none(),
         "no tools dialog means no combo to pop"
     );
 
     // `C4ToolsDlg::Open`'s tail sets Active even with no dialog of its own.
     app.open_developer_prop_tools();
     press_console_key(&mut app, VirtualKeyCode::KeyM, ModifiersState::CONTROL);
-    runtime_assert_eq!(app.developer_tools_open_combo => Some(ToolsCombo::Materials));
+    runtime_assert_eq!(app.developer.tools_open_combo => Some(ToolsCombo::Materials));
 
     press_console_key(&mut app, VirtualKeyCode::KeyT, ModifiersState::CONTROL);
-    runtime_assert_eq!(app.developer_tools_open_combo => Some(ToolsCombo::Textures));
+    runtime_assert_eq!(app.developer.tools_open_combo => Some(ToolsCombo::Textures));
 }
 
 /// `idSelectedDef` is only ever the *single* selected object's identity.
@@ -5949,7 +5949,7 @@ fn the_property_page_reload_target_is_the_single_selected_definition() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
 
     runtime_assert_eq!(
         app.developer_property_selected_definition() => None,
@@ -5957,7 +5957,7 @@ fn the_property_page_reload_target_is_the_single_selected_definition() {
     );
 
     let first = app.snapshot.objects.first().test_value().clone();
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, first.id);
     runtime_assert_eq!(
         app.developer_property_selected_definition() => Some(first.definition_id.clone()),
@@ -5968,9 +5968,9 @@ fn the_property_page_reload_target_is_the_single_selected_definition() {
         .engine
         .spawn_test_object(clonk_engine::SpawnConfig::new(first.definition_id.clone()));
     app.snapshot = app.engine.snapshot();
-    app.developer_selection
+    app.developer.selection
         .toggle(SelectionWriter::EditCursor, second);
-    runtime_assert_eq!(app.developer_selection.objects().len() => 2);
+    runtime_assert_eq!(app.developer.selection.objects().len() => 2);
     runtime_assert_eq!(
         app.developer_property_selected_definition() => None,
         "a multiple selection names none, even when both share a definition",
@@ -6000,14 +6000,14 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     app.open_developer_prop_tools();
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
         ConsoleEditMode::Edit,
     )])
     .test_value();
     runtime_assert_eq!(
-        app.developer_toolbox.current_page() => Some(ToolboxPage::Property),
+        app.developer.toolbox.current_page() => Some(ToolboxPage::Property),
         "leaving Draw reopens the toolbox on Property",
     );
 
@@ -6021,7 +6021,7 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
 
     // One object selected: the button now has something to act on.
     let first = app.snapshot.objects.first().test_value().clone();
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, first.id);
     runtime_assert_eq!(
         app.developer_property_reload_target() => Some(first.definition_id.clone())
@@ -6040,15 +6040,15 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
         .engine
         .spawn_test_object(clonk_engine::SpawnConfig::new(first.definition_id.clone()));
     app.snapshot = app.engine.snapshot();
-    app.developer_selection
+    app.developer.selection
         .toggle(SelectionWriter::EditCursor, second);
     runtime_assert_eq!(app.developer_property_reload_target() => None);
     runtime_assert!(!app.developer_property_page_click(button, extent));
 
     // `Console.Editing` off disables the control outright.
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, first.id);
-    app.developer_console_editing_enabled = false;
+    app.developer.console_editing_enabled = false;
     runtime_assert_eq!(
         app.developer_property_reload_target() => None,
         "a disabled button reloads nothing however the selection stands",
@@ -6183,7 +6183,7 @@ fn the_property_script_entry_is_gated_on_editing_and_survives_a_refresh() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     runtime_assert!(app.developer_console_editing());
 
     runtime_assert!(app.developer_property_script_input().is_empty());
@@ -6193,7 +6193,7 @@ fn the_property_script_entry_is_gated_on_editing_and_survives_a_refresh() {
 
     // A selection change rebuilds the pane; the half-typed call stays.
     let subject = app.snapshot.objects.first().test_value().id;
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, subject);
     let _ = app.render_developer_toolbox_page(
         crate::developer_windows::ToolboxPage::Property,
@@ -6210,7 +6210,7 @@ fn the_property_script_entry_is_gated_on_editing_and_survives_a_refresh() {
     runtime_assert_eq!(app.developer_property_script_input() => "Mark(1");
 
     // Editing off: the control is disabled and takes nothing.
-    app.developer_console_editing_enabled = false;
+    app.developer.console_editing_enabled = false;
     runtime_assert!(!app.developer_console_editing());
     runtime_assert!(
         !app.type_developer_property_script("X"),
@@ -6231,10 +6231,10 @@ fn the_property_script_entry_submits_the_live_selection_on_enter() {
 
     let mut app = new_state_only_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
     let subject = app.snapshot.objects.first().test_value().id;
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, subject);
 
     // Empty input is not a submission.
@@ -6261,7 +6261,7 @@ fn the_property_script_entry_submits_the_live_selection_on_enter() {
     );
 
     // Editing off, Enter does nothing at all.
-    app.developer_console_editing_enabled = false;
+    app.developer.console_editing_enabled = false;
     runtime_assert!(!app.submit_developer_property_script().test_value());
     runtime_assert!(commands.take_submitted_decided_controls().is_empty());
 }
@@ -6309,7 +6309,7 @@ fn the_property_script_completion_is_the_public_engine_and_selected_definition()
     }
 
     // One object selected: its public functions join the list.
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::ObjectTree, subject);
     let selected = app.developer_property_script_completions();
     for offered in ["OfferedOne", "OfferedTwo"] {
@@ -6334,9 +6334,9 @@ fn the_property_script_completion_is_the_public_engine_and_selected_definition()
         .engine
         .spawn_test_object(clonk_engine::SpawnConfig::new("CMPL"));
     app.snapshot = app.engine.snapshot();
-    app.developer_selection
+    app.developer.selection
         .toggle(SelectionWriter::ObjectTree, second);
-    runtime_assert_eq!(app.developer_selection.objects().len() => 2);
+    runtime_assert_eq!(app.developer.selection.objects().len() => 2);
     runtime_assert_eq!(
         app.developer_property_script_completions() => global,
         "a multiple selection offers only the engine's own",
@@ -6375,7 +6375,7 @@ fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane()
     // Recomputed before every press: the thumb moves as the view does, so a
     // rectangle captured once stops describing the bar after the first step.
     let bar_now = |app: &GameApp| {
-        object_list_bar(extent, rows, app.developer_object_list_scroll).expect("overflowing")
+        object_list_bar(extent, rows, app.developer.object_list_scroll).expect("overflowing")
     };
     let bar = bar_now(&app);
 
@@ -6387,20 +6387,20 @@ fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane()
     ));
 
     // The trailing arrow steps by one row.
-    let selection_before = app.developer_selection.objects().to_vec();
+    let selection_before = app.developer.selection.objects().to_vec();
     runtime_assert!(app.developer_pane_scroll_press(
         DeveloperPane::ObjectList,
         (bar.track.x + 1, bar.track.y + bar.track.h - 2),
         extent
     ));
-    runtime_assert_eq!(app.developer_object_list_scroll.window(rows, extent.1).0 => 1);
+    runtime_assert_eq!(app.developer.object_list_scroll.window(rows, extent.1).0 => 1);
     runtime_assert_eq!(
-        app.developer_selection.objects() => selection_before.as_slice(),
+        app.developer.selection.objects() => selection_before.as_slice(),
         "a press the bar took never selected a row",
     );
 
     // The track below the thumb pages by the visible capacity.
-    let page = app.developer_object_list_scroll.window(rows, extent.1).1;
+    let page = app.developer.object_list_scroll.window(rows, extent.1).1;
     let stepped = bar_now(&app);
     runtime_assert!(app.developer_pane_scroll_press(
         DeveloperPane::ObjectList,
@@ -6408,7 +6408,7 @@ fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane()
         extent
     ));
     runtime_assert_eq!(
-        app.developer_object_list_scroll.window(rows, extent.1).0 => 1 + page
+        app.developer.object_list_scroll.window(rows, extent.1).0 => 1 + page
     );
 
     // The thumb captures, and the drag names an absolute row.
@@ -6418,14 +6418,14 @@ fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane()
         (paged.track.x + 1, paged.thumb.y + paged.thumb.h / 2),
         extent
     ));
-    runtime_assert_eq!(app.developer_pane_scroll_drag => Some(DeveloperPane::ObjectList));
+    runtime_assert_eq!(app.developer.pane_scroll_drag => Some(DeveloperPane::ObjectList));
     runtime_assert!(app.developer_pane_scroll_drag(
         DeveloperPane::ObjectList,
         (bar.track.x + 1, bar.track.y + bar.track.h),
         extent
     ));
     runtime_assert_eq!(
-        app.developer_object_list_scroll.window(rows, extent.1).0 => rows - page,
+        app.developer.object_list_scroll.window(rows, extent.1).0 => rows - page,
         "dragging to the bottom shows the last full page",
     );
     // The other pane is not this drag.
@@ -6438,12 +6438,12 @@ fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane()
     runtime_assert!(!app.developer_pane_scroll_release());
 
     // A pane whose content fits has no bar and answers no press.
-    app.developer_selection.clear(SelectionWriter::ObjectTree);
+    app.developer.selection.clear(SelectionWriter::ObjectTree);
     runtime_assert!(
         crate::developer_toolbox_view::property_output_bar(
             (240, 160),
             app.developer_property_page_line_count(),
-            app.developer_property_scroll,
+            app.developer.property_scroll,
         )
         .is_none(),
         "an empty property pane is one line and fits"
@@ -6494,19 +6494,19 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     // Plain click replaces.
     app.input_routing.live.modifiers = ModifiersState::empty();
     click(&mut app, 3);
-    runtime_assert_eq!(app.developer_selection.objects() => &[rows[3].id]);
+    runtime_assert_eq!(app.developer.selection.objects() => &[rows[3].id]);
 
     // Ctrl-click adds — and the writeback is in path order, not click order.
     app.input_routing.live.modifiers = ModifiersState::CONTROL;
     click(&mut app, 1);
     runtime_assert_eq!(
-        app.developer_selection.objects() => &[rows[1].id, rows[3].id],
+        app.developer.selection.objects() => &[rows[1].id, rows[3].id],
         "the earlier row comes first however late it was clicked",
     );
 
     // Ctrl-clicking a selected row takes it out again.
     click(&mut app, 3);
-    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+    runtime_assert_eq!(app.developer.selection.objects() => &[rows[1].id]);
 
     // Shift-click covers the anchor through the clicked row, replacing. The
     // anchor is row 3: a Ctrl-click *sets* it, so an extension afterwards
@@ -6514,13 +6514,13 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     app.input_routing.live.modifiers = ModifiersState::SHIFT;
     click(&mut app, 4);
     runtime_assert_eq!(
-        app.developer_selection.objects() => &[rows[3].id, rows[4].id]
+        app.developer.selection.objects() => &[rows[3].id, rows[4].id]
     );
     // A second Shift-click extends from that same anchor rather than from the
     // row the last one reached.
     click(&mut app, 2);
     runtime_assert_eq!(
-        app.developer_selection.objects() => &[rows[2].id, rows[3].id]
+        app.developer.selection.objects() => &[rows[2].id, rows[3].id]
     );
 
     // Ctrl+Shift adds the range to what is already selected.
@@ -6529,24 +6529,24 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     app.input_routing.live.modifiers = ModifiersState::CONTROL;
     click(&mut app, 0);
     runtime_assert_eq!(
-        app.developer_selection.objects() => &[rows[0].id, rows[4].id]
+        app.developer.selection.objects() => &[rows[0].id, rows[4].id]
     );
     app.input_routing.live.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
     click(&mut app, 2);
     runtime_assert_eq!(
-        app.developer_selection.objects() =>
+        app.developer.selection.objects() =>
         &[rows[0].id, rows[1].id, rows[2].id, rows[4].id],
         "the range joins the selection instead of replacing it",
     );
 
     // A live mutation keeps every still-valid id, in the same order.
-    let survivors = app.developer_selection.objects().to_vec();
+    let survivors = app.developer.selection.objects().to_vec();
     app.engine
         .spawn_test_object(clonk_engine::SpawnConfig::new(definition.clone()));
     app.snapshot = app.engine.snapshot();
     let _ = app.render_developer_object_list(extent.0, extent.1);
     runtime_assert_eq!(
-        app.developer_selection.objects() => survivors.as_slice(),
+        app.developer.selection.objects() => survivors.as_slice(),
         "a spawned object disturbs no existing selection",
     );
 
@@ -6554,7 +6554,7 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     // nothing does.
     app.input_routing.live.modifiers = ModifiersState::empty();
     app.developer_object_list_click((10, extent.1 as i32 - 4), extent);
-    runtime_assert!(app.developer_selection.objects().is_empty());
+    runtime_assert!(app.developer.selection.objects().is_empty());
     let _ = SelectionWriter::ObjectTree;
 }
 
@@ -6590,35 +6590,35 @@ fn object_list_arrow_keys_move_the_selection_and_ctrl_moves_only_the_cursor() {
 
     // With no cursor, the first key lands on the first row and selects it.
     runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, false, height));
-    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[0].id));
-    runtime_assert_eq!(app.developer_selection.objects() => &[rows[0].id]);
+    runtime_assert_eq!(app.developer.object_list_cursor => Some(rows[0].id));
+    runtime_assert_eq!(app.developer.selection.objects() => &[rows[0].id]);
 
     // A plain arrow takes the selection with it.
     runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, false, height));
-    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+    runtime_assert_eq!(app.developer.selection.objects() => &[rows[1].id]);
 
     // Ctrl moves the cursor and leaves the selection where it was.
     runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, true, false, height));
-    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[2].id));
+    runtime_assert_eq!(app.developer.object_list_cursor => Some(rows[2].id));
     runtime_assert_eq!(
-        app.developer_selection.objects() => &[rows[1].id],
+        app.developer.selection.objects() => &[rows[1].id],
         "Ctrl+arrow is a cursor move, not a selection change",
     );
 
     // Ctrl+Space then adds what the cursor is on.
     runtime_assert!(app.toggle_developer_object_list_cursor_selection());
-    let mut selected = app.developer_selection.objects().to_vec();
+    let mut selected = app.developer.selection.objects().to_vec();
     selected.sort_by_key(|id| id.as_u64());
     let mut expected = vec![rows[1].id, rows[2].id];
     expected.sort_by_key(|id| id.as_u64());
     runtime_assert_eq!(selected => expected);
     // And removes it again.
     runtime_assert!(app.toggle_developer_object_list_cursor_selection());
-    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+    runtime_assert_eq!(app.developer.selection.objects() => &[rows[1].id]);
 
     // Home returns to the top, and asking again claims nothing.
     runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Home, false, false, height));
-    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[0].id));
+    runtime_assert_eq!(app.developer.object_list_cursor => Some(rows[0].id));
     runtime_assert!(
         !app.navigate_developer_object_list(ObjectListKey::Home, false, false, height),
         "already at the top: the key is left unclaimed"
@@ -6631,18 +6631,18 @@ fn object_list_arrow_keys_move_the_selection_and_ctrl_moves_only_the_cursor() {
     // Shift extends a range from the anchor the last plain move set.
     runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, true, height));
     runtime_assert!(app.navigate_developer_object_list(ObjectListKey::Down, false, true, height));
-    let mut extended = app.developer_selection.objects().to_vec();
+    let mut extended = app.developer.selection.objects().to_vec();
     extended.sort_by_key(|id| id.as_u64());
     let mut range = vec![rows[0].id, rows[1].id, rows[2].id];
     range.sort_by_key(|id| id.as_u64());
     runtime_assert_eq!(extended => range, "Shift covers the anchor through the cursor");
 
     // A click resets both, the way `set_cursor` does.
-    app.developer_selection.clear(SelectionWriter::ObjectTree);
+    app.developer.selection.clear(SelectionWriter::ObjectTree);
     let rect = crate::developer_object_list_view::object_list_row_rect_for_test(1, 200);
     app.developer_object_list_click((rect.x + rect.w - 4, rect.y + rect.h / 2), (200, height));
-    runtime_assert_eq!(app.developer_object_list_cursor => Some(rows[1].id));
-    runtime_assert_eq!(app.developer_selection.objects() => &[rows[1].id]);
+    runtime_assert_eq!(app.developer.object_list_cursor => Some(rows[1].id));
+    runtime_assert_eq!(app.developer.selection.objects() => &[rows[1].id]);
 }
 
 /// The tree opens on the expander and stays open across a rebuild.
@@ -6689,7 +6689,7 @@ fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
     );
 
     // A click on the expander opens it, and does not select the row.
-    let before = app.developer_selection.objects().to_vec();
+    let before = app.developer.selection.objects().to_vec();
     let rect = crate::developer_object_list_view::object_list_row_rect_for_test(index, extent.0);
     let expander = expander_rect(rect, rows[index].depth).test_value();
     app.developer_object_list_click(
@@ -6697,7 +6697,7 @@ fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
         extent,
     );
     runtime_assert_eq!(
-        app.developer_selection.objects() => before.as_slice(),
+        app.developer.selection.objects() => before.as_slice(),
         "the expander column consumes its own click",
     );
     runtime_assert!(
@@ -6715,12 +6715,12 @@ fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
 
     // Selecting the contained object from the edit cursor does not close it
     // either, and clicking its own row still selects.
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, held);
     let index = row_of(&app, held).test_value();
     let rect = crate::developer_object_list_view::object_list_row_rect_for_test(index, extent.0);
     app.developer_object_list_click((rect.x + rect.w - 4, rect.y + rect.h / 2), extent);
-    runtime_assert_eq!(app.developer_selection.objects() => &[held]);
+    runtime_assert_eq!(app.developer.selection.objects() => &[held]);
 }
 
 /// The list's scroll survives the rebuilds a live round produces, and moves
@@ -6765,10 +6765,10 @@ fn the_object_list_scroll_survives_rebuilds_and_follows_only_a_new_selection() {
         app.scroll_developer_object_list(4, height),
         "a wheel notch moves the retained view"
     );
-    let scrolled = app.developer_object_list_scroll;
+    let scrolled = app.developer.object_list_scroll;
     let _ = app.render_developer_object_list(200, height);
     runtime_assert_eq!(
-        app.developer_object_list_scroll => scrolled,
+        app.developer.object_list_scroll => scrolled,
         "drawing the list does not move it",
     );
 
@@ -6779,25 +6779,25 @@ fn the_object_list_scroll_survives_rebuilds_and_follows_only_a_new_selection() {
     app.snapshot = app.engine.snapshot();
     let _ = app.render_developer_object_list(200, height);
     runtime_assert_eq!(
-        app.developer_object_list_scroll => scrolled,
+        app.developer.object_list_scroll => scrolled,
         "a spawned object does not scroll the list",
     );
 
     // Selecting an offscreen row does move it, once.
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, extra);
     let _ = app.render_developer_object_list(200, height);
-    let revealed = app.developer_object_list_scroll;
+    let revealed = app.developer.object_list_scroll;
     runtime_assert!(
         revealed != scrolled,
         "the new selection was offscreen and brought the view with it"
     );
     // Scroll away from the revealed row: the direction that always has room.
     runtime_assert!(app.scroll_developer_object_list(3, height));
-    let moved_away = app.developer_object_list_scroll;
+    let moved_away = app.developer.object_list_scroll;
     let _ = app.render_developer_object_list(200, height);
     runtime_assert_eq!(
-        app.developer_object_list_scroll => moved_away,
+        app.developer.object_list_scroll => moved_away,
         "the same selection does not drag the view back",
     );
 }
@@ -6817,7 +6817,7 @@ fn the_property_output_scroll_survives_a_refresh_and_clamps_for_a_shorter_object
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     // A box two lines tall, so the fixture object's three-line detail
     // overflows it — the whole point of the pane being scrollable.
     let height = 74u32;
@@ -6832,7 +6832,7 @@ fn the_property_output_scroll_survives_a_refresh_and_clamps_for_a_shorter_object
 
     // Select something with enough detail to overflow the box.
     let subject = app.snapshot.objects.first().test_value().clone();
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, subject.id);
     let lines = app.developer_property_page_line_count();
     runtime_assert!(
@@ -6841,13 +6841,13 @@ fn the_property_output_scroll_survives_a_refresh_and_clamps_for_a_shorter_object
     );
 
     runtime_assert!(app.scroll_developer_property_page(1, height));
-    let scrolled = app.developer_property_scroll;
+    let scrolled = app.developer.property_scroll;
     // What is *shown* has to follow the retained line, not merely be stored
     // beside it.
     let shown = |app: &GameApp| {
         property_output_window(
             app.developer_property_page_line_count(),
-            app.developer_property_scroll,
+            app.developer.property_scroll,
             height,
         )
         .0
@@ -6855,19 +6855,19 @@ fn the_property_output_scroll_survives_a_refresh_and_clamps_for_a_shorter_object
     runtime_assert_eq!(shown(&app) => 1, "the box starts at the scrolled line");
     let _ = app.render_developer_toolbox_page(ToolboxPage::Property, 240, height);
     runtime_assert_eq!(
-        app.developer_property_scroll => scrolled,
+        app.developer.property_scroll => scrolled,
         "drawing the pane does not move it",
     );
     runtime_assert_eq!(shown(&app) => 1);
 
     // Deselecting shortens the output to one line; the retained position is
     // clamped for display but not thrown away.
-    app.developer_selection.clear(SelectionWriter::EditCursor);
+    app.developer.selection.clear(SelectionWriter::EditCursor);
     let _ = app.render_developer_toolbox_page(ToolboxPage::Property, 240, height);
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, subject.id);
     runtime_assert_eq!(
-        app.developer_property_scroll => scrolled,
+        app.developer.property_scroll => scrolled,
         "re-selecting comes back to where the user was",
     );
     runtime_assert_eq!(shown(&app) => 1, "and shows that line again");
@@ -6882,19 +6882,19 @@ fn developer_object_list_opens_and_binds_the_selection_both_ways() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    assert!(!app.developer_object_list_open);
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
+    assert!(!app.developer.object_list_open);
 
     // `EditObjects` is one line, and unlike Script/Title/Info it carries
     // no network refusal — the list only reads.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditObjects])
         .test_value();
-    assert!(app.developer_object_list_open);
+    assert!(app.developer.object_list_open);
     // Opening again is idempotent: C++ builds the window only when it has
     // none.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditObjects])
         .test_value();
-    assert!(app.developer_object_list_open);
+    assert!(app.developer.object_list_open);
 
     let extent = (
         crate::developer_object_list_view::OBJECT_LIST_WIDTH,
@@ -6908,16 +6908,16 @@ fn developer_object_list_opens_and_binds_the_selection_both_ways() {
     // own write so the edit cursor can tell it from its own.
     let subject = app.snapshot.objects.first().test_value().id;
     app.developer_object_list_click((8, 8), extent);
-    assert_eq!(app.developer_selection.objects(), &[subject]);
+    assert_eq!(app.developer.selection.objects(), &[subject]);
 
     // A click on empty space below the last row clears it — an empty
     // `gtk_tree_selection_get_selected_rows` still runs the handler.
     app.developer_object_list_click((8, extent.1 as i32 - 8), extent);
-    assert!(app.developer_selection.is_empty());
+    assert!(app.developer.selection.is_empty());
 
     // The list mirrors a selection the *viewport* made, which is the other
     // half of the binding.
-    app.developer_selection
+    app.developer.selection
         .replace(SelectionWriter::EditCursor, subject);
     let mirrored = app.render_developer_object_list(extent.0, extent.1);
     runtime_assert_ne!(mirrored.pixels() => surface.pixels(), "the selected row is drawn differently from an unselected one");
@@ -6925,7 +6925,7 @@ fn developer_object_list_opens_and_binds_the_selection_both_ways() {
     // Closing destroys it rather than hiding it, so the next Objects click
     // builds a new window.
     app.close_developer_object_list();
-    assert!(!app.developer_object_list_open);
+    assert!(!app.developer.object_list_open);
 }
 
 // C4Viewport.cpp:225-240 and C4Game.cpp:1641-1676 — dropping a definition
@@ -7032,7 +7032,7 @@ fn viewport_window_geometry_round_trips_through_the_console_subkey() {
 fn console_viewport_draws_scroll_bars_only_while_unlocked() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let identity = open_test_console_viewport(&mut app, None);
 
     // The thumb grey `draw_console_scroll_bars` paints. Counting it is enough:
@@ -7101,7 +7101,7 @@ fn console_viewport_file_drop_emits_a_definition_drop_control() {
     let [(_, clonk_engine::ControlPacket::EmDropDef(drop), false)] = decided.as_slice() else {
         panic!(
             "expected one definition drop control, got {decided:?}; console said {:?}",
-            app.developer_console.log().text()
+            app.developer.console.log().text()
         );
     };
     assert_eq!(drop.id, definition.as_bytes());
@@ -7120,22 +7120,22 @@ fn console_viewport_file_drop_emits_a_definition_drop_control() {
     );
 
     // A `.c4d` the engine does not hold emits nothing and says so.
-    app.developer_console.clear_log();
+    app.developer.console.clear_log();
     app.drop_file_on_console_viewport(identity, std::path::Path::new("/tmp/Missing.c4d"), local);
     assert!(commands.take_submitted_decided_controls().is_empty());
     runtime_assert!(
-        app.developer_console.log().text().contains("Missing.c4d"),
+        app.developer.console.log().text().contains("Missing.c4d"),
         "the failure names the file: {:?}",
-        app.developer_console.log().text()
+        app.developer.console.log().text()
     );
 
     // A console that may not edit refuses the whole drop, with the same
     // message the draw tools use.
-    app.developer_console_editing_enabled = false;
-    app.developer_console.clear_log();
+    app.developer.console_editing_enabled = false;
+    app.developer.console.clear_log();
     app.drop_file_on_console_viewport(identity, &source, local);
     assert!(commands.take_submitted_decided_controls().is_empty());
-    assert!(!app.developer_console.log().text().is_empty());
+    assert!(!app.developer.console.log().text().is_empty());
 }
 
 /// The other half of `C4Game::DropFile`: when `C4Id2Def` misses, C++ loads the
@@ -7177,7 +7177,7 @@ fn console_viewport_file_drop_loads_a_definition_outside_the_loaded_set() {
     let [(_, clonk_engine::ControlPacket::EmDropDef(drop), false)] = decided.as_slice() else {
         panic!(
             "expected one definition drop control, got {decided:?}; console said {:?}",
-            app.developer_console.log().text()
+            app.developer.console.log().text()
         );
     };
     assert_eq!(drop.id, definition.as_bytes());
@@ -7200,20 +7200,20 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Draw;
+    app.developer.console_edit_mode = ConsoleEditMode::Draw;
 
     // Nothing opens the toolbox on its own: `SetMode` reopens it only when
     // one of the two pages was already active (`:508-516`).
-    assert!(app.developer_toolbox_effects.is_empty());
-    assert_eq!(app.developer_toolbox.current_page(), None);
+    assert!(app.developer.toolbox_effects.is_empty());
+    assert_eq!(app.developer.toolbox.current_page(), None);
 
     // Draw mode's Properties row opens the Tools page, and `C4ToolsDlg::
     // Open`'s tail sets Active even with no dialog of its own.
     app.open_developer_prop_tools();
-    assert!(app.developer_tools.active());
-    runtime_assert_eq!(app.developer_toolbox.current_page() => Some(ToolboxPage::Tools));
-    runtime_assert_eq!(app.developer_toolbox.pages() => &[ToolboxPage::Tools, ToolboxPage::Property], "both pages are appended, whichever is switched to");
-    let effects = std::mem::take(&mut app.developer_toolbox_effects);
+    assert!(app.developer.tools.active());
+    runtime_assert_eq!(app.developer.toolbox.current_page() => Some(ToolboxPage::Tools));
+    runtime_assert_eq!(app.developer.toolbox.pages() => &[ToolboxPage::Tools, ToolboxPage::Property], "both pages are appended, whichever is switched to");
+    let effects = std::mem::take(&mut app.developer.toolbox_effects);
     runtime_assert!(
         matches!(effects.first(), Some(ToolboxEffect::Create(_))),
         "the first page creates the window: {effects:?}"
@@ -7235,8 +7235,8 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
         ConsoleEditMode::Edit,
     )])
     .test_value();
-    assert!(!app.developer_tools.active(), "Clear drops Active");
-    runtime_assert_eq!(app.developer_toolbox.current_page() => Some(ToolboxPage::Property));
+    assert!(!app.developer.tools.active(), "Clear drops Active");
+    runtime_assert_eq!(app.developer.toolbox.current_page() => Some(ToolboxPage::Property));
 
     // The page's own controls: everything but the landscape mode is local
     // dialog state, and only the mode leaves as a control.
@@ -7244,7 +7244,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
         ConsoleEditMode::Draw,
     )])
     .test_value();
-    app.developer_toolbox_effects.clear();
+    app.developer.toolbox_effects.clear();
     let extent = (TOOLBOX_WIDTH, TOOLBOX_HEIGHT);
     let center = |app: &GameApp, control: ToolsControl| {
         let rect = app
@@ -7266,9 +7266,9 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
 
     let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
     app.developer_toolbox_click(center(&app, ToolsControl::Line), extent);
-    runtime_assert_eq!(app.developer_tools.tool() => clonk_engine::developer_tools::Tool::Line);
+    runtime_assert_eq!(app.developer.tools.tool() => clonk_engine::developer_tools::Tool::Line);
     app.developer_toolbox_click(center(&app, ToolsControl::NoIft), extent);
-    assert!(!app.developer_tools.ift());
+    assert!(!app.developer.tools.ift());
     runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "the tool and IFT are dialog state, not synchronized state"
@@ -7313,18 +7313,18 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     // shared devmode window's "hide" to `OnWindowHide`, whose body is
     // exactly that (`C4ToolsDlg.cpp:393,1098-1101`). Without it the next
     // mode change would resurrect a toolbox the user closed.
-    assert!(app.developer_tools.active());
+    assert!(app.developer.tools.active());
     app.close_developer_toolbox(Some((120, 80)));
-    assert!(!app.developer_tools.active());
-    assert!(!app.developer_toolbox.visible());
-    assert_eq!(app.developer_toolbox.remembered_position(), Some((120, 80)));
-    app.developer_toolbox_effects.clear();
+    assert!(!app.developer.tools.active());
+    assert!(!app.developer.toolbox.visible());
+    assert_eq!(app.developer.toolbox.remembered_position(), Some((120, 80)));
+    app.developer.toolbox_effects.clear();
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
         ConsoleEditMode::Play,
     )])
     .test_value();
     runtime_assert!(
-        app.developer_toolbox_effects.is_empty(),
+        app.developer.toolbox_effects.is_empty(),
         "a closed toolbox is not reopened by a mode change"
     );
     // Re-opening restores the remembered position rather than re-centring.
@@ -7333,14 +7333,14 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     )])
     .test_value();
     app.open_developer_prop_tools();
-    runtime_assert!(app.developer_toolbox_effects.iter().any(|effect| matches!(
+    runtime_assert!(app.developer.toolbox_effects.iter().any(|effect| matches!(
         effect,
         ToolboxEffect::Show {
             position: Some((120, 80)),
             ..
         }
     )));
-    app.developer_toolbox_effects.clear();
+    app.developer.toolbox_effects.clear();
 
     // The property page is a read-only text box: clicking it emits
     // nothing at all.
@@ -7348,7 +7348,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
         ConsoleEditMode::Edit,
     )])
     .test_value();
-    runtime_assert_eq!(app.developer_toolbox.current_page() => Some(ToolboxPage::Property));
+    runtime_assert_eq!(app.developer.toolbox.current_page() => Some(ToolboxPage::Property));
     app.developer_toolbox_click(center(&app, ToolsControl::ModeExact), extent);
     assert!(commands.take_submitted_decided_controls().is_empty());
 
@@ -7369,7 +7369,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let identity = open_test_console_viewport(&mut app, None);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
@@ -7383,7 +7383,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
     runtime_assert_eq!(app.snapshot.object(container).expect("the container is live").contents => vec![held]);
 
     let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
-    app.developer_selection.replace(
+    app.developer.selection.replace(
         clonk_engine::developer_selection::SelectionWriter::EditCursor,
         container,
     );
@@ -7404,7 +7404,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
     // The selection is now the contents, not the container, and `Hold` is
     // set before the control leaves — that is what lets the freed objects
     // be dragged straight out.
-    assert_eq!(app.developer_selection.objects(), &[held]);
+    assert_eq!(app.developer.selection.objects(), &[held]);
     assert!(app.edit_cursor.hold);
     let decided = commands.take_submitted_decided_controls();
     let [(_, clonk_engine::ControlPacket::EmMoveObject(exit), false)] = decided.as_slice() else {
@@ -7447,7 +7447,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     let pressed = (40, 10);
     app.console_viewport_press(identity, pressed, 1.0, false, false);
     runtime_assert!(
-        app.developer_tools.holding(),
+        app.developer.tools.holding(),
         "a draw press arms Hold like every other gesture"
     );
     let decided = commands.take_submitted_decided_controls();
@@ -7476,7 +7476,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     assert_eq!((dragging.x, dragging.y), world(dragged));
 
     app.console_viewport_release(identity);
-    assert!(!app.developer_tools.holding(), "the release clears Hold");
+    assert!(!app.developer.tools.holding(), "the release clears Hold");
     runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "the brush emits nothing on release"
@@ -7486,7 +7486,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
     // with the *live* cursor leading and the anchor second — C++'s own
     // argument order, `C4ControlEMDrawTool(EMDT_Line, Mode, X, Y, X2, Y2)`
     // (`:558`).
-    app.developer_tools.set_tool(Tool::Line, false);
+    app.developer.tools.set_tool(Tool::Line, false);
     let anchor = (12, 34);
     app.console_viewport_press(identity, anchor, 1.0, false, false);
     runtime_assert!(
@@ -7521,15 +7521,15 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
     let projection = app.console_viewports.projections[&identity];
     let world = |local: (i32, i32)| (projection.target_x + local.0, projection.target_y + local.1);
-    app.developer_tools.set_tool(Tool::Fill, false);
+    app.developer.tools.set_tool(Tool::Fill, false);
 
     // Halted: the click is refused with IDS_CNS_FILLNOHALT and Hold is
     // never armed, so the frame repeat cannot start either (`:227-231`).
     app.network_control_running = false;
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
-    assert!(!app.developer_tools.holding(), "a halted fill never holds");
+    assert!(!app.developer.tools.holding(), "a halted fill never holds");
     runtime_assert!(app
-        .developer_console
+        .developer.console
         .log()
         .text()
         .contains("The fill tool cannot be used in halt mode."));
@@ -7540,7 +7540,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     app.network_control_running = true;
     let pressed = (40, 10);
     app.console_viewport_press(identity, pressed, 1.0, false, false);
-    assert!(app.developer_tools.holding());
+    assert!(app.developer.tools.holding());
     runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
         "fill emits nothing on the click itself"
@@ -7603,12 +7603,12 @@ fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
 
     // A console that cannot edit refuses the brush, says so, and drops the
     // hold — so the following drag steps are silent too (`:677`).
-    app.developer_console_editing_enabled = false;
+    app.developer.console_editing_enabled = false;
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
     assert!(commands.take_submitted_decided_controls().is_empty());
-    assert!(!app.developer_tools.holding(), "EditingOK clears Hold");
+    assert!(!app.developer.tools.holding(), "EditingOK clears Hold");
     runtime_assert!(app
-        .developer_console
+        .developer.console
         .log()
         .text()
         .contains("No editing while replaying."));
@@ -7620,14 +7620,14 @@ fn a_refused_draw_stroke_and_a_mode_change_both_clear_the_held_gesture() {
 
     // A mode change between press and release must not strand the hold:
     // `LeftButtonUp` clears it unconditionally (`:300-304`).
-    app.developer_console_editing_enabled = true;
+    app.developer.console_editing_enabled = true;
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
-    assert!(app.developer_tools.holding());
+    assert!(app.developer.tools.holding());
     let _ = commands.take_submitted_decided_controls();
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     app.console_viewport_release(identity);
     runtime_assert!(
-        !app.developer_tools.holding(),
+        !app.developer.tools.holding(),
         "the release clears Hold even though the Draw finish did not run"
     );
 }
@@ -7640,7 +7640,7 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
 
     let mut app = new_lightweight_running_sandbox_app();
     app.console_mode = true;
-    app.developer_console_edit_mode = ConsoleEditMode::Draw;
+    app.developer.console_edit_mode = ConsoleEditMode::Draw;
     // `ApplyToolPicker` samples nothing outside Static and Exact.
     app.apply_ready_controls(
         1,
@@ -7660,17 +7660,17 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
     // Alt overrides the tool only while it is held, and only in Draw mode
     // (`C4EditCursor::AltDown`, `:773-780`).
     app.update_console_editor_modifiers(ModifiersState::ALT);
-    assert_eq!(app.developer_tools.tool(), Tool::Picker);
+    assert_eq!(app.developer.tools.tool(), Tool::Picker);
 
     // Sampling empty landscape selects the sky pseudo-material and leaves
     // the texture alone (`:717`, `:727`) — set it away from its default
     // first, so "unchanged" cannot be confused with "reset".
-    app.developer_tools.set_texture("Smooth");
+    app.developer.tools.set_texture("Smooth");
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
-    assert_eq!(app.developer_tools.material(), "Sky");
-    assert_eq!(app.developer_tools.texture(), "Smooth");
+    assert_eq!(app.developer.tools.material(), "Sky");
+    assert_eq!(app.developer.tools.texture(), "Smooth");
     runtime_assert!(
-        !app.developer_tools.holding(),
+        !app.developer.tools.holding(),
         "ApplyToolPicker ends with Hold = false (`:731`)"
     );
     runtime_assert!(
@@ -7680,12 +7680,12 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
 
     // Releasing Alt restores the tool the dialog had before.
     app.update_console_editor_modifiers(ModifiersState::empty());
-    assert_eq!(app.developer_tools.tool(), Tool::Brush);
+    assert_eq!(app.developer.tools.tool(), Tool::Brush);
 
     // Outside Draw mode Alt is inert.
-    app.developer_console_edit_mode = ConsoleEditMode::Edit;
+    app.developer.console_edit_mode = ConsoleEditMode::Edit;
     app.update_console_editor_modifiers(ModifiersState::ALT);
-    assert_eq!(app.developer_tools.tool(), Tool::Brush);
+    assert_eq!(app.developer.tools.tool(), Tool::Brush);
 }
 
 // C4Viewport.cpp:125-146,250-284,1162 — a console viewport window scrolls

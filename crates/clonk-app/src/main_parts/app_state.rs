@@ -964,6 +964,11 @@ pub(crate) struct ConsoleViewportState {
     /// Per physical viewport: two detached windows can be dragged one after
     /// the other without the first one's capture answering for the second.
     pub(crate) scroll_drag: Option<(u64, clonk_engine::developer_viewport::ScrollAxis)>,
+    /// The projection each console viewport window was last drawn with,
+    /// keyed by physical identity. `GraphicsSystem::active_viewports` holds
+    /// the *fullscreen* layout, which console mode never renders, so a
+    /// detached window's pointer routing has no other source of its own
+    /// `ViewX`/`ViewY` (`C4Viewport.cpp:1146`).
     pub(crate) projections:
         std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
     /// `C4EditCursor::DoContextMenu`'s popup and the physical viewport whose
@@ -1013,6 +1018,96 @@ pub(crate) struct EditCursorState {
     /// `(X2, Y2)` corner, both in world coordinates. `Some` exactly while a
     /// rubber band is armed.
     pub(crate) drag_frame: Option<((i32, i32), (i32, i32))>,
+}
+
+/// The developer console and toolbox: the console and its edit mode, the
+/// selection and the tool set, the object list and property panes with
+/// their scroll, cursor and expansion state, the toolbox and its effects,
+/// the component editor and its hosts. `GameApp` composes it as
+/// `developer`.
+pub(crate) struct DeveloperToolsState {
+    pub(crate) console: DeveloperConsole,
+    pub(crate) console_edit_mode: ConsoleEditMode,
+    /// `C4EditCursor::Selection`. Shared by the viewport edit cursor, the
+    /// property panel and the object tree, so a write from one is visible
+    /// to the others (`C4EditCursor.h:39`).
+    pub(crate) selection: clonk_engine::developer_selection::DeveloperSelection,
+    /// `C4Console::ToolsDlg` — the retained tool, grade, IFT, material and
+    /// texture the Draw-mode gestures read, plus their own `Hold`/anchor.
+    /// Away from Win32 and GTK this state *is* the tools dialog: `Open`
+    /// creates no window at all on the reference build (`C4ToolsDlg.cpp:262`).
+    pub(crate) tools: clonk_engine::developer_tools::DeveloperTools,
+    /// Which Tools-page selector is showing its list.
+    ///
+    /// Presentation state, so it lives here rather than in the engine's
+    /// `DeveloperTools`: C++'s combo owns its own dropped-down state and the
+    /// dialog reads it back, and nothing about it reaches the simulation.
+    pub(crate) tools_open_combo: Option<crate::developer_toolbox_view::ToolsCombo>,
+    /// The object list's retained scroll position, and the selection it was
+    /// last moved for. `C4ObjectListDlg::Update` rebuilds the model on every
+    /// object change and only moves the view when the *cursor* changes
+    /// (`C4ObjectListDlg.cpp:599-646,747-780`), so the reveal has to fire on a
+    /// selection change rather than on every frame — otherwise scrolling away
+    /// from the selection would be impossible.
+    pub(crate) object_list_scroll: crate::developer_object_list_view::ObjectListScroll,
+    /// Which developer pane's scroll thumb is being dragged.
+    ///
+    /// One field for both panes because they live in different windows: a
+    /// drag can only ever be in one of them, and holding it here is what lets
+    /// the release find it wherever the pointer ended up.
+    pub(crate) pane_scroll_drag: Option<DeveloperPane>,
+    /// The object list's keyboard cursor.
+    ///
+    /// `GtkTreeView` keeps a cursor separate from the selection: Ctrl+arrows
+    /// move it without selecting, and Ctrl+Space then selects what it is on.
+    /// A cursor whose row is no longer drawn is not a position, so navigation
+    /// starts over from the top rather than guessing.
+    pub(crate) object_list_cursor: Option<clonk_engine::ObjectId>,
+    /// Where a Shift-extended range is anchored.
+    pub(crate) object_list_anchor: Option<clonk_engine::ObjectId>,
+    /// Which containers the user has opened in the object tree
+    /// (`C4ObjectListDlg.cpp:726-787`).
+    pub(crate) object_tree_expansion: crate::developer_object_list_view::ObjectTreeExpansion,
+    pub(crate) object_list_revealed: Option<clonk_engine::ObjectId>,
+    /// What is typed into the property page's script entry.
+    ///
+    /// `IDC_COMBOINPUT`'s own text: `UpdateInputCtrl` reads it before
+    /// rebuilding the completion list and writes it back afterwards
+    /// (`C4PropertyDlg.cpp:296-306,372-374`), so the rebuild `Update` performs
+    /// on Tick35 and on every selection change cannot eat a half-typed call.
+    /// Holding it here is that preservation: nothing else writes it.
+    pub(crate) property_script_input: String,
+    /// The property pane's retained first visible line
+    /// (`C4PropertyDlg.cpp:257-262`).
+    pub(crate) property_scroll: crate::developer_toolbox_view::LineScroll,
+    /// `C4Console::ToolsDlg` and `PropertyDlg`'s shared `C4DevmodeDlg`
+    /// notebook. The model owns every decision about the window
+    /// ([`crate::developer_toolbox`]); the runner owns the window itself, so
+    /// the effects it produces queue here until the event loop, which is the
+    /// only place winit will build one, can apply them.
+    pub(crate) toolbox: crate::developer_toolbox::DeveloperToolbox,
+    pub(crate) toolbox_effects: Vec<crate::developer_toolbox::ToolboxEffect>,
+    /// `C4ObjectListDlg`'s `window != nullptr` — the whole of its state.
+    /// Everything the list draws is read from the snapshot at redraw, so
+    /// unlike the toolbox there is no model to keep beside the window.
+    pub(crate) object_list_open: bool,
+    /// The open `C4ComponentHost::ShowDialog`: which component, the host
+    /// holding its committed bytes, and the text being edited. C++ keeps the
+    /// host on `C4Game` (`Game.Script`, `Game.Title`, `Game.Info`) for the
+    /// whole round; the port has no runtime host at all, so it loads one when
+    /// the editor opens and hands its bytes to the save.
+    pub(crate) component_editor: Option<DeveloperComponentEdit>,
+    /// Components the user has committed this round, which the scenario save
+    /// projects onto its group journal
+    /// (`developer_console_save::component_save_mutations`). C++ keeps them on
+    /// `C4Game` and asks each one at save time; the port collects them here as
+    /// they are accepted, which is the same set for the same reason.
+    pub(crate) component_hosts: Vec<clonk_engine::developer_components::ComponentHost>,
+    /// Native `C4Console::Editing` starts true and is irreversibly cleared
+    /// when `EnableControls` observes a no-input playback. Opening another
+    /// game defaults the edit cursor mode, but does not restore this latch.
+    pub(crate) console_editing_enabled: bool,
+    pub(crate) console_pointer: GuiPoint,
 }
 
 pub(crate) struct GameApp {
@@ -1111,6 +1206,8 @@ pub(crate) struct GameApp {
     /// The console's viewport windows and their painted popup
     /// (clonk-org/clonk-rs#1242).
     pub(crate) console_viewports: ConsoleViewportState,
+    /// The developer console and toolbox (clonk-org/clonk-rs#1242).
+    pub(crate) developer: DeveloperToolsState,
     #[cfg(test)]
     #[cfg(test)]
     pub(crate) sec1_timer_call_count: usize,
@@ -1240,98 +1337,10 @@ pub(crate) struct GameApp {
     /// (C4Application.cpp:598-612,617-624), which is what lets a dedicated
     /// server park for the next command instead of ending its process.
     pub(crate) console_restored_startup_dialog: bool,
-    pub(crate) developer_console: DeveloperConsole,
-    pub(crate) developer_console_edit_mode: ConsoleEditMode,
-    /// `C4EditCursor::Selection`. Shared by the viewport edit cursor, the
-    /// property panel and the object tree, so a write from one is visible
-    /// to the others (`C4EditCursor.h:39`).
-    pub(crate) developer_selection: clonk_engine::developer_selection::DeveloperSelection,
-    /// `C4Console::ToolsDlg` — the retained tool, grade, IFT, material and
-    /// texture the Draw-mode gestures read, plus their own `Hold`/anchor.
-    /// Away from Win32 and GTK this state *is* the tools dialog: `Open`
-    /// creates no window at all on the reference build (`C4ToolsDlg.cpp:262`).
-    pub(crate) developer_tools: clonk_engine::developer_tools::DeveloperTools,
-    /// Which Tools-page selector is showing its list.
-    ///
-    /// Presentation state, so it lives here rather than in the engine's
-    /// `DeveloperTools`: C++'s combo owns its own dropped-down state and the
-    /// dialog reads it back, and nothing about it reaches the simulation.
-    pub(crate) developer_tools_open_combo: Option<crate::developer_toolbox_view::ToolsCombo>,
-    /// The projection each console viewport window was last drawn with,
-    /// keyed by physical identity. `GraphicsSystem::active_viewports` holds
-    /// the *fullscreen* layout, which console mode never renders, so a
-    /// detached window's pointer routing has no other source of its own
-    /// `ViewX`/`ViewY` (`C4Viewport.cpp:1146`).
-    /// The object list's retained scroll position, and the selection it was
-    /// last moved for. `C4ObjectListDlg::Update` rebuilds the model on every
-    /// object change and only moves the view when the *cursor* changes
-    /// (`C4ObjectListDlg.cpp:599-646,747-780`), so the reveal has to fire on a
-    /// selection change rather than on every frame — otherwise scrolling away
-    /// from the selection would be impossible.
-    pub(crate) developer_object_list_scroll: crate::developer_object_list_view::ObjectListScroll,
-    /// Which developer pane's scroll thumb is being dragged.
-    ///
-    /// One field for both panes because they live in different windows: a
-    /// drag can only ever be in one of them, and holding it here is what lets
-    /// the release find it wherever the pointer ended up.
-    pub(crate) developer_pane_scroll_drag: Option<DeveloperPane>,
-    /// The object list's keyboard cursor.
-    ///
-    /// `GtkTreeView` keeps a cursor separate from the selection: Ctrl+arrows
-    /// move it without selecting, and Ctrl+Space then selects what it is on.
-    /// A cursor whose row is no longer drawn is not a position, so navigation
-    /// starts over from the top rather than guessing.
-    pub(crate) developer_object_list_cursor: Option<clonk_engine::ObjectId>,
-    /// Where a Shift-extended range is anchored.
-    pub(crate) developer_object_list_anchor: Option<clonk_engine::ObjectId>,
-    /// Which containers the user has opened in the object tree
-    /// (`C4ObjectListDlg.cpp:726-787`).
-    pub(crate) developer_object_tree_expansion:
-        crate::developer_object_list_view::ObjectTreeExpansion,
-    pub(crate) developer_object_list_revealed: Option<clonk_engine::ObjectId>,
-    /// What is typed into the property page's script entry.
-    ///
-    /// `IDC_COMBOINPUT`'s own text: `UpdateInputCtrl` reads it before
-    /// rebuilding the completion list and writes it back afterwards
-    /// (`C4PropertyDlg.cpp:296-306,372-374`), so the rebuild `Update` performs
-    /// on Tick35 and on every selection change cannot eat a half-typed call.
-    /// Holding it here is that preservation: nothing else writes it.
-    pub(crate) developer_property_script_input: String,
-    /// The property pane's retained first visible line
-    /// (`C4PropertyDlg.cpp:257-262`).
-    pub(crate) developer_property_scroll: crate::developer_toolbox_view::LineScroll,
     /// `C4Game::FileMonitor`. Armed once per game when
     /// `Developer.AutoFileReload` is set and the app is windowed
     /// (`C4Game.cpp:2413-2424`), started after definitions have loaded.
     pub(crate) file_monitor: Option<clonk_platform::file_monitor::DirectoryMonitor>,
-    /// `C4Console::ToolsDlg` and `PropertyDlg`'s shared `C4DevmodeDlg`
-    /// notebook. The model owns every decision about the window
-    /// ([`crate::developer_toolbox`]); the runner owns the window itself, so
-    /// the effects it produces queue here until the event loop, which is the
-    /// only place winit will build one, can apply them.
-    pub(crate) developer_toolbox: crate::developer_toolbox::DeveloperToolbox,
-    pub(crate) developer_toolbox_effects: Vec<crate::developer_toolbox::ToolboxEffect>,
-    /// `C4ObjectListDlg`'s `window != nullptr` — the whole of its state.
-    /// Everything the list draws is read from the snapshot at redraw, so
-    /// unlike the toolbox there is no model to keep beside the window.
-    pub(crate) developer_object_list_open: bool,
-    /// The open `C4ComponentHost::ShowDialog`: which component, the host
-    /// holding its committed bytes, and the text being edited. C++ keeps the
-    /// host on `C4Game` (`Game.Script`, `Game.Title`, `Game.Info`) for the
-    /// whole round; the port has no runtime host at all, so it loads one when
-    /// the editor opens and hands its bytes to the save.
-    pub(crate) developer_component_editor: Option<DeveloperComponentEdit>,
-    /// Components the user has committed this round, which the scenario save
-    /// projects onto its group journal
-    /// (`developer_console_save::component_save_mutations`). C++ keeps them on
-    /// `C4Game` and asks each one at save time; the port collects them here as
-    /// they are accepted, which is the same set for the same reason.
-    pub(crate) developer_component_hosts: Vec<clonk_engine::developer_components::ComponentHost>,
-    /// Native `C4Console::Editing` starts true and is irreversibly cleared
-    /// when `EnableControls` observes a no-input playback. Opening another
-    /// game defaults the edit cursor mode, but does not restore this latch.
-    pub(crate) developer_console_editing_enabled: bool,
-    pub(crate) developer_console_pointer: GuiPoint,
     /// Thread-safe tracing mirror drained by the console window each app
     /// iteration. It remains `None` for the fullscreen client.
     pub(crate) console_log_capture: Option<clonk_logging::ConsoleLogCapture>,

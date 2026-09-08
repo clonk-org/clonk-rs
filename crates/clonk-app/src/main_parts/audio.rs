@@ -2165,7 +2165,7 @@ fn handle_developer_console_text(
             app.handle_text_input(character)?;
             changed = true;
         } else {
-            changed |= app.developer_console.handle_character(character);
+            changed |= app.developer.console.handle_character(character);
         }
     }
     Ok(changed)
@@ -2206,8 +2206,8 @@ fn handle_developer_console_window_event(
                 app.handle_cursor_moved(PhysicalPosition::new(x, y))?;
             } else {
                 let point = GuiPoint::new(x as f32, y as f32);
-                app.developer_console_pointer = point;
-                app.developer_console.handle_pointer_move(point);
+                app.developer.console_pointer = point;
+                app.developer.console.handle_pointer_move(point);
                 app.input_routing.live.pointer_inside_window = true;
             }
             window.request_redraw();
@@ -2234,15 +2234,17 @@ fn handle_developer_console_window_event(
             } else {
                 let surface = app.rendering.graphics.surface();
                 let (width, height) = (surface.width(), surface.height());
-                let point = app.developer_console_pointer;
+                let point = app.developer.console_pointer;
                 match state {
                     ElementState::Pressed => {
-                        app.developer_console
+                        app.developer
+                            .console
                             .handle_pointer_down(point, width, height);
                     }
                     ElementState::Released => {
                         let actions = app
-                            .developer_console
+                            .developer
+                            .console
                             .handle_pointer_up(point, width, height);
                         app.dispatch_developer_console_actions(actions)?;
                     }
@@ -2259,7 +2261,7 @@ fn handle_developer_console_window_event(
                     MouseScrollDelta::PixelDelta(position) => (position.y / 15.0).round() as i32,
                 };
                 if lines != 0 {
-                    app.developer_console.scroll_log(lines);
+                    app.developer.console.scroll_log(lines);
                     window.request_redraw();
                 }
             }
@@ -2287,12 +2289,12 @@ fn handle_developer_console_window_event(
                     if pressed
                         && alt_only
                         && developer_console_menu_mnemonic(key).is_some_and(|mnemonic| {
-                            app.developer_console.handle_menu_mnemonic(mnemonic)
+                            app.developer.console.handle_menu_mnemonic(mnemonic)
                         })
                     {
                         window.request_redraw();
                     } else if let Some(key) = map_developer_console_key(key) {
-                        let actions = app.developer_console.handle_key(key, pressed);
+                        let actions = app.developer.console.handle_key(key, pressed);
                         app.dispatch_developer_console_actions(actions)?;
                         window.request_redraw();
                     }

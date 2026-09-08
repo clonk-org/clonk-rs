@@ -106,7 +106,8 @@ impl DeveloperWindowPresenter<GameApp> for ToolboxWindowHost {
     fn present(&mut self, app: &mut GameApp) -> Result<(), String> {
         let (width, height) = self.surface.surface_extent();
         let page = app
-            .developer_toolbox
+            .developer
+            .toolbox
             .current_page()
             .map(|page| app.render_developer_toolbox_page(page, width, height));
         match self.surface.present_surface(page.as_ref())? {
@@ -117,8 +118,8 @@ impl DeveloperWindowPresenter<GameApp> for ToolboxWindowHost {
             // answer the next `switch_page` with a bare retitle, and leave a
             // window nobody can bring back.
             SoftwarePresent::SurfaceLost => {
-                let effect = app.developer_toolbox.close(None);
-                app.developer_toolbox_effects.extend(effect);
+                let effect = app.developer.toolbox.close(None);
+                app.developer.toolbox_effects.extend(effect);
                 Err("the developer toolbox surface was lost".to_owned())
             }
         }

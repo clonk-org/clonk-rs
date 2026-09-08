@@ -3655,28 +3655,28 @@ impl GameApp {
             // (`C4EditCursor.cpp:530-545`), so a replay changes nothing.
             ConsoleToolsAction::ToggleCursorMode => {
                 if self.console_editing_ok() {
-                    let next = match self.developer_console_edit_mode {
+                    let next = match self.developer.console_edit_mode {
                         ConsoleEditMode::Play => ConsoleEditMode::Edit,
                         ConsoleEditMode::Edit => ConsoleEditMode::Draw,
                         ConsoleEditMode::Draw => ConsoleEditMode::Play,
                     };
                     let previous = self.console_cursor_mode();
-                    self.developer_console_edit_mode = next;
+                    self.developer.console_edit_mode = next;
                     self.apply_developer_cursor_mode_change(previous);
                 }
             }
             // `Delete` carries its own `EditingOK` (`:350-359`).
             ConsoleToolsAction::DeleteSelection => self.console_delete_selection(),
-            ConsoleToolsAction::GradeUp => self.developer_tools.change_grade(1),
-            ConsoleToolsAction::GradeDown => self.developer_tools.change_grade(-1),
-            ConsoleToolsAction::ToggleIft => self.developer_tools.toggle_ift(),
-            ConsoleToolsAction::ToggleTool => self.developer_tools.toggle_tool(),
+            ConsoleToolsAction::GradeUp => self.developer.tools.change_grade(1),
+            ConsoleToolsAction::GradeDown => self.developer.tools.change_grade(-1),
+            ConsoleToolsAction::ToggleIft => self.developer.tools.toggle_ift(),
+            ConsoleToolsAction::ToggleTool => self.developer.tools.toggle_tool(),
             // `PopMaterial`/`PopTextures` return false without a dialog window
             // (`C4ToolsDlg.cpp:747-772`), so they pop nothing unless the tools
             // page is up to hold the combo.
             ConsoleToolsAction::PopMaterial | ConsoleToolsAction::PopTextures => {
-                if self.developer_toolbox.current_page() == Some(ToolboxPage::Tools) {
-                    self.developer_tools_open_combo = Some(match action {
+                if self.developer.toolbox.current_page() == Some(ToolboxPage::Tools) {
+                    self.developer.tools_open_combo = Some(match action {
                         ConsoleToolsAction::PopTextures => ToolsCombo::Textures,
                         _ => ToolsCombo::Materials,
                     });

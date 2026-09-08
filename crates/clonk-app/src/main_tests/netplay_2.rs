@@ -4864,7 +4864,7 @@ fn developer_console_latches_no_input_and_reflects_pending_network_pause() {
     app.sync_developer_console_view();
     app.records.playback = None;
     app.sync_developer_console_view();
-    main_assert!(!app.developer_console.view_model().editing);
+    main_assert!(!app.developer.console.view_model().editing);
 
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
     app.network_control_running = true;

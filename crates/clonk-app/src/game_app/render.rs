@@ -1394,7 +1394,8 @@ impl GameApp {
         if self.console_mode {
             self.sync_developer_console_view();
             let font = self.assets.font_arc();
-            self.developer_console
+            self.developer
+                .console
                 .render(self.rendering.graphics.surface_mut(), font.as_ref());
             self.render_message_dialogs(None)?;
             let surface = self.rendering.graphics.surface();
@@ -2798,11 +2799,11 @@ impl GameApp {
             }
             return None;
         }
-        if self.developer_console_edit_mode == ConsoleEditMode::Draw {
+        if self.developer.console_edit_mode == ConsoleEditMode::Draw {
             self.console_draw_press(identity, local, scale);
             return None;
         }
-        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+        if self.developer.console_edit_mode != ConsoleEditMode::Edit {
             return None;
         }
         let projection = *self.console_viewports.projections.get(&identity)?;
@@ -2813,7 +2814,7 @@ impl GameApp {
         // One world view per gesture: `edit_target` calls the hit test
         // repeatedly to walk a shift-click stack.
         let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
-        let selection = self.developer_selection.objects().to_vec();
+        let selection = self.developer.selection.objects().to_vec();
         let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
 
         let press = edit_press(control, target, &selection);
@@ -2821,16 +2822,18 @@ impl GameApp {
         self.edit_cursor.last_world = Some((x, y));
         match press.selection {
             Some(SelectionEdit::Replace(object)) => self
-                .developer_selection
+                .developer
+                .selection
                 .replace(SelectionWriter::EditCursor, object),
             Some(SelectionEdit::Remove(object)) | Some(SelectionEdit::Add(object)) => self
-                .developer_selection
+                .developer
+                .selection
                 .toggle(SelectionWriter::EditCursor, object),
             Some(SelectionEdit::ClearAndDragFrame) => {
                 // `DragFrame = true; X2 = X; Y2 = Y` — the band is anchored at
                 // the press, in world coordinates.
                 self.edit_cursor.drag_frame = Some(((x, y), (x, y)));
-                self.developer_selection.clear(SelectionWriter::EditCursor)
+                self.developer.selection.clear(SelectionWriter::EditCursor)
             }
             // The bare clear is the right button's alone (`right_press`).
             Some(SelectionEdit::Clear) | None => None,
@@ -2857,7 +2860,7 @@ impl GameApp {
     ) -> clonk_engine::developer_viewport::ViewportEventRoute {
         use clonk_engine::developer_cursor::CursorMode;
 
-        let mode = match self.developer_console_edit_mode {
+        let mode = match self.developer.console_edit_mode {
             ConsoleEditMode::Play => CursorMode::Play,
             ConsoleEditMode::Edit => CursorMode::Edit,
             ConsoleEditMode::Draw => CursorMode::Draw,
@@ -2901,11 +2904,11 @@ impl GameApp {
             }
             return;
         }
-        if self.developer_console_edit_mode == ConsoleEditMode::Draw {
+        if self.developer.console_edit_mode == ConsoleEditMode::Draw {
             self.console_draw_motion(identity, local, scale);
             return;
         }
-        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+        if self.developer.console_edit_mode != ConsoleEditMode::Edit {
             return;
         }
         let Some(projection) = self.console_viewports.projections.get(&identity).copied() else {
@@ -2938,9 +2941,9 @@ impl GameApp {
             return;
         }
         let hit_test = clonk_engine::EditCursorHitTest::new(&self.snapshot);
-        let selection = self.developer_selection.objects().to_vec();
+        let selection = self.developer.selection.objects().to_vec();
         let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
-        self.developer_selection.set_hover(target);
+        self.developer.selection.set_hover(target);
     }
 
     /// Releasing the left button inside a console viewport window.
@@ -2981,15 +2984,15 @@ impl GameApp {
         // Line or Rect it finished is mode-dependent. The release carries no
         // coordinates of its own: C++ reads the `X`/`Y` the window's preceding
         // motion message already stored.
-        let (x, y) = self.developer_tools.cursor();
-        let finished_stroke = self.developer_tools.release(x, y);
-        if self.developer_console_edit_mode == ConsoleEditMode::Draw {
+        let (x, y) = self.developer.tools.cursor();
+        let finished_stroke = self.developer.tools.release(x, y);
+        if self.developer.console_edit_mode == ConsoleEditMode::Draw {
             if let Some(control) = finished_stroke {
                 self.submit_editor_draw_tool(control);
             }
             return None;
         }
-        if self.developer_console_edit_mode != ConsoleEditMode::Edit {
+        if self.developer.console_edit_mode != ConsoleEditMode::Edit {
             return None;
         }
 
@@ -3018,7 +3021,8 @@ impl GameApp {
                         .collect::<Vec<_>>();
                     let framed = frame_selection(anchor, corner, &candidates);
                     result = self
-                        .developer_selection
+                        .developer
+                        .selection
                         .select_frame(SelectionWriter::EditCursor, framed);
                 }
                 // `PutContents` — `EMMoveObject(EMMO_Enter, 0, 0, DropTarget,
@@ -3061,7 +3065,8 @@ impl GameApp {
         // `fCursorIsOnSelection` — `pLnk->Obj->At(X, Y)` over the selection
         // itself, not the topmost object under the cursor (`:251-257`).
         let cursor_on_selection = self
-            .developer_selection
+            .developer
+            .selection
             .objects()
             .iter()
             .any(|object| hit_test.object_covers(*object, x, y));
@@ -3073,10 +3078,11 @@ impl GameApp {
             cursor_on_selection,
         ) {
             Some(SelectionEdit::Replace(object)) => self
-                .developer_selection
+                .developer
+                .selection
                 .replace(SelectionWriter::EditCursor, object),
             Some(SelectionEdit::Clear) => {
-                self.developer_selection.clear(SelectionWriter::EditCursor)
+                self.developer.selection.clear(SelectionWriter::EditCursor)
             }
             // The right button produces neither a toggle nor a rubber band.
             Some(SelectionEdit::Remove(_))
@@ -3132,13 +3138,14 @@ impl GameApp {
             DropOutcome::Refused => {
                 let message =
                     self.runtime_resource_text("IDS_CNS_NONETEDIT", "No editing while replaying.");
-                self.developer_console.out(&message);
+                self.developer.console.out(&message);
             }
             // Not a definition file: C++ says nothing at all.
             DropOutcome::Ignored => {}
             DropOutcome::NoDefinition(name) => {
                 let message = self.runtime_resource_text("IDS_CNS_DROPNODEF", "%s: no definition");
-                self.developer_console
+                self.developer
+                    .console
                     .out(&message.replacen("%s", &name, 1));
             }
             DropOutcome::Drop(id) => {
@@ -3207,8 +3214,8 @@ impl GameApp {
         }
 
         // `Target = nullptr` — the hover is dropped before the menu opens.
-        self.developer_selection.set_hover(None);
-        let selection = self.developer_selection.objects();
+        self.developer.selection.set_hover(None);
+        let selection = self.developer.selection.objects();
         // `Selection.GetObject()->Contents.ObjectCount()` asks the *first*
         // selected object only (`:590`).
         let contents = selection
@@ -3376,15 +3383,15 @@ impl GameApp {
         // `C4ToolsDlg::Open`'s tail on a build with no dialog of its own:
         // `Active = true` plus the ordered refresh (`C4ToolsDlg.cpp:399-408`).
         if page == ToolboxPage::Tools {
-            let _ = self.developer_tools.open();
+            let _ = self.developer.tools.open();
         }
         for page in [ToolboxPage::Tools, ToolboxPage::Property] {
-            let effect = self.developer_toolbox.add_page(page);
-            self.developer_toolbox_effects.extend(effect);
+            let effect = self.developer.toolbox.add_page(page);
+            self.developer.toolbox_effects.extend(effect);
         }
-        let position = self.developer_toolbox.remembered_position();
-        let effect = self.developer_toolbox.switch_page(page, position);
-        self.developer_toolbox_effects.extend(effect);
+        let position = self.developer.toolbox.remembered_position();
+        let effect = self.developer.toolbox.switch_page(page, position);
+        self.developer.toolbox_effects.extend(effect);
     }
 
     /// `C4EditCursor::SetMode`'s prop-tools arm (`C4EditCursor.cpp:503-518`).
@@ -3402,18 +3409,18 @@ impl GameApp {
         let change = set_mode(
             previous,
             self.console_cursor_mode(),
-            self.developer_tools.active(),
+            self.developer.tools.active(),
             // `C4PropertyDlg::Active`, which only a *shown* property page
             // sets. Asking `current_page` instead would call a closed toolbox
             // active forever, because hiding it keeps its pages.
-            self.developer_toolbox.visible()
-                && self.developer_toolbox.current_page()
+            self.developer.toolbox.visible()
+                && self.developer.toolbox.current_page()
                     == Some(crate::developer_windows::ToolboxPage::Property),
         );
         // `Clear()` drops `Active` and nothing else, which is why re-opening
         // restores the previous selection rather than the defaults.
         if change.clear_page == Some(PropertyToolsPage::Tools) {
-            self.developer_tools.clear();
+            self.developer.tools.clear();
         }
         if change.reopen_prop_tools {
             self.open_developer_prop_tools();
@@ -3429,9 +3436,9 @@ impl GameApp {
     /// would make the next mode change resurrect a toolbox the user closed —
     /// `SetMode` reopens on `ToolsDlg.Active || PropertyDlg.Active`.
     pub(crate) fn close_developer_toolbox(&mut self, position: Option<(i32, i32)>) {
-        let effect = self.developer_toolbox.close(position);
-        self.developer_toolbox_effects.extend(effect);
-        self.developer_tools.clear();
+        let effect = self.developer.toolbox.close(position);
+        self.developer.toolbox_effects.extend(effect);
+        self.developer.tools.clear();
     }
 
     /// `C4Console::EditScript`/`EditTitle`/`EditInfo`
@@ -3450,7 +3457,7 @@ impl GameApp {
 
         // `ShowDialog` is modal, so a second editor cannot open over the
         // first — and letting one would discard whatever was being typed.
-        if self.developer_component_editor.is_some() {
+        if self.developer.component_editor.is_some() {
             return;
         }
         if !component_editor_available(self.network.is_some()) {
@@ -3458,14 +3465,14 @@ impl GameApp {
                 "IDS_CNS_NONETEDIT",
                 "No editing while a network game is running.",
             );
-            self.developer_console.out(&message);
+            self.developer.console.out(&message);
             return;
         }
         match self.load_developer_component(component) {
-            Some(edit) => self.developer_component_editor = Some(edit),
+            Some(edit) => self.developer.component_editor = Some(edit),
             None => {
                 let message = self.runtime_resource_text("IDS_CNS_NOSCENARIO", "No scenario open.");
-                self.developer_console.out(&message);
+                self.developer.console.out(&message);
             }
         }
         // `Game.ScriptEngine.ReLink(&Game.Defs)` past the `#endif` (`:1342`).
@@ -3496,7 +3503,8 @@ impl GameApp {
         // the first edit. Re-reading the group here would show the stale
         // on-disk text and the second commit would overwrite the first.
         if let Some(host) = self
-            .developer_component_hosts
+            .developer
+            .component_hosts
             .iter()
             .rev()
             .find(|host| host.filename() == filename)
@@ -3538,7 +3546,7 @@ impl GameApp {
     pub(crate) fn commit_developer_component_editor(&mut self) {
         use clonk_engine::developer_components::EditableComponent;
 
-        let Some(mut edit) = self.developer_component_editor.take() else {
+        let Some(mut edit) = self.developer.component_editor.take() else {
             return;
         };
         // `Accept` replaces the bytes and sets `Modified` **without
@@ -3560,15 +3568,16 @@ impl GameApp {
         }
         // One host per component: a second commit replaces the first rather
         // than queueing a second write of the same filename at save time.
-        self.developer_component_hosts
+        self.developer
+            .component_hosts
             .retain(|host| host.filename() != edit.host.filename());
-        self.developer_component_hosts.push(edit.host);
+        self.developer.component_hosts.push(edit.host);
     }
 
     /// `C4ComponentHost`'s Cancel arm, which mutates nothing — not even the
     /// modified flag.
     pub(crate) fn cancel_developer_component_editor(&mut self) {
-        if let Some(mut edit) = self.developer_component_editor.take() {
+        if let Some(mut edit) = self.developer.component_editor.take() {
             edit.host.cancel();
         }
     }
@@ -3585,7 +3594,7 @@ impl GameApp {
             clonk_graphics::PixelFormat::Rgba8888,
         );
         let font = self.assets.font_arc();
-        let edit = self.developer_component_editor.as_mut()?;
+        let edit = self.developer.component_editor.as_mut()?;
         let title = format!("{}  —  Enter commits, Escape cancels", edit.host.filename());
         edit.text.render(&mut surface, font.as_ref(), &title);
         Some(surface)
@@ -3597,13 +3606,13 @@ impl GameApp {
     /// Opening is idempotent: C++ creates the window only `if (window ==
     /// nullptr)`, so a second Objects click on an open list does nothing.
     pub(crate) fn open_developer_object_list(&mut self) {
-        self.developer_object_list_open = true;
+        self.developer.object_list_open = true;
     }
 
     /// The `"destroy"` handler, which nulls the window and the model rather
     /// than hiding them (`:592-597`).
     pub(crate) fn close_developer_object_list(&mut self) {
-        self.developer_object_list_open = false;
+        self.developer.object_list_open = false;
     }
 
     /// The console scoreboard child window's caption and natural size.
@@ -3800,8 +3809,8 @@ impl GameApp {
             &mut surface,
             font.as_ref(),
             &rows,
-            self.developer_selection.objects(),
-            self.developer_object_list_scroll,
+            self.developer.selection.objects(),
+            self.developer.object_list_scroll,
         );
         surface
     }
@@ -3818,15 +3827,16 @@ impl GameApp {
         rows: &[crate::developer_object_list_view::ObjectListRow],
         height: u32,
     ) {
-        let selected = self.developer_selection.objects().first().copied();
-        if selected == self.developer_object_list_revealed {
+        let selected = self.developer.selection.objects().first().copied();
+        if selected == self.developer.object_list_revealed {
             return;
         }
-        self.developer_object_list_revealed = selected;
+        self.developer.object_list_revealed = selected;
         let Some(row) = selected.and_then(|id| rows.iter().position(|row| row.id == id)) else {
             return;
         };
-        self.developer_object_list_scroll
+        self.developer
+            .object_list_scroll
             .reveal(row, rows.len(), height);
     }
 
@@ -3857,22 +3867,23 @@ impl GameApp {
         let rows = self.developer_object_list_rows();
         let page = ObjectListScroll::capacity(height);
         let Some(navigation) =
-            object_list_navigate(&rows, self.developer_object_list_cursor, key, page)
+            object_list_navigate(&rows, self.developer.object_list_cursor, key, page)
         else {
             return false;
         };
         match navigation {
             ObjectListNavigation::Expand(object) | ObjectListNavigation::Collapse(object) => {
-                self.developer_object_tree_expansion.toggle(object);
+                self.developer.object_tree_expansion.toggle(object);
             }
             ObjectListNavigation::MoveCursor(object) => {
-                self.developer_object_list_cursor = Some(object);
+                self.developer.object_list_cursor = Some(object);
                 // The cursor is what the view scrolls to follow.
                 let moved = rows.iter().position(|row| row.id == object);
                 if let Some(row) = moved {
-                    self.developer_object_list_scroll
+                    self.developer
+                        .object_list_scroll
                         .reveal(row, rows.len(), height);
-                    self.developer_object_list_revealed = Some(object);
+                    self.developer.object_list_revealed = Some(object);
                 }
                 if control {
                     // Ctrl moves the cursor alone.
@@ -3881,8 +3892,9 @@ impl GameApp {
                 if shift {
                     self.extend_developer_object_list_selection(&rows, object);
                 } else {
-                    self.developer_object_list_anchor = Some(object);
-                    self.developer_selection
+                    self.developer.object_list_anchor = Some(object);
+                    self.developer
+                        .selection
                         .replace(SelectionWriter::ObjectTree, object);
                 }
             }
@@ -3910,21 +3922,23 @@ impl GameApp {
         let control = self.input_routing.live.modifiers.control_key();
         let shift = self.input_routing.live.modifiers.shift_key();
         if !control && !shift {
-            self.developer_object_list_anchor = Some(object);
-            self.developer_selection
+            self.developer.object_list_anchor = Some(object);
+            self.developer
+                .selection
                 .replace(SelectionWriter::ObjectTree, object);
             return;
         }
 
-        let selected = self.developer_selection.objects().to_vec();
+        let selected = self.developer.selection.objects().to_vec();
         let wanted: Vec<clonk_engine::ObjectId> = if shift {
             // The anchor stays put, so a second Shift-click re-covers from the
             // same place rather than from the last row reached.
-            let anchor = self.developer_object_list_anchor.unwrap_or(object);
+            let anchor = self.developer.object_list_anchor.unwrap_or(object);
             let index_of = |id| rows.iter().position(|row| row.id == id);
             let (Some(from), Some(to)) = (index_of(anchor), index_of(object)) else {
-                self.developer_object_list_anchor = Some(object);
-                self.developer_selection
+                self.developer.object_list_anchor = Some(object);
+                self.developer
+                    .selection
                     .replace(SelectionWriter::ObjectTree, object);
                 return;
             };
@@ -3940,7 +3954,7 @@ impl GameApp {
                 .map(|row| row.id)
                 .collect()
         } else {
-            self.developer_object_list_anchor = Some(object);
+            self.developer.object_list_anchor = Some(object);
             rows.iter()
                 .filter(|row| {
                     if row.id == object {
@@ -3952,7 +3966,8 @@ impl GameApp {
                 .map(|row| row.id)
                 .collect()
         };
-        self.developer_selection
+        self.developer
+            .selection
             .select_frame(SelectionWriter::ObjectTree, wanted);
     }
 
@@ -3964,17 +3979,19 @@ impl GameApp {
     ) {
         use clonk_engine::developer_selection::SelectionWriter;
 
-        let anchor = self.developer_object_list_anchor.unwrap_or(cursor);
+        let anchor = self.developer.object_list_anchor.unwrap_or(cursor);
         let index_of = |id| rows.iter().position(|row| row.id == id);
         let (Some(from), Some(to)) = (index_of(anchor), index_of(cursor)) else {
-            self.developer_selection
+            self.developer
+                .selection
                 .replace(SelectionWriter::ObjectTree, cursor);
             return;
         };
         let (low, high) = if from <= to { (from, to) } else { (to, from) };
-        self.developer_selection.clear(SelectionWriter::ObjectTree);
+        self.developer.selection.clear(SelectionWriter::ObjectTree);
         for row in &rows[low..=high] {
-            self.developer_selection
+            self.developer
+                .selection
                 .toggle(SelectionWriter::ObjectTree, row.id);
         }
     }
@@ -3984,15 +4001,16 @@ impl GameApp {
     pub(crate) fn toggle_developer_object_list_cursor_selection(&mut self) -> bool {
         use clonk_engine::developer_selection::SelectionWriter;
 
-        let Some(cursor) = self.developer_object_list_cursor else {
+        let Some(cursor) = self.developer.object_list_cursor else {
             return false;
         };
         let rows = self.developer_object_list_rows();
         if !rows.iter().any(|row| row.id == cursor) {
             return false;
         }
-        self.developer_object_list_anchor = Some(cursor);
-        self.developer_selection
+        self.developer.object_list_anchor = Some(cursor);
+        self.developer
+            .selection
             .toggle(SelectionWriter::ObjectTree, cursor);
         true
     }
@@ -4018,7 +4036,7 @@ impl GameApp {
         };
         match part {
             PaneScrollPart::Thumb => {
-                self.developer_pane_scroll_drag = Some(pane);
+                self.developer.pane_scroll_drag = Some(pane);
             }
             PaneScrollPart::LineBack => self.step_developer_pane_scroll(pane, -1, extent),
             PaneScrollPart::LineForward => self.step_developer_pane_scroll(pane, 1, extent),
@@ -4043,7 +4061,7 @@ impl GameApp {
     ) -> bool {
         use clonk_frontend::developer_chrome::pane_scroll_bar_line;
 
-        if self.developer_pane_scroll_drag != Some(pane) {
+        if self.developer.pane_scroll_drag != Some(pane) {
             return false;
         }
         let Some(bar) = self.developer_pane_scroll_bar(pane, extent) else {
@@ -4054,12 +4072,14 @@ impl GameApp {
             DeveloperPane::PropertyOutput => {
                 let lines = self.developer_property_page_line_count();
                 let capacity = crate::developer_toolbox_view::property_output_capacity(extent.1);
-                self.developer_property_scroll
+                self.developer
+                    .property_scroll
                     .scroll_to(first, lines, capacity);
             }
             DeveloperPane::ObjectList => {
                 let rows = self.developer_object_list_rows().len();
-                self.developer_object_list_scroll
+                self.developer
+                    .object_list_scroll
                     .scroll_to(first, rows, extent.1);
             }
         }
@@ -4068,7 +4088,7 @@ impl GameApp {
 
     /// Release whichever pane thumb is held.
     pub(crate) fn developer_pane_scroll_release(&mut self) -> bool {
-        self.developer_pane_scroll_drag.take().is_some()
+        self.developer.pane_scroll_drag.take().is_some()
     }
 
     fn developer_pane_scroll_bar(
@@ -4080,12 +4100,12 @@ impl GameApp {
             DeveloperPane::PropertyOutput => crate::developer_toolbox_view::property_output_bar(
                 extent,
                 self.developer_property_page_line_count(),
-                self.developer_property_scroll,
+                self.developer.property_scroll,
             ),
             DeveloperPane::ObjectList => crate::developer_object_list_view::object_list_bar(
                 extent,
                 self.developer_object_list_rows().len(),
-                self.developer_object_list_scroll,
+                self.developer.object_list_scroll,
             ),
         }
     }
@@ -4108,10 +4128,11 @@ impl GameApp {
     /// nothing else — it does not change the selection.
     pub(crate) fn scroll_developer_object_list(&mut self, rows_delta: i32, height: u32) -> bool {
         let rows = self.developer_object_list_rows().len();
-        let before = self.developer_object_list_scroll;
-        self.developer_object_list_scroll
+        let before = self.developer.object_list_scroll;
+        self.developer
+            .object_list_scroll
             .scroll_by(rows_delta, rows, height);
-        self.developer_object_list_scroll != before
+        self.developer.object_list_scroll != before
     }
 
     /// The visible rows, for a test that needs to address one by index.
@@ -4129,7 +4150,7 @@ impl GameApp {
         let tree = object_tree(&self.snapshot.render_order, &self.snapshot);
         crate::developer_object_list_view::object_list_rows(
             &tree,
-            &self.developer_object_tree_expansion,
+            &self.developer.object_tree_expansion,
             |id| {
                 // `name_cell_data_func` draws `object->GetName()` (`:659-664`),
                 // which is the custom name when there is one and the definition's
@@ -4187,7 +4208,7 @@ impl GameApp {
         let rows = self.developer_object_list_rows();
         match crate::developer_object_list_view::object_list_hit(
             &rows,
-            self.developer_object_list_scroll,
+            self.developer.object_list_scroll,
             extent.0,
             extent.1,
             point,
@@ -4195,18 +4216,18 @@ impl GameApp {
             Some(ObjectListClick::Select(object)) => {
                 // A click sets the cursor as well: GTK's `set_cursor` is what
                 // a button press on a row performs.
-                self.developer_object_list_cursor = Some(object);
+                self.developer.object_list_cursor = Some(object);
                 self.select_developer_object_list_row(&rows, object);
             }
             // The expander column consumes its own click: `GtkTreeView` opens
             // or closes the row and the selection does not follow.
             Some(ObjectListClick::Toggle(object)) => {
-                self.developer_object_tree_expansion.toggle(object);
+                self.developer.object_tree_expansion.toggle(object);
             }
             // No path under the pointer: `gtk_tree_selection_get_selected_rows`
             // returns an empty list and the handler still clears.
             None => {
-                self.developer_selection.clear(SelectionWriter::ObjectTree);
+                self.developer.selection.clear(SelectionWriter::ObjectTree);
             }
         }
     }
@@ -4232,12 +4253,12 @@ impl GameApp {
                 .render(&mut surface, font.as_ref()),
             ToolboxPage::Property => {
                 let text = self.developer_property_page_text();
-                let script = self.developer_property_script_input.clone();
+                let script = self.developer.property_script_input.clone();
                 crate::developer_toolbox_view::render_property_page(
                     &mut surface,
                     font.as_ref(),
                     &text,
-                    self.developer_property_scroll,
+                    self.developer.property_scroll,
                     &script,
                     self.developer_console_editing(),
                     &self.runtime_resource_text("IDS_BTN_RELOADDEF", "Reload def"),
@@ -4262,13 +4283,13 @@ impl GameApp {
         use crate::developer_toolbox_view::property_output_capacity;
 
         let lines_available = self.developer_property_page_text().lines().count();
-        let before = self.developer_property_scroll;
-        self.developer_property_scroll.scroll_by(
+        let before = self.developer.property_scroll;
+        self.developer.property_scroll.scroll_by(
             lines,
             lines_available,
             property_output_capacity(height),
         );
-        self.developer_property_scroll != before
+        self.developer.property_scroll != before
     }
 
     /// A click on whichever page the toolbox shows.
@@ -4276,11 +4297,11 @@ impl GameApp {
         use crate::developer_toolbox_view::ToolsPageAction;
         use crate::developer_windows::ToolboxPage;
 
-        if self.developer_toolbox.current_page() == Some(ToolboxPage::Property) {
+        if self.developer.toolbox.current_page() == Some(ToolboxPage::Property) {
             let _ = self.developer_property_page_click(point, extent);
             return;
         }
-        if self.developer_toolbox.current_page() != Some(ToolboxPage::Tools) {
+        if self.developer.toolbox.current_page() != Some(ToolboxPage::Tools) {
             return;
         }
         let Some(action) = self
@@ -4294,31 +4315,31 @@ impl GameApp {
             // every peer has to change landscape mode at the same tick
             // (`C4ToolsDlg.cpp:875-879`).
             ToolsPageAction::SetLandscapeMode(mode) => self.submit_editor_landscape_mode(mode),
-            ToolsPageAction::SetTool(tool) => self.developer_tools.set_tool(tool, false),
+            ToolsPageAction::SetTool(tool) => self.developer.tools.set_tool(tool, false),
             ToolsPageAction::SetIft(ift) => {
-                self.developer_tools.set_ift(ift);
+                self.developer.tools.set_ift(ift);
             }
             ToolsPageAction::SetGrade(grade) => {
-                self.developer_tools.set_grade(grade);
+                self.developer.tools.set_grade(grade);
             }
             // `C4ToolsDlg::SetMaterial` runs `AssertValidTexture` after the
             // material lands (`:565-572`), which is what stops a Static
             // landscape being handed a pair its tex map has no slot for.
             ToolsPageAction::SetMaterial(material) => {
-                self.developer_tools.set_material(material);
+                self.developer.tools.set_material(material);
                 self.assert_valid_developer_texture();
-                self.developer_tools_open_combo = None;
+                self.developer.tools_open_combo = None;
             }
             ToolsPageAction::SetTexture(texture) => {
-                self.developer_tools.set_texture(texture);
+                self.developer.tools.set_texture(texture);
                 // Selecting closes the list, as a combo does.
-                self.developer_tools_open_combo = None;
+                self.developer.tools_open_combo = None;
             }
             ToolsPageAction::OpenCombo(combo) => {
-                self.developer_tools_open_combo = Some(combo);
+                self.developer.tools_open_combo = Some(combo);
             }
             ToolsPageAction::CloseCombo => {
-                self.developer_tools_open_combo = None;
+                self.developer.tools_open_combo = None;
             }
         }
     }
@@ -4330,11 +4351,11 @@ impl GameApp {
         };
         if let Some(texture) = clonk_engine::developer_landscape::corrected_tool_texture(
             state.texmap(),
-            self.developer_tools.material(),
-            self.developer_tools.texture(),
+            self.developer.tools.material(),
+            self.developer.tools.texture(),
             state.mode,
         ) {
-            self.developer_tools.set_texture(texture);
+            self.developer.tools.set_texture(texture);
         }
     }
 
@@ -4367,7 +4388,7 @@ impl GameApp {
                 "IDS_CNS_EXACTTOSTATIC",
                 "The exact landscape would be lost. Switching to static is refused.",
             );
-            self.developer_console.out(&message);
+            self.developer.console.out(&message);
             return;
         }
         if let Err(error) =
@@ -4390,15 +4411,15 @@ impl GameApp {
         use clonk_engine::developer_tools::LandscapeMode;
 
         let state = self.engine.developer_landscape_tool_state();
-        let material = self.developer_tools.material().to_owned();
+        let material = self.developer.tools.material().to_owned();
         ToolsPageModel {
             mode: state.as_ref().map_or(LandscapeMode::Undefined, |state| {
                 landscape_mode_of(state.mode)
             }),
             has_map: state.as_ref().is_some_and(|state| state.has_map),
-            tool: self.developer_tools.tool(),
-            grade: self.developer_tools.grade(),
-            ift: self.developer_tools.ift(),
+            tool: self.developer.tools.tool(),
+            grade: self.developer.tools.grade(),
+            ift: self.developer.tools.ift(),
             materials: state
                 .as_ref()
                 .map(|state| state.material_catalog())
@@ -4407,9 +4428,9 @@ impl GameApp {
                 .as_ref()
                 .map(|state| state.texture_catalog(&material))
                 .unwrap_or_default(),
-            open_combo: self.developer_tools_open_combo,
+            open_combo: self.developer.tools_open_combo,
             preview: self.developer_tools_preview_sample(&material),
-            texture: self.developer_tools.texture().to_owned(),
+            texture: self.developer.tools.texture().to_owned(),
             material,
         }
     }
@@ -4427,9 +4448,9 @@ impl GameApp {
         clonk_frontend::material_preview_swatch_for(
             PREVIEW_EXTENT,
             PREVIEW_EXTENT,
-            self.developer_tools.grade(),
+            self.developer.tools.grade(),
             material,
-            self.developer_tools.texture(),
+            self.developer.tools.texture(),
             &self.rendering.material_render_info,
             &self.rendering.material_texture_images,
             clonk_graphics::Color::opaque(0x40, 0x40, 0x40),
@@ -4467,7 +4488,7 @@ impl GameApp {
         ] {
             *target = self.runtime_resource_text(key, fallback);
         }
-        let selection = self.developer_selection.objects();
+        let selection = self.developer.selection.objects();
         let object = selection
             .first()
             .filter(|_| selection.len() == 1)
@@ -4526,7 +4547,7 @@ impl GameApp {
 
     /// What has been typed into the script entry.
     pub(crate) fn developer_property_script_input(&self) -> &str {
-        &self.developer_property_script_input
+        &self.developer.property_script_input
     }
 
     /// Append typed text, if the control is enabled.
@@ -4538,7 +4559,7 @@ impl GameApp {
         if !self.developer_console_editing() || text.is_empty() {
             return false;
         }
-        self.developer_property_script_input.push_str(text);
+        self.developer.property_script_input.push_str(text);
         true
     }
 
@@ -4547,7 +4568,7 @@ impl GameApp {
         if !self.developer_console_editing() {
             return false;
         }
-        self.developer_property_script_input.pop().is_some()
+        self.developer.property_script_input.pop().is_some()
     }
 
     /// Enter: run what was typed on the live selection.
@@ -4557,12 +4578,13 @@ impl GameApp {
     /// the `EMMO_Script` control this already had. Returns whether anything
     /// was submitted.
     pub(crate) fn submit_developer_property_script(&mut self) -> Result<bool, EngineError> {
-        if !self.developer_console_editing() || self.developer_property_script_input.is_empty() {
+        if !self.developer_console_editing() || self.developer.property_script_input.is_empty() {
             return Ok(false);
         }
-        let script = std::mem::take(&mut self.developer_property_script_input);
+        let script = std::mem::take(&mut self.developer.property_script_input);
         let objects = self
-            .developer_selection
+            .developer
+            .selection
             .objects()
             .iter()
             .map(|id| id.as_u64() as i32)
@@ -4590,7 +4612,7 @@ impl GameApp {
     /// `Game.ReloadDef` looks the identity up and returns false when it names
     /// no definition (`C4Game.cpp:2321-2323`).
     pub(crate) fn developer_property_selected_definition(&self) -> Option<String> {
-        let selection = self.developer_selection.objects();
+        let selection = self.developer.selection.objects();
         selection
             .first()
             .filter(|_| selection.len() == 1)
@@ -4678,7 +4700,7 @@ impl GameApp {
     fn console_grab_contents(&mut self) {
         use clonk_engine::developer_selection::SelectionWriter;
 
-        let Some(container) = self.developer_selection.objects().first().copied() else {
+        let Some(container) = self.developer.selection.objects().first().copied() else {
             return;
         };
         let Some(contents) = self
@@ -4688,7 +4710,8 @@ impl GameApp {
         else {
             return;
         };
-        self.developer_selection
+        self.developer
+            .selection
             .select_frame(SelectionWriter::EditCursor, contents);
         self.edit_cursor.hold = true;
         self.submit_editor_selection_action(clonk_engine::EMMO_EXIT, "grab contents");
@@ -4698,7 +4721,8 @@ impl GameApp {
     /// commands that carry no offset and no target object.
     fn submit_editor_selection_action(&mut self, action: u8, what: &str) {
         let objects = self
-            .developer_selection
+            .developer
+            .selection
             .objects()
             .iter()
             .map(|id| id.as_u64() as i32)
@@ -4721,7 +4745,7 @@ impl GameApp {
     pub(crate) fn console_cursor_mode(&self) -> clonk_engine::developer_cursor::CursorMode {
         use clonk_engine::developer_cursor::CursorMode;
 
-        match self.developer_console_edit_mode {
+        match self.developer.console_edit_mode {
             ConsoleEditMode::Play => CursorMode::Play,
             ConsoleEditMode::Edit => CursorMode::Edit,
             ConsoleEditMode::Draw => CursorMode::Draw,
@@ -4954,13 +4978,13 @@ impl GameApp {
         modifiers: winit::keyboard::ModifiersState,
     ) {
         self.input_routing.live.modifiers = modifiers;
-        if self.developer_console_edit_mode != ConsoleEditMode::Draw {
+        if self.developer.console_edit_mode != ConsoleEditMode::Draw {
             return;
         }
         if modifiers.alt_key() {
-            self.developer_tools.press_alt(true);
+            self.developer.tools.press_alt(true);
         } else {
-            self.developer_tools.release_alt();
+            self.developer.tools.release_alt();
         }
     }
 
@@ -4975,13 +4999,13 @@ impl GameApp {
         let Some((x, y)) = self.console_viewport_world(identity, local, scale) else {
             return;
         };
-        match self.developer_tools.tool() {
+        match self.developer.tools.tool() {
             // `ApplyToolPicker` ends with `Hold = false` (`:731`), so a picker
             // click never arms a drag — press, sample, release.
             Tool::Picker => {
-                self.developer_tools.press(x, y);
+                self.developer.tools.press(x, y);
                 self.console_apply_tool_picker(x, y);
-                self.developer_tools.release(x, y);
+                self.developer.tools.release(x, y);
             }
             // A halted game refuses Fill outright and says so, clearing Hold
             // with it so the frame repeat never starts (`:227-231`).
@@ -4990,10 +5014,10 @@ impl GameApp {
                     "IDS_CNS_FILLNOHALT",
                     "The fill tool cannot be used in halt mode.",
                 );
-                self.developer_console.out(&message);
+                self.developer.console.out(&message);
             }
             _ => {
-                if let Some(control) = self.developer_tools.press(x, y) {
+                if let Some(control) = self.developer.tools.press(x, y) {
                     self.submit_editor_draw_tool(control);
                 }
             }
@@ -5006,7 +5030,7 @@ impl GameApp {
         let Some((x, y)) = self.console_viewport_world(identity, local, scale) else {
             return;
         };
-        if let Some(control) = self.developer_tools.drag(x, y) {
+        if let Some(control) = self.developer.tools.drag(x, y) {
             self.submit_editor_draw_tool(control);
         }
     }
@@ -5046,7 +5070,7 @@ impl GameApp {
         {
             return false;
         }
-        if self.edit_cursor.hold || self.developer_tools.holding() {
+        if self.edit_cursor.hold || self.developer.tools.holding() {
             return false;
         }
         let Some((x, y)) = self.console_viewport_world(identity, local, scale) else {
@@ -5060,7 +5084,7 @@ impl GameApp {
     /// picker samples goes into the tools dialog, not onto the landscape.
     fn console_apply_tool_picker(&mut self, x: i32, y: i32) {
         if let Some(pick) = self.engine.developer_tool_pick(x, y) {
-            self.developer_tools.apply_pick(&pick);
+            self.developer.tools.apply_pick(&pick);
         }
     }
 
@@ -5078,10 +5102,10 @@ impl GameApp {
         if self.developer_console_editing() {
             return true;
         }
-        self.developer_tools.clear_hold();
+        self.developer.tools.clear_hold();
         let message =
             self.runtime_resource_text("IDS_CNS_NONETEDIT", "No editing while replaying.");
-        self.developer_console.out(&message);
+        self.developer.console.out(&message);
         false
     }
 
@@ -5101,18 +5125,18 @@ impl GameApp {
             return;
         };
         let Some(material) =
-            clonk_engine::LegacyCString::from_bytes(self.developer_tools.material().into())
+            clonk_engine::LegacyCString::from_bytes(self.developer.tools.material().into())
         else {
             tracing::warn!("the selected draw material contained an embedded NUL");
             return;
         };
         let Some(texture) =
-            clonk_engine::LegacyCString::from_bytes(self.developer_tools.texture().into())
+            clonk_engine::LegacyCString::from_bytes(self.developer.tools.texture().into())
         else {
             tracing::warn!("the selected draw texture contained an embedded NUL");
             return;
         };
-        let ift = self.developer_tools.ift();
+        let ift = self.developer.tools.ift();
         let (action, x, y, x2, y2, ift) = match control {
             DrawControl::Brush { x, y } => (clonk_engine::EMDT_BRUSH, x, y, 0, 0, ift),
             DrawControl::Line { x, y, x2, y2 } => (clonk_engine::EMDT_LINE, x, y, x2, y2, ift),
@@ -5128,7 +5152,7 @@ impl GameApp {
                 y,
                 x2,
                 y2,
-                grade: self.developer_tools.grade(),
+                grade: self.developer.tools.grade(),
                 ift,
                 material,
                 texture,
@@ -5153,7 +5177,8 @@ impl GameApp {
             return;
         }
         let objects = self
-            .developer_selection
+            .developer
+            .selection
             .objects()
             .iter()
             .map(|id| id.as_u64() as i32)
@@ -5182,7 +5207,7 @@ impl GameApp {
     ) -> Option<clonk_engine::ObjectId> {
         use clonk_engine::developer_cursor::{drop_target, DropCandidate};
 
-        let selection = self.developer_selection.objects();
+        let selection = self.developer.selection.objects();
         if !control || selection.is_empty() {
             return None;
         }
@@ -5216,7 +5241,8 @@ impl GameApp {
     /// DropTarget, &Selection)`.
     fn submit_editor_enter(&mut self, target: clonk_engine::ObjectId) {
         let objects = self
-            .developer_selection
+            .developer
+            .selection
             .objects()
             .iter()
             .map(|id| id.as_u64() as i32)
@@ -5245,7 +5271,7 @@ impl GameApp {
     pub(crate) fn console_edit_cursor_tick(&mut self) {
         use clonk_engine::developer_cursor::{edit_tick_move, CursorMode};
 
-        let mode = match self.developer_console_edit_mode {
+        let mode = match self.developer.console_edit_mode {
             ConsoleEditMode::Play => CursorMode::Play,
             ConsoleEditMode::Edit => CursorMode::Edit,
             ConsoleEditMode::Draw => CursorMode::Draw,
@@ -5265,7 +5291,8 @@ impl GameApp {
         }
         self.edit_cursor.tick_frame = Some(frame);
         let objects = self
-            .developer_selection
+            .developer
+            .selection
             .objects()
             .iter()
             .map(|id| id.as_u64() as i32)
@@ -5289,7 +5316,7 @@ impl GameApp {
     fn console_draw_tools_tick(&mut self) {
         let halted = self.runtime_halt_active();
         let editing = self.developer_console_editing();
-        let Some(control) = self.developer_tools.execute_frame(halted, editing) else {
+        let Some(control) = self.developer.tools.execute_frame(halted, editing) else {
             self.edit_cursor.tick_frame = None;
             return;
         };
@@ -5422,7 +5449,7 @@ impl GameApp {
             &mut frame.surface,
             snapshot,
             frame.projection,
-            self.developer_selection.objects(),
+            self.developer.selection.objects(),
             self.edit_cursor.drag_frame,
         );
         // `ScrollBarsByViewPosition` is fed the view the frame was drawn with,
