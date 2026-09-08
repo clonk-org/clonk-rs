@@ -30,6 +30,14 @@ If the threshold is met, open a narrowly scoped follow-up for a blocker family;
 do not change C4Script semantics as part of the measurement. Otherwise retain
 the negative result without expanding lowering.
 
+Scope such a follow-up by the probe's `sole <family>` lines, never by the
+per-family invocation counts above them. The plain counts overlap: every
+family blocking an invocation is counted, so they say how often a family
+appears, not how many invocations it alone holds back. The `sole` count is
+the number of AST invocations whose blocker set has exactly that one member,
+which is the mass a single-family lowering change can convert, and the
+`sole <family>: N ns` line is the exclusive AST time those invocations cost.
+
 ## Reproduction
 
 Use the pinned content checkout and a disk-backed target directory. Run the
@@ -87,4 +95,6 @@ Every window is in
 [`benchmarks/results/loop-control-lowering.json`](../benchmarks/results/loop-control-lowering.json).
 The remaining mass in Tower of Magic is `special_or_forwarded_call` (12,750)
 and `method_or_optional_call` (10,765); measure a family that large before
-lowering another one.
+lowering another one. Those two overlapping counts alone sum to more than the
+scenario's 23,387 AST invocations, which is exactly the ambiguity the `sole`
+lines resolve: read them, not the overlapping counts, for the next candidate.
