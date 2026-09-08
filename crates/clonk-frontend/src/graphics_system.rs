@@ -1327,6 +1327,8 @@ pub struct GraphicsSystem {
     /// The software tile pass reads the same relit texels every frame; a
     /// large sky costs 20 ms a frame to relight from scratch.
     lit_sky_texels: Option<LitSkyTexels>,
+    /// Composed upper/message board bands, retained across frames.
+    hud_boards: hud::HudBoardCache,
     /// Native material texture surfaces by byte-folded texture name. Both
     /// Surface32 PNGs and indexed Surface8 BMPs participate in landscape
     /// patterns; only Surface32 is eligible for graphical PXS.
@@ -1463,6 +1465,7 @@ impl GraphicsSystem {
             sky: None,
             retained_lit_sky: None,
             lit_sky_texels: None,
+            hud_boards: hud::HudBoardCache::default(),
             material_textures: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
             material_catalogue_revision: 0,
@@ -11303,6 +11306,7 @@ impl GraphicsSystem {
             let text_width = self.initialized_upper_board_text_width();
             hud::draw_message_board_with_gamma(
                 &mut self.surface,
+                &mut self.hud_boards,
                 &font,
                 &self.hud_graphics,
                 &self.message_board,
@@ -11310,6 +11314,7 @@ impl GraphicsSystem {
             );
             hud::draw_upper_board_with_initialized_text_width(
                 &mut self.surface,
+                &mut self.hud_boards,
                 &font,
                 &self.hud_graphics,
                 self.upper_board_mode,
