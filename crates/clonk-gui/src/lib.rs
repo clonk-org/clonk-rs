@@ -1,5 +1,10 @@
 pub mod caption_scroll;
 pub mod edit;
+/// The C ABI the pinned oracle's GUI-validation bridge links
+/// (clonk-org/clonk-rs#1266). Only the `ffi` feature compiles this
+/// surface, and the crate types it needs are emitted by `cargo xtask ffi`.
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod ime;
 pub mod search_edit;
 
