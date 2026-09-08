@@ -17,3 +17,9 @@ ffi = []
 
 [dependencies]
 clonk-graphics = { path = "../clonk-graphics" }
+
+# The Rust side of the GUI bridge differential; it measures with the bridge's
+# font, so it needs the feature and must not be built by a default test run.
+[[example]]
+name = "bridge_scenario"
+required-features = ["ffi"]
