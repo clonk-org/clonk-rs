@@ -12,17 +12,9 @@ impl GameApp {
             || (self.mode == AppMode::Running && self.loader.terminal_frame_pending)
     }
 
-    pub(crate) fn finish_terminal_loader_frame_presentation(&mut self) -> bool {
-        std::mem::take(&mut self.loader.terminal_frame_pending)
-    }
-
     pub(crate) fn arm_terminal_loader_frame_presentation(&mut self) {
         self.loader.terminal_frame_pending =
             !self.console_session.enabled && self.loader.screen.is_some();
-    }
-
-    pub(crate) fn discard_terminal_loader_frame_for_headless_render(&mut self) -> bool {
-        std::mem::take(&mut self.loader.terminal_frame_pending)
     }
 
     /// Hold a rebuilt `General.Participants` for the shutdown save.
@@ -236,29 +228,6 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn startup_crew_rename_rect(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
-        let rename = self.startup.crew_rename.as_ref()?;
-        let current = self.startup.crew_files.get(rename.index)?;
-        if current.file_name != rename.file_name || current.player_path != rename.player_path {
-            return None;
-        }
-        let dialog = self
-            .startup
-            .player_dialog
-            .as_ref()
-            .filter(|dialog| dialog.is_crew_mode())?;
-        let layout = dialog.layout();
-        let row = i32::try_from(rename.index).unwrap_or(i32::MAX);
-        Some(clonk_frontend::classic_gui::IntRect::new(
-            layout.list_viewport.x + (layout.item_height + 2) * 2,
-            layout.list_viewport.y + layout.item_pitch.saturating_mul(row)
-                - dialog.list_scroll_offset()
-                + 2,
-            (layout.item_width - (layout.item_height + 2) * 2 - 2).max(1),
-            (layout.item_height - 4).max(1),
-        ))
-    }
-
     pub(crate) fn startup_crew_rename_char_pos(
         &self,
         point: GuiPoint,
@@ -267,7 +236,7 @@ impl GameApp {
         let rename = self.startup.crew_rename.as_ref()?;
         let dialog = self.startup.player_dialog.as_ref()?;
         let layout = dialog.layout();
-        let rect = self.startup_crew_rename_rect()?;
+        let rect = self.startup.startup_crew_rename_rect()?;
         let inside_rect = point.x >= rect.x as f32
             && point.x < (rect.x + rect.w) as f32
             && point.y >= rect.y as f32
@@ -645,7 +614,7 @@ impl GameApp {
             && key == VirtualKeyCode::ContextMenu
             && modifiers.is_empty()
         {
-            if let Some(rect) = self.startup_crew_rename_rect() {
+            if let Some(rect) = self.startup.startup_crew_rename_rect() {
                 let anchor =
                     GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32);
                 self.open_startup_crew_rename_context_menu(anchor)?;
@@ -1330,20 +1299,6 @@ impl GameApp {
         }
     }
 
-    /// The masterserver branch of `C4StartupNetListEntry::Execute` re-queries
-    /// without calling `UpdateText`/`UpdateSmallState`, so the labels keep the
-    /// previous reply — its game count, message of the day and hyperlink — and
-    /// only the icon returns to the animated `fctNetGetRef` facet. The re-query
-    /// still arms `iRequestTimeout` through `QueryReferences`
-    /// (src/C4StartupNetDlg.cpp:182,191-207).
-    pub(crate) fn begin_startup_masterserver_requery_at(&mut self, now: Instant) {
-        self.startup_network.masterserver_request_timeout_at =
-            now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT);
-        if let Some(dialog) = self.startup_network.dialog.as_mut() {
-            dialog.set_masterserver_row_icon(clonk_frontend::startup_netdlg::NetDlgRowIcon::Query);
-        }
-    }
-
     pub(crate) fn set_startup_masterserver_error(&mut self, message: String) {
         self.set_startup_masterserver_error_at(Instant::now(), message);
     }
@@ -1470,22 +1425,6 @@ impl GameApp {
         }
     }
 
-    fn selected_startup_direct_reference_query_id(&self) -> Option<u64> {
-        let selected = self.startup_network.dialog.as_ref()?.selected_game()?;
-        let query_index = selected
-            .checked_sub(self.startup_network.game_references.len())?
-            .checked_sub(self.startup_network.discovery_reference_queries.len())?;
-        self.startup_network
-            .direct_reference_queries
-            .get(query_index)
-            .map(|query| query.id)
-    }
-
-    fn selected_startup_game_reference(&self) -> Option<clonk_network::NetworkGameReference> {
-        let selected = self.startup_network.dialog.as_ref()?.selected_game()?;
-        self.startup_network.game_references.get(selected).cloned()
-    }
-
     pub(crate) fn focus_startup_game_reference(
         &mut self,
         reference: &clonk_network::NetworkGameReference,
@@ -1510,49 +1449,6 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn selected_startup_discovery_reference_query_id(&self) -> Option<u64> {
-        let selected = self.startup_network.dialog.as_ref()?.selected_game()?;
-        let query_index = selected.checked_sub(self.startup_network.game_references.len())?;
-        self.startup_network
-            .discovery_reference_queries
-            .get(query_index)
-            .map(|query| query.id)
-    }
-
-    pub(crate) fn focus_startup_discovery_reference_query(&mut self, id: u64) -> bool {
-        let Some(query_index) = self
-            .startup_network
-            .discovery_reference_queries
-            .iter()
-            .position(|query| query.id == id)
-        else {
-            return false;
-        };
-        let row = self.startup_network.game_references.len() + query_index;
-        if let Some(dialog) = self.startup_network.dialog.as_mut() {
-            let _ = dialog.focus_game(row);
-        }
-        true
-    }
-
-    pub(crate) fn focus_startup_direct_reference_query(&mut self, id: u64) -> bool {
-        let Some(query_index) = self
-            .startup_network
-            .direct_reference_queries
-            .iter()
-            .position(|query| query.id == id)
-        else {
-            return false;
-        };
-        let row = self.startup_network.game_references.len()
-            + self.startup_network.discovery_reference_queries.len()
-            + query_index;
-        if let Some(dialog) = self.startup_network.dialog.as_mut() {
-            let _ = dialog.focus_game(row);
-        }
-        true
-    }
-
     pub(crate) fn begin_startup_direct_reference_query(&mut self, address: String) {
         if let Some(existing) = self
             .startup_network
@@ -1564,7 +1460,8 @@ impl GameApp {
             })
             .map(|query| query.id)
         {
-            self.focus_startup_direct_reference_query(existing);
+            self.startup_network
+                .focus_startup_direct_reference_query(existing);
             return;
         }
 
@@ -1601,7 +1498,8 @@ impl GameApp {
             }
         }
         self.sync_startup_network_game_rows();
-        self.focus_startup_direct_reference_query(id);
+        self.startup_network
+            .focus_startup_direct_reference_query(id);
     }
 
     pub(crate) fn startup_network_join_target(
@@ -1652,7 +1550,9 @@ impl GameApp {
         {
             return;
         }
-        let selected_direct_query = self.selected_startup_direct_reference_query_id();
+        let selected_direct_query = self
+            .startup_network
+            .selected_startup_direct_reference_query_id();
         self.startup_network.next_direct_reference_query_id = self
             .startup_network
             .next_direct_reference_query_id
@@ -1668,7 +1568,8 @@ impl GameApp {
             });
         self.sync_startup_network_game_rows();
         if let Some(id) = selected_direct_query {
-            self.focus_startup_direct_reference_query(id);
+            self.startup_network
+                .focus_startup_direct_reference_query(id);
         }
     }
 
@@ -1678,9 +1579,13 @@ impl GameApp {
         references: Vec<clonk_network::NetworkGameReference>,
         resolved_reference: bool,
     ) {
-        let selected_reference = self.selected_startup_game_reference();
-        let selected_direct_query = self.selected_startup_direct_reference_query_id();
-        let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
+        let selected_reference = self.startup_network.selected_startup_game_reference();
+        let selected_direct_query = self
+            .startup_network
+            .selected_startup_direct_reference_query_id();
+        let selected_discovery_query = self
+            .startup_network
+            .selected_startup_discovery_reference_query_id();
         let Some(query_index) = self
             .startup_network
             .discovery_reference_queries
@@ -1710,10 +1615,12 @@ impl GameApp {
         if let Some(reference) = selected_reference.as_ref() {
             self.focus_startup_game_reference(reference);
         } else if let Some(id) = selected_direct_query {
-            self.focus_startup_direct_reference_query(id);
+            self.startup_network
+                .focus_startup_direct_reference_query(id);
         } else if let Some(selected_id) = selected_discovery_query {
             if selected_id != query_id {
-                self.focus_startup_discovery_reference_query(selected_id);
+                self.startup_network
+                    .focus_startup_discovery_reference_query(selected_id);
             }
         }
     }
@@ -1751,9 +1658,13 @@ impl GameApp {
         references: Vec<clonk_network::NetworkGameReference>,
         selected_index: Option<usize>,
     ) {
-        let selected_reference = self.selected_startup_game_reference();
-        let selected_query = self.selected_startup_direct_reference_query_id();
-        let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
+        let selected_reference = self.startup_network.selected_startup_game_reference();
+        let selected_query = self
+            .startup_network
+            .selected_startup_direct_reference_query_id();
+        let selected_discovery_query = self
+            .startup_network
+            .selected_startup_discovery_reference_query_id();
         let Some(query_index) = self
             .startup_network
             .direct_reference_queries
@@ -1775,7 +1686,8 @@ impl GameApp {
                     }
                 }
                 Some(id) => {
-                    self.focus_startup_direct_reference_query(id);
+                    self.startup_network
+                        .focus_startup_direct_reference_query(id);
                 }
                 None => {}
             }
@@ -1786,20 +1698,24 @@ impl GameApp {
                 Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
             self.sync_startup_network_game_rows();
             if let Some(id) = selected_query {
-                self.focus_startup_direct_reference_query(id);
+                self.startup_network
+                    .focus_startup_direct_reference_query(id);
             }
         }
         if selected_query.is_none() {
             if let Some(reference) = selected_reference.as_ref() {
                 self.focus_startup_game_reference(reference);
             } else if let Some(id) = selected_discovery_query {
-                self.focus_startup_discovery_reference_query(id);
+                self.startup_network
+                    .focus_startup_discovery_reference_query(id);
             }
         }
     }
 
     fn fail_startup_direct_reference_query(&mut self, request_id: u64, message: String) {
-        let selected_query = self.selected_startup_direct_reference_query_id();
+        let selected_query = self
+            .startup_network
+            .selected_startup_direct_reference_query_id();
         let Some(query) = self
             .startup_network
             .direct_reference_queries
@@ -1812,13 +1728,18 @@ impl GameApp {
         query.expires_at = Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
         self.sync_startup_network_game_rows();
         if let Some(id) = selected_query {
-            self.focus_startup_direct_reference_query(id);
+            self.startup_network
+                .focus_startup_direct_reference_query(id);
         }
     }
 
     pub(crate) fn tick_startup_network_query_rows_at(&mut self, now: Instant) {
-        let selected_query = self.selected_startup_direct_reference_query_id();
-        let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
+        let selected_query = self
+            .startup_network
+            .selected_startup_direct_reference_query_id();
+        let selected_discovery_query = self
+            .startup_network
+            .selected_startup_discovery_reference_query_id();
         let query_count = self.startup_network.discovery_reference_queries.len()
             + self.startup_network.direct_reference_queries.len();
         self.startup_network
@@ -1833,9 +1754,11 @@ impl GameApp {
         {
             self.sync_startup_network_game_rows();
             if let Some(id) = selected_query {
-                self.focus_startup_direct_reference_query(id);
+                self.startup_network
+                    .focus_startup_direct_reference_query(id);
             } else if let Some(id) = selected_discovery_query {
-                self.focus_startup_discovery_reference_query(id);
+                self.startup_network
+                    .focus_startup_discovery_reference_query(id);
             }
         }
 
@@ -1856,7 +1779,8 @@ impl GameApp {
             // returns before the iRequestTimeout check, so the fresh request
             // gets its full deadline (src/C4StartupNetDlg.cpp:191-207).
             self.startup_network.masterserver_next_query_at = None;
-            self.begin_startup_masterserver_requery_at(now);
+            self.startup_network
+                .begin_startup_masterserver_requery_at(now);
         } else if self
             .startup_network
             .masterserver_request_timeout_at
@@ -3258,8 +3182,12 @@ impl GameApp {
         }
         match event {
             clonk_network::StartupGameSearchEvent::Cleared => {
-                let selected_query = self.selected_startup_direct_reference_query_id();
-                let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
+                let selected_query = self
+                    .startup_network
+                    .selected_startup_direct_reference_query_id();
+                let selected_discovery_query = self
+                    .startup_network
+                    .selected_startup_discovery_reference_query_id();
                 self.startup_network.game_references.clear();
                 self.sync_startup_network_game_rows();
                 self.reset_startup_masterserver_entry();
@@ -3274,23 +3202,31 @@ impl GameApp {
                     None
                 };
                 if let Some(id) = selected_query {
-                    self.focus_startup_direct_reference_query(id);
+                    self.startup_network
+                        .focus_startup_direct_reference_query(id);
                 } else if let Some(id) = selected_discovery_query {
-                    self.focus_startup_discovery_reference_query(id);
+                    self.startup_network
+                        .focus_startup_discovery_reference_query(id);
                 }
             }
             clonk_network::StartupGameSearchEvent::ReferencesUpdated(references) => {
-                let selected_reference = self.selected_startup_game_reference();
-                let selected_query = self.selected_startup_direct_reference_query_id();
-                let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
+                let selected_reference = self.startup_network.selected_startup_game_reference();
+                let selected_query = self
+                    .startup_network
+                    .selected_startup_direct_reference_query_id();
+                let selected_discovery_query = self
+                    .startup_network
+                    .selected_startup_discovery_reference_query_id();
                 self.startup_network.game_references = references;
                 self.sync_startup_network_game_rows();
                 if let Some(reference) = selected_reference.as_ref() {
                     self.focus_startup_game_reference(reference);
                 } else if let Some(id) = selected_query {
-                    self.focus_startup_direct_reference_query(id);
+                    self.startup_network
+                        .focus_startup_direct_reference_query(id);
                 } else if let Some(id) = selected_discovery_query {
-                    self.focus_startup_discovery_reference_query(id);
+                    self.startup_network
+                        .focus_startup_discovery_reference_query(id);
                 }
             }
             clonk_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address } => {
@@ -3349,17 +3285,6 @@ impl GameApp {
             && !self.dialogs.messages.is_empty()
     }
 
-    fn next_startup_game_search_event(&mut self) -> Option<clonk_network::StartupGameSearchEvent> {
-        #[cfg(test)]
-        if let Some(event) = self.startup_network.game_search_test_events.pop_front() {
-            return Some(event);
-        }
-        self.startup_network
-            .game_search
-            .as_ref()
-            .and_then(|search| search.events().try_recv().ok())
-    }
-
     pub(crate) fn poll_startup_game_search(&mut self) -> Result<(), EngineError> {
         // C4StartupNetDlg::OnSec1Timer stops before both DiscoverClient.Execute
         // and UpdateList while a message dialog owns the active-dialog slot.
@@ -3379,7 +3304,7 @@ impl GameApp {
             if self.startup_network_dialog_is_covered_by_message() {
                 break;
             }
-            let Some(event) = self.next_startup_game_search_event() else {
+            let Some(event) = self.startup_network.next_startup_game_search_event() else {
                 break;
             };
             self.apply_startup_game_search_event(event)?;
@@ -3553,7 +3478,8 @@ impl GameApp {
                     self.open_startup_player_portrait_selector();
                 }
                 PlayerPropertiesAction::PortraitLocationChanged { index, path } => {
-                    self.reload_startup_player_portrait_location(index, &path);
+                    self.startup
+                        .reload_startup_player_portrait_location(index, &path);
                 }
                 PlayerPropertiesAction::PortraitSelectorClosed { location_index } => {
                     self.startup.last_portrait_folder_index = Some(location_index);
@@ -3585,27 +3511,6 @@ impl GameApp {
                     self.apply_startup_player_portrait_selection(commit);
                 }
                 PlayerPropertiesAction::Submit => self.save_open_startup_player_properties(),
-            }
-        }
-    }
-
-    pub(crate) fn reload_startup_player_portrait_location(&mut self, index: usize, path: &Path) {
-        match clonk_frontend::startup_portraitsel::portrait_files_in_location(path) {
-            Ok(entries) => {
-                if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
-                    pending
-                        .controller
-                        .replace_portrait_location_entries(index, entries);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "failed to scan portrait location");
-                if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
-                    pending.controller.fail_portrait_location_entries(
-                        index,
-                        format!("failed to scan {}: {error}", path.display()),
-                    );
-                }
             }
         }
     }
@@ -3679,24 +3584,6 @@ impl GameApp {
             );
             pending.controller.close_portrait_selector();
             pending.controller.clear_validation_error();
-        }
-    }
-
-    pub(crate) fn advance_startup_player_portrait_thumbnail(&mut self) {
-        let request = self
-            .startup
-            .player_properties_dialog
-            .as_mut()
-            .and_then(|pending| pending.controller.advance_portrait_selector_idle());
-        let Some(request) = request else {
-            return;
-        };
-        let thumbnail = load_startup_portrait_image(&request.path)
-            .map(|image| resize_startup_player_image(&image, 100));
-        if let Some(pending) = self.startup.player_properties_dialog.as_mut() {
-            pending
-                .controller
-                .complete_portrait_thumbnail(&request, thumbnail);
         }
     }
 
@@ -4553,21 +4440,13 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn restore_startup_crew_focus(&mut self, focus: Option<PlrSelControl>) {
-        if let (Some(dialog), Some(focus)) = (self.startup.player_dialog.as_mut(), focus) {
-            if dialog.is_crew_mode() {
-                dialog.restore_focus(focus);
-            }
-        }
-    }
-
     pub(crate) fn abort_startup_crew_rename(&mut self) -> bool {
         let Some(mut rename) = self.startup.crew_rename.take() else {
             return false;
         };
         rename.edit.abort();
         let previous_focus = rename.edit.take_previous_focus();
-        self.restore_startup_crew_focus(previous_focus);
+        self.startup.restore_startup_crew_focus(previous_focus);
         true
     }
 
@@ -4584,7 +4463,7 @@ impl GameApp {
             .take()
             .expect("finished crew rename state remains installed");
         let previous_focus = rename.edit.take_previous_focus();
-        self.restore_startup_crew_focus(previous_focus);
+        self.startup.restore_startup_crew_focus(previous_focus);
         true
     }
 

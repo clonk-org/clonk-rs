@@ -3575,7 +3575,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
             expires_at: None,
         });
     selection_app.sync_startup_network_game_rows();
-    selection_app.focus_startup_direct_reference_query(41);
+    selection_app.startup_network.focus_startup_direct_reference_query(41);
     main_assert_eq!(selection_app.startup_network.dialog.as_ref().unwrap().selected_game() => Some(1));
     let second_address: SocketAddr = "127.0.0.1:30112".parse().test_value();
     selection_app.begin_startup_discovery_reference_query(second_address);
@@ -3612,7 +3612,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
     retry_app.begin_startup_discovery_reference_query(address);
     let retry_id = retry_app.startup_network.discovery_reference_queries[1].id;
     main_assert_ne!(failed_id => retry_id);
-    retry_app.focus_startup_discovery_reference_query(retry_id);
+    retry_app.startup_network.focus_startup_discovery_reference_query(retry_id);
     retry_app
         .apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::ReferencesUpdated(
             vec![n2_fixture!(reference {
@@ -3631,7 +3631,7 @@ fn lan_query_rows_resolve_fail_and_expire_without_modal() {
         Some(2),
         "a selected pending retry must not retarget to an older failed row for the same address"
     );
-    main_assert_eq!(retry_app.selected_startup_discovery_reference_query_id() => Some(retry_id));
+    main_assert_eq!(retry_app.startup_network.selected_startup_discovery_reference_query_id() => Some(retry_id));
 }
 
 #[test]
@@ -4277,7 +4277,7 @@ fn network_direct_query_ids_preserve_selection_across_out_of_order_results() {
         },
     ];
     app.sync_startup_network_game_rows();
-    app.focus_startup_direct_reference_query(10);
+    app.startup_network.focus_startup_direct_reference_query(10);
 
     let second = n2_fixture!(reference {
         title: "Second".to_string(),

@@ -4034,7 +4034,7 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
         "opening the selector does not mutate either image intent"
     );
 
-    app.advance_startup_player_portrait_thumbnail();
+    app.startup.advance_startup_player_portrait_thumbnail();
     main_assert!(matches!(
         portrait_selector(&app, "selector remains open").items()[0].thumbnail(),
         clonk_frontend::startup_portraitsel::PortraitThumbnail::Ready(_)

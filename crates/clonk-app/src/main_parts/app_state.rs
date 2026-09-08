@@ -298,6 +298,76 @@ pub(crate) struct StartupDialogState {
     pub(crate) player_last_click: Option<(usize, Instant)>,
 }
 
+impl StartupDialogState {
+    pub(crate) fn startup_crew_rename_rect(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
+        let rename = self.crew_rename.as_ref()?;
+        let current = self.crew_files.get(rename.index)?;
+        if current.file_name != rename.file_name || current.player_path != rename.player_path {
+            return None;
+        }
+        let dialog = self
+            .player_dialog
+            .as_ref()
+            .filter(|dialog| dialog.is_crew_mode())?;
+        let layout = dialog.layout();
+        let row = i32::try_from(rename.index).unwrap_or(i32::MAX);
+        Some(clonk_frontend::classic_gui::IntRect::new(
+            layout.list_viewport.x + (layout.item_height + 2) * 2,
+            layout.list_viewport.y + layout.item_pitch.saturating_mul(row)
+                - dialog.list_scroll_offset()
+                + 2,
+            (layout.item_width - (layout.item_height + 2) * 2 - 2).max(1),
+            (layout.item_height - 4).max(1),
+        ))
+    }
+
+    pub(crate) fn reload_startup_player_portrait_location(&mut self, index: usize, path: &Path) {
+        match clonk_frontend::startup_portraitsel::portrait_files_in_location(path) {
+            Ok(entries) => {
+                if let Some(pending) = self.player_properties_dialog.as_mut() {
+                    pending
+                        .controller
+                        .replace_portrait_location_entries(index, entries);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "failed to scan portrait location");
+                if let Some(pending) = self.player_properties_dialog.as_mut() {
+                    pending.controller.fail_portrait_location_entries(
+                        index,
+                        format!("failed to scan {}: {error}", path.display()),
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn advance_startup_player_portrait_thumbnail(&mut self) {
+        let request = self
+            .player_properties_dialog
+            .as_mut()
+            .and_then(|pending| pending.controller.advance_portrait_selector_idle());
+        let Some(request) = request else {
+            return;
+        };
+        let thumbnail = load_startup_portrait_image(&request.path)
+            .map(|image| resize_startup_player_image(&image, 100));
+        if let Some(pending) = self.player_properties_dialog.as_mut() {
+            pending
+                .controller
+                .complete_portrait_thumbnail(&request, thumbnail);
+        }
+    }
+
+    pub(crate) fn restore_startup_crew_focus(&mut self, focus: Option<PlrSelControl>) {
+        if let (Some(dialog), Some(focus)) = (self.player_dialog.as_mut(), focus) {
+            if dialog.is_crew_mode() {
+                dialog.restore_focus(focus);
+            }
+        }
+    }
+}
+
 /// The dialogs a running game can put on screen, and the stack that orders
 /// them.
 ///
@@ -1987,6 +2057,89 @@ pub(crate) struct StartupNetworkState {
     pub(crate) join_edit_last_click: Option<Instant>,
 }
 
+impl StartupNetworkState {
+    /// The masterserver branch of `C4StartupNetListEntry::Execute` re-queries
+    /// without calling `UpdateText`/`UpdateSmallState`, so the labels keep the
+    /// previous reply — its game count, message of the day and hyperlink — and
+    /// only the icon returns to the animated `fctNetGetRef` facet. The re-query
+    /// still arms `iRequestTimeout` through `QueryReferences`
+    /// (src/C4StartupNetDlg.cpp:182,191-207).
+    pub(crate) fn begin_startup_masterserver_requery_at(&mut self, now: Instant) {
+        self.masterserver_request_timeout_at =
+            now.checked_add(clonk_network::REFERENCE_QUERY_TIMEOUT);
+        if let Some(dialog) = self.dialog.as_mut() {
+            dialog.set_masterserver_row_icon(clonk_frontend::startup_netdlg::NetDlgRowIcon::Query);
+        }
+    }
+
+    pub(crate) fn selected_startup_direct_reference_query_id(&self) -> Option<u64> {
+        let selected = self.dialog.as_ref()?.selected_game()?;
+        let query_index = selected
+            .checked_sub(self.game_references.len())?
+            .checked_sub(self.discovery_reference_queries.len())?;
+        self.direct_reference_queries
+            .get(query_index)
+            .map(|query| query.id)
+    }
+
+    pub(crate) fn selected_startup_game_reference(
+        &self,
+    ) -> Option<clonk_network::NetworkGameReference> {
+        let selected = self.dialog.as_ref()?.selected_game()?;
+        self.game_references.get(selected).cloned()
+    }
+
+    pub(crate) fn selected_startup_discovery_reference_query_id(&self) -> Option<u64> {
+        let selected = self.dialog.as_ref()?.selected_game()?;
+        let query_index = selected.checked_sub(self.game_references.len())?;
+        self.discovery_reference_queries
+            .get(query_index)
+            .map(|query| query.id)
+    }
+
+    pub(crate) fn focus_startup_discovery_reference_query(&mut self, id: u64) -> bool {
+        let Some(query_index) = self
+            .discovery_reference_queries
+            .iter()
+            .position(|query| query.id == id)
+        else {
+            return false;
+        };
+        let row = self.game_references.len() + query_index;
+        if let Some(dialog) = self.dialog.as_mut() {
+            let _ = dialog.focus_game(row);
+        }
+        true
+    }
+
+    pub(crate) fn focus_startup_direct_reference_query(&mut self, id: u64) -> bool {
+        let Some(query_index) = self
+            .direct_reference_queries
+            .iter()
+            .position(|query| query.id == id)
+        else {
+            return false;
+        };
+        let row = self.game_references.len() + self.discovery_reference_queries.len() + query_index;
+        if let Some(dialog) = self.dialog.as_mut() {
+            let _ = dialog.focus_game(row);
+        }
+        true
+    }
+
+    pub(crate) fn next_startup_game_search_event(
+        &mut self,
+    ) -> Option<clonk_network::StartupGameSearchEvent> {
+        #[cfg(test)]
+        if let Some(event) = self.game_search_test_events.pop_front() {
+            return Some(event);
+        }
+        self.game_search
+            .as_ref()
+            .and_then(|search| search.events().try_recv().ok())
+    }
+}
+
 /// The loader-screen half of the app: which `C4LoaderScreen` is active for
 /// the current startup or scenario load, or the typed reason none is, how
 /// it renders, and the presentation-only latch that keeps the 100% frame
@@ -2007,6 +2160,16 @@ pub(crate) struct LoaderScreenState {
     /// latch affects presentation only and never delays simulation or network
     /// readiness.
     pub(crate) terminal_frame_pending: bool,
+}
+
+impl LoaderScreenState {
+    pub(crate) fn finish_terminal_loader_frame_presentation(&mut self) -> bool {
+        std::mem::take(&mut self.terminal_frame_pending)
+    }
+
+    pub(crate) fn discard_terminal_loader_frame_for_headless_render(&mut self) -> bool {
+        std::mem::take(&mut self.terminal_frame_pending)
+    }
 }
 
 /// The definition selector: the modal C4DefinitionSelDlg opened from the

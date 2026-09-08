@@ -3963,10 +3963,10 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
         app.loader.terminal_frame_pending,
         "preparing a frame is not a successful window presentation"
     );
-    main_assert!(app.finish_terminal_loader_frame_presentation());
+    main_assert!(app.loader.finish_terminal_loader_frame_presentation());
     main_assert!(!app.loader_presentation_active());
     app.loader.terminal_frame_pending = true;
-    main_assert!(app.discard_terminal_loader_frame_for_headless_render());
+    main_assert!(app.loader.discard_terminal_loader_frame_for_headless_render());
     main_assert!(!app.loader_presentation_active());
     app.console_session.enabled = true;
     app.arm_terminal_loader_frame_presentation();
