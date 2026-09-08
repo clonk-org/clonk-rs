@@ -277,7 +277,8 @@ each has to be built and run on its own:
 - `USE_RUST_GROUP_VALIDATION`: restored, see
   [The group-validation bridge](#the-group-validation-bridge).
 - `USE_RUST_GUI_VALIDATION`: clonk-org/clonk-rs#1266
-- `USE_RUST_PLATFORM_PATHS`: clonk-org/clonk-rs#1267
+- `USE_RUST_PLATFORM_PATHS`: restored, see
+  [The platform-path bridge](#the-platform-path-bridge).
 
 #### The config bridge
 
@@ -389,6 +390,47 @@ under `leaks --atExit`; only AppKit's three Foundation objects remain.
 Slash canonicalisation is exercised only as far as both readers report the
 same names: an entry name carrying a backslash needs a pack made on Windows,
 which neither packer here produces.
+
+#### The platform-path bridge
+
+`build-oracle-validation.sh --with-platform-paths` builds the oracle with
+`USE_RUST_PLATFORM_PATHS=ON`. `C4ConfigGeneral::DeterminePaths` then asks this
+tree's `clonk-platform` for eight paths through the pinned getters, takes the
+whole set or none of it, adopts install root, temp, logs and user data, and
+asks Rust to create the user directories. The pinned C++ compiled and worked;
+what it lacked was any way to see what it took. `oracle-platform-bridge.patch`
+writes the set to stderr (the call runs inside `C4Config::Load`, before the log
+opens), names the getter whose null answer sent C++ back to its own paths,
+reports whether the user directories were created, and adds
+`LC_RUST_PLATFORM_FAULT=<getter>`, which discards that getter's answer after
+freeing it, the only way to reach the incomplete-set path. Its non-engine
+undef lives in the bridge header so the patch shares no hunk with the config
+patch; `scripts/tests/test_oracle_platform_patch.py` applies the three bridge
+patches in both orders.
+
+`run-platform-differential.sh` proves the linked archive and the ten exported
+symbols, then runs the oracle from a private install root (Rust recognises a
+root by `planet/System.c4g`, the pinned oracle wants `System.c4g` beside the
+binary, so the root carries both) with `HOME`, `TMPDIR` and every `LC_*_DIR`
+pointing under `--out`:
+
+| case | what is checked |
+|---|---|
+| every directory overridden | the report names exactly the roots the environment set; the saved config's `UserPath` and `LogPath` are Rust's; the user, config, cache and logs directories exist; `Clonk.log` lands in the install root |
+| defaults | user data under `Library/Application Support/Clonk Rust`, cache, logs and config beneath it, temp under `clonk-rust` in `TMPDIR` |
+| an existing `LegacyClonk` user directory | Rust prefers it, and a bridge-less oracle beside it derives the same directory for the same `HOME` |
+| a root named outside ASCII | the bytes survive both crossings; the saved config spells them as the INI writer's octal escapes |
+| `LC_RUST_PLATFORM_FAULT=lc_platform_logs_dir` | the fallback line names the getter, no set is reported, no directory is created, and `LogPath` and `UserPath` are C++'s own |
+
+The log file is the proof that ExePath was adopted: the pinned log system
+opens `Clonk.log` in the working directory, which `DeterminePaths` sets to
+ExePath, and nothing at the pin reads `LogPath`. The defaults case records the
+port's documented policy (compat profile `pres-userdata-directory`): the pinned
+oracle alone keeps `LogPath` beside the binary and temp at `/tmp`. A path that
+is not valid UTF-8 cannot be created on this filesystem; that boundary is the
+lossy conversion in the Rust getters and is documented rather than run.
+`--leaks` runs the override case; only AppKit's three Foundation objects
+remain.
 
 No required gate runs the live bridge: it needs a separately built oracle
 checkout and is intentionally an opt-in investigation tool. `cargo xtask parity
