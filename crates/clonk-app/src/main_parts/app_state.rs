@@ -136,6 +136,17 @@ pub(crate) struct ScenarioSelectorState {
     pub(crate) search_last_click: Option<Instant>,
 }
 
+impl ScenarioSelectorState {
+    /// Stop the catalog discovery worker, if one is running, and forget it.
+    pub(crate) fn cancel_discovery(&mut self) {
+        if let Some(state) = self.discovery.take() {
+            state
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// The audio device and everything whose lifetime is tied to it.
 ///
 /// The mixer is one resource with several claimants: a frontend-to-scenario

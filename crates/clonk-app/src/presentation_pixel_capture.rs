@@ -2735,7 +2735,7 @@ mod tests {
             // the previous case last selected.
             self.app.last_startup_dialog = self.baseline_startup_dialog;
             self.app.return_to_menu();
-            self.app.cancel_scenario_selector_discovery();
+            self.app.scensel.cancel_discovery();
             self.app.menu_state.stack = self.baseline_menu_stack.clone();
             self.app.menu_state.clear_search();
             self.app

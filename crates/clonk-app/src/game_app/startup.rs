@@ -5132,7 +5132,7 @@ impl GameApp {
             self.input_routing.live.gamepads.set_options_open_slot(None);
         }
         if view != StartupView::ScenarioBrowser {
-            self.cancel_scenario_selector_discovery();
+            self.scensel.cancel_discovery();
         }
         self.startup.view = view;
         let keeps_pending_fade = self

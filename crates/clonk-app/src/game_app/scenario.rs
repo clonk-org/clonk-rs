@@ -753,7 +753,7 @@ impl GameApp {
 
     pub(crate) fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
         let reload = std::mem::replace(&mut self.scensel.reload_on_next_show, true);
-        self.cancel_scenario_selector_discovery();
+        self.scensel.cancel_discovery();
         self.menu_state.abort_renaming();
         self.close_context_menu_silently();
         self.startup.player_properties_dialog = None;
