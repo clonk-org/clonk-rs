@@ -1271,7 +1271,7 @@ fn positional_mix_ownerless_viewport_listens_at_its_live_center() {
 fn rendered_object_audibility_cache_retains_until_the_next_completed_render() {
     let line = make_object(1, "LINE", Vector2::new(2_000, 100));
     let mut snapshot = make_snapshot(vec![line.clone()], Vec::new());
-    snapshot.definition_lines.insert(
+    std::sync::Arc::make_mut(&mut snapshot.definition_lines).insert(
         line.definition_id.clone(),
         clonk_engine::DefinitionLineMetadata {
             line: 1,

@@ -32,6 +32,10 @@ path = "../clonk-engine/src/lib.rs"
 name = "particle_allocations"
 path = "tests/particle_allocations.rs"
 
+[[test]]
+name = "snapshot_definition_allocations"
+path = "tests/snapshot_definition_allocations.rs"
+
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
@@ -52,7 +56,7 @@ rustc-hash = "2"
 proptest = { version = "1", default-features = false, features = ["std"] }
 rand = { version = "0.10", default-features = false, features = ["std"] }
 rand_core = "0.10"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 smallvec = { version = "1", features = ["const_generics", "const_new"] }
 tempfile = "3"

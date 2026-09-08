@@ -1245,11 +1245,9 @@ mod tests {
             open_container,
             visible_repeller,
         ];
-        snapshot
-            .definition_closed_containers
+        std::sync::Arc::make_mut(&mut snapshot.definition_closed_containers)
             .insert("Closed".into(), 1);
-        snapshot
-            .definition_closed_containers
+        std::sync::Arc::make_mut(&mut snapshot.definition_closed_containers)
             .insert("ClosedTwo".into(), 2);
         // Generator intentionally precedes the repeller: native still applies
         // it last and leaves their shared center black.
@@ -5392,7 +5390,7 @@ mod tests {
             clonk_engine::ObjectVertex::new(10, 8),
             clonk_engine::ObjectVertex::new(20, 8),
         ];
-        first.definition_lines.insert(
+        std::sync::Arc::make_mut(&mut first.definition_lines).insert(
             DefinitionId::from("LightningLine"),
             DefinitionLineMetadata {
                 line: 4,

@@ -69,6 +69,7 @@ impl Engine {
         if self.definitions.remove(id).is_none() {
             return false;
         }
+        self.definition_order.snapshot_metadata.borrow_mut().take();
         let definition_id = DefinitionId::from(id);
         self.definition_order
             .load_order
@@ -179,6 +180,7 @@ impl Engine {
                 .unwrap_or_default()
         });
         self.definitions.insert(id, Rc::new(definition));
+        self.definition_order.snapshot_metadata.borrow_mut().take();
         self.definition_order.metadata_cache.borrow_mut().take();
         self.definition_order
             .command_snapshot_cache

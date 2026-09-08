@@ -5354,12 +5354,12 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub network_packets: Vec<NetworkPacketSnapshot>,
     #[serde(default)]
-    pub definition_categories: HashMap<DefinitionId, i32>,
+    pub definition_categories: Arc<HashMap<DefinitionId, i32>>,
     /// Definition `ClosedContainer` values needed by the viewport FoW pass.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub definition_closed_containers: BTreeMap<DefinitionId, i32>,
+    pub definition_closed_containers: Arc<BTreeMap<DefinitionId, i32>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub definition_lines: HashMap<DefinitionId, DefinitionLineMetadata>,
+    pub definition_lines: Arc<HashMap<DefinitionId, DefinitionLineMetadata>>,
     #[serde(default)]
     pub transfer_zones: Vec<TransferZoneState>,
     /// Presentation-only graph retained by the most recent pathfinder run.
@@ -5396,9 +5396,7 @@ fn simulation_snapshot_roundtrips_fow_presentation_and_defaults_legacy_frames() 
             view_target: Some(ObjectId::new(11)),
         },
     );
-    snapshot
-        .definition_closed_containers
-        .insert("HUT1".into(), 1);
+    std::sync::Arc::make_mut(&mut snapshot.definition_closed_containers).insert("HUT1".into(), 1);
 
     let encoded = serde_json::to_value(&snapshot).expect("snapshot serializes");
     let restored: SimulationSnapshot =
@@ -7734,6 +7732,8 @@ pub struct ExecutionListState {
 /// these derive from, not another derivation, and test bodies name it.
 #[derive(Default)]
 pub(crate) struct DefinitionOrderState {
+    /// Frame metadata is immutable until a definition is registered or removed.
+    snapshot_metadata: RefCell<Option<DefinitionSnapshotMetadata>>,
     /// Definition registration order — C++ links scripts in child
     /// registration order (C4AulScript::Child0 walk, C4AulLink.cpp:31),
     /// which decides the overload chain when several appends hit the same
@@ -7765,6 +7765,14 @@ pub(crate) struct DefinitionOrderState {
     /// remain Arc-shared; host contexts only clone this Rc table.
     pub(crate) solid_mask_metadata_cache:
         std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::HostSolidMaskMetadata>>>>,
+}
+
+/// Shared frame projections; invalidation leaves retained snapshots intact.
+struct DefinitionSnapshotMetadata {
+    categories: Arc<HashMap<DefinitionId, i32>>,
+    closed_containers: Arc<BTreeMap<DefinitionId, i32>>,
+    no_closed_containers: Arc<BTreeMap<DefinitionId, i32>>,
+    lines: Arc<HashMap<DefinitionId, DefinitionLineMetadata>>,
 }
 
 /// `Game.pScenarioSections` and the bookkeeping that materializes it.
