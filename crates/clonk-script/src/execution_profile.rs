@@ -184,3 +184,97 @@ pub(crate) fn record_ast_after_runtime_guard() {
         profile.set(current);
     });
 }
+
+/// Exclusive execution intervals, including native host work but excluding
+/// nested script bodies. This bounds interpreter cost; it is not pure VM time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionTiming {
+    pub compiled_ns: u64,
+    pub ast_ns: u64,
+}
+
+#[cfg(any(test, feature = "execution-profile"))]
+impl ExecutionTiming {
+    fn enter(self, now: u64) -> (u64, u64) {
+        (now, self.compiled_ns.saturating_add(self.ast_ns))
+    }
+
+    fn exit(&mut self, (started, children_before): (u64, u64), now: u64, ast: bool) {
+        let children = self
+            .compiled_ns
+            .saturating_add(self.ast_ns)
+            .saturating_sub(children_before);
+        let exclusive = now.saturating_sub(started).saturating_sub(children);
+        let counter = if ast {
+            &mut self.ast_ns
+        } else {
+            &mut self.compiled_ns
+        };
+        *counter = counter.saturating_add(exclusive);
+    }
+}
+
+thread_local! {
+    static TIMING: Cell<ExecutionTiming> = const { Cell::new(ExecutionTiming {
+        compiled_ns: 0,
+        ast_ns: 0,
+    }) };
+    static TIMING_ENABLED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Start a fresh timing window, or disable timing. Call outside script execution.
+/// Requires `execution-profile`; normal builds never read the clock in the VM.
+pub fn set_timing_enabled(enabled: bool) {
+    TIMING.with(|timing| timing.set(ExecutionTiming::default()));
+    TIMING_ENABLED.with(|current| current.set(enabled));
+}
+
+pub fn timing_snapshot() -> ExecutionTiming {
+    TIMING.with(Cell::get)
+}
+
+#[cfg(feature = "execution-profile")]
+pub(crate) struct ExecutionTimer {
+    started: std::time::Instant,
+    interval: (u64, u64),
+    ast: bool,
+}
+
+#[cfg(feature = "execution-profile")]
+impl ExecutionTimer {
+    pub(crate) fn enter(ast: bool) -> Option<Self> {
+        TIMING_ENABLED.with(Cell::get).then(|| Self {
+            started: std::time::Instant::now(),
+            interval: TIMING.with(|timing| timing.get().enter(0)),
+            ast,
+        })
+    }
+}
+
+#[cfg(feature = "execution-profile")]
+impl Drop for ExecutionTimer {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        TIMING.with(|timing| {
+            let mut current = timing.get();
+            current.exit(self.interval, elapsed, self.ast);
+            timing.set(current);
+        });
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn nested_execution_time_is_charged_only_to_its_own_path() {
+        let mut timing = ExecutionTiming::default();
+        let outer = timing.enter(10);
+        let inner = timing.enter(20);
+        timing.exit(inner, 50, true);
+        timing.exit(outer, 90, false);
+        assert_eq!(timing.ast_ns, 30);
+        assert_eq!(timing.compiled_ns, 50);
+    }
+}

@@ -1,0 +1,367 @@
+{
+  "fingerprint": {
+    "base_commit": "17ae8a81e060c2bbacff33fd3adbf45b7c3a850b",
+    "content_commit": "9a01c8f55f0fbdccfa2dcf3a67e3cfcfcac7c009",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "platform": "Linux-7.1.11-arch1-1-x86_64-with-glibc2.44",
+    "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+    "warmup_frames": 100,
+    "measured_frames": 400,
+    "runs": 5,
+    "seed": 0,
+    "profile": "release",
+    "build_jobs": 1,
+    "test_threads": 1,
+    "cargo_lock_sha256": "663caa2b669f715ad0285e204ed2c7d5a35653f365edf811eb3220239b4c800e",
+    "instrumentation_patch_sha256": "ac50bed02b73ef179728290aeffd27fce562bec8c0aeed8fd6688c9898e0e063",
+    "instrumented_source_sha256": {
+      "crates/clonk-script/src/execution_profile.rs": "bac9112a52283796ec6bd4ea641a4c0e420bf143d69ba5374a1b6231e43ae140",
+      "crates/clonk-script/src/vm.rs": "b6a9ee7dd20225d1a84204f80e18b2676daedc8d72c332af24a7e5c034311cf6",
+      "crates/clonk-engine/tests/it/script_execution_profile.rs": "5c93b1239a6d2582fefac9e5391ee4dc068cca5bdd391e3513ef8bf7f176a146"
+    }
+  },
+  "windows": [
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 1860041070,
+      "ast_ns": 871153499,
+      "compiled_ns": 123068464,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 12750,
+        "method_or_optional_call": 10765,
+        "break_or_continue": 7563,
+        "complex_assignment": 4418,
+        "foreach": 646,
+        "legacy_or_global_call": 20
+      }
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 1853621108,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 1904086152,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 1922729489,
+      "ast_ns": 894079542,
+      "compiled_ns": 126685336,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 12750,
+        "method_or_optional_call": 10765,
+        "break_or_continue": 7563,
+        "complex_assignment": 4418,
+        "foreach": 646,
+        "legacy_or_global_call": 20
+      }
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 1892162248,
+      "ast_ns": 874449598,
+      "compiled_ns": 124930915,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 12750,
+        "method_or_optional_call": 10765,
+        "break_or_continue": 7563,
+        "complex_assignment": 4418,
+        "foreach": 646,
+        "legacy_or_global_call": 20
+      }
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 1935662670,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 1886912021,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 1863902756,
+      "ast_ns": 867548242,
+      "compiled_ns": 123419511,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 12750,
+        "method_or_optional_call": 10765,
+        "break_or_continue": 7563,
+        "complex_assignment": 4418,
+        "foreach": 646,
+        "legacy_or_global_call": 20
+      }
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 1866198410,
+      "ast_ns": 864910221,
+      "compiled_ns": 123553489,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 12750,
+        "method_or_optional_call": 10765,
+        "break_or_continue": 7563,
+        "complex_assignment": 4418,
+        "foreach": 646,
+        "legacy_or_global_call": 20
+      }
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 1912362228,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28831,
+      "ast": 23504,
+      "guards": 169
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 559752510,
+      "ast_ns": 187760568,
+      "compiled_ns": 44079266,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 2549,
+        "method_or_optional_call": 1852,
+        "complex_assignment": 1580,
+        "foreach": 728,
+        "break_or_continue": 183
+      }
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 566659122,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 561508114,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 557571706,
+      "ast_ns": 187463153,
+      "compiled_ns": 44303510,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 2549,
+        "method_or_optional_call": 1852,
+        "complex_assignment": 1580,
+        "foreach": 728,
+        "break_or_continue": 183
+      }
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 577824095,
+      "ast_ns": 193263017,
+      "compiled_ns": 46153955,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 2549,
+        "method_or_optional_call": 1852,
+        "complex_assignment": 1580,
+        "foreach": 728,
+        "break_or_continue": 183
+      }
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 587334739,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 565383956,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 570084704,
+      "ast_ns": 192145730,
+      "compiled_ns": 45518471,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 2549,
+        "method_or_optional_call": 1852,
+        "complex_assignment": 1580,
+        "foreach": 728,
+        "break_or_continue": 183
+      }
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 561289627,
+      "ast_ns": 189336432,
+      "compiled_ns": 44546828,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36,
+      "fallback_reasons": {
+        "special_or_forwarded_call": 2549,
+        "method_or_optional_call": 1852,
+        "complex_assignment": 1580,
+        "foreach": 728,
+        "break_or_continue": 183
+      }
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 548437099,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10359,
+      "ast": 4444,
+      "guards": 36
+    }
+  ],
+  "summary": [
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "ast_ms_per_frame": 2.1778837475,
+      "ast_percent_of_tick": 46.50053723704032,
+      "timed_tick_ms": 4.665496025,
+      "untimed_tick_ms": 4.76021538,
+      "exceeds_threshold": true,
+      "observed_timer_on_tick_difference_percent": -1.9898123811364132
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "ast_ms_per_frame": 0.47334108,
+      "ast_percent_of_tick": 33.62135326859645,
+      "timed_tick_ms": 1.4032240674999998,
+      "untimed_tick_ms": 1.41345989,
+      "exceeds_threshold": true,
+      "observed_timer_on_tick_difference_percent": -0.7241678785805616
+    }
+  ],
+  "threshold": {
+    "ast_ms_per_frame_at_least": 0.278,
+    "ast_percent_of_tick_at_least": 5,
+    "both_required": true
+  },
+  "interpretation": "Exclusive execution intervals include native host work and bound interpreter overhead, not attainable speedup. Timer-on tick differences include shared-machine noise. Counters remain enabled in both conditions.",
+  "follow_up": "clonk-org/clonk-rs#1565"
+}

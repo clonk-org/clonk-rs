@@ -6608,6 +6608,8 @@ impl<'a> Vm<'a> {
         start_statement: usize,
         direct_exec_context: Option<DirectExecContinuationContext>,
     ) -> Result<ControlFlow, RuntimeError> {
+        #[cfg(feature = "execution-profile")]
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(true);
         let statements = Arc::new(function.body.clone());
         let state = AstMachineState {
             tasks: vec![AstTask::Statements {
@@ -6641,6 +6643,8 @@ impl<'a> Vm<'a> {
         caller: Option<ScriptCallerContext>,
         direct_exec_context: Option<&DirectExecContinuationContext>,
     ) -> Result<ControlFlow, RuntimeError> {
+        #[cfg(feature = "execution-profile")]
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(true);
         let mut diagnostic = direct_exec_context.map(|context| {
             ScriptDiagnosticGuard::enter_direct(context.frame.clone(), context.profile_on_error)
         });
@@ -18200,6 +18204,8 @@ impl CompiledFunction {
         compiled: Arc<CompiledFunction>,
         frame_value_stack: usize,
     ) -> Result<Option<ControlFlow>, RuntimeError> {
+        #[cfg(feature = "execution-profile")]
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(false);
         let Some(bindings) = self.bindings(env) else {
             return Ok(None);
         };
@@ -18257,6 +18263,8 @@ impl CompiledFunction {
         state: CompiledExecutionState,
         frame_value_stack: usize,
     ) -> Result<Option<ControlFlow>, RuntimeError> {
+        #[cfg(feature = "execution-profile")]
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(false);
         let CompiledExecutionState {
             mut stack,
             mut registered_slots,
