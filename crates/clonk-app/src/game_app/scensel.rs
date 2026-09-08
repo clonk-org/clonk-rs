@@ -843,7 +843,7 @@ impl GameApp {
         select_first_when_missing: bool,
         apply_live_search: bool,
     ) -> Result<(), EngineError> {
-        self.cancel_scenario_selector_discovery();
+        self.scensel.cancel_discovery();
         self.menu_state.scrollbar_interaction = None;
         let selected_identifier = selected_identifier.map(str::to_string);
         let Some(paths) = self.app_paths.clone() else {
@@ -934,12 +934,6 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn cancel_scenario_selector_discovery(&mut self) {
-        if let Some(state) = self.scensel.discovery.take() {
-            state.cancel.store(true, AtomicOrdering::Relaxed);
-        }
-    }
-
     pub(crate) fn scenario_selector_loading_label(&self) -> Option<String> {
         let progress = self
             .scensel
@@ -1009,7 +1003,7 @@ impl GameApp {
             );
         }
         if disconnected {
-            self.cancel_scenario_selector_discovery();
+            self.scensel.cancel_discovery();
             self.status_text = "Scenario discovery interrupted".to_string();
             tracing::warn!("scenario discovery worker disconnected");
         }
