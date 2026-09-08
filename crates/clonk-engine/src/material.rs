@@ -778,10 +778,8 @@ impl MaterialProperties {
         let min_height_count = definition.int("minheightcount").unwrap_or(0);
         let dig_free = definition.bool_flag("digfree").unwrap_or(false);
         let blast_free = definition.bool_flag("blastfree").unwrap_or(false);
-        let dig_to_object_on_request_only = definition
-            .bool_flag("dig2objectrequest")
-            .or_else(|| definition.bool_flag("dig2objectonrequestonly"))
-            .unwrap_or(false);
+        let dig_to_object_on_request_only =
+            definition.bool_flag("dig2objectrequest").unwrap_or(false);
         let placement = match definition.int("placement") {
             Some(value) if value != 0 => value,
             _ => Self::default_placement(
@@ -806,7 +804,7 @@ impl MaterialProperties {
             if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed.to_ascii_uppercase())
+                Some(trimmed.to_owned())
             }
         });
         let blast_to_object_ratio = definition
@@ -820,7 +818,7 @@ impl MaterialProperties {
             if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed.to_ascii_uppercase())
+                Some(trimmed.to_owned())
             }
         });
         let dig_to_object_ratio = definition
@@ -1245,6 +1243,275 @@ impl MaterialSet {
         self.script_reactions
             .get(usize::from(func))
             .map(String::as_str)
+    }
+
+    /// Pointer-free compiled material cores for the end-of-frame shadow diff.
+    ///
+    /// `GetMaterialVal` can expose every named compiler field to synchronized
+    /// script, including graphics-only values, while the primitive fields also
+    /// drive PXS, mass-mover, temperature, and landscape behavior. The stream
+    /// follows `C4MaterialCore::CompileFunc` and each custom reaction's
+    /// `CompileFunc` order (C4Material.cpp:48-68,170-226).
+    pub(crate) fn runtime_behavior_validation_state(&self) -> Result<Vec<u8>, String> {
+        const FORMAT_VERSION: u32 = 1;
+
+        fn core_value(
+            material: &Material,
+            name: &str,
+            index: usize,
+        ) -> Result<MaterialCoreValue, String> {
+            material.core_entry(name, index).ok_or_else(|| {
+                format!(
+                    "material {} compiled core {name}[{index}] is missing",
+                    material.name()
+                )
+            })
+        }
+
+        fn core_int(material: &Material, name: &str, index: usize) -> Result<i32, String> {
+            match core_value(material, name, index)? {
+                MaterialCoreValue::Int(value) => Ok(value),
+                value => Err(format!(
+                    "material {} compiled core {name}[{index}] is {value:?}, expected integer",
+                    material.name()
+                )),
+            }
+        }
+
+        fn core_array_int(material: &Material, name: &str, index: usize) -> Result<i32, String> {
+            match material.core_entry(name, index) {
+                Some(MaterialCoreValue::Int(value)) => Ok(value),
+                None => Ok(0),
+                Some(value) => Err(format!(
+                    "material {} compiled core {name}[{index}] is {value:?}, expected integer",
+                    material.name()
+                )),
+            }
+        }
+
+        fn core_bool(material: &Material, name: &str, index: usize) -> Result<bool, String> {
+            match core_value(material, name, index)? {
+                MaterialCoreValue::Bool(value) => Ok(value),
+                value => Err(format!(
+                    "material {} compiled core {name}[{index}] is {value:?}, expected boolean",
+                    material.name()
+                )),
+            }
+        }
+
+        fn core_string(material: &Material, name: &str, index: usize) -> Result<String, String> {
+            match core_value(material, name, index)? {
+                MaterialCoreValue::String(value) => Ok(value),
+                value => Err(format!(
+                    "material {} compiled core {name}[{index}] is {value:?}, expected string",
+                    material.name()
+                )),
+            }
+        }
+
+        fn core_id(material: &Material, name: &str) -> Result<u32, String> {
+            let MaterialCoreValue::C4Id(value) = core_value(material, name, 0)? else {
+                return Err(format!(
+                    "material {} compiled core {name}[0] is not a C4ID",
+                    material.name()
+                ));
+            };
+            u32::try_from(clonk_script::c4_id_raw(&value)).map_err(|_| {
+                format!(
+                    "material {} compiled core {name}[0] exceeds u32",
+                    material.name()
+                )
+            })
+        }
+
+        fn push_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), String> {
+            let value = clonk_script::c4_string_bytes_cow(value);
+            let length = u32::try_from(value.len())
+                .map_err(|_| "compiled material string exceeds u32".to_owned())?;
+            bytes.extend_from_slice(&length.to_le_bytes());
+            bytes.extend_from_slice(&value);
+            Ok(())
+        }
+
+        let material_count = u32::try_from(self.materials.len())
+            .map_err(|_| "material behavior count exceeds u32".to_owned())?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"LCMB");
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&material_count.to_le_bytes());
+
+        for material in &self.materials {
+            push_string(&mut bytes, &core_string(material, "Name", 0)?)?;
+            for index in 0..9 {
+                bytes.extend_from_slice(
+                    &(core_array_int(material, "Color", index)? as u32).to_le_bytes(),
+                );
+            }
+            for index in 0..6 {
+                bytes.extend_from_slice(
+                    &(core_array_int(material, "Alpha", index)? as u32).to_le_bytes(),
+                );
+            }
+            for name in ["Shape", "Density", "Friction", "DigFree", "BlastFree"] {
+                bytes.extend_from_slice(&core_int(material, name, 0)?.to_le_bytes());
+            }
+            bytes.extend_from_slice(&core_id(material, "Blast2Object")?.to_le_bytes());
+            bytes.extend_from_slice(&core_id(material, "Dig2Object")?.to_le_bytes());
+            for name in [
+                "Dig2ObjectRatio",
+                "Dig2ObjectRequest",
+                "Blast2ObjectRatio",
+                "Blast2PXSRatio",
+                "Instable",
+                "MaxAirSpeed",
+                "MaxSlide",
+                "WindDrift",
+                "Inflammable",
+                "Incindiary",
+                "Corrode",
+                "Corrosive",
+                "Extinguisher",
+                "Soil",
+                "Placement",
+            ] {
+                bytes.extend_from_slice(&core_int(material, name, 0)?.to_le_bytes());
+            }
+            push_string(&mut bytes, &core_string(material, "TextureOverlay", 0)?)?;
+            bytes.extend_from_slice(&core_int(material, "OverlayType", 0)?.to_le_bytes());
+            push_string(&mut bytes, &core_string(material, "PXSGfx", 0)?)?;
+            for index in 0..6 {
+                bytes
+                    .extend_from_slice(&core_array_int(material, "PXSGfxRt", index)?.to_le_bytes());
+            }
+            bytes.extend_from_slice(&core_int(material, "PXSGfxSize", 0)?.to_le_bytes());
+            bytes.extend_from_slice(&core_int(material, "TempConvStrength", 0)?.to_le_bytes());
+            for name in ["BlastShiftTo", "InMatConvert", "InMatConvertTo"] {
+                push_string(&mut bytes, &core_string(material, name, 0)?)?;
+            }
+            for name in [
+                "InMatConvertDepth",
+                "AboveTempConvert",
+                "AboveTempConvertDir",
+            ] {
+                bytes.extend_from_slice(&core_int(material, name, 0)?.to_le_bytes());
+            }
+            push_string(&mut bytes, &core_string(material, "AboveTempConvertTo", 0)?)?;
+            for name in ["BelowTempConvert", "BelowTempConvertDir"] {
+                bytes.extend_from_slice(&core_int(material, name, 0)?.to_le_bytes());
+            }
+            push_string(&mut bytes, &core_string(material, "BelowTempConvertTo", 0)?)?;
+            for name in ["MinHeightCount", "SplashRate"] {
+                bytes.extend_from_slice(&core_int(material, name, 0)?.to_le_bytes());
+            }
+
+            let reaction_count = u32::try_from(material.definition().reactions().len())
+                .map_err(|_| format!("material {} reaction count exceeds u32", material.name()))?;
+            bytes.extend_from_slice(&reaction_count.to_le_bytes());
+            for index in 0..reaction_count as usize {
+                for name in ["Type", "TargetSpec", "ScriptFunc"] {
+                    push_string(&mut bytes, &core_string(material, name, index)?)?;
+                }
+                bytes.extend_from_slice(&core_int(material, "ExecMask", index)?.to_le_bytes());
+                for name in ["Reverse", "InverseSpec", "CheckSlide"] {
+                    bytes.push(u8::from(core_bool(material, name, index)?));
+                }
+                bytes.extend_from_slice(&core_int(material, "Depth", index)?.to_le_bytes());
+                push_string(&mut bytes, &core_string(material, "ConvertMat", index)?)?;
+                bytes.extend_from_slice(&core_int(material, "CorrosionRate", index)?.to_le_bytes());
+            }
+        }
+
+        Ok(bytes)
+    }
+
+    /// Pointer-free effective reaction state for the end-of-frame native
+    /// shadow diff. `CrossMapMaterials` stores one event-agnostic pointer per
+    /// ordered pair; expanding `ExecMask` here makes every future dispatch
+    /// input explicit without serializing implementation addresses.
+    pub(crate) fn runtime_validation_state(
+        &self,
+        mut script_resolves: impl FnMut(&str) -> bool,
+    ) -> Result<Vec<u8>, String> {
+        const FORMAT_VERSION: u32 = 1;
+        fn push_i32(bytes: &mut Vec<u8>, value: i32) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let material_count = u32::try_from(self.materials.len())
+            .map_err(|_| "material reaction count exceeds u32".to_owned())?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"LCMR");
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&material_count.to_le_bytes());
+
+        for event in MaterialInteractionEvent::ALL {
+            for landscape_index in 0..=self.materials.len() {
+                let landscape_material = landscape_index.checked_sub(1).and_then(MaterialId::new);
+                for pxs_index in 0..=self.materials.len() {
+                    let pxs_material = pxs_index.checked_sub(1).and_then(MaterialId::new);
+                    let reaction = self.reaction_for_event(pxs_material, landscape_material, event);
+                    bytes.push(match reaction.kind {
+                        MaterialReactionKind::None => 0,
+                        MaterialReactionKind::Convert { .. } => 1,
+                        MaterialReactionKind::Poof => 2,
+                        MaterialReactionKind::Corrode { .. } => 3,
+                        MaterialReactionKind::Incinerate => 4,
+                        MaterialReactionKind::Insert => 5,
+                        MaterialReactionKind::Script { .. } => 6,
+                    });
+                    bytes.push(u8::from(reaction.user_defined));
+                    bytes.push(u8::from(reaction.insertion_check));
+                    match reaction.kind {
+                        MaterialReactionKind::Convert { target, depth } => {
+                            let target = target
+                                .map(|target| {
+                                    i32::try_from(target.index()).map_err(|_| {
+                                        "material reaction target exceeds i32".to_owned()
+                                    })
+                                })
+                                .transpose()?
+                                .unwrap_or(-1);
+                            push_i32(&mut bytes, target);
+                            push_i32(&mut bytes, depth.unwrap_or(0));
+                        }
+                        MaterialReactionKind::Corrode {
+                            corrosive_strength,
+                            corrode_resistance,
+                            corrosion_probability,
+                        } => {
+                            push_i32(&mut bytes, corrosive_strength);
+                            push_i32(&mut bytes, corrode_resistance);
+                            bytes.push(u8::from(corrosion_probability.is_some()));
+                            push_i32(&mut bytes, corrosion_probability.unwrap_or(0));
+                        }
+                        MaterialReactionKind::Script { func } => {
+                            let function = self.script_reaction_name(func).ok_or_else(|| {
+                                format!("material reaction script ordinal {func} is missing")
+                            })?;
+                            let function = clonk_script::c4_string_bytes_cow(function);
+                            if function.contains(&0) {
+                                return Err(
+                                    "material reaction script name contains an embedded NUL".into(),
+                                );
+                            }
+                            let function_len = u32::try_from(function.len()).map_err(|_| {
+                                "material reaction script name exceeds u32".to_owned()
+                            })?;
+                            bytes.extend_from_slice(&function_len.to_le_bytes());
+                            bytes.extend_from_slice(&function);
+                            bytes.push(u8::from(script_resolves(
+                                &clonk_script::c4_string_from_bytes(&function),
+                            )));
+                        }
+                        MaterialReactionKind::None
+                        | MaterialReactionKind::Poof
+                        | MaterialReactionKind::Incinerate
+                        | MaterialReactionKind::Insert => {}
+                    }
+                }
+            }
+        }
+        Ok(bytes)
     }
 
     pub fn push(&mut self, mut material: Material) {
@@ -2584,6 +2851,132 @@ mod tests {
         };
 
         assert_eq!(set.script_reaction_name(func), Some("Callback "));
+    }
+
+    #[test]
+    fn runtime_validation_state_covers_effective_reaction_routing() {
+        // CrossMapMaterials installs one reaction pointer for every ordered
+        // PXS/landscape pair, and mrfUserCheck applies ExecMask at dispatch
+        // (C4Material.cpp:311-345,386-493,612-625). Equal material names and
+        // pixels are insufficient when that future-driving route differs.
+        let mut materials = build_material_set(
+            "[Material Source]\nName=Source\nDensity=25\n\n\
+             [Reaction]\nType=Convert\nTargetSpec=Target\nExecMask=2\n\
+             ConvertMat=Source\nDepth=3\n\n\
+             [Material Target]\nName=Target\nDensity=80\n",
+        );
+        let matching = materials
+            .runtime_validation_state(|_| false)
+            .expect("valid reaction state encodes");
+        let occupied = materials.custom_reactions_by_event
+            [MaterialInteractionEvent::PxsMove.index()]
+        .iter_mut()
+        .find_map(Option::as_mut)
+        .expect("custom reaction occupies a pair");
+        occupied.insertion_check = !occupied.insertion_check;
+
+        assert_ne!(
+            materials
+                .runtime_validation_state(|_| false)
+                .expect("mutated reaction state encodes"),
+            matching
+        );
+    }
+
+    #[test]
+    fn runtime_behavior_validation_state_covers_compiled_core_values() {
+        // GetMaterialVal decompiles the loaded C4MaterialCore, so even fields
+        // that only affect rendering can steer synchronized script behavior
+        // (C4Script.cpp:4283-4300; C4Material.cpp:170-226).
+        let baseline =
+            build_material_set("[Material Earth]\nName=Earth\nDensity=50\nFriction=10\n")
+                .runtime_behavior_validation_state()
+                .expect("material behavior state encodes");
+        let changed = build_material_set("[Material Earth]\nName=Earth\nDensity=50\nFriction=11\n")
+            .runtime_behavior_validation_state()
+            .expect("changed material behavior state encodes");
+
+        assert_eq!(&baseline[..4], b"LCMB");
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn dig_request_uses_only_the_cpp_compiler_key() {
+        // C4MaterialCore::CompileFunc binds Dig2ObjectOnRequestOnly only to
+        // `Dig2ObjectRequest`; unknown INI keys do not change the field or its
+        // derived Placement (C4Material.cpp:145-158,189).
+        let source = |key: &str| {
+            format!(
+                "[Material Earth]\nName=Earth\nDensity=50\n\
+                 Dig2Object=ROCK\nDig2ObjectRatio=1\n{key}"
+            )
+        };
+        let baseline = build_material_set(&source(""));
+        let alias = build_material_set(&source("Dig2ObjectOnRequestOnly=1\n"));
+        let canonical = build_material_set(&source("Dig2ObjectRequest=1\n"));
+
+        assert!(!alias.materials()[0].dig_to_object_on_request_only());
+        assert_eq!(alias.materials()[0].placement(), 70);
+        assert_eq!(
+            alias
+                .runtime_behavior_validation_state()
+                .expect("alias material behavior state encodes"),
+            baseline
+                .runtime_behavior_validation_state()
+                .expect("baseline material behavior state encodes")
+        );
+        assert!(canonical.materials()[0].dig_to_object_on_request_only());
+        assert_eq!(canonical.materials()[0].placement(), 60);
+        assert_ne!(
+            canonical
+                .runtime_behavior_validation_state()
+                .expect("canonical material behavior state encodes"),
+            baseline
+                .runtime_behavior_validation_state()
+                .expect("baseline material behavior state encodes")
+        );
+    }
+
+    #[test]
+    fn object_conversion_ids_preserve_cpp_byte_case() {
+        // C4IDAdapt passes the four parsed bytes to C4Id without case folding;
+        // definition lookup later compares that numeric ID exactly
+        // (C4Id.h:32-68,133-147; C4Def.cpp:1436-1440).
+        let materials = build_material_set(
+            "[Material Earth]\nName=Earth\nBlast2Object=rock\nDig2Object=gEm_\n",
+        );
+        let earth = &materials.materials()[0];
+
+        assert_eq!(earth.blast_to_object_name(), Some("rock"));
+        assert_eq!(earth.dig_to_object_name(), Some("gEm_"));
+    }
+
+    #[test]
+    fn runtime_behavior_validation_state_includes_script_visible_graphics_and_reactions() {
+        // GetMaterialVal exposes the graphics fields and source reaction list
+        // verbatim (C4Script.cpp:4283-4300; C4Material.cpp:48-68,170-226), so
+        // a script can turn either difference into synchronized simulation.
+        let source = |color: i32, target: &str| {
+            format!(
+                "[Material Source]\nName=Source\nDensity=25\nColor={color}\n\
+                 TextureOverlay=Rough\nPXSGfx=Pixel\nPXSGfxRt=1,2,3,4,5,6\n\n\
+                 [Reaction]\nType=Convert\nTargetSpec={target}\nExecMask=2\n\
+                 ConvertMat=Source\nDepth=3\n\n\
+                 [Material Target]\nName=Target\nDensity=50\n"
+            )
+        };
+        let baseline = build_material_set(&source(1, "Target"))
+            .runtime_behavior_validation_state()
+            .expect("material behavior state encodes");
+        let changed_color = build_material_set(&source(2, "Target"))
+            .runtime_behavior_validation_state()
+            .expect("changed color state encodes");
+        let changed_reaction = build_material_set(&source(1, "Source"))
+            .runtime_behavior_validation_state()
+            .expect("changed reaction state encodes");
+
+        assert_ne!(baseline, changed_color);
+        assert_ne!(baseline, changed_reaction);
     }
 
     #[test]

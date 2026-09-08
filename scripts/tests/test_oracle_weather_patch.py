@@ -13,6 +13,13 @@ PINNED_ORACLE_REVISION = "7d43b47b7d789b533f32d005e64596e0a07019cd"
 PATCH = REPOSITORY / "parity" / "bridge" / "oracle-weather.patch"
 BUILD_SCRIPT = REPOSITORY / "parity" / "bridge" / "build-oracle-validation.sh"
 EXPECTED_ORACLE_PATHS = {
+    "src/C4Landscape.h",
+    "src/C4MapCreatorS2.cpp",
+    "src/C4MapCreatorS2.h",
+    "src/C4MassMover.h",
+    "src/C4PXS.h",
+    "src/C4SolidMask.h",
+    "src/C4Texture.h",
     "src/C4Weather.cpp",
     "src/C4Weather.h",
     "src/rust/RustEngineBridge.cpp",
@@ -117,7 +124,7 @@ class OracleWeatherPatchTests(unittest.TestCase):
                 )
                 self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
                 self.assertIn(
-                    "applied the oracle weather instrumentation patch", first.stdout
+                    "applied the oracle runtime instrumentation patch", first.stdout
                 )
 
                 second = subprocess.run(
@@ -129,7 +136,7 @@ class OracleWeatherPatchTests(unittest.TestCase):
                 )
                 self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
                 self.assertIn(
-                    "oracle weather instrumentation patch already applied",
+                    "oracle runtime instrumentation patch already applied",
                     second.stdout,
                 )
 
@@ -150,7 +157,7 @@ class OracleWeatherPatchTests(unittest.TestCase):
                 )
                 self.assertNotEqual(partial.returncode, 0)
                 self.assertIn(
-                    "oracle weather patch is partially applied", partial.stderr
+                    "oracle runtime patch is partially applied", partial.stderr
                 )
             finally:
                 subprocess.run(

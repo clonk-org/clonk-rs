@@ -3,7 +3,11 @@ use crate::landscape::{
     LandscapeRasterState, PixelGrid, RuntimeTexMapMaterial, RuntimeTexMapState,
 };
 
-fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, MaterialId) {
+fn blast_engine(
+    copy_to_lower_slot: bool,
+    blast_shift_to: &str,
+    target_name: &str,
+) -> (Engine, MaterialId) {
     let source = format!(
         r#"
             [Material Rock]
@@ -11,8 +15,8 @@ fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, Mate
             Density=80
             BlastShiftTo={blast_shift_to}
 
-            [Material Target]
-            Name=Target
+            [Material {target_name}]
+            Name={target_name}
             Density=30
             "#
     );
@@ -25,7 +29,7 @@ fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, Mate
     densities[40] = 30;
     let mut material_names = vec![None; 128];
     material_names[10] = Some("Rock".to_string());
-    material_names[40] = Some("Target".to_string());
+    material_names[40] = Some(target_name.to_string());
     let mut texture_names = vec![None; 128];
     texture_names[10] = Some("Rough".to_string());
     texture_names[40] = Some("Smooth".to_string());
@@ -57,7 +61,7 @@ fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, Mate
         shapes: vec![None; 128],
         materials: runtime_materials,
         texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
-        default_material_entries: vec![("Rock".to_string(), 10), ("Target".to_string(), 40)],
+        default_material_entries: vec![("Rock".to_string(), 10), (target_name.to_string(), 40)],
         material_crossmap_entries: vec![40],
         ..Default::default()
     };
@@ -85,8 +89,8 @@ fn blast_engine(copy_to_lower_slot: bool, blast_shift_to: &str) -> (Engine, Mate
 
 #[test]
 fn blast_shift_uses_frozen_crossmap_slot_after_lower_index_copy() {
-    let (mut baseline, baseline_rock) = blast_engine(false, "Target-Smooth");
-    let (mut moved, moved_rock) = blast_engine(true, "Target-Smooth");
+    let (mut baseline, baseline_rock) = blast_engine(false, "Target-Smooth", "Target");
+    let (mut moved, moved_rock) = blast_engine(true, "Target-Smooth", "Target");
     let mut expected_baseline_rng = baseline.rng.clone();
     let mut expected_moved_rng = moved.rng.clone();
     let _ = expected_baseline_rng.random(1);
@@ -124,7 +128,7 @@ fn blast_shift_uses_frozen_crossmap_slot_after_lower_index_copy() {
 
 #[test]
 fn frozen_zero_crossmap_does_not_re_resolve_a_later_pair() {
-    let (mut engine, rock) = blast_engine(true, "Target-Smooth");
+    let (mut engine, rock) = blast_engine(true, "Target-Smooth", "Target");
     crate::TestValueExt::test_value(engine.landscape.as_mut().unwrap().raster_state_mut())
         .texmap_mut()
         .material_crossmap_entries[0] = 0;
@@ -142,7 +146,27 @@ fn frozen_zero_crossmap_does_not_re_resolve_a_later_pair() {
 
 #[test]
 fn blast_shift_without_texture_keeps_frozen_default_slot() {
-    let (mut engine, rock) = blast_engine(true, "Target");
+    let (mut engine, rock) = blast_engine(true, "Target", "Target");
+    let mut expected_rng = engine.rng.clone();
+    let _ = expected_rng.random(1);
+
+    let result = crate::TestValueExt::test_value(engine.blast_circle(Vector2::new(2, 2), 2, None));
+
+    assert_eq!(result.pixel_count_by_material[&rock], 1);
+    assert_eq!(
+        engine.landscape().unwrap().grid_byte_at(2, 2),
+        Some(40 | 0x80)
+    );
+    assert_eq!(engine.rng, expected_rng);
+}
+
+#[test]
+fn blast_shift_uses_cpp_full_material_fallback_for_hyphenated_names() {
+    // GetIndexMatTex first interprets `Foo-Bar` as a material/texture pair,
+    // then falls back to the complete string as a material name and returns
+    // its DefaultMatTex (C4Texture.cpp:346-369). BlastFreePix still consumes
+    // one Random draw for that cross-mapped shift (C4Landscape.cpp:941-970).
+    let (mut engine, rock) = blast_engine(false, "Foo-Bar", "Foo-Bar");
     let mut expected_rng = engine.rng.clone();
     let _ = expected_rng.random(1);
 
@@ -163,7 +187,7 @@ fn raster_blast_resolves_each_material_shift_once() {
     // material properties for each pixel (C4Landscape.cpp:941-970,1022-1063;
     // C4Material.cpp:474-479). Resolving that immutable property repeatedly
     // must not add work or alter the row-major draw sequence.
-    let (mut engine, rock) = blast_engine(false, "Target-Smooth");
+    let (mut engine, rock) = blast_engine(false, "Target-Smooth", "Target");
     for y in 0..5 {
         for x in 0..5 {
             engine

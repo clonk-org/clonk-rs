@@ -216,6 +216,12 @@ struct Point {
     y: i32,
     rx: IntBool,
     ry: IntBool,
+    /// Native leaves an omitted `RX`/`RY` indeterminate. Keep explicit-set
+    /// metadata so validation can transport only fields the parser initialized.
+    #[serde(default = "bool_true", skip_serializing_if = "bool_is_true")]
+    rx_set: bool,
+    #[serde(default = "bool_true", skip_serializing_if = "bool_is_true")]
+    ry_set: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,6 +517,343 @@ impl MapCreatorS2State {
             }
         }
     }
+
+    /// Canonical, pointer-free state for the end-of-frame native shadow diff.
+    ///
+    /// A retained creator can affect later `DrawMap`/`DrawDefMap` calls even
+    /// when its most recent render produced the same bytes. The stream walks
+    /// the evaluated tree in sibling order and carries the callback bitmaps
+    /// still owned by `C4MapCreatorS2`; arena indices and transient init-only
+    /// Rust fields are deliberately excluded.
+    pub(crate) fn runtime_validation_state(
+        &self,
+        materials: &crate::MaterialSet,
+    ) -> Result<Vec<u8>, String> {
+        const FORMAT_VERSION: u32 = 1;
+
+        let callback_count = self.tree.callbacks.len();
+        if callback_count != self.callbacks.arrays.len() {
+            return Err(format!(
+                "map creator callback definitions {} disagree with arrays {}",
+                callback_count,
+                self.callbacks.arrays.len()
+            ));
+        }
+        if !self.default_map.is_map {
+            return Err("map creator default map is not a map".into());
+        }
+
+        let mut encoder = RuntimeMapCreatorEncoder::default();
+        encoder.bytes.extend_from_slice(b"LCMC");
+        encoder.push_u32(FORMAT_VERSION);
+        encoder.push_u8(3);
+        encoder.push_overlay(&self.default_map, callback_count, materials)?;
+
+        let Some(root) = self.tree.nodes.first() else {
+            return Err("map creator tree has no root".into());
+        };
+        if root.owner.is_some() || !matches!(root.kind, NodeKind::Root) {
+            return Err("map creator node 0 is not an ownerless root".into());
+        }
+        let mut visited = vec![false; self.tree.nodes.len()];
+        self.encode_runtime_node(
+            0,
+            None,
+            callback_count,
+            materials,
+            &mut visited,
+            &mut encoder,
+        )?;
+        if let Some(unreachable) = visited.iter().position(|visited| !visited) {
+            return Err(format!(
+                "map creator node {unreachable} is unreachable from the root"
+            ));
+        }
+
+        encoder.push_len(callback_count, "callback count")?;
+        for (index, (definition, array)) in self
+            .tree
+            .callbacks
+            .iter()
+            .zip(&self.callbacks.arrays)
+            .enumerate()
+        {
+            if definition.function != array.function {
+                return Err(format!(
+                    "map creator callback {index} function {:?} disagrees with array {:?}",
+                    definition.function, array.function
+                ));
+            }
+            encoder.push_string(&definition.function, "callback function")?;
+            if array.bits.is_empty() {
+                encoder.push_u8(0);
+                continue;
+            }
+            let width = usize::try_from(array.width).map_err(|_| {
+                format!(
+                    "map creator callback {index} width {} is negative",
+                    array.width
+                )
+            })?;
+            let height = usize::try_from(array.height).map_err(|_| {
+                format!(
+                    "map creator callback {index} height {} is negative",
+                    array.height
+                )
+            })?;
+            let pixel_count = width
+                .checked_mul(height)
+                .ok_or_else(|| format!("map creator callback {index} dimensions overflow"))?;
+            if pixel_count == 0 {
+                return Err(format!(
+                    "map creator callback {index} has allocated bits with empty dimensions"
+                ));
+            }
+            let expected_len = pixel_count.div_ceil(8);
+            if array.bits.len() != expected_len {
+                return Err(format!(
+                    "map creator callback {index} bitmap length {} does not match {expected_len}",
+                    array.bits.len()
+                ));
+            }
+            let used_last_bits = pixel_count % 8;
+            if used_last_bits != 0
+                && array.bits[expected_len - 1] & !((1_u8 << used_last_bits) - 1) != 0
+            {
+                return Err(format!(
+                    "map creator callback {index} has set bitmap padding bits"
+                ));
+            }
+            encoder.push_u8(1);
+            encoder.push_i32(array.width);
+            encoder.push_i32(array.height);
+            encoder.push_len(array.bits.len(), "callback bitmap length")?;
+            encoder.bytes.extend_from_slice(&array.bits);
+        }
+        Ok(encoder.bytes)
+    }
+
+    fn encode_runtime_node(
+        &self,
+        id: NodeId,
+        owner: Option<NodeId>,
+        callback_count: usize,
+        materials: &crate::MaterialSet,
+        visited: &mut [bool],
+        encoder: &mut RuntimeMapCreatorEncoder,
+    ) -> Result<(), String> {
+        let node = self
+            .tree
+            .nodes
+            .get(id)
+            .ok_or_else(|| format!("map creator references missing node {id}"))?;
+        let slot = visited
+            .get_mut(id)
+            .ok_or_else(|| format!("map creator references missing node {id}"))?;
+        if std::mem::replace(slot, true) {
+            return Err(format!(
+                "map creator node {id} is referenced more than once"
+            ));
+        }
+        if node.owner != owner {
+            return Err(format!(
+                "map creator node {id} owner {:?} does not match {:?}",
+                node.owner, owner
+            ));
+        }
+
+        match &node.kind {
+            NodeKind::Root => {
+                if id != 0 {
+                    return Err(format!("map creator node {id} is an extra root"));
+                }
+                encoder.push_u8(0);
+            }
+            NodeKind::Overlay(overlay) => {
+                if overlay.is_map && owner != Some(0) {
+                    return Err(format!("map creator map node {id} is not global"));
+                }
+                encoder.push_u8(if overlay.is_map { 3 } else { 1 });
+            }
+            NodeKind::Point(_) => encoder.push_u8(2),
+        }
+        encoder.push_string(&node.name, "node name")?;
+        match &node.kind {
+            NodeKind::Root => {}
+            NodeKind::Overlay(overlay) => {
+                encoder.push_overlay(overlay, callback_count, materials)?
+            }
+            NodeKind::Point(point) => encoder.push_point(point),
+        }
+        encoder.push_len(node.children.len(), "child count")?;
+        for &child in &node.children {
+            self.encode_runtime_node(child, Some(id), callback_count, materials, visited, encoder)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RuntimeMapCreatorEncoder {
+    bytes: Vec<u8>,
+}
+
+impl RuntimeMapCreatorEncoder {
+    fn push_u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn push_u32(&mut self, value: u32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_i32(&mut self, value: i32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_len(&mut self, value: usize, name: &str) -> Result<(), String> {
+        let value = u32::try_from(value).map_err(|_| format!("map creator {name} exceeds u32"))?;
+        self.push_u32(value);
+        Ok(())
+    }
+
+    fn push_string(&mut self, value: &str, name: &str) -> Result<(), String> {
+        let bytes = clonk_script::c4_string_bytes_cow(value);
+        if bytes.contains(&0) {
+            return Err(format!("map creator {name} contains an embedded NUL"));
+        }
+        self.push_len(bytes.len(), name)?;
+        self.bytes.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    fn push_bool(&mut self, value: bool) {
+        self.push_u8(u8::from(value));
+    }
+
+    fn push_int_bool(&mut self, value: IntBool) {
+        self.push_i32(value.value);
+        self.push_bool(value.percent);
+    }
+
+    fn push_callback(
+        &mut self,
+        callback: Option<CallbackId>,
+        callback_count: usize,
+    ) -> Result<(), String> {
+        let value = match callback {
+            None => -1,
+            Some(callback) if callback < callback_count => i32::try_from(callback)
+                .map_err(|_| "map creator callback ordinal exceeds i32".to_owned())?,
+            Some(callback) => {
+                return Err(format!(
+                    "map creator callback ordinal {callback} exceeds count {callback_count}"
+                ));
+            }
+        };
+        self.push_i32(value);
+        Ok(())
+    }
+
+    fn push_overlay(
+        &mut self,
+        overlay: &Overlay,
+        callback_count: usize,
+        materials: &crate::MaterialSet,
+    ) -> Result<(), String> {
+        for value in [
+            overlay.seed,
+            overlay.fixed_seed,
+            overlay.x,
+            overlay.y,
+            overlay.wdt,
+            overlay.hgt,
+            overlay.off_x,
+            overlay.off_y,
+        ] {
+            self.push_i32(value);
+        }
+        for value in [
+            overlay.rx,
+            overlay.ry,
+            overlay.rwdt,
+            overlay.rhgt,
+            overlay.roff_x,
+            overlay.roff_y,
+        ] {
+            self.push_int_bool(value);
+        }
+        let material = overlay
+            .material
+            .as_deref()
+            .map(|name| {
+                materials
+                    .id_of(name)
+                    .ok_or_else(|| format!("map creator overlay material {name:?} is unknown"))
+                    .and_then(|material| {
+                        i32::try_from(material.index())
+                            .map_err(|_| "map creator overlay material exceeds i32".to_owned())
+                    })
+            })
+            .transpose()?
+            .unwrap_or(-1);
+        self.push_i32(material);
+        self.push_bool(overlay.sub);
+        self.push_string(&overlay.texture, "overlay texture")?;
+        self.push_u8(overlay.mat_clr);
+        self.push_u8(match overlay.op {
+            Op::None => 0,
+            Op::And => 1,
+            Op::Or => 2,
+            Op::Xor => 3,
+        });
+        self.push_u8(match overlay.algorithm {
+            Algo::Solid => 0,
+            Algo::Random => 1,
+            Algo::Checker => 2,
+            Algo::Bozo => 3,
+            Algo::Sin => 4,
+            Algo::Boxes => 5,
+            Algo::RndChecker => 6,
+            Algo::Lines => 7,
+            Algo::Border => 8,
+            Algo::Mandel => 9,
+            Algo::Gradient => 10,
+            Algo::Script => 11,
+            Algo::RndAll => 12,
+            Algo::Poly => 13,
+        });
+        for value in [overlay.turbulence, overlay.lambda, overlay.rotate] {
+            self.push_i32(value);
+        }
+        self.push_int_bool(overlay.alpha);
+        self.push_int_bool(overlay.beta);
+        self.push_i32(overlay.zoom_x);
+        self.push_i32(overlay.zoom_y);
+        for value in [
+            overlay.invert,
+            overlay.loose_bounds,
+            overlay.group,
+            overlay.mask,
+        ] {
+            self.push_bool(value);
+        }
+        self.push_callback(overlay.eval_callback, callback_count)?;
+        self.push_callback(overlay.draw_callback, callback_count)
+    }
+
+    fn push_point(&mut self, point: &Point) {
+        self.push_i32(point.x);
+        self.push_i32(point.y);
+        self.push_bool(point.rx_set);
+        if point.rx_set {
+            self.push_int_bool(point.rx);
+        }
+        self.push_bool(point.ry_set);
+        if point.ry_set {
+            self.push_int_bool(point.ry);
+        }
+    }
 }
 
 pub(crate) struct S2MapCreation {
@@ -524,6 +867,14 @@ const SKYPARCOUR_WATER_EXPOSURE_CANONICAL_FNV1A64: u64 = 0x6abc_3e93_6ed2_fcda;
 
 fn bool_is_false(value: &bool) -> bool {
     !*value
+}
+
+const fn bool_true() -> bool {
+    true
+}
+
+fn bool_is_true(value: &bool) -> bool {
+    *value
 }
 
 fn source_has_skyparcour_water_exposure_bug(source: &str) -> bool {
@@ -1784,8 +2135,14 @@ impl Parser<'_, '_> {
                     return Err(format!("field '{field}' not found"));
                 }
                 match field {
-                    "x" => point.rx = IntBool::new(int_par()?, val_type == ValType::Percent),
-                    "y" => point.ry = IntBool::new(int_par()?, val_type == ValType::Percent),
+                    "x" => {
+                        point.rx = IntBool::new(int_par()?, val_type == ValType::Percent);
+                        point.rx_set = true;
+                    }
+                    "y" => {
+                        point.ry = IntBool::new(int_par()?, val_type == ValType::Percent);
+                        point.ry_set = true;
+                    }
                     _ => return Err(format!("field '{field}' not found")),
                 }
                 Ok(())
@@ -2135,11 +2492,15 @@ fn render_last_map(
     Option<clonk_resources::bitmap::IndexedBitmap>,
     PostInitMapCallbacks,
 ) {
+    let unallocated_callbacks = || PostInitMapCallbacks {
+        arrays: tree.callbacks.iter().map(CallbackArray::new).collect(),
+        map_zoom: 0,
+    };
     let Some(map) = last_map(tree) else {
-        return (None, PostInitMapCallbacks::default());
+        return (None, unallocated_callbacks());
     };
     render_map_with_callbacks(tree, map, rng, script_algo).map_or_else(
-        || (None, PostInitMapCallbacks::default()),
+        || (None, unallocated_callbacks()),
         |(bitmap, callbacks)| (Some(bitmap), callbacks),
     )
 }
@@ -2313,6 +2674,159 @@ pub(crate) fn rerender_last_s2_map_with_script_algo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_validation_state_covers_retained_map_geometry() {
+        // DrawDefMap changes a retained map's size and re-evaluates the whole
+        // creator tree (C4Landscape.cpp:2672-2696;
+        // C4MapCreatorS2.cpp:676-681,239-246). Equal rendered pixels are not
+        // enough if that future-driving geometry differs.
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let (width, height) = params();
+        let mut creator = create_s2_map_with_state_and_functions(
+            "map Main { overlay { mat=Earth; tex=Rough; }; };",
+            &mut classifier,
+            width,
+            height,
+            false,
+            1,
+            &mut rng,
+            &HashSet::new(),
+        )
+        .creator;
+        let materials = crate::MaterialSet::from_resource_library(
+            &clonk_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\n")
+                .expect("test materials parse"),
+        );
+        let matching = creator
+            .runtime_validation_state(&materials)
+            .expect("valid creator encodes");
+        let map = creator
+            .tree
+            .nodes
+            .iter_mut()
+            .find_map(|node| match &mut node.kind {
+                NodeKind::Overlay(overlay) if overlay.is_map => Some(overlay),
+                _ => None,
+            })
+            .expect("map exists");
+        map.wdt += 1;
+
+        assert_ne!(
+            creator
+                .runtime_validation_state(&materials)
+                .expect("mutated creator encodes"),
+            matching
+        );
+    }
+
+    #[test]
+    fn runtime_validation_state_encodes_each_callback_reference_once() {
+        // C4MCOverlay retains exactly pEvaluateFunc and pDrawFunc after Mask
+        // (C4MapCreatorS2.h:260-275). The native stream must therefore carry
+        // two signed callback ordinals, including -1 for each null pointer.
+        let creator = MapCreatorS2State {
+            tree: Tree::new(),
+            default_map: default_retained_map(),
+            callbacks: PostInitMapCallbacks::default(),
+            pre_render_rng: None,
+            skyparcour_water_exposure_guard: false,
+        };
+
+        assert_eq!(
+            creator
+                .runtime_validation_state(&crate::MaterialSet::new())
+                .expect("empty creator encodes")
+                .len(),
+            138
+        );
+    }
+
+    #[test]
+    fn runtime_point_state_uses_only_defined_evaluated_coordinates() {
+        // C4MCPoint::C4MCPoint initializes only X/Y, and SetField initializes
+        // RX and RY independently (C4MapCreatorS2.cpp:575-606). Observation
+        // must not read an omitted coordinate's indeterminate int_bool.
+        let point = Point {
+            x: 12,
+            y: 34,
+            rx: IntBool::new(56, true),
+            ry: IntBool::new(78, false),
+            rx_set: false,
+            ry_set: false,
+        };
+        let serialized = serde_json::to_value(&point).expect("point serializes");
+        assert_eq!(serialized["rx_set"], false);
+        assert_eq!(serialized["ry_set"], false);
+        let point = serde_json::from_value(serialized).expect("point restores");
+        let mut encoder = RuntimeMapCreatorEncoder::default();
+        encoder.push_point(&point);
+
+        assert_eq!(
+            encoder.bytes,
+            [
+                12_i32.to_le_bytes().as_slice(),
+                34_i32.to_le_bytes().as_slice(),
+                &[0, 0],
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn runtime_point_state_distinguishes_equal_percent_and_pixel_coordinates() {
+        // DrawDefMap calls C4MCMap::SetSize and re-evaluates RX/RY, so two
+        // currently equal points with percent-vs-pixel source coordinates are
+        // different future-driving state (C4MapCreatorS2.cpp:610-623,676-681).
+        let create = |point: &str| {
+            let mut classifier = test_classifier();
+            let mut rng = LcgRng::seed_from_u64(1);
+            let (width, height) = params();
+            create_s2_map_with_state_and_functions(
+                &format!(
+                    "map Main {{ seed=1; mat=Earth; tex=Rough; sub=0; algo=poly; \
+                     point {{ {point} }}; point {{ x=0px; y=0px; }}; \
+                     point {{ x=20px; y=10px; }}; }};"
+                ),
+                &mut classifier,
+                width,
+                height,
+                false,
+                1,
+                &mut rng,
+                &HashSet::new(),
+            )
+        };
+        let percent = create("x=50%; y=50%;");
+        let pixels = create("x=10px; y=5px;");
+        assert_eq!(percent.bitmap, pixels.bitmap);
+
+        // Legacy EngineState JSON already persisted RX/RY but predates the
+        // explicit-set flags. Missing flags must therefore migrate to true;
+        // newly parsed omitted coordinates serialize an explicit false.
+        let percent_json = serde_json::to_value(&percent.creator).expect("creator serializes");
+        let pixels_json = serde_json::to_value(&pixels.creator).expect("creator serializes");
+        assert!(!percent_json.to_string().contains("rx_set"));
+        assert!(!percent_json.to_string().contains("ry_set"));
+        let percent: MapCreatorS2State =
+            serde_json::from_value(percent_json).expect("legacy percent creator restores");
+        let pixels: MapCreatorS2State =
+            serde_json::from_value(pixels_json).expect("legacy pixel creator restores");
+
+        let materials = crate::MaterialSet::from_resource_library(
+            &clonk_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\n")
+                .expect("test materials parse"),
+        );
+        assert_ne!(
+            percent
+                .runtime_validation_state(&materials)
+                .expect("percent creator encodes"),
+            pixels
+                .runtime_validation_state(&materials)
+                .expect("pixel creator encodes")
+        );
+    }
 
     #[test]
     fn water_exposure_guard_matches_only_the_shipped_skyparcour_program() {
@@ -3773,6 +4287,31 @@ mod tests {
 
         assert!(creation.bitmap.is_none(), "the later map was never parsed");
         assert!(creation.callbacks.arrays.is_empty());
+    }
+
+    #[test]
+    fn callback_without_a_renderable_map_remains_unallocated() {
+        // C4MCCallbackArray registers during evalFn assignment and keeps a
+        // null pMap until EnablePixel runs inside RenderTo
+        // (C4MapCreatorS2.cpp:31-40,43-58). A creator with no map must retain
+        // that future-driving array rather than forget the declaration.
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let functions = HashSet::from(["Known".to_owned()]);
+        let creation = create_s2_map_with_state_and_functions(
+            "overlay Deferred { evalFn=Known; };",
+            &mut classifier,
+            LegacyC4SVal::new(3, 0, 3, 3),
+            LegacyC4SVal::new(2, 0, 2, 2),
+            false,
+            1,
+            &mut rng,
+            &functions,
+        );
+
+        assert!(creation.bitmap.is_none());
+        assert_eq!(creation.callbacks.arrays.len(), 1);
+        assert!(creation.callbacks.arrays[0].bits.is_empty());
     }
 
     #[test]

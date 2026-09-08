@@ -281,22 +281,19 @@ impl Engine {
                             .materials
                             .get_by_id(material)
                             .map(|entry| {
-                                let shift_byte = entry
-                                    .blast_shift_to_spec()
-                                    .zip(entry.blast_shift_to_target())
-                                    .and_then(|(spec, fallback)| {
-                                        #[cfg(test)]
-                                        BLAST_SHIFT_BYTE_RESOLUTIONS
-                                            .with(|count| count.set(count.get() + 1));
-                                        self.landscape.as_ref().and_then(|landscape| {
-                                            landscape.crossmapped_material_texture_byte(
-                                                spec,
-                                                material,
-                                                &self.materials,
-                                                fallback,
-                                            )
-                                        })
-                                    });
+                                let shift_byte = entry.blast_shift_to_spec().and_then(|spec| {
+                                    #[cfg(test)]
+                                    BLAST_SHIFT_BYTE_RESOLUTIONS
+                                        .with(|count| count.set(count.get() + 1));
+                                    self.landscape.as_ref().and_then(|landscape| {
+                                        landscape.crossmapped_material_texture_byte(
+                                            spec,
+                                            material,
+                                            &self.materials,
+                                            entry.blast_shift_to_target(),
+                                        )
+                                    })
+                                });
                                 (entry.blast_free(), shift_byte)
                             })
                             .unwrap_or((false, None));

@@ -110,7 +110,8 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
     let click_point = GuiPoint::new(region_point.x, region_point.y - 14.0);
     main_assert_eq!(app.ingame_viewport_region(owner, click_point) => Some(IngameViewportRegion::Inventory(target)));
     let behind = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .viewport_point_at(click_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
@@ -138,13 +139,13 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     main_assert_eq!(
-                app.ingame_mouse_select_target(owner, click_point) =>
-                Some(overlap),
-                "fixture must catch a leaked selection; overlap={:?}, projected={:?}, behind={behind:?}, region={click_point:?}, raw_pick={:?}",
-                app.snapshot.object(overlap),
-                app.rendering.graphics.world_to_screen(owner, behind),
-                app.rendering.graphics.object_at_point(&app.snapshot, owner, click_point),
-            );
+        app.ingame_mouse_select_target(owner, click_point) =>
+        Some(overlap),
+        "fixture must catch a leaked selection; overlap={:?}, projected={:?}, behind={behind:?}, region={click_point:?}, raw_pick={:?}",
+        app.snapshot.object(overlap),
+        app.rendering.graphics.world_to_screen(owner, behind),
+        app.rendering.graphics.object_at_point(&app.snapshot, owner, click_point),
+    );
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
     app.netplay.manager = Some(manager);
@@ -163,7 +164,10 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
     main_assert_eq!(controls => vec![(owner, rendering_fixture!(raw_control: 9, target.as_u64() as i32), tick,)]);
     main_assert!(commands.is_empty(), "HUD click must not queue MoveTo");
-    main_assert!(selections.is_empty(), "HUD click must not select world crew");
+    main_assert!(
+        selections.is_empty(),
+        "HUD click must not select world crew"
+    );
 }
 
 #[test]
@@ -195,7 +199,12 @@ fn hud_inventory_autostop_queues_stored_press_and_release() {
         f64::from(outside.x),
         f64::from(outside.y),
     ));
-    main_assert!(app.ingame_mouse.left.is_some_and(|state| !state.motion.moved), "three pixels must remain Drag_None");
+    main_assert!(
+        app.ingame_mouse
+            .left
+            .is_some_and(|state| !state.motion.moved),
+        "three pixels must remain Drag_None"
+    );
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
@@ -245,7 +254,8 @@ fn definition_sprite_carries_the_raw_defcore_picture_rect() {
     app.rebuild_definition_sprites();
 
     let picture_of = |id: &str| {
-        app.rendering.graphics
+        app.rendering
+            .graphics
             .object_sprite(&sprite_map_key(id, None))
             .test_value()
             .picture
@@ -271,7 +281,8 @@ fn picture_only_magic_definition_keeps_a_zero_sized_world_face() {
     app.rebuild_definition_sprites();
 
     let sprite = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .object_sprite(&sprite_map_key("MAG0", None))
         .test_value();
     main_assert_eq!(sprite.picture => Some(clonk_engine::DefinitionRect::new(0, 0, 64, 64)), "the menu picture remains available",);
@@ -308,15 +319,24 @@ fn running_graphics_recreation_keeps_script_particle_catalog() {
     };
     app.engine.register_particle_resource(&flame).test_value();
     app.rebuild_definition_sprites();
-    main_assert!(app.rendering.graphics.particle_sprite("Fire2").is_some(), "precondition: the scenario definition rebuild installs Fire2");
+    main_assert!(
+        app.rendering.graphics.particle_sprite("Fire2").is_some(),
+        "precondition: the scenario definition rebuild installs Fire2"
+    );
 
     let label = app.scenario_label.clone();
     let ground = app.fallback_ground;
     app.configure_running_state(label, ground);
-    main_assert!(app.rendering.graphics.particle_sprite("Fire2").is_some(), "entering the running presentation must retain script particle graphics");
+    main_assert!(
+        app.rendering.graphics.particle_sprite("Fire2").is_some(),
+        "entering the running presentation must retain script particle graphics"
+    );
 
     app.resize(321, 201).test_value();
-    main_assert!(app.rendering.graphics.particle_sprite("Fire2").is_some(), "resizing the running presentation must retain script particle graphics");
+    main_assert!(
+        app.rendering.graphics.particle_sprite("Fire2").is_some(),
+        "resizing the running presentation must retain script particle graphics"
+    );
 }
 
 #[test]
@@ -336,7 +356,8 @@ fn viewport_buttons_use_only_the_exact_mouse_viewport() {
     render_mouse_test_app(&mut app);
 
     let viewports = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .active_viewport_projections()
         .into_iter()
         .filter(|viewport| viewport.owner == owner)
@@ -367,7 +388,8 @@ fn viewport_button_stack_is_wired_into_the_late_app_render() {
 
     let viewport = app.active_ingame_mouse_viewport().test_value();
     let gamma = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .active_gamma_ramp(&app.snapshot.environment.gamma);
     app.rendering.graphics.update_overlay(&GraphicsOverlay {
         frame_text: "",
@@ -386,9 +408,16 @@ fn viewport_button_stack_is_wired_into_the_late_app_render() {
         show_commands: true,
         show_command_keys: false,
     });
-    app.rendering.graphics.surface_mut().fill(Color::transparent());
-    app.rendering.graphics
-        .draw_viewport_control_overlays(Some(viewport.index), false, None, Some(&gamma));
+    app.rendering
+        .graphics
+        .surface_mut()
+        .fill(Color::transparent());
+    app.rendering.graphics.draw_viewport_control_overlays(
+        Some(viewport.index),
+        false,
+        None,
+        Some(&gamma),
+    );
     let isolated = app.rendering.graphics.surface().pixels().to_vec();
 
     app.rendering.display_flags.show_commands = true;
@@ -410,7 +439,10 @@ fn viewport_button_stack_is_wired_into_the_late_app_render() {
                 }
             }
         }
-        main_assert!(opaque_pixels > 100, "the isolated {button:?} control must contain a substantial opaque facet");
+        main_assert!(
+            opaque_pixels > 100,
+            "the isolated {button:?} control must contain a substantial opaque facet"
+        );
     }
 }
 
@@ -436,7 +468,10 @@ fn hud_command_bar_left_click_queues_exact_drawn_coms_only() {
         let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
         main_assert_eq!(controls => vec![(owner, rendering_fixture!(raw_control: command, 0), tick,)]);
         main_assert!(commands.is_empty(), "COM {command} leaked a world command");
-        main_assert!(selections.is_empty(), "COM {command} leaked world selection");
+        main_assert!(
+            selections.is_empty(),
+            "COM {command} leaked world selection"
+        );
     }
 }
 
@@ -458,11 +493,13 @@ fn selection_drag_entering_hud_region_is_cancelled() {
         })
         .find(|(start, crossed)| {
             [*start, *crossed].into_iter().all(|point| {
-                app.rendering.graphics
+                app.rendering
+                    .graphics
                     .viewport_point_at(point)
                     .is_some_and(|pointer| pointer.owner == owner)
                     && app
-                        .rendering.graphics
+                        .rendering
+                        .graphics
                         .object_at_point(&app.snapshot, owner, point)
                         .is_none()
                     && app.ingame_viewport_region(owner, point).is_none()
@@ -483,14 +520,19 @@ fn selection_drag_entering_hud_region_is_cancelled() {
         f64::from(crossed.x),
         f64::from(crossed.y),
     ));
-    main_assert!(app.ingame_mouse.left.is_some_and(|state| state.motion.moved && state.motion.selection_frame));
+    main_assert!(app
+        .ingame_mouse
+        .left
+        .is_some_and(|state| state.motion.moved && state.motion.selection_frame));
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(region_point.x),
         f64::from(region_point.y),
     ));
     main_assert!(app.ingame_selection_frame().is_none());
-    main_assert!(app.ingame_mouse.left.is_some_and(|state| {!state.motion.selection_frame && state.motion.selection_cancelled_by_region}));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| {
+        !state.motion.selection_frame && state.motion.selection_cancelled_by_region
+    }));
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
@@ -681,7 +723,12 @@ fn framebuffer_backends_widen_to_gl_before_giving_up() {
     // `PixelsBuilder::build` then fails out of `main`.
     let attempts = framebuffer_backend_attempts(None);
     main_assert_eq!(attempts.first().copied() => Some(Backends::PRIMARY), "the desktop-clean set is still tried first");
-    main_assert!(attempts.last().is_some_and(|backends| backends.contains(Backends::GL)), "a board with only GLES must still get an adapter attempt");
+    main_assert!(
+        attempts
+            .last()
+            .is_some_and(|backends| backends.contains(Backends::GL)),
+        "a board with only GLES must still get an adapter attempt"
+    );
     main_assert!(attempts.len() >= 2);
 
     // An explicit WGPU_BACKEND is an instruction, not a hint: never widen
@@ -700,16 +747,38 @@ fn the_last_framebuffer_attempt_asks_for_a_software_adapter() {
 
     let attempts = framebuffer_attempts(None);
 
-    main_assert!(attempts.iter().take(attempts.len() - 1).all(|attempt| !attempt.fallback_adapter), "hardware is tried first, on every backend set: {attempts:?}");
+    main_assert!(
+        attempts
+            .iter()
+            .take(attempts.len() - 1)
+            .all(|attempt| !attempt.fallback_adapter),
+        "hardware is tried first, on every backend set: {attempts:?}"
+    );
     let last = attempts.last().expect("at least one attempt");
-    main_assert!(last.fallback_adapter, "the final attempt is the explicit software one: {attempts:?}");
-    main_assert!(last.backends.contains(Backends::GL), "and it keeps the widest backend set: {attempts:?}");
+    main_assert!(
+        last.fallback_adapter,
+        "the final attempt is the explicit software one: {attempts:?}"
+    );
+    main_assert!(
+        last.backends.contains(Backends::GL),
+        "and it keeps the widest backend set: {attempts:?}"
+    );
 
     // An explicit WGPU_BACKEND still names the backend; asking that backend
     // for its software adapter is not widening to another one.
     let explicit = framebuffer_attempts(Some(Backends::VULKAN));
-    main_assert!(explicit.iter().all(|attempt| attempt.backends == Backends::VULKAN), "{explicit:?}");
-    main_assert!(explicit.last().is_some_and(|attempt| attempt.fallback_adapter), "{explicit:?}");
+    main_assert!(
+        explicit
+            .iter()
+            .all(|attempt| attempt.backends == Backends::VULKAN),
+        "{explicit:?}"
+    );
+    main_assert!(
+        explicit
+            .last()
+            .is_some_and(|attempt| attempt.fallback_adapter),
+        "{explicit:?}"
+    );
 }
 
 #[test]
@@ -743,7 +812,10 @@ fn a_simulation_burst_yields_to_the_event_loop_once_its_budget_is_spent() {
             .test_value();
     main_assert_eq!(bounded.executed_frames => 1, "an exhausted budget yields after one frame, it does not stall");
     main_assert_eq!(app.engine.frame() => before + 1);
-    main_assert!(accumulator >= schedule.simulation_interval, "the unspent backlog is retained for the next pass, not discarded");
+    main_assert!(
+        accumulator >= schedule.simulation_interval,
+        "the unspent backlog is retained for the next pass, not discarded"
+    );
 }
 
 #[test]
@@ -768,7 +840,10 @@ fn swallowed_script_error_keeps_a_presentable_landscape_snapshot() {
 
     advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
 
-    main_assert!(app.snapshot.landscape.is_some(), "the next redraw must not lose terrain after a nonfatal script error");
+    main_assert!(
+        app.snapshot.landscape.is_some(),
+        "the next redraw must not lose terrain after a nonfatal script error"
+    );
 }
 
 #[test]
@@ -933,10 +1008,13 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
     let mut app = new_running_sandbox_app();
     app.presentation.frames_per_second = 36;
     for _ in 0..9 {
-        app.presentation.presentation_stats
+        app.presentation
+            .presentation_stats
             .record_presentation(Duration::from_millis(32));
     }
-    app.presentation.presentation_stats.record_automatic_graphics_skip();
+    app.presentation
+        .presentation_stats
+        .record_automatic_graphics_skip();
     app.presentation.presentation_stats.sample_second();
 
     app.update_diagnostics_overlay();
@@ -945,7 +1023,8 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
     app.rendering.display_flags.show_stats = true;
     app.update_diagnostics_overlay();
     let text = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
@@ -953,7 +1032,10 @@ fn the_diagnostics_overlay_reports_both_frame_rates_and_stays_off_by_default() {
     main_assert!(text.contains("Render 9 FPS"), "{text}");
     main_assert!(text.contains("32.0 ms"), "{text}");
     main_assert!(text.contains("skips 1"), "{text}");
-    main_assert!(!text.contains("PreSend"), "an offline round has no control horizon to report: {text}");
+    main_assert!(
+        !text.contains("PreSend"),
+        "an offline round has no control horizon to report: {text}"
+    );
 
     // And turning it back off retires the draw site rather than freezing it.
     app.rendering.display_flags.show_stats = false;
@@ -976,15 +1058,22 @@ fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from()
 
     app.update_diagnostics_overlay();
     let text = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
     let presend = app.netplay.control_clock.test_value().control_presend();
     main_assert!(text.contains(&format!("PreSend {presend}")), "{text}");
     main_assert!(text.contains("late 300 ms"), "{text}");
-    main_assert!(text.contains("budget 300.0 ms"), "the tail-aware envelope, not the ping-derived ACT: {text}");
-    main_assert!(!text.contains("Ping"), "a stub with no live route must not invent one: {text}");
+    main_assert!(
+        text.contains("budget 300.0 ms"),
+        "the tail-aware envelope, not the ping-derived ACT: {text}"
+    );
+    main_assert!(
+        !text.contains("Ping"),
+        "a stub with no live route must not invent one: {text}"
+    );
 }
 
 #[test]
@@ -997,7 +1086,8 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
     let mut app = new_running_sandbox_app();
     let (_events, commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.netplay.stats = Some(clonk_network::NetworkStats::new());
-    app.netplay.stats
+    app.netplay
+        .stats
         .as_mut()
         .test_value()
         .register_client(7, "Client");
@@ -1023,16 +1113,18 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
         worker_started_tx.send(()).test_value();
         release_rx.recv().test_value();
         completion
-            .send(Ok(vec![clonk_app_netplay::network::RuntimeNetworkConnection {
-                connection_id: 1,
-                client_id: 7,
-                usage: "Msg".to_string(),
-                protocol: clonk_network::NetworkProtocol::Udp,
-                peer_address: None,
-                packet_loss: 0,
-                ping_ms: 21,
-                lag_ms: 19,
-            }]))
+            .send(Ok(vec![
+                clonk_app_netplay::network::RuntimeNetworkConnection {
+                    connection_id: 1,
+                    client_id: 7,
+                    usage: "Msg".to_string(),
+                    protocol: clonk_network::NetworkProtocol::Udp,
+                    peer_address: None,
+                    packet_loss: 0,
+                    ping_ms: 21,
+                    lag_ms: 19,
+                },
+            ]))
             .test_value();
     });
     worker_started_rx.recv().test_value();
@@ -1042,25 +1134,31 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
     app.update_diagnostics_overlay();
     app.record_network_stats_second();
     let pending = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
     main_assert!(pending.contains("Network routes pending"), "{pending}");
-    main_assert!(!pending.contains("Ping"), "no route is complete yet: {pending}");
+    main_assert!(
+        !pending.contains("Ping"),
+        "no route is complete yet: {pending}"
+    );
 
     release_tx.send(()).test_value();
     responder.join().test_value();
     app.record_network_stats_second();
     app.update_diagnostics_overlay();
     let fresh = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
     main_assert!(fresh.contains("Ping 21 ms, loss 0"), "{fresh}");
     let ping_graph = app
-        .netplay.stats
+        .netplay
+        .stats
         .as_ref()
         .test_value()
         .client_ping_graph(7)
@@ -1081,13 +1179,19 @@ fn stats_toggle_is_default_unbound_and_a_custom_chord_flips_the_overlay() {
 
     let parsed = parse_runtime_key_config(b"[Keys]\nStatsToggle=F8\n").test_value();
     app.input_routing.runtime_key_config_cache = OnceLock::new();
-    app.input_routing.runtime_key_config_cache.set(Ok(parsed)).test_value();
+    app.input_routing
+        .runtime_key_config_cache
+        .set(Ok(parsed))
+        .test_value();
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     main_assert!(app.rendering.display_flags.show_stats);
     app.update_diagnostics_overlay();
     main_assert!(app.rendering.graphics.diagnostics_overlay_text().is_some());
-    main_assert!(app.runtime_flash_message.is_none(), "the toggle flashes no message, exactly like ToggleShowNetStatus");
+    main_assert!(
+        app.runtime_flash_message.is_none(),
+        "the toggle flashes no message, exactly like ToggleShowNetStatus"
+    );
 
     app.test_key(VirtualKeyCode::F8, ElementState::Released);
     main_assert!(app.rendering.display_flags.show_stats);
@@ -1115,7 +1219,10 @@ fn a_refused_presentation_rearms_the_repaint_floor() {
     let overdue = base + MAX_TIME_BETWEEN_RENDERS;
     main_assert!(floor.must_present(overdue));
     floor.note_refused_presentation(overdue);
-    main_assert!(!floor.must_present(overdue + Duration::from_millis(499)), "a refused presentation still consumed the opportunity");
+    main_assert!(
+        !floor.must_present(overdue + Duration::from_millis(499)),
+        "a refused presentation still consumed the opportunity"
+    );
     main_assert!(floor.must_present(overdue + MAX_TIME_BETWEEN_RENDERS));
 
     // The refusal cost no graphics time, so the simulation reservation that the
@@ -1134,7 +1241,10 @@ fn only_a_real_presentation_marks_the_window_as_having_drawn() {
     main_assert!(!floor.has_presented());
 
     floor.note_refused_presentation(base);
-    main_assert!(!floor.has_presented(), "a refused opportunity drew nothing, whatever it did to the floor");
+    main_assert!(
+        !floor.has_presented(),
+        "a refused opportunity drew nothing, whatever it did to the floor"
+    );
     let _ = floor.must_present(base);
     main_assert!(!floor.has_presented(), "arming the floor is not drawing");
 
@@ -1154,7 +1264,9 @@ fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
 #[test]
 fn automatic_frame_skip_freezes_cpp_parameter_precedence() {
     main_assert!(configured_auto_frame_skip(b""));
-    main_assert!(!configured_auto_frame_skip(b"[Graphics]\nAutoFrameSkip=false\n"));
+    main_assert!(!configured_auto_frame_skip(
+        b"[Graphics]\nAutoFrameSkip=false\n"
+    ));
     main_assert!(!frozen_auto_frame_skip(true, Some(false), None));
     main_assert!(frozen_auto_frame_skip(false, Some(false), Some(true)));
 }
@@ -1188,8 +1300,15 @@ fn graphics_deadline_never_banks_more_than_one_period_ahead() {
     for pass in 0..10_000_u32 {
         let now = base + Duration::from_micros(u64::from(pass) * 4);
         deadline = advance_graphics_deadline(deadline, now, interval);
-        main_assert!(deadline <= now + interval, "pass {pass} banked {:?} of deadline debt", deadline.saturating_duration_since(now + interval),);
-        main_assert!(deadline > now, "pass {pass} left the deadline in the past, which would spin");
+        main_assert!(
+            deadline <= now + interval,
+            "pass {pass} banked {:?} of deadline debt",
+            deadline.saturating_duration_since(now + interval),
+        );
+        main_assert!(
+            deadline > now,
+            "pass {pass} left the deadline in the past, which would spin"
+        );
     }
 }
 
@@ -1227,7 +1346,11 @@ fn configured_fullscreen_reaches_platform_startup_path() {
     main_assert_eq!(windowed.mode => DisplayMode::Window);
     main_assert!(!defer_startup_fullscreen_until_resumed(windowed.mode));
     main_assert!(!should_reconcile_deferred_fullscreen(windowed.mode, false));
-    main_assert!(startup_window_attributes(&windowed, PhysicalSize::new(800, 600)).fullscreen.is_none());
+    main_assert!(
+        startup_window_attributes(&windowed, PhysicalSize::new(800, 600))
+            .fullscreen
+            .is_none()
+    );
 
     fs::write(&config_file, "[Graphics]\nDisplayMode=Fullscreen\n").test_value();
     let display = DisplayOptions::load(Some(&paths));
@@ -1240,7 +1363,10 @@ fn configured_fullscreen_reaches_platform_startup_path() {
     if defer_startup_fullscreen_until_resumed(display.mode) {
         main_assert!(attributes.fullscreen.is_none());
     } else {
-        main_assert!(matches!(attributes.fullscreen.as_ref(), Some(Fullscreen::Borderless(None))));
+        main_assert!(matches!(
+            attributes.fullscreen.as_ref(),
+            Some(Fullscreen::Borderless(None))
+        ));
     }
 }
 
@@ -1312,7 +1438,10 @@ fn rendered_object_audibility_cache_retains_until_the_next_completed_render() {
     main_assert_eq!(compute_mix_values_for(100, Some(line.id), None, &snapshot, &viewports) => (0.0, 1.0), "the live origin mix remains observably different",);
 
     audio.cache_rendered_object_audibility(&HashMap::new(), &snapshot, &viewports);
-    main_assert!(audio.rendered_object_audibility.is_empty(), "the next completed render replaces rather than extends the cache",);
+    main_assert!(
+        audio.rendered_object_audibility.is_empty(),
+        "the next completed render replaces rather than extends the cache",
+    );
     audio.cache_rendered_object_audibility(&calls, &snapshot, &viewports);
     audio.reset_sound_system_generation();
     main_assert!(audio.rendered_object_audibility.is_empty());
@@ -1748,8 +1877,14 @@ fn player_overlay_projects_transient_hud_flags() {
         .iter()
         .find(|player| player.owner == owner)
         .test_value();
-    main_assert!(overlay.view_wealth, "nonzero ViewWealth uses C++ truthiness");
-    main_assert!(!overlay.view_value, "ViewValue stays hidden when Game.ValueGain is disabled");
+    main_assert!(
+        overlay.view_wealth,
+        "nonzero ViewWealth uses C++ truthiness"
+    );
+    main_assert!(
+        !overlay.view_value,
+        "ViewValue stays hidden when Game.ValueGain is disabled"
+    );
 
     set_test_scenario_value_gain(&mut app, -1);
     let player = app
@@ -1772,7 +1907,10 @@ fn player_overlay_projects_transient_hud_flags() {
         .find(|player| player.owner == owner)
         .test_value();
     main_assert!(!overlay.view_wealth);
-    main_assert!(overlay.view_value, "nonzero ViewValue is visible when Game.ValueGain is enabled");
+    main_assert!(
+        overlay.view_value,
+        "nonzero ViewValue is visible when Game.ValueGain is enabled"
+    );
 }
 
 #[test]
@@ -1843,7 +1981,10 @@ fn speaking_overlay_maps_authenticated_player_to_selected_cursor() {
         vec![selected],
         "voice ownership maps to the real selected crew cursor, not ViewCursor",
     );
-    main_assert!(collect_speaking_overlay_objects(&app.snapshot, &[(8, player_id)]).is_empty(), "a client must not mark another client's player as speaking",);
+    main_assert!(
+        collect_speaking_overlay_objects(&app.snapshot, &[(8, player_id)]).is_empty(),
+        "a client must not mark another client's player as speaking",
+    );
     main_assert_eq!(
         collect_speaking_overlay_objects(&app.snapshot, &[(7, player_id), (7, player_id)]) =>
         vec![selected],
@@ -2063,7 +2204,8 @@ fn running_render_draws_resolved_world_cursor() {
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
     app.test_render(&mut frame);
     let viewport = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -2095,7 +2237,10 @@ fn running_render_draws_resolved_world_cursor() {
     app.chat.external_dialog_visible = true;
     app.input_routing.live.world_mouse_owned = true;
     app.pointer_left().test_value();
-    main_assert!(app.input_routing.live.ingame_pointer.is_some(), "fixture exercises the dialog-owned pointer-left early return");
+    main_assert!(
+        app.input_routing.live.ingame_pointer.is_some(),
+        "fixture exercises the dialog-owned pointer-left early return"
+    );
     app.chat.external_dialog_visible = false;
     app.test_render(&mut frame);
     main_assert_ne!(
@@ -2120,7 +2265,8 @@ fn passive_observer_renders_region_cursor() {
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
     app.test_render(&mut frame);
     let viewport = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.is_no_owner_viewport)
@@ -2137,7 +2283,15 @@ fn passive_observer_renders_region_cursor() {
 
     app.test_render(&mut frame);
     main_assert_eq!(app.input_routing.live.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
-    main_assert!(app.rendering.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == [1, 40, 200, 255]), "passive Region cell must reach the composed frame");
+    main_assert!(
+        app.rendering
+            .graphics
+            .surface()
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == [1, 40, 200, 255]),
+        "passive Region cell must reach the composed frame"
+    );
 }
 
 #[test]
@@ -2151,7 +2305,8 @@ fn running_render_draws_throw_point_and_shift_add_marker() {
     let mut frame = vec![0_u8; width as usize * height as usize * 4];
     app.test_render(&mut frame);
     let viewport = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == app.players.local_owner)
@@ -2178,7 +2333,15 @@ fn running_render_draws_throw_point_and_shift_add_marker() {
         ("landing Point", [27, 67, 200, 255]),
         ("Shift Add", [31, 71, 200, 255]),
     ] {
-        main_assert!(app.rendering.graphics.surface().pixels().chunks_exact(4).any(|pixel| pixel == color), "{phase} cursor cell must reach the composed frame");
+        main_assert!(
+            app.rendering
+                .graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel == color),
+            "{phase} cursor cell must reach the composed frame"
+        );
     }
 }
 
@@ -2485,7 +2648,11 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
         message.players.local_owner,
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
-    message.input_routing.live.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
+    message
+        .input_routing
+        .live
+        .pressed_engine_keys
+        .insert(VirtualKeyCode::KeyA);
     remove_global_gui_sheet(&mut message, "GUISpinBoxArrow.png");
     let before = runtime_global_ui_snapshot(&message);
     let error = message
@@ -2506,7 +2673,11 @@ fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
         Some(IngameMenuState::surrender_menu(&IngameMenuLabels::default())),
     );
     game_over.dialogs.scoreboard_initial_reconcile_pending = true;
-    game_over.input_routing.live.pressed_engine_keys.insert(VirtualKeyCode::KeyA);
+    game_over
+        .input_routing
+        .live
+        .pressed_engine_keys
+        .insert(VirtualKeyCode::KeyA);
     remove_global_gui_sheet(&mut game_over, "GUISpinBoxArrow.png");
     let before = runtime_global_ui_snapshot(&game_over);
     let error = game_over
@@ -2575,14 +2746,19 @@ fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
 
     let mut app = new_real_menu_app(320, 200);
     app.startup.dialog_fade = None;
-    app.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
     app.handle_main_menu_activation(MainMenuItem::About)
         .test_value();
     let presentation = retained_test_presentation(&app);
     let frame = app.render_retained_gpu_frame(presentation).test_value();
     assert_retained_frame_has_commands("startup fade", &frame);
-    main_assert!(frame.layers.len() >= 3, "startup fade must retain underlay, outgoing, and incoming painter layers");
+    main_assert!(
+        frame.layers.len() >= 3,
+        "startup fade must retain underlay, outgoing, and incoming painter layers"
+    );
 }
 
 #[test]
@@ -2731,7 +2907,10 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
         &provider,
     )
     .test_value();
-    main_assert!(provider.requests().iter().all(|(_, weight)| *weight == 400), "the requested FontDef weight reaches system lookup");
+    main_assert!(
+        provider.requests().iter().all(|(_, weight)| *weight == 400),
+        "the requested FontDef weight reaches system lookup"
+    );
 
     provider.clear_requests();
     resolve_classic_font_bundle_for_request_with_system_fonts(
@@ -2756,7 +2935,10 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
         .file_name()
         .and_then(|name| name.to_str())
         .test_value();
-    main_assert!(clonk_script::c4_string_bytes(explicit_face).len() <= 30, "the explicit-file precedence fixture must fit C4MaxName");
+    main_assert!(
+        clonk_script::c4_string_bytes(explicit_face).len() <= 30,
+        "the explicit-file precedence fixture must fit C4MaxName"
+    );
     resolve_classic_font_bundle_for_request_with_system_fonts(
         &paths,
         explicit_face,
@@ -2791,7 +2973,9 @@ fn system_family_fallback_preserves_precedence_and_failure_boundary() {
     )
     .err()
     .test_value();
-    main_assert!(error.to_string().contains("failed to initialize classic vector font"));
+    main_assert!(error
+        .to_string()
+        .contains("failed to initialize classic vector font"));
 }
 
 #[test]
@@ -2877,7 +3061,10 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
         &provider,
     )
     .test_value();
-    main_assert!(provider.requests().is_empty(), "the system face is attempted only after every matching registered face");
+    main_assert!(
+        provider.requests().is_empty(),
+        "the system face is attempted only after every matching registered face"
+    );
 
     let bad_registrations = [
         registration(2, unreadable_vector),
@@ -2895,7 +3082,10 @@ fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces()
     .test_value();
     main_assert_eq!(system_bundle.native_source.expect("system fallback supplies a native source").bytes.as_ref() => system_font.as_slice());
     main_assert!(!provider.requests().is_empty());
-    main_assert!(provider.requests().iter().all(|(family, weight)| family == "FallbackFace" && *weight == 400));
+    main_assert!(provider
+        .requests()
+        .iter()
+        .all(|(family, weight)| family == "FallbackFace" && *weight == 400));
 }
 
 #[test]
@@ -3296,7 +3486,12 @@ fn initial_extra_override_rebinds_canonical_and_malformed_winner_never_falls_bac
                     && matches!(&issues[0].defect,
                         ClassicGuiBootstrapDefect::Malformed { .. })
         ));
-        main_assert!(!assets.startup_dialog_images.contains_key("GUIBigArrows.png"), "a malformed winning source must remove the lower base image");
+        main_assert!(
+            !assets
+                .startup_dialog_images
+                .contains_key("GUIBigArrows.png"),
+            "a malformed winning source must remove the lower base image"
+        );
     }
 }
 
@@ -3498,10 +3693,22 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     main_assert_eq!(app.startup.options_dialog.as_ref().expect("reopened Options").program().font_face => "Mock System Face");
     let config = Config::load(paths.config_file()).test_value();
     main_assert_eq!(config.get_in(Some("General"), "FontName") => Some("Mock System Face"));
-    main_assert!(!Arc::ptr_eq(app.assets.clonk_fonts.as_ref().unwrap(), &prior_gui));
-    main_assert!(!Arc::ptr_eq(app.assets.book_fonts.as_ref().unwrap(), &prior_book));
-    main_assert!(!Arc::ptr_eq(app.assets.options_book_fonts.as_ref().unwrap(), &prior_options));
-    main_assert!(!Arc::ptr_eq(app.assets.plrsel_book_fonts.as_ref().unwrap(), &prior_player));
+    main_assert!(!Arc::ptr_eq(
+        app.assets.clonk_fonts.as_ref().unwrap(),
+        &prior_gui
+    ));
+    main_assert!(!Arc::ptr_eq(
+        app.assets.book_fonts.as_ref().unwrap(),
+        &prior_book
+    ));
+    main_assert!(!Arc::ptr_eq(
+        app.assets.options_book_fonts.as_ref().unwrap(),
+        &prior_options
+    ));
+    main_assert!(!Arc::ptr_eq(
+        app.assets.plrsel_book_fonts.as_ref().unwrap(),
+        &prior_player
+    ));
     let native_source = app.assets.startup_native_font_source.test_ref();
     main_assert_eq!(native_source.bytes.as_ref() => font_bytes.as_ref());
     main_assert_eq!(native_source.face_index => 0);
@@ -3517,7 +3724,10 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
     .test_value();
     main_assert_eq!(app.dialogs.messages.len() => dialog_count + 1);
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().program().font_face => "Mock System Face");
-    main_assert!(Arc::ptr_eq(app.assets.clonk_fonts.as_ref().unwrap(), &selected_gui));
+    main_assert!(Arc::ptr_eq(
+        app.assets.clonk_fonts.as_ref().unwrap(),
+        &selected_gui
+    ));
     main_assert_eq!(fs::read(paths.config_file()).unwrap() => before_failure);
 }
 
@@ -3531,7 +3741,8 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     app.open_options_menu();
     app.process_options_dialog_actions(vec![OptionsDlgAction::OpenGraphicsScaleText])
         .test_value();
-    app.dialogs.game_option_input
+    app.dialogs
+        .game_option_input
         .test_mut()
         .controller
         .set_input_text("225");
@@ -3539,9 +3750,14 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     main_assert!(app.dialogs.game_option_input.is_none());
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 225);
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 225, false)));
-    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
+    main_assert!(app
+        .dialogs
+        .messages
+        .last()
+        .is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
     main_assert!(matches!(
-        app.dialogs.messages
+        app.dialogs
+            .messages
             .last()
             .map(|dialog| &dialog.continuation),
         Some(MessageDialogContinuation::OptionsScaleTest {
@@ -3559,7 +3775,8 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 100, false)));
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().proposed_scale_percent => 100);
 
-    app.startup.options_dialog
+    app.startup
+        .options_dialog
         .as_mut()
         .test_value()
         .graphics_mut()
@@ -3577,7 +3794,8 @@ fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     main_assert_eq!(app.pending_options_display_requests.pop_front() => Some(rendering_fixture!(set_scale: 175, true)));
     main_assert_eq!(app.startup.options_dialog.as_ref().unwrap().graphics().applied_scale_percent => 175);
 
-    app.startup.options_dialog
+    app.startup
+        .options_dialog
         .as_mut()
         .test_value()
         .graphics_mut()
@@ -3652,7 +3870,10 @@ fn msgboard_command_reaches_continuous_multiline_render() {
         })
     };
     main_assert!(band_changed(output_y));
-    main_assert!(band_changed(output_y + line_height), "/msgboard 3 must render more than one simultaneous message line");
+    main_assert!(
+        band_changed(output_y + line_height),
+        "/msgboard 3 must render more than one simultaneous message line"
+    );
 }
 
 #[test]
@@ -3723,20 +3944,23 @@ fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primar
         .find_map(|point| {
             let hovered = app.rendering.graphics.viewport_output_point_at(point)?;
             let projected = app
-                .rendering.graphics
+                .rendering
+                .graphics
                 .viewport_output_point_for_owner(secondary, point)?;
             (hovered.owner == primary
                 && projected.owner == secondary
                 && projected.screen != point
                 && app
-                    .rendering.graphics
+                    .rendering
+                    .graphics
                     .crew_at_point(&app.snapshot, secondary, projected.screen)
                     .is_none())
             .then_some((point, projected))
         })
         .test_value();
     let expected_pointer = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .viewport_output_point_for_owner(
             secondary,
             GuiPoint::new(physical_point.x.ceil(), physical_point.y.ceil()),
@@ -3809,7 +4033,10 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     main_assert!(app.ingame_viewport_region(owner, left).is_none());
-    main_assert!(app.script_menu_pointer_target(left).expect("left edge target query").is_none());
+    main_assert!(app
+        .script_menu_pointer_target(left)
+        .expect("left edge target query")
+        .is_none());
     let view_state = |app: &GameApp| {
         let snapshot = app.engine.snapshot();
         let player = snapshot
@@ -3836,7 +4063,8 @@ fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
     main_assert_eq!(view_state(&app) => (Vector2::new(before.x - 10, before.y), clonk_engine::PLAYER_VIEW_MODE_SCROLLING,));
     app.test_render(&mut frame);
     let projection = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .active_viewport_projections()
         .into_iter()
         .find(|projection| projection.owner == owner)
@@ -3906,22 +4134,19 @@ fn construction_edge_scroll_preserves_ordered_scoreboard_lifecycle_requests() {
     let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let edge_point = (0..viewport.width as i32)
         .map(|x| (viewport.x + x, viewport.y))
-        .chain((0..viewport.width as i32).map(|x| {
-            (
-                viewport.x + x,
-                viewport.y + viewport.height as i32 - 1,
-            )
-        }))
+        .chain(
+            (0..viewport.width as i32)
+                .map(|x| (viewport.x + x, viewport.y + viewport.height as i32 - 1)),
+        )
         .chain((0..viewport.height as i32).map(|y| (viewport.x, viewport.y + y)))
-        .chain((0..viewport.height as i32).map(|y| {
-            (
-                viewport.x + viewport.width as i32 - 1,
-                viewport.y + y,
-            )
-        }))
+        .chain(
+            (0..viewport.height as i32)
+                .map(|y| (viewport.x + viewport.width as i32 - 1, viewport.y + y)),
+        )
         .map(|(x, y)| GuiPoint::new(x as f32, y as f32))
         .find(|point| {
-            app.rendering.graphics
+            app.rendering
+                .graphics
                 .viewport_output_point_at(*point)
                 .is_some_and(|pointer| {
                     pointer.owner == owner
@@ -3948,13 +4173,19 @@ fn construction_edge_scroll_preserves_ordered_scoreboard_lifecycle_requests() {
         app.test_update();
     }
     app.test_update();
-    main_assert!(app.dialogs.scoreboard.is_some(), "a show request survives edge scrolling");
+    main_assert!(
+        app.dialogs.scoreboard.is_some(),
+        "a show request survives edge scrolling"
+    );
 
     while app.engine.frame() % 10 != 9 {
         app.test_update();
     }
     app.test_update();
-    main_assert!(app.dialogs.scoreboard.is_none(), "a hide request survives edge scrolling");
+    main_assert!(
+        app.dialogs.scoreboard.is_none(),
+        "a hide request survives edge scrolling"
+    );
 }
 
 #[test]
@@ -3981,7 +4212,8 @@ fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
     app.test_render(&mut frame);
     let scroll = app.input_routing.live.ingame_edge_scroll.test_value();
     let expected = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .viewport_output_point_for_index(scroll.viewport_index, scroll.screen)
         .test_value();
     main_assert_ne!(expected.world => stale.world, "the rendered camera movement must change the fixed screen point's world coordinate");
@@ -4013,7 +4245,10 @@ fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
         GuiPoint::new(20.0, 20.0),
     )
     .test_value();
-    main_assert!(app.input_routing.live.ingame_edge_scroll.is_some(), "opening the popup alone does not synthesize a pointer move");
+    main_assert!(
+        app.input_routing.live.ingame_edge_scroll.is_some(),
+        "opening the popup alone does not synthesize a pointer move"
+    );
     let row = app.context_menus.open.test_ref().layout().panels[0].rows[0].rect;
     let stopped = app.engine.player(owner).test_value().viewports()[0].center;
 
@@ -4055,8 +4290,14 @@ fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclampi
     let wider = app.rendering.graphics.viewport_rect(owner).test_value();
     main_assert!(wider.width > original.width);
     main_assert_eq!(app.input_routing.live.ingame_viewport_mouse.expect("resize retains native VpX/VpY").position.x => original.width as i32 - 1);
-    main_assert!(original.width as i32 - 1 < wider.width as i32 - 1, "the retained right edge is now an interior viewport coordinate");
-    main_assert!(app.input_routing.live.ingame_edge_scroll.is_some(), "native Scrolling stays armed until the next Execute reevaluates VpX");
+    main_assert!(
+        original.width as i32 - 1 < wider.width as i32 - 1,
+        "the retained right edge is now an interior viewport coordinate"
+    );
+    main_assert!(
+        app.input_routing.live.ingame_edge_scroll.is_some(),
+        "native Scrolling stays armed until the next Execute reevaluates VpX"
+    );
 
     app.test_update();
     main_assert_eq!(
@@ -4169,7 +4410,10 @@ fn mouse_viewport_corner_pans_both_axes_and_uses_diagonal_cursor() {
     let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let corner = GuiPoint::new(rect.x as f32, rect.y as f32);
     main_assert!(app.ingame_viewport_region(owner, corner).is_none());
-    main_assert!(app.script_menu_pointer_target(corner).expect("corner target query").is_none());
+    main_assert!(app
+        .script_menu_pointer_target(corner)
+        .expect("corner target query")
+        .is_none());
     let before = app.engine.player(owner).test_value().viewports()[0].center;
 
     app.test_cursor(PhysicalPosition::new(
@@ -4191,7 +4435,8 @@ fn fullscreen_mouse_edge_pan_uses_the_forty_pixel_overflow_bound() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     let projection = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .active_viewport_projections()
         .into_iter()
         .find(|viewport| viewport.owner == owner)
@@ -4227,7 +4472,11 @@ fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
     // viewport without changing the sandbox engine's player records
     // (C4MouseControl.cpp:244-257,1328-1345).
     let mut app = new_running_sandbox_app();
-    let engine_viewports = app.engine.test_player(app.players.local_owner).viewports().to_vec();
+    let engine_viewports = app
+        .engine
+        .test_player(app.players.local_owner)
+        .viewports()
+        .to_vec();
     app.local_controls = LocalControlRegistry::default();
     let snapshot = app.snapshot.clone();
     let focus = snapshot.objects.first().test_value();
@@ -4406,7 +4655,10 @@ fn automatic_retirement_closes_viewport_and_releases_local_control() {
     app.engine.set_player_surrendered(player, true).test_value();
     for frame in 1..60 {
         app.test_update();
-        main_assert!(app.engine.player(player).is_some(), "player retired before frame {frame}");
+        main_assert!(
+            app.engine.player(player).is_some(),
+            "player retired before frame {frame}"
+        );
         main_assert!(app.sound.ui_log.is_empty());
     }
     app.test_update();
@@ -4452,17 +4704,28 @@ fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
     );
     main_assert_eq!(app.ingame_viewport_region(owner, hud_point) => Some(IngameViewportRegion::Inventory(carried)));
     let world = app
-        .rendering.graphics
+        .rendering
+        .graphics
         .viewport_output_point_at(hud_point)
         .map(ingame_pointer_world_pixel)
         .test_value();
     let mut landscape = Landscape::flat(480, world.y);
     landscape.set_world_height(world.y.saturating_add(40));
     app.engine.set_landscape(landscape);
-    main_assert!(app.engine.construction_site_valid("BLD1", world), "terrain behind the HUD is otherwise a valid construction site");
+    main_assert!(
+        app.engine.construction_site_valid("BLD1", world),
+        "terrain behind the HUD is otherwise a valid construction site"
+    );
 
     begin_construction_drag(&mut app, menu_point, hud_point);
-    main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {pointer: Some(_), site_valid: false,..})));
+    main_assert!(matches!(
+        app.ingame_menus.construction_drag.as_ref(),
+        Some(ConstructionMenuDrag::Active {
+            pointer: Some(_),
+            site_valid: false,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -4522,7 +4785,10 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
     ));
     main_assert_eq!(app.script_menu_pointer_target(start).expect("title hit-test resources") => Some(EngineScriptMenuPointerTarget::Title));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(matches!(app.dialogs.menu_title_drag, Some(MenuTitleDrag::Script { .. })));
+    main_assert!(matches!(
+        app.dialogs.menu_title_drag,
+        Some(MenuTitleDrag::Script { .. })
+    ));
     let destination = GuiPoint::new(start.x - 400.0, start.y + 17.0);
     app.test_cursor(PhysicalPosition::new(
         f64::from(destination.x),
@@ -4542,7 +4808,8 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.menu_title_drag.is_none());
     let retained = app
-        .ingame_menus.script_presentations
+        .ingame_menus
+        .script_presentations
         .get(&owner)
         .and_then(|state| state.location);
     app.test_cursor(PhysicalPosition::new(10.0, 10.0));
@@ -4580,7 +4847,8 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             ..IngameMenuGraphics::default()
         };
         player_app
-            .ingame_menus.players
+            .ingame_menus
+            .players
             .get(player)
             .test_value()
             .bounds(area, &font, &gfx)
@@ -4608,7 +4876,8 @@ fn title_drag_is_captured_exactly_and_resize_resets_location() {
             ..IngameMenuGraphics::default()
         };
         player_app
-            .ingame_menus.players
+            .ingame_menus
+            .players
             .get(player)
             .test_value()
             .bounds(area, &font, &gfx)
@@ -4683,12 +4952,16 @@ fn runtime_help_and_flash_resolve_fontregular_images() {
     let mut app = new_classic_running_sandbox_app();
     let resolved =
         resolve_font_images_in_texts(&app.engine, ["{{CLNK}}"], app.script_text_spec_resources());
-    main_assert!(resolved.font_image("CLNK").is_some(), "the live FontRegular provider resolves installed definitions");
+    main_assert!(
+        resolved.font_image("CLNK").is_some(),
+        "the live FontRegular provider resolves installed definitions"
+    );
     app.status_text.clear();
     app.snapshot.hud.messages.clear();
     hold_message_board_for_frame_comparison(&mut app);
     app.dialogs.help_text_cache = OnceLock::new();
-    app.dialogs.help_text_cache
+    app.dialogs
+        .help_text_cache
         .set(Ok(RuntimeHelpColumns {
             left: "<i>{{CLNK}}</i>".to_string(),
             right: String::new(),
@@ -4823,11 +5096,17 @@ fn runtime_f1_language_parser_preserves_cpp_boundaries_and_font_safety() {
         let mut table = HashMap::new();
         table.insert("IDS_CON_HELP".to_string(), supported.to_string());
         let columns = build_runtime_help_columns(&table).test_value();
-        main_assert!(columns.left.contains(supported), "help column must preserve {supported:?}");
+        main_assert!(
+            columns.left.contains(supported),
+            "help column must preserve {supported:?}"
+        );
     }
     let mut unicode = HashMap::new();
     unicode.insert("IDS_CON_HELP".to_string(), "Помощь".to_string());
-    main_assert!(build_runtime_help_columns(&unicode).is_ok(), "UTF-8 FontRegular dynamically supports non-CP1252 scalars");
+    main_assert!(
+        build_runtime_help_columns(&unicode).is_ok(),
+        "UTF-8 FontRegular dynamically supports non-CP1252 scalars"
+    );
     let mut oversized = HashMap::new();
     oversized.insert("IDS_CON_HELP".to_string(), "x".repeat(2501));
     let error = build_runtime_help_columns(&oversized)
@@ -4923,9 +5202,14 @@ fn ownerless_escape_opens_fullscreen_abort_confirmation() {
     main_assert!(app.viewports.primary_physical_viewport_is_no_owner());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })));
+    main_assert!(app.dialogs.messages.last().is_some_and(|dialog| matches!(
+        dialog.continuation,
+        MessageDialogContinuation::AbortGame { .. }
+    )));
     main_assert!(app.ingame_menus.players.is_none());
-    main_assert!(!app.ingame_menus.ingame_menu_belongs_to(app.players.local_owner));
+    main_assert!(!app
+        .ingame_menus
+        .ingame_menu_belongs_to(app.players.local_owner));
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(!app.take_exit_request());
 }
@@ -4979,6 +5263,25 @@ fn material_render_info_preserves_signed_placement_and_defaults_only_zero() {
 
         main_assert_eq!(material_render_placement(definition) => expected);
         main_assert_eq!(material_render_info(definition) => clonk_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 50).with_placement(expected),);
+    }
+}
+
+#[test]
+fn material_render_placement_uses_only_the_cpp_dig_request_key() {
+    // C4MaterialCore::CompileFunc names this field `Dig2ObjectRequest`;
+    // unknown INI keys do not affect the default-placement calculation
+    // (C4Material.cpp:145-158,189).
+    for (key, expected) in [
+        ("Dig2ObjectOnRequestOnly=1", 70),
+        ("Dig2ObjectRequest=1", 60),
+    ] {
+        let library = clonk_resources::MaterialLibrary::parse(&format!(
+            "[Material]\nName=Earth\nDensity=50\n{key}\n"
+        ))
+        .test_value();
+        let definition = library.get("Earth").test_value();
+
+        main_assert_eq!(material_render_placement(definition) => expected);
     }
 }
 
@@ -5042,7 +5345,10 @@ fn hazard_tutorial_inherits_parent_material_metadata_and_textures() {
         ),
         "the parent default PXSGfxSize=32 must beat global Ashes size 6",
     );
-    main_assert!(load_scenario_material_textures(&tutorial, None).contains_key("industrial1"), "parent-group texture must load through Group::open_child");
+    main_assert!(
+        load_scenario_material_textures(&tutorial, None).contains_key("industrial1"),
+        "parent-group texture must load through Group::open_child"
+    );
 
     let paths = cached_app_paths().test_value();
     let scenario = Scenario::load_from_path_with_languages(
@@ -5250,11 +5556,20 @@ fn a_machine_with_neither_presentation_path_is_told_it_was_both() {
 
     let message = crate::main_audio::both_presentations_failed_context(&gpu_error);
 
-    main_assert!(message.contains("software presentation could not start either"), "the software half must survive: {message}");
-    main_assert!(message.contains("no GPU adapter on any backend"), "the GPU half must survive: {message}");
+    main_assert!(
+        message.contains("software presentation could not start either"),
+        "the software half must survive: {message}"
+    );
+    main_assert!(
+        message.contains("no GPU adapter on any backend"),
+        "the GPU half must survive: {message}"
+    );
     // `{:#}` renders the whole chain; the outer context alone names nothing an
     // operator can act on.
-    main_assert!(message.contains("no GPU backends were attempted"), "the GPU cause must survive, not just its outermost context: {message}");
+    main_assert!(
+        message.contains("no GPU backends were attempted"),
+        "the GPU cause must survive, not just its outermost context: {message}"
+    );
 }
 
 #[test]
@@ -5312,14 +5627,14 @@ fn the_presentation_path_never_reaches_the_simulation() {
 fn native_menu_text_baseline_is_one_bound_draw_per_glyph() {
     let mut app = new_real_menu_app(640, 480);
     app.startup.dialog_fade = None;
-    app.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
     app.configure_native_startup_fonts(1.0, false);
     app.handle_main_menu_activation(MainMenuItem::About)
         .test_value();
     let presentation = retained_test_presentation(&app);
-    let frame = app
-        .render_retained_gpu_frame(presentation)
-        .test_value();
+    let frame = app.render_retained_gpu_frame(presentation).test_value();
 
     let commands = frame
         .layers

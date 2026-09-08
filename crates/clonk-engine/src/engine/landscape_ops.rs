@@ -1911,6 +1911,18 @@ impl Engine {
         Some((value.unwrap_or(Value::Nil), finals))
     }
 
+    pub(crate) fn material_reaction_script_resolves(&self, function: &str) -> bool {
+        !function.is_empty()
+            && self
+                .global_script_functions
+                .as_deref()
+                .is_some_and(|functions| functions.contains_key(function))
+            && self
+                .host_world_context()
+                .resolve_engine_global_script(function)
+                .is_some()
+    }
+
     /// `Smoke()` (C4Effect.cpp:859-865): create a "Smoke" particle if the def
     /// is loaded. (The FXS1 object fallback for missing particle defs is not
     /// ported.) `level/2` is integer division like the C++ call.

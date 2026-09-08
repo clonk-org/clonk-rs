@@ -20,8 +20,8 @@ HEADERS = (
     "lc_group_ffi.h",
     "lc_platform_ffi.h",
 )
-# The engine header extends the pin with the weather transport the weather
-# patch consumes; the other three must be the pin's bytes.
+# The engine header extends the pin with the runtime observation transports the
+# layered engine patch consumes; the other three must be the pin's bytes.
 PINNED_HEADERS = HEADERS[1:]
 EXPECTED_ORACLE_PATHS = {
     "src/C4Config.cpp",

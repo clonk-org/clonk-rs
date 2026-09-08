@@ -342,6 +342,128 @@ typedef struct LcEngineRuntimeWeatherSnapshot {
     uint8_t reserved[3];
 } LcEngineRuntimeWeatherSnapshot;
 
+#define LC_ENGINE_RUNTIME_LANDSCAPE_ABI_VERSION 1u
+#define LC_ENGINE_RUNTIME_LANDSCAPE_TEXMAP_CAPACITY 127u
+#define LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY 125u
+
+typedef struct LcEngineRuntimeLandscapeTexMapEntrySnapshot {
+    const uint8_t *material_name;
+    size_t material_name_len;
+    const uint8_t *texture_name;
+    size_t texture_name_len;
+    int32_t material_index;
+    uint8_t present;
+    uint8_t texture_name_present;
+    uint8_t reserved[2];
+} LcEngineRuntimeLandscapeTexMapEntrySnapshot;
+
+typedef struct LcEngineRuntimeLandscapeSolidMaskSnapshot {
+    uint64_t owner_id;
+    int32_t source_x;
+    int32_t source_y;
+    int32_t source_width;
+    int32_t source_height;
+    int32_t source_target_x;
+    int32_t source_target_y;
+    int32_t put_x;
+    int32_t put_y;
+    int32_t put_width;
+    int32_t put_height;
+    int32_t put_target_x;
+    int32_t put_target_y;
+    int32_t put_rotation;
+    int32_t mat_buff_pitch;
+    const uint8_t *alpha;
+    size_t alpha_len;
+    const uint8_t *background;
+    size_t background_len;
+    size_t attachment_count;
+    uint8_t mask_put;
+    uint8_t reserved[7];
+} LcEngineRuntimeLandscapeSolidMaskSnapshot;
+
+typedef struct LcEngineRuntimeLandscapeSnapshot {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    int32_t width;
+    int32_t height;
+    int32_t surface_width;
+    int32_t surface_height;
+    int32_t pitch;
+    int32_t surface_clip_x;
+    int32_t surface_clip_y;
+    int32_t surface_clip_x2;
+    int32_t surface_clip_y2;
+    const uint8_t *surface8;
+    size_t surface8_len;
+    int32_t map_width;
+    int32_t map_height;
+    int32_t map_surface_width;
+    int32_t map_surface_height;
+    int32_t map_pitch;
+    int32_t map_clip_x;
+    int32_t map_clip_y;
+    int32_t map_clip_x2;
+    int32_t map_clip_y2;
+    const uint8_t *map;
+    size_t map_len;
+    const uint8_t *default_mat_tex;
+    size_t default_mat_tex_len;
+    const uint8_t *material_crossmap;
+    size_t material_crossmap_len;
+    const uint8_t *texture_inventory;
+    size_t texture_inventory_len;
+    const uint8_t *map_creator_state;
+    size_t map_creator_state_len;
+    const uint8_t *material_reaction_state;
+    size_t material_reaction_state_len;
+    const uint8_t *material_behavior_state;
+    size_t material_behavior_state_len;
+    const uint8_t *pxs_state;
+    size_t pxs_state_len;
+    const uint8_t *mass_mover_state;
+    size_t mass_mover_state_len;
+    int32_t material_count;
+    int32_t in_mat_convert_to[LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY];
+    int32_t pix2mat[256];
+    int32_t pix2dens[256];
+    int32_t pix2place[256];
+    uint32_t mat_count[LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY];
+    uint32_t effective_mat_count[LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY];
+    int32_t pix_cnt_pitch;
+    const uint8_t *pix_cnt;
+    size_t pix_cnt_len;
+    int32_t mode;
+    int32_t map_seed;
+    int32_t map_zoom;
+    int32_t scan_x;
+    int32_t scan_speed;
+    int32_t left_open;
+    int32_t right_open;
+    int32_t gravity_raw;
+    uint32_t modulation;
+    int32_t vehicle_material;
+    int32_t tunnel_material;
+    int32_t water_material;
+    int32_t snow_material;
+    int32_t granite_material;
+    uint8_t vehicle_pixel;
+    uint8_t no_scan;
+    uint8_t top_open;
+    uint8_t bottom_open;
+    uint8_t shade_materials;
+    uint8_t map_changed;
+    uint8_t texmap_initialized;
+    uint8_t texmap_entries_added;
+    uint8_t texmap_overload_materials;
+    uint8_t texmap_overload_textures;
+    uint8_t reserved[6];
+    const LcEngineRuntimeLandscapeSolidMaskSnapshot *solid_masks;
+    size_t solid_mask_count;
+    LcEngineRuntimeLandscapeTexMapEntrySnapshot
+        texmap[LC_ENGINE_RUNTIME_LANDSCAPE_TEXMAP_CAPACITY];
+} LcEngineRuntimeLandscapeSnapshot;
+
 typedef struct LcEngineRuntimeObjectStateArray LcEngineRuntimeObjectStateArray;
 typedef struct LcEngineRuntimeLandscapeArray LcEngineRuntimeLandscapeArray;
 typedef struct LcEngineRuntimePathResult LcEngineRuntimePathResult;
@@ -363,6 +485,12 @@ bool lc_engine_runtime_supply_weather_snapshot(
     LcEngineRuntimeHandle *handle,
     uint64_t frame,
     const LcEngineRuntimeWeatherSnapshot *snapshot,
+    char **error_message);
+
+bool lc_engine_runtime_supply_landscape_snapshot(
+    LcEngineRuntimeHandle *handle,
+    uint64_t frame,
+    const LcEngineRuntimeLandscapeSnapshot *snapshot,
     char **error_message);
 
 bool lc_engine_runtime_compare_snapshot(

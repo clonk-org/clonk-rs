@@ -350,6 +350,47 @@ impl MassMoverSet {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
 
+    /// Pointer-free, byte-stable state for the native end-of-frame shadow
+    /// comparison. Absolute indices and `CreatePtr` determine later allocation
+    /// and execution order (`C4MassMover.cpp:50-94`); `Count` remains the raw
+    /// C++ ledger and is deliberately not derived from occupied slots.
+    ///
+    /// Layout, all integers little-endian: `LCMM`, version u32, Count i32,
+    /// CreatePtr i32, live-slot-count u32, then ascending `(slot u32, Mat i32,
+    /// x i32, y i32)` records.
+    pub(crate) fn runtime_validation_state(&self) -> Result<Vec<u8>, String> {
+        const FORMAT_VERSION: u32 = 1;
+
+        if self.slots.len() > CHUNK {
+            return Err(format!(
+                "mass-mover set has {} slots, maximum is {CHUNK}",
+                self.slots.len()
+            ));
+        }
+        let create_ptr = i32::try_from(self.create_ptr)
+            .map_err(|_| "mass-mover CreatePtr exceeds native i32".to_owned())?;
+        let slot_count = u32::try_from(self.live_movers())
+            .map_err(|_| "mass-mover live-slot count exceeds u32".to_owned())?;
+        let mut bytes = Vec::with_capacity(20 + slot_count as usize * 16);
+        bytes.extend_from_slice(b"LCMM");
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.count.to_le_bytes());
+        bytes.extend_from_slice(&create_ptr.to_le_bytes());
+        bytes.extend_from_slice(&slot_count.to_le_bytes());
+        for (slot, mover) in self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, mover)| mover.as_ref().map(|mover| (slot, mover)))
+        {
+            bytes.extend_from_slice(&(slot as u32).to_le_bytes());
+            bytes.extend_from_slice(&(mover.mat.index() as i32).to_le_bytes());
+            bytes.extend_from_slice(&mover.x.to_le_bytes());
+            bytes.extend_from_slice(&mover.y.to_le_bytes());
+        }
+        Ok(bytes)
+    }
+
     /// Decode `MassMover.c4b`: raw 12-byte records occupy leading slots,
     /// `Count` is the file record count, and `CreatePtr` remains zero after
     /// `Default` (C4MassMover.cpp:204-217).
@@ -707,6 +748,51 @@ mod tests {
 
     fn mat(index: usize) -> MaterialId {
         MaterialId::new(index).expect("valid material id")
+    }
+
+    #[test]
+    fn runtime_validation_state_preserves_absolute_slots_count_and_create_cursor() {
+        // The pinned set stores Count and CreatePtr alongside 10,000 absolute
+        // slots (oracle-src-pinned src/C4MassMover.h:25-55). Create starts just
+        // after CreatePtr and wraps (src/C4MassMover.cpp:67-94), while Execute
+        // walks slots 9999..0 (src/C4MassMover.cpp:50-65), so neither the cursor
+        // nor sparse slot indices may be derived from the live mover count.
+        let mut set = MassMoverSet::new();
+        let first = MassMover {
+            mat: mat(3),
+            x: i32::MIN,
+            y: 17,
+        };
+        let second = MassMover {
+            mat: mat(5),
+            x: -23,
+            y: i32::MAX,
+        };
+        set.fill_slot(2, first);
+        set.fill_slot(CHUNK - 1, second);
+        set.set_create_ptr_for_test(7_777);
+        for _ in 0..7 {
+            set.bump_count();
+        }
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"LCMM");
+        expected.extend_from_slice(&1_u32.to_le_bytes());
+        expected.extend_from_slice(&7_i32.to_le_bytes());
+        expected.extend_from_slice(&7_777_i32.to_le_bytes());
+        expected.extend_from_slice(&2_u32.to_le_bytes());
+        for (slot, mover) in [(2_u32, first), ((CHUNK - 1) as u32, second)] {
+            expected.extend_from_slice(&slot.to_le_bytes());
+            expected.extend_from_slice(&(mover.mat.index() as i32).to_le_bytes());
+            expected.extend_from_slice(&mover.x.to_le_bytes());
+            expected.extend_from_slice(&mover.y.to_le_bytes());
+        }
+
+        assert_eq!(
+            set.runtime_validation_state()
+                .expect("valid mass-mover state encodes"),
+            expected
+        );
     }
 
     fn materials(source: &str) -> MaterialSet {

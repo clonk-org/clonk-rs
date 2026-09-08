@@ -98,7 +98,7 @@ impl Engine {
         self.objects
             .iter()
             .find(|object| object.id.as_u64() == id)
-            .map(|object| object.solid_mask_bake.is_some() || object.solid_mask_empty_put)
+            .map(|object| object.solid_mask_bake.is_some() || object.solid_mask_empty_put.is_some())
     }
 
     /// The force-close/RejectContents lifecycle shared by the internal
