@@ -3842,7 +3842,7 @@ fn an_unflushed_internet_toggle_outranks_the_config_file() {
     // The scenario selector's Internet checkbox is the same in-memory toggle —
     // no C++ game-option surface saves the file — so it replaces the netdlg's
     // pending change rather than superseding it through the file.
-    app.persist_game_option_value("Network", "MasterServerSignUp", "1".to_string());
+    app.config.persist_game_option_value("Network", "MasterServerSignUp", "1".to_string());
     main_assert_eq!(app.config.deferred.get("Network", "MasterServerSignUp") => Some("1"));
     main_assert!(app.masterserver_signup_setting());
     main_assert!(load_network_startup_settings(Some(&paths)).0, "and the file still holds the value this session started from");

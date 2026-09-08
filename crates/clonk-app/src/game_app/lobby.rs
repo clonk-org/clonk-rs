@@ -2715,7 +2715,7 @@ impl GameApp {
         {
             prepared.set_runtime_join_allowed(allowed);
         }
-        self.persist_game_option_value(
+        self.config.persist_game_option_value(
             "Network",
             "NoRuntimeJoin",
             if allowed { "0" } else { "1" }.to_string(),
@@ -7572,7 +7572,7 @@ impl GameApp {
                         let effective = !enabled;
                         self.scenario_game_options
                             .apply_lobby_internet_result(effective);
-                        self.persist_game_option_value(
+                        self.config.persist_game_option_value(
                             "Network",
                             "MasterServerSignUp",
                             i32::from(effective).to_string(),
@@ -7584,7 +7584,7 @@ impl GameApp {
                 }
             }
             GameOptionAction::LeagueSignupChanged(enabled) => {
-                self.persist_game_option_value(
+                self.config.persist_game_option_value(
                     "Network",
                     "LeagueServerSignUp",
                     i32::from(enabled).to_string(),
@@ -7621,7 +7621,8 @@ impl GameApp {
                     return Ok(());
                 }
                 if let Some(password) = remember_for_next_round.as_ref() {
-                    self.persist_game_option_text("Network", "LastPassword", password);
+                    self.config
+                        .persist_game_option_text("Network", "LastPassword", password);
                 }
                 let comment = self
                     .advertised_game_reference
@@ -7646,7 +7647,8 @@ impl GameApp {
                         "Network comment contains an unsupported NUL byte".to_string();
                     return Ok(());
                 };
-                self.persist_game_option_text("Network", "Comment", &comment);
+                self.config
+                    .persist_game_option_text("Network", "Comment", &comment);
                 let password_needed = self
                     .advertised_game_reference
                     .as_ref()
@@ -7677,7 +7679,11 @@ impl GameApp {
             GameOptionAction::RecordPreferenceChanged(enabled) => {
                 self.startup.view_flags.record = enabled;
                 self.records.enabled = enabled && self.records.directory.is_some();
-                self.persist_game_option_value("General", "Record", i32::from(enabled).to_string());
+                self.config.persist_game_option_value(
+                    "General",
+                    "Record",
+                    i32::from(enabled).to_string(),
+                );
             }
             GameOptionAction::FairCrewPreferenceChanged(_) => {
                 tracing::error!("lobby controller emitted selector-only FairCrew preference");

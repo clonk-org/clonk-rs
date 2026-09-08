@@ -3193,7 +3193,7 @@ impl GameApp {
         {
             prepared.set_runtime_join_allowed(allowed);
         }
-        self.persist_game_option_value(
+        self.config.persist_game_option_value(
             "Network",
             "NoRuntimeJoin",
             if allowed { "0" } else { "1" }.to_string(),

@@ -2280,7 +2280,7 @@ fn run() -> Result<()> {
                     if let Some(inhibitor) = display_sleep_inhibitor.take() {
                         inhibitor.release();
                     }
-                    if !app.configuration_reset_requested {
+                    if !app.config.reset_requested {
                         if let Some(paths) = app_paths.as_ref() {
                             if let Err(error) = persist_dirty_gamepad_axis_calibration(
                                 paths.as_ref(),
@@ -2313,7 +2313,7 @@ fn run() -> Result<()> {
             // C4MouseControl/C4GUI draw the selected themed cell themselves.
             window.set_cursor_visible(app.platform_cursor_visible());
             if let Some(paths) = app_paths.as_ref().filter(|_| {
-                event_target.exiting() && !app.configuration_reset_requested && !app.console_mode
+                event_target.exiting() && !app.config.reset_requested && !app.console_mode
             }) {
                 display_options.persist_if_dirty(paths.as_ref());
             }
@@ -2324,7 +2324,7 @@ fn run() -> Result<()> {
             // quit; an aborted run discards it (C4Application.cpp:351-367).
             // Mission access deliberately does not wait for this — see
             // `persist_mission_access_if_changed`.
-            if event_target.exiting() && !app.configuration_reset_requested {
+            if event_target.exiting() && !app.config.reset_requested {
                 if let Some(paths) = app_paths.as_ref() {
                     for (section, entries) in app.config.deferred.take_by_section() {
                         let updates: Vec<(&str, clonk_app_netplay::NativeConfigValue<'_>)> =
@@ -2341,7 +2341,7 @@ fn run() -> Result<()> {
                 }
             }
             let console_shutdown =
-                event_target.exiting() && app.console_mode && !app.configuration_reset_requested;
+                event_target.exiting() && app.console_mode && !app.config.reset_requested;
             if let (true, Some(paths), Some((x, y))) = (
                 console_shutdown,
                 app_paths.as_ref(),
@@ -2924,6 +2924,7 @@ impl GameApp {
                 // Native gates the whole subsystem on the startup value.
                 gamepad_input_enabled: gamepads_enabled,
                 gamepad_gui_control: load_gamepad_gui_control(paths),
+                reset_requested: false,
             },
             saves: SaveState {
                 // The two language values are computed above; the rest of the
@@ -3244,7 +3245,6 @@ impl GameApp {
             window_occluded: false,
             exit_requested: false,
             exit_reason: None,
-            configuration_reset_requested: false,
             game_over_handled: false,
             pending_league_end: None,
             runtime_flash_resources_cache,
@@ -7142,7 +7142,7 @@ impl GameApp {
                     host_snapshot_changed = true;
                 }
                 if matches!(runtime_network_role, RuntimeNetworkRole::Host) {
-                    self.persist_game_option_value(
+                    self.config.persist_game_option_value(
                         "Network",
                         "ControlRate",
                         control_rate.to_string(),
