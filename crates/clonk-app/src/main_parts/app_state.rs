@@ -600,6 +600,144 @@ impl RecordingState {
     pub(crate) fn runtime_record_possible(&self, running: bool) -> bool {
         running && !self.runtime_requested && self.playback.is_none() && self.session.is_none()
     }
+
+    /// `C4Record::Stop`'s first half: push the last league stream delta and
+    /// close the stream, then hand back the description inputs the session
+    /// carried. `None` when nothing was recording.
+    pub(crate) fn finish_stream(
+        &mut self,
+        network: Option<&NetworkManager>,
+    ) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
+        let session = self.session.as_mut()?;
+        let league_streaming = session.league_streaming;
+        queue_league_record_bytes(network, session.take_stream_delta());
+        if league_streaming {
+            let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+            if let Some(network) = network {
+                if let Err(error) = network.finish_league_record_stream(now) {
+                    tracing::error!(%error, "failed to finish league record stream");
+                }
+            }
+        }
+        Some((
+            session.description_title.clone(),
+            session.description_definition_modules.clone(),
+        ))
+    }
+
+    /// `C4Record::Stop`'s second half: install the final description and
+    /// player infos, close CtrlRec with its end marker, repack the record
+    /// group, and hash it for the league when asked to.
+    pub(crate) fn finish_session(
+        &mut self,
+        frame: u32,
+        maker_bytes: &[u8],
+        league: bool,
+        description_name: &[u8],
+        description: &[u8],
+        final_player_info_snapshot: &clonk_network::PlayerInfoListSnapshot,
+    ) -> Option<LeagueEndRecord> {
+        let RecordingSession {
+            writer,
+            mut ctrl_rec,
+            output_path,
+            disk_writer_pos,
+            ..
+        } = self.session.take()?;
+        if let Err(error) = write_folder_save_entry(&output_path, description_name, description) {
+            // C4Record::Stop deliberately ignores SaveDesc's return value.
+            tracing::warn!(%error, "failed to install final record description");
+        }
+        // C4PlayerInfoList::Save deletes the prior entry before it tests for
+        // an empty list or invokes the compiler. A compiler failure must not
+        // leave stale copied final-player data behind.
+        if let Err(error) = delete_folder_save_entry(&output_path, b"RecPlayerInfos.txt") {
+            tracing::warn!(%error, "failed to remove stale final player infos");
+        }
+        if !final_player_info_snapshot.clients.is_empty() {
+            match clonk_network::encode_player_info_list_ini(final_player_info_snapshot) {
+                Ok(final_player_infos) => {
+                    if let Err(error) = write_folder_save_entry(
+                        &output_path,
+                        b"RecPlayerInfos.txt",
+                        &final_player_infos,
+                    ) {
+                        tracing::warn!(%error, "failed to install final player infos in record group");
+                    }
+                }
+                Err(error) => {
+                    // Native ignores this failure and still closes/packs the
+                    // recording directory.
+                    tracing::warn!(%error, "failed to serialize final record player infos");
+                }
+            }
+        }
+        let stream = writer.finish(frame);
+        if let Err(error) = ctrl_rec
+            .write_all(&stream[disk_writer_pos.min(stream.len())..])
+            .and_then(|()| ctrl_rec.flush())
+        {
+            tracing::warn!(%error, "failed to append final CtrlRec marker");
+        }
+        drop(ctrl_rec);
+        let group = match Group::open(&output_path) {
+            Ok(group) => group,
+            Err(error) => {
+                tracing::warn!(%error, "failed to reopen recording directory");
+                return None;
+            }
+        };
+        let mut group = match MutableGroup::from_group(&group) {
+            Ok(group) => group,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read recording directory");
+                return None;
+            }
+        };
+        if !maker_bytes.is_empty() {
+            group.set_maker_bytes_recursively(maker_bytes);
+        }
+        let packed = match group.pack() {
+            Ok(packed) => packed,
+            Err(error) => {
+                tracing::warn!(%error, "failed to pack scenario recording");
+                return None;
+            }
+        };
+        if let Err(error) = replace_file_from_same_directory(&output_path, &packed) {
+            tracing::warn!(%error, path = %output_path.display(), "failed to write scenario recording");
+            return None;
+        }
+        tracing::info!(path = %output_path.display(), "saved scenario recording");
+        if !league {
+            // C4Game::Evaluate passes a null SHA destination outside league
+            // play, so C4Record::Stop never rereads or hashes the packed file.
+            return None;
+        }
+        let on_disk = match fs::read(&output_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, path = %output_path.display(), "failed to read closed scenario recording");
+                return None;
+            }
+        };
+        let name = league_record_name(&output_path)?;
+        Some(LeagueEndRecord {
+            name,
+            sha1: Sha1::digest(&on_disk).into(),
+        })
+    }
+}
+
+/// Hand a league record stream delta to the network; nothing to do without a
+/// delta or without a network to stream it.
+pub(crate) fn queue_league_record_bytes(network: Option<&NetworkManager>, bytes: Option<Vec<u8>>) {
+    let (Some(bytes), Some(network)) = (bytes, network) else {
+        return;
+    };
+    if let Err(error) = network.append_league_record_bytes(&bytes) {
+        tracing::error!(%error, "failed to queue league record bytes");
+    }
 }
 
 /// The presentation half of the app: frame counters and refresh ceilings
