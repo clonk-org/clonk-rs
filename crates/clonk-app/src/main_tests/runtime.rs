@@ -3768,7 +3768,7 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
     app.finish_message_dialog(MessageDialogResult::No)
         .test_value();
     assert_eq!(fs::read(paths.config_file()).unwrap(), before_cancel);
-    assert!(!app.configuration_reset_requested);
+    assert!(!app.config.reset_requested);
     assert!(!app.take_exit_request());
 
     app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
@@ -3779,7 +3779,7 @@ fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
     assert_eq!(reset.get_in(Some("General"), "VendorResetKey"), None);
     assert_eq!(reset.get_in(Some("General"), "FontSize"), None);
     assert_eq!(reset.get_in(Some("Graphics"), "Scale"), None);
-    assert!(app.configuration_reset_requested);
+    assert!(app.config.reset_requested);
     assert!(app.take_exit_request());
     assert_eq!(app.startup.view, StartupView::Options);
 }

@@ -4635,7 +4635,7 @@ impl GameApp {
                     }
                 }
                 self.pending_options_display_requests.clear();
-                self.configuration_reset_requested = true;
+                self.config.reset_requested = true;
                 self.request_exit("the configuration was reset");
             }
             MessageDialogContinuation::OptionsResetConfiguration => {}

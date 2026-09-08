@@ -208,6 +208,10 @@ pub(crate) struct ConfigState {
     /// poll `C4GamePadControl` when this was false during application init.
     pub(crate) gamepad_input_enabled: bool,
     pub(crate) gamepad_gui_control: bool,
+    /// A confirmed `Config.Default()` reset owns shutdown persistence. Keep
+    /// this latched after `take_exit_request` so the event-loop tail cannot
+    /// merge stale display values back into the freshly reset config.
+    pub(crate) reset_requested: bool,
 }
 
 /// The startup screens: which one is showing, the controller behind it, and
@@ -1547,10 +1551,6 @@ pub(crate) struct GameApp {
     /// loop unwinds, and the banner is written at the very end
     /// (clonk-org/clonk-rs#40).
     pub(crate) exit_reason: Option<&'static str>,
-    /// A confirmed `Config.Default()` reset owns shutdown persistence. Keep
-    /// this latched after `take_exit_request` so the event-loop tail cannot
-    /// merge stale display values back into the freshly reset config.
-    pub(crate) configuration_reset_requested: bool,
     pub(crate) game_over_handled: bool,
     pub(crate) pending_league_end: Option<PendingLeagueEnd>,
     /// Process-start localization/encoding metadata needed by live flash

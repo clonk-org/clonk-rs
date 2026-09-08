@@ -1539,7 +1539,7 @@ pub(crate) fn apply_options_display_requests(
                 }
             }
         }
-        if !app.configuration_reset_requested {
+        if !app.config.reset_requested {
             if let Some(paths) = paths {
                 display_options.persist_if_dirty(paths);
             }
