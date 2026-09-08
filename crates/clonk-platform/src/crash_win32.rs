@@ -343,6 +343,73 @@ pub fn loaded_module_line(module: &LoadedModule) -> String {
     )
 }
 
+/// The bytes around the faulting stack pointer that `VirtualQuery` let the
+/// handler read (`C4CrashHandlerWin32.cpp:206-232`): the window
+/// `(rsp - 256) & ~0xF ..= (rsp + 256) | 0xF`, clipped to the region that
+/// holds `rsp`. `bytes` covers `min..=max`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StackMemory {
+    pub min: usize,
+    pub max: usize,
+    pub bytes: Vec<u8>,
+}
+
+/// What the stack-memory attempt produced (`C4CrashHandlerWin32.cpp:206-253`):
+/// the window, or a `VirtualQuery` that failed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StackMemoryDump {
+    Failed,
+    Window(StackMemory),
+}
+
+/// The `Stack contents:` section, or nothing for a summary that never
+/// attempted it (`C4CrashHandlerWin32.cpp:206-253`).
+pub fn stack_contents_section(dump: Option<&StackMemoryDump>) -> String {
+    match dump {
+        None => String::new(),
+        Some(StackMemoryDump::Failed) => {
+            "\nStack contents:\n[Failed to access stack memory]\n".to_owned()
+        }
+        Some(StackMemoryDump::Window(window)) => (window.min & !0xF..window.max).step_by(16).fold(
+            "\nStack contents:\n".to_owned(),
+            |mut section, row_base| {
+                section.push_str(&stack_contents_row(window, row_base));
+                section
+            },
+        ),
+    }
+}
+
+/// One `Stack contents:` row (`C4CrashHandlerWin32.cpp:216-249`): the row base
+/// as a pointer, `%02x ` per byte, three spaces, then the bytes as text.
+/// Bytes outside the window print as blanks of the same width, which is how a
+/// window that starts or ends mid-row keeps its columns.
+fn stack_contents_row(window: &StackMemory, row_base: usize) -> String {
+    let byte_at = |address: usize| {
+        (window.min..=window.max)
+            .contains(&address)
+            .then(|| window.bytes[address - window.min])
+    };
+    let hex: String = (row_base..row_base + 16)
+        .map(|address| byte_at(address).map_or("   ".to_owned(), |byte| format!("{byte:02x} ")))
+        .collect();
+    let text: String = (row_base..row_base + 16)
+        .map(|address| byte_at(address).map_or(' ', stack_contents_char))
+        .collect();
+    format!("{}: {hex}   {text}\n", pointer(row_base))
+}
+
+/// The text column's classification (`C4CrashHandlerWin32.cpp:240-244`):
+/// control bytes and the 0x7f..=0xa0 range print as `.`, every other byte as
+/// itself.
+fn stack_contents_char(byte: u8) -> char {
+    if byte < 0x20 || (0x7f..=0xa0).contains(&byte) {
+        '.'
+    } else {
+        char::from(byte)
+    }
+}
+
 /// The stack trace, or the one line that stands in for it
 /// (`C4CrashHandlerWin32.cpp:255-256,291-328`).
 ///
@@ -395,6 +462,10 @@ pub struct ExceptionSummary {
     pub registers: X64Registers,
     /// `ContextRecord->EFlags`.
     pub eflags: u32,
+    /// The stack bytes around `rsp` (`C4CrashHandlerWin32.cpp:206-253`), or
+    /// `None` for a summary that never attempted them; the same off-Windows
+    /// reasoning as `walk`.
+    pub stack_memory: Option<StackMemoryDump>,
     /// What the handler collected after the register block, or `None` for a
     /// summary that describes no attempt at all — which is what keeps the
     /// report composable, and assertable, off Windows.
@@ -418,8 +489,9 @@ pub struct CollectedWalk {
 /// Assembles the human-readable report `SafeTextDump` writes to the log
 /// descriptor (`C4CrashHandlerWin32.cpp:86-352`) for one exception.
 ///
-/// The walk and the module list are collected by the handler, so a summary
-/// carrying neither composes exactly the report it did before they existed.
+/// The stack contents, the walk and the module list are collected by the
+/// handler, so a summary carrying none of them composes exactly the report it
+/// did before they existed.
 pub fn compose_report(exception: &ExceptionSummary, dump_filename: Option<&str>) -> String {
     let walk = exception
         .walk
@@ -433,13 +505,14 @@ pub fn compose_report(exception: &ExceptionSummary, dump_filename: Option<&str>)
         })
         .unwrap_or_default();
     format!(
-        "{}{}{}{}{}{}{walk}",
+        "{}{}{}{}{}{}{}{walk}",
         report_header(exception.code, dump_filename),
         exception_description(exception.code),
         continuable_line(exception.exception_flags),
         access_violation_detail(exception.code, &exception.parameters),
         x64_register_lines(&exception.registers),
         eflags_line(exception.eflags),
+        stack_contents_section(exception.stack_memory.as_ref()),
     )
 }
 
@@ -452,7 +525,8 @@ pub use windows_impl::{
 mod windows_impl {
     use super::{
         compose_report, crash_dialog_text, crash_dump_filename, CollectedWalk, ExceptionSummary,
-        LoadedModule, SourceLocation, StackFrame, SymbolMatch, X64Registers,
+        LoadedModule, SourceLocation, StackFrame, StackMemory, StackMemoryDump, SymbolMatch,
+        X64Registers,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -476,6 +550,7 @@ mod windows_impl {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
     };
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
     use windows_sys::Win32::System::SystemInformation::GetSystemTime;
     use windows_sys::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
     use windows_sys::Win32::System::Threading::{
@@ -559,6 +634,50 @@ mod windows_impl {
     ///
     /// `StackWalk64` writes through the `CONTEXT` it is given, so it gets a copy
     /// — C++ takes one for the same reason (:257).
+    /// The stack bytes around `stack_pointer` (`C4CrashHandlerWin32.cpp:206-232`):
+    /// `VirtualQuery` supplies the region that holds it, and the window
+    /// `(rsp - 256) & ~0xF ..= (rsp + 256) | 0xF` is clipped to that region.
+    /// C++ reads one byte past a region that clips the top of the window; the
+    /// port stops at the region's last byte, which is the only byte it can
+    /// prove is mapped.
+    pub(super) fn collect_stack_memory(stack_pointer: usize) -> StackMemoryDump {
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let queried = unsafe {
+            VirtualQuery(
+                stack_pointer as *const std::ffi::c_void,
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if queried == 0 {
+            return StackMemoryDump::Failed;
+        }
+        let region_base = info.BaseAddress as usize;
+        let region_end = region_base.saturating_add(info.RegionSize);
+        let min = region_base.max(stack_pointer.wrapping_sub(256) & !0xF);
+        let max = region_end
+            .min(stack_pointer.saturating_add(256) | 0xF)
+            .min(region_end.saturating_sub(1));
+        if max < min {
+            return StackMemoryDump::Failed;
+        }
+        // Inside the region VirtualQuery just described, as in C++.
+        let bytes = (min..=max)
+            .map(|address| unsafe { std::ptr::read_volatile(address as *const u8) })
+            .collect();
+        StackMemoryDump::Window(StackMemory { min, max, bytes })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn stack_pointer_from_context(context: &CONTEXT) -> Option<usize> {
+        Some(context.Rsp as usize)
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn stack_pointer_from_context(_context: &CONTEXT) -> Option<usize> {
+        None
+    }
+
     pub(super) fn collect_walk(context: &CONTEXT) -> CollectedWalk {
         CollectedWalk {
             frames: walk_stack(context),
@@ -822,6 +941,7 @@ mod windows_impl {
         {
             exception.registers = registers_from_context(context);
             exception.eflags = context.EFlags;
+            exception.stack_memory = stack_pointer_from_context(context).map(collect_stack_memory);
             exception.walk = Some(collect_walk(context));
         }
         let user_path = USER_PATH
@@ -1370,6 +1490,7 @@ mod tests {
             parameters: vec![1, 0xDEAD_BEEF],
             registers,
             eflags: 0x40,
+            stack_memory: None,
             // The artifact path is what this pins; the walk is driven from a
             // real captured context by its own test.
             walk: None,
@@ -1418,5 +1539,123 @@ mod tests {
                  C:\\Clonk.log.\nA crash dump has been generated at {dump_path}."
             )
         );
+    }
+
+    /// C4CrashHandlerWin32.cpp:206-253 — a `VirtualQuery` that fails leaves
+    /// the section header in place and one failure line under it. A summary
+    /// that never attempted the dump contributes nothing, which is what keeps
+    /// the reports composed off Windows byte-for-byte what they were.
+    #[test]
+    fn a_failed_stack_query_reports_the_failure_line() {
+        assert_eq!(
+            stack_contents_section(Some(&StackMemoryDump::Failed)),
+            "\nStack contents:\n[Failed to access stack memory]\n"
+        );
+        assert_eq!(stack_contents_section(None), "");
+    }
+
+    /// C4CrashHandlerWin32.cpp:216-249 — one row per 16 bytes: the row base as
+    /// a pointer, `%02x ` per byte, three spaces, then the bytes as text with
+    /// everything below 0x20 and inside 0x7f..=0xa0 shown as `.`.
+    #[test]
+    fn stack_contents_rows_follow_the_oracle_layout_and_classification() {
+        let min = 0x7ff0_0000_1000usize;
+        let mut bytes: Vec<u8> = (0x00..=0x0f).collect();
+        bytes.extend(b"ABCDEFGHIJKLMNOP");
+        bytes.extend([
+            0x7e, 0x7f, 0x80, 0xa0, 0xa1, 0xff, 0x20, 0x2e, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+            0x36, 0x37,
+        ]);
+        let window = StackMemory {
+            min,
+            max: min + bytes.len() - 1,
+            bytes,
+        };
+        assert_eq!(
+            stack_contents_section(Some(&StackMemoryDump::Window(window))),
+            "\nStack contents:\n\
+             0x00007ff000001000: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f    ................\n\
+             0x00007ff000001010: 41 42 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f 50    ABCDEFGHIJKLMNOP\n\
+             0x00007ff000001020: 7e 7f 80 a0 a1 ff 20 2e 30 31 32 33 34 35 36 37    ~...\u{a1}\u{ff} .01234567\n"
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:220-247 — a window clipped by its region starts
+    /// and ends mid-row; the bytes outside it print as blanks of the same
+    /// width so the columns hold, and the row loop still covers the last byte.
+    #[test]
+    fn a_clipped_stack_window_blanks_the_bytes_outside_it() {
+        let window = StackMemory {
+            min: 0x7ff0_0000_1008,
+            max: 0x7ff0_0000_1017,
+            bytes: vec![0x41; 16],
+        };
+        assert_eq!(
+            stack_contents_section(Some(&StackMemoryDump::Window(window))),
+            format!(
+                "\nStack contents:\n\
+                 0x00007ff000001000: {blank8}{a8}   {sp8}AAAAAAAA\n\
+                 0x00007ff000001010: {a8}{blank8}   AAAAAAAA{sp8}\n",
+                blank8 = "   ".repeat(8),
+                a8 = "41 ".repeat(8),
+                sp8 = " ".repeat(8),
+            )
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:202-256 — the stack contents follow the EFLAGS
+    /// line and precede the trace, whether they succeeded or not; a summary
+    /// that never attempted them composes the report it did before.
+    #[test]
+    fn the_report_places_the_stack_contents_between_eflags_and_the_trace() {
+        let exception = ExceptionSummary {
+            code: EXCEPTION_ILLEGAL_INSTRUCTION,
+            eflags: 0x40,
+            walk: Some(CollectedWalk {
+                frames: Some(Vec::new()),
+                modules: None,
+            }),
+            ..ExceptionSummary::default()
+        };
+        assert!(
+            compose_report(&exception, None)
+                .contains("EFLAGS: 0x00000040 (...Z...)\n\nStack trace:\n"),
+            "no attempt, no section"
+        );
+        let attempted = ExceptionSummary {
+            stack_memory: Some(StackMemoryDump::Failed),
+            ..exception
+        };
+        assert!(
+            compose_report(&attempted, None).contains(
+                "EFLAGS: 0x00000040 (...Z...)\n\nStack contents:\n\
+                 [Failed to access stack memory]\n\nStack trace:\n"
+            ),
+            "{}",
+            compose_report(&attempted, None)
+        );
+    }
+
+    /// C4CrashHandlerWin32.cpp:206-232 on a live stack: the window sits around
+    /// the queried pointer inside the region that holds it and reads back the
+    /// bytes that are there.
+    #[cfg(windows)]
+    #[test]
+    fn a_live_stack_pointer_yields_its_window() {
+        let marker = [0xC3u8; 32];
+        let pointer = marker.as_ptr() as usize;
+        let StackMemoryDump::Window(window) = super::windows_impl::collect_stack_memory(pointer)
+        else {
+            panic!("VirtualQuery failed on the live stack");
+        };
+        assert!(window.min <= pointer && pointer <= window.max);
+        assert!(window.min >= (pointer - 256) & !0xF);
+        assert!(window.max <= (pointer + 256) | 0xF);
+        assert_eq!(window.bytes.len(), window.max - window.min + 1);
+        let offset = pointer - window.min;
+        assert_eq!(&window.bytes[offset..offset + 32], &marker);
+        let section = stack_contents_section(Some(&StackMemoryDump::Window(window)));
+        assert!(section.lines().count() <= 34, "{section}");
+        assert!(section.contains("c3 c3 c3 c3"), "{section}");
     }
 }
