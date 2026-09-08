@@ -934,7 +934,7 @@ fn wait_for_menu_impl(app: &mut GameApp, dismiss_first_player_dialog: bool) {
     // Asset-less unit fixtures intentionally test isolated menu logic.
     // Production stays in Loading and reports the typed loader boundary;
     // only this test helper bypasses startup presentation explicitly.
-    if app.app_paths.is_none() && app.loader_error.is_some() {
+    if app.app_paths.is_none() && app.loader.error.is_some() {
         app.boot_loading = None;
         app.mode = AppMode::Menu;
         app.startup.dialog_fade = None;
@@ -1562,8 +1562,8 @@ fn install_native_test_fonts(app: &mut GameApp, scale: f32) {
     app.rendering
         .graphics
         .set_runtime_sprite_filtering(scale, false);
-    app.loader_render_config = Some(LoaderRenderConfig::new(scale, false).test_value());
-    app.loader_render_error = None;
+    app.loader.render_config = Some(LoaderRenderConfig::new(scale, false).test_value());
+    app.loader.render_error = None;
     let font_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../planet/System.c4g/Endeavour.ttf");
     let bytes = fs::read(font_path).test_value();
@@ -3542,7 +3542,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     .test_value();
 
     let mut app = new_menu_app(320, 200);
-    app.loader_screen = Some(
+    app.loader.screen = Some(
         LoaderScreen::new(
             LoaderSelection::startup("Loader.png").expect("synthetic loader selection"),
             ImageData::new(1, 1, vec![0, 0, 0, 0xff]),
@@ -3667,7 +3667,8 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     // transfer percentage below remains a separate progress domain
     // (src/C4Game.cpp:2558-2568).
     assert_eq!(
-        app.loader_screen
+        app.loader
+            .screen
             .as_ref()
             .expect("client loader while retrieving scenario")
             .state()
@@ -3795,7 +3796,8 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
         7
     );
     assert_eq!(
-        app.loader_screen
+        app.loader
+            .screen
             .as_ref()
             .expect("client loader after resource retrieval")
             .state()
@@ -3838,7 +3840,8 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
         "a chase target ahead of the saved tick must enter running catch-up"
     );
     assert_eq!(
-        app.loader_screen
+        app.loader
+            .screen
             .as_ref()
             .expect("client loader retained through final init")
             .state()
@@ -3971,7 +3974,8 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
     app.process_network_events().test_value();
     assert!(matches!(app.mode, AppMode::Running));
     assert_eq!(
-        app.loader_screen
+        app.loader
+            .screen
             .as_ref()
             .expect("client loader retained after final init")
             .state()

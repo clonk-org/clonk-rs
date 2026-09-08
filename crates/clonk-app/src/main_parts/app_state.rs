@@ -835,6 +835,28 @@ pub(crate) struct StartupNetworkState {
     pub(crate) connection: Option<StartupNetworkConnection>,
 }
 
+/// The loader-screen half of the app: which `C4LoaderScreen` is active for
+/// the current startup or scenario load, or the typed reason none is, how
+/// it renders, and the presentation-only latch that keeps the 100% frame
+/// pending until one real presentation accepts it. `GameApp` composes it
+/// as `loader`.
+pub(crate) struct LoaderScreenState {
+    /// Exact C4LoaderScreen selected for the currently active startup or
+    /// scenario load. A missing screen is paired with `loader_error` and is
+    /// always a logged typed boundary, never a generic pane.
+    pub(crate) screen: Option<LoaderScreen>,
+    /// Why no `loader_screen` is installed, when one was attempted.
+    pub(crate) error: Option<LoaderScreenFailure>,
+    pub(crate) render_config: Option<LoaderRenderConfig>,
+    pub(crate) render_error: Option<String>,
+    pub(crate) gamma: Option<clonk_graphics::GammaRamp>,
+    /// Successful activation leaves its 100% loader frame pending until one
+    /// real window presentation accepts it. The game is already Running; this
+    /// latch affects presentation only and never delays simulation or network
+    /// readiness.
+    pub(crate) terminal_frame_pending: bool,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -919,6 +941,10 @@ pub(crate) struct GameApp {
     /// deadlines, the retained references and reference queries, and the
     /// connection being joined (clonk-org/clonk-rs#1238).
     pub(crate) startup_network: StartupNetworkState,
+    /// The loader screen (`C4LoaderScreen`): the selected screen or why none
+    /// is installed, its render configuration and error, its gamma ramp, and
+    /// the terminal 100% frame latch (clonk-org/clonk-rs#1238).
+    pub(crate) loader: LoaderScreenState,
     #[cfg(test)]
     #[cfg(test)]
     pub(crate) sec1_timer_call_count: usize,
@@ -996,21 +1022,12 @@ pub(crate) struct GameApp {
     /// fonts with Application.GetScale()
     /// (C4Fonts.cpp:158-173).
     pub(crate) native_startup_fonts: Option<Arc<clonk_frontend::clonk_fonts::NativeClonkFontSet>>,
-    /// Exact C4LoaderScreen selected for the currently active startup or
-    /// scenario load. A missing screen is paired with `loader_error` and is
-    /// always a logged typed boundary, never a generic pane.
-    pub(crate) loader_screen: Option<LoaderScreen>,
     /// Loader percentage mirrored to the platform taskbar
     /// (`C4Game.cpp:4094-4106`; `StdWindow.cpp:183-196`). The backend is
     /// injected because C++'s SDL and X11 windows implement it as no-ops.
     pub(crate) taskbar_progress: clonk_platform::taskbar_progress::LoaderTaskbarProgress<
         Box<dyn clonk_platform::taskbar_progress::TaskbarProgressSink>,
     >,
-    /// Why no `loader_screen` is installed, when one was attempted.
-    pub(crate) loader_error: Option<LoaderScreenFailure>,
-    pub(crate) loader_render_config: Option<LoaderRenderConfig>,
-    pub(crate) loader_render_error: Option<String>,
-    pub(crate) loader_gamma: Option<clonk_graphics::GammaRamp>,
     pub(crate) app_paths: Option<AppPaths>,
     /// Process-local compatibility arguments applied after configuration is
     /// loaded. They must never be written back to the selected config file.
@@ -1425,11 +1442,6 @@ pub(crate) struct GameApp {
     pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
     pub(crate) sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     pub(crate) loading_state: Option<ScenarioLoadingState>,
-    /// Successful activation leaves its 100% loader frame pending until one
-    /// real window presentation accepts it. The game is already Running; this
-    /// latch affects presentation only and never delays simulation or network
-    /// readiness.
-    pub(crate) terminal_loader_frame_pending: bool,
     pub(crate) boot_loading: Option<BootLoadingState>,
     /// When set, boot straight into the sandbox scenario once boot loading
     /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared

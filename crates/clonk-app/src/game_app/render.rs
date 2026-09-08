@@ -1999,7 +1999,7 @@ impl GameApp {
             AppMode::Loading => self
                 .render_loading(frame, defer_native_loader_text, defer_monitor_gamma)
                 .map(|()| true),
-            AppMode::Running if self.terminal_loader_frame_pending => self
+            AppMode::Running if self.loader.terminal_frame_pending => self
                 .render_loading(frame, defer_native_loader_text, defer_monitor_gamma)
                 .map(|()| true),
             AppMode::Running => self
@@ -2050,7 +2050,7 @@ impl GameApp {
         defer_monitor_gamma: bool,
     ) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
-        if let Some(failure) = self.loader_error.as_ref() {
+        if let Some(failure) = self.loader.error.as_ref() {
             // A native init failure stops the game exactly as C++ stops, so it
             // is reported as the ordinary fatal C++ reports and not as an
             // unimplemented path; only the port-only state keeps the boundary.
@@ -2070,12 +2070,13 @@ impl GameApp {
         // must not stop the loader here. The native text is skipped; the rest
         // of the frame still presents.
         let Some(config) = self
-            .loader_render_error
+            .loader
+            .render_error
             .is_none()
-            .then_some(self.loader_render_config)
+            .then_some(self.loader.render_config)
             .flatten()
         else {
-            if let Some(detail) = self.loader_render_error.as_deref() {
+            if let Some(detail) = self.loader.render_error.as_deref() {
                 tracing::debug!(detail, "loader native text skipped for an unusable scale");
             }
             return Ok(());
@@ -2130,7 +2131,8 @@ impl GameApp {
         }
 
         if ordered_native {
-            self.loader_screen
+            self.loader
+                .screen
                 .as_ref()
                 .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
                 .render_chrome(self.rendering.graphics.surface_mut(), config, Some(gamma));
@@ -2190,7 +2192,8 @@ impl GameApp {
 
         if retained_gpu {
             let render = self
-                .loader_screen
+                .loader
+                .screen
                 .as_ref()
                 .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
                 .render_with_config(self.rendering.graphics.surface_mut(), config, Some(gamma));
@@ -2229,7 +2232,8 @@ impl GameApp {
         }
 
         let loader = self
-            .loader_screen
+            .loader
+            .screen
             .as_ref()
             .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?;
         let mut surface = Surface::from_bytes(width, height, PixelFormat::Rgba8888, frame.to_vec())
@@ -2676,7 +2680,7 @@ impl GameApp {
                     let default_fonts = default_fonts.as_deref().context(
                         "scale-native loader font bundle disappeared during GPU capture",
                     )?;
-                    let loader = self.loader_screen.as_ref().ok_or_else(|| {
+                    let loader = self.loader.screen.as_ref().ok_or_else(|| {
                         self.loader_boundary(
                             "selected classic loader disappeared during retained presentation",
                         )

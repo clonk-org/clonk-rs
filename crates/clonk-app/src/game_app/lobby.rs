@@ -832,7 +832,7 @@ impl GameApp {
                 detail: error.to_string(),
             })
         })?;
-        let loader = self.loader_screen.as_ref().ok_or_else(|| {
+        let loader = self.loader.screen.as_ref().ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
                 detail: "staged scenario loader is not installed".to_string(),
             })
@@ -7763,19 +7763,19 @@ impl GameApp {
     pub(crate) fn render_classic_host_lobby(&mut self) -> Result<()> {
         self.close_stale_classic_lobby_team_combo();
         let gamma = self.startup_fragment_gamma();
-        let config = self.loader_render_config.ok_or_else(|| {
+        let config = self.loader.render_config.ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
                 detail: "loader render configuration is unavailable".to_string(),
             })
         })?;
-        if let Some(detail) = self.loader_render_error.as_deref() {
+        if let Some(detail) = self.loader.render_error.as_deref() {
             return Err(classic_game_lobby_error(
                 ClassicGameLobbyBoundary::Resources {
                     detail: detail.to_string(),
                 },
             ));
         }
-        let loader = self.loader_screen.as_ref().ok_or_else(|| {
+        let loader = self.loader.screen.as_ref().ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
                 detail: "staged scenario loader is unavailable".to_string(),
             })

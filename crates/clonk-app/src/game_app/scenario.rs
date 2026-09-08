@@ -1159,8 +1159,8 @@ impl GameApp {
             Some(initial_tooltip_font),
             loader_setup.initial_native_font_source.clone(),
         );
-        self.loader_screen = Some(loader_setup.screen);
-        self.loader_error = None;
+        self.loader.screen = Some(loader_setup.screen);
+        self.loader.error = None;
 
         let resolver_paths = cached_app_paths().ok();
         let languages = startup_language_sequence(resolver_paths.as_deref());

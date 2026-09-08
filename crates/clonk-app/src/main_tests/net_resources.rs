@@ -1690,7 +1690,7 @@ fn global_gui_bootstrap_issues_are_aggregated_in_cpp_init_order() {
 fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
     let mut app = new_classic_menu_app(320, 200);
     app.mode = AppMode::Loading;
-    app.loader_error = Some(LoaderScreenFailure::NativeInit(
+    app.loader.error = Some(LoaderScreenFailure::NativeInit(
         "lower-priority loader failure".to_string(),
     ));
     remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
@@ -1713,14 +1713,14 @@ fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(320, 200, &paths);
     app.mode = AppMode::Loading;
-    let loader_state_before = app.loader_screen.test_ref().state().clone();
+    let loader_state_before = app.loader.screen.test_ref().state().clone();
     let loader_gui_before = app
-        .loader_screen
+        .loader.screen
         .test_ref()
         .resources()
         .gui_progress()
         .clone();
-    let loader_fonts_before = app.loader_screen.test_ref().resources().fonts().clone();
+    let loader_fonts_before = app.loader.screen.test_ref().resources().fonts().clone();
     let resources = app.assets.loader_resources().test_value();
     let (sender, receiver) = mpsc::channel();
     let mut failures = HashMap::new();
@@ -1760,7 +1760,7 @@ fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
     main_assert_eq!(state.refreshed_global_gui_failures.as_ref() => Some(&failures));
     main_assert!(app.active_global_gui_failures.is_empty());
     main_assert_eq!(app.mode => AppMode::Loading);
-    let loader = app.loader_screen.test_ref();
+    let loader = app.loader.screen.test_ref();
     main_assert_eq!(loader.state() => &loader_state_before);
     main_assert_eq!(loader.resources().gui_progress() => &loader_gui_before);
     main_assert!(Arc::ptr_eq(loader.resources().fonts(), &loader_fonts_before));
@@ -1808,7 +1808,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
         ..
     } = staged;
     let scenario = scenario.test_value();
-    success.loader_screen = loader_screen;
+    success.loader.screen = loader_screen;
     let refreshed = make_resources(&success, [0x11, 0x22, 0x33, 0xff]);
     let expected_progress = refreshed.progress_bar().test_value().pixels().to_vec();
     let (sender, receiver) = mpsc::channel();
@@ -1829,11 +1829,11 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
     success.poll_loading().test_value();
     main_assert_eq!(success.mode => AppMode::Running);
     main_assert!(success.loading_state.is_none());
-    main_assert_eq!(success.loader_screen.as_ref().expect("loader retained").state().progress() => 100);
+    main_assert_eq!(success.loader.screen.as_ref().expect("loader retained").state().progress() => 100);
     main_assert!(success.active_global_gui_failures.is_empty());
     main_assert_eq!(
         success
-            .loader_screen
+            .loader.screen
             .as_ref()
             .expect("loader retained")
             .resources()
@@ -1851,7 +1851,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
         ..
     } = staged;
     let scenario = scenario.test_value();
-    failure.loader_screen = loader_screen;
+    failure.loader.screen = loader_screen;
     let refreshed = make_resources(&failure, [0x44, 0x55, 0x66, 0xff]);
     let (sender, receiver) = mpsc::channel();
     failure.loading_state = Some(ScenarioLoadingState::new(
@@ -1874,8 +1874,8 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
     main_assert!(failure.loading_state.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
-    main_assert!(failure.loader_screen.is_some());
-    main_assert!(failure.loader_error.is_none());
+    main_assert!(failure.loader.screen.is_some());
+    main_assert!(failure.loader.error.is_none());
     main_assert!(failure.active_global_gui_failures.is_empty());
     assert_startup_error_log(
         &failure,
@@ -2048,8 +2048,8 @@ fn installed_startup_loader_renders_before_boot_completion() {
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     main_assert!(frame.chunks_exact(4).any(|pixel| pixel != [0, 0, 0, 0]));
-    main_assert_eq!(app.loader_screen.as_ref().expect("loader").selection().context() => clonk_frontend::loader_screen::LoaderContext::Startup);
-    let state = app.loader_screen.test_ref().state();
+    main_assert_eq!(app.loader.screen.as_ref().expect("loader").selection().context() => clonk_frontend::loader_screen::LoaderContext::Startup);
+    let state = app.loader.screen.test_ref().state();
     main_assert_eq!(state.title() => "Loading...");
     main_assert_eq!(state.progress() => 0);
     main_assert_eq!(state.log() => &clonk_frontend::loader_screen::LoaderLog::Hidden);

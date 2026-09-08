@@ -508,7 +508,7 @@ fn console_open_real_scenario_reaches_running() {
         if matches!(app.mode, AppMode::Running) {
             break;
         }
-        runtime_assert_ne!(app.mode => AppMode::Menu, "startup menu must stay suppressed; status={:?}; loader_error={:?}", app.status_text, app.loader_error);
+        runtime_assert_ne!(app.mode => AppMode::Menu, "startup menu must stay suppressed; status={:?}; loader_error={:?}", app.status_text, app.loader.error);
         runtime_assert!(
             Instant::now() < deadline,
             "direct scenario did not finish loading; status={:?}",
@@ -2243,7 +2243,7 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     assert!(app.loading_state.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
-    assert!(app.loader_screen.is_some());
+    assert!(app.loader.screen.is_some());
     assert_startup_error_log(
         &app,
         "Failed to start Two players: Fullscreen mode requires at least one participating player.",

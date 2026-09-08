@@ -536,7 +536,7 @@ impl GameApp {
                 }
             }
             if batch.native_loader_text {
-                let loader = self.loader_screen.as_ref().ok_or_else(|| {
+                let loader = self.loader.screen.as_ref().ok_or_else(|| {
                     self.loader_boundary("selected classic loader disappeared before presentation")
                 })?;
                 composer

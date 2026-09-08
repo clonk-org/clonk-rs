@@ -4358,7 +4358,7 @@ impl GameApp {
                             // HandleJoinData installed Go/Pause; DoLobby is
                             // entered only for GS_Lobby (src/C4Game.cpp:400-417;
                             // src/C4Network2.cpp:1574-1592).
-                            if let Some(loader) = self.loader_screen.as_mut() {
+                            if let Some(loader) = self.loader.screen.as_mut() {
                                 // RetrieveScenario publishes 6 before blocking
                                 // on synchronized resources (src/C4Game.cpp:2558-2568).
                                 loader.update(LoaderUpdate::SetProgress(6));
@@ -4499,7 +4499,7 @@ impl GameApp {
                                     // synchronized scenario resource
                                     // (src/C4Game.cpp:2558-2568).
                                     if !first_part_preloaded {
-                                        if let Some(loader) = self.loader_screen.as_mut() {
+                                        if let Some(loader) = self.loader.screen.as_mut() {
                                             loader.update(LoaderUpdate::SetProgress(6));
                                         }
                                     }
@@ -7175,8 +7175,8 @@ impl GameApp {
             self.install_active_classic_fonts(fonts, Some(initial_tooltip), initial_native_source);
         }
         if let Some(loader) = staged.loader_screen.take() {
-            self.loader_screen = Some(loader);
-            self.loader_error = None;
+            self.loader.screen = Some(loader);
+            self.loader.error = None;
         }
         self.network_lobby_min_players = Some(staged.lobby.min_players);
         self.staged_network_host_scenario = Some(staged);
@@ -9980,14 +9980,14 @@ impl GameApp {
                 detail: "application paths are unavailable".to_string(),
             })
         })?;
-        if let Some(detail) = self.loader_render_error.as_deref() {
+        if let Some(detail) = self.loader.render_error.as_deref() {
             return Err(classic_game_lobby_error(
                 ClassicGameLobbyBoundary::Resources {
                     detail: format!("loader render configuration is invalid: {detail}"),
                 },
             ));
         }
-        self.loader_render_config.ok_or_else(|| {
+        self.loader.render_config.ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
                 detail: "loader render configuration is unavailable".to_string(),
             })

@@ -1484,16 +1484,17 @@ impl GameApp {
         self.rendering
             .graphics
             .set_advanced_renderer_config(advanced_renderer_config);
-        self.loader_gamma = load_classic_loader_gamma_from_native(&native_config);
+        self.loader.gamma = load_classic_loader_gamma_from_native(&native_config);
         let main_menu_gamma = self.rendering.graphics.fragment_gamma_enabled().then(|| {
             Arc::new(
-                self.loader_gamma
+                self.loader
+                    .gamma
                     .clone()
                     .unwrap_or_else(clonk_graphics::GammaRamp::standard),
             )
         });
         self.main_menu_state.menu.set_gamma_ramp(main_menu_gamma);
-        if let Some(config) = self.loader_render_config {
+        if let Some(config) = self.loader.render_config {
             self.configure_native_startup_fonts(config.application_scale(), point_filtering);
         }
         self.menu_backdrop_cache = StartupBackdropCache::default();
