@@ -9151,7 +9151,10 @@ impl GameApp {
                 .as_ref()
                 .map_or("Scenario", |scenario| scenario.title.as_str())
                 .to_owned();
-            if self.startup_dialog_in_use() {
+            if self
+                .console_session
+                .startup_dialog_in_use(self.failed_open_game_returns_to_startup())
+            {
                 // A console engine reaching `C4AS_Startup` "just stay[s] in
                 // this state until aborted or new commands arrive on stdin"
                 // (src/C4Application.cpp:428-429), so the operator's next

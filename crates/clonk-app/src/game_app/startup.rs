@@ -5395,7 +5395,11 @@ impl GameApp {
                     self.status_text = format!("Unable to start command-line scenario: {error}");
                     failed = true;
                 }
-                if failed && !self.startup_dialog_in_use() {
+                if failed
+                    && !self
+                        .console_session
+                        .startup_dialog_in_use(self.failed_open_game_returns_to_startup())
+                {
                     // ParseCommandLine disables the startup dialog for an
                     // explicit scenario, direct join or record stream
                     // (C4Game.cpp:3299), so their failed start unwinds
