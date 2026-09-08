@@ -754,7 +754,8 @@ fn stage_tutorial_checkpoint(
         );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    app.discard_terminal_loader_frame_for_headless_render();
+    app.loader
+        .discard_terminal_loader_frame_for_headless_render();
     app.sound
         .context
         .as_ref()

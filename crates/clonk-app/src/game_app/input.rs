@@ -4262,7 +4262,8 @@ impl GameApp {
                         })
                     });
                 if let Some((index, path)) = location {
-                    self.reload_startup_player_portrait_location(index, &path);
+                    self.startup
+                        .reload_startup_player_portrait_location(index, &path);
                 }
                 return Ok(());
             }
@@ -11527,7 +11528,8 @@ impl GameApp {
                             self.startup.player_last_click = None;
                         }
                         self.process_player_dialog_actions(actions)?;
-                        self.restore_startup_crew_focus(restore_rename_focus);
+                        self.startup
+                            .restore_startup_crew_focus(restore_rename_focus);
                         Ok(())
                     }
                     StartupView::ScenarioBrowser => {
@@ -12533,7 +12535,8 @@ impl GameApp {
                     })
                     .unwrap_or_default();
                 self.process_player_dialog_actions(actions)?;
-                self.restore_startup_crew_focus(restore_rename_focus);
+                self.startup
+                    .restore_startup_crew_focus(restore_rename_focus);
                 if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                     self.pointer_left_unchecked();
                 }

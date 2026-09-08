@@ -1421,7 +1421,7 @@ impl GameApp {
                         .expect("ordered presentation plan is active")
                         .monitor_gamma = monitor_gamma.clone();
                 }
-                self.advance_startup_player_portrait_thumbnail();
+                self.startup.advance_startup_player_portrait_thumbnail();
                 // C4GUI::ScrollBar repeats held arrows from DrawElement, so
                 // advance once per presentation rather than per update.
                 let _ = self

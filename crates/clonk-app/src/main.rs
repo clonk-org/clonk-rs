@@ -1905,7 +1905,7 @@ fn run() -> Result<()> {
                             Ok(RetainedGpuProfiledOutcome::Presented(profile)) => {
                                 surface_rebuild.note_presented();
                                 let presented_terminal_loader =
-                                    app.finish_terminal_loader_frame_presentation();
+                                    app.loader.finish_terminal_loader_frame_presentation();
                                 if app.mode == AppMode::Running
                                     && !presented_terminal_loader
                                     && !app.console_session.enabled
@@ -2169,7 +2169,7 @@ fn run() -> Result<()> {
                         Ok(RetainedGpuPresentOutcome::Presented) => {
                             surface_rebuild.note_presented();
                             let presented_terminal_loader =
-                                app.finish_terminal_loader_frame_presentation();
+                                app.loader.finish_terminal_loader_frame_presentation();
                             while !app.pending_screenshots.is_empty() {
                                 let (width, height) = presenter.physical_size();
                                 let result = app.save_next_screenshot(

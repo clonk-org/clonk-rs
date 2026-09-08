@@ -2798,7 +2798,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     main_assert!(!rename.edit.label_visible());
     main_assert!(rename.edit.is_focused());
     main_assert_eq!(rename.edit.selected_text() => Some("Alpha"));
-    main_assert!(app.startup_crew_rename_rect().is_some());
+    main_assert!(app.startup.startup_crew_rename_rect().is_some());
     main_assert!(app.dialogs.game_option_input.is_none());
     for character in "Draft".chars() {
         app.test_text_input(character);
@@ -2806,7 +2806,7 @@ fn crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
     app.test_key(VirtualKeyCode::F2, ElementState::Pressed);
     main_assert_eq!(app.startup.crew_rename.as_ref().expect("restarted inline rename").edit.selected_text() => Some("Alpha"));
 
-    let edit_rect = app.startup_crew_rename_rect().test_value();
+    let edit_rect = app.startup.startup_crew_rename_rect().test_value();
     let edit_point = GuiPoint::new(
         (edit_rect.x + edit_rect.w / 2) as f32,
         (edit_rect.y + edit_rect.h / 2) as f32,
