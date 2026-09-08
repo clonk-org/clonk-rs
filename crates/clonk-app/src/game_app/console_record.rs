@@ -1816,7 +1816,7 @@ impl GameApp {
         self.record_control_resource_file(packet);
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
         let stream_delta = self.records.record_packet(frame, packet);
-        self.append_league_record_stream_bytes(stream_delta);
+        queue_league_record_bytes(self.network.as_ref(), stream_delta);
     }
 
     pub(crate) fn record_control_batch(&mut self, packets: &[clonk_engine::ControlPacket]) {
@@ -1825,16 +1825,7 @@ impl GameApp {
         }
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
         let stream_delta = self.records.record_batch(frame, packets);
-        self.append_league_record_stream_bytes(stream_delta);
-    }
-
-    fn append_league_record_stream_bytes(&self, bytes: Option<Vec<u8>>) {
-        let (Some(bytes), Some(network)) = (bytes, self.network.as_ref()) else {
-            return;
-        };
-        if let Err(error) = network.append_league_record_bytes(&bytes) {
-            tracing::error!(%error, "failed to queue league record bytes");
-        }
+        queue_league_record_bytes(self.network.as_ref(), stream_delta);
     }
 
     /// `C4ControlJoinPlayer::PreRec` copies resource-backed player groups into
@@ -2002,134 +1993,22 @@ impl GameApp {
     pub(crate) fn finish_recording(&mut self) -> Option<LeagueEndRecord> {
         self.records.runtime_requested = false;
         self.engine.set_recording_active(false);
-        self.records.session.as_ref()?;
-        let (league_streaming, stream_delta) = {
-            let session = self
-                .records
-                .session
-                .as_mut()
-                .expect("recording checked above");
-            (session.league_streaming, session.take_stream_delta())
-        };
-        self.append_league_record_stream_bytes(stream_delta);
-        if league_streaming {
-            let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
-            if let Some(network) = self.network.as_ref() {
-                if let Err(error) = network.finish_league_record_stream(now) {
-                    tracing::error!(%error, "failed to finish league record stream");
-                }
-            }
-        }
-        let (description_title, description_definition_modules) = self
-            .records
-            .session
-            .as_ref()
-            .map(|session| {
-                (
-                    session.description_title.clone(),
-                    session.description_definition_modules.clone(),
-                )
-            })
-            .expect("recording checked above");
+        let (description_title, description_definition_modules) =
+            self.records.finish_stream(self.network.as_ref())?;
         let (description_name, description) = self.classic_save_description(
             &description_title,
             &description_definition_modules,
             ClassicSaveDescriptionKind::Record,
         );
         let final_player_info_snapshot = self.recording_player_info_snapshot();
-        let session = self
-            .records
-            .session
-            .take()
-            .expect("recording checked above");
-        let RecordingSession {
-            writer,
-            mut ctrl_rec,
-            output_path,
-            disk_writer_pos,
-            ..
-        } = session;
-        if let Err(error) = write_folder_save_entry(&output_path, &description_name, &description) {
-            // C4Record::Stop deliberately ignores SaveDesc's return value.
-            tracing::warn!(%error, "failed to install final record description");
-        }
-        // C4PlayerInfoList::Save deletes the prior entry before it tests for
-        // an empty list or invokes the compiler. A compiler failure must not
-        // leave stale copied final-player data behind.
-        if let Err(error) = delete_folder_save_entry(&output_path, b"RecPlayerInfos.txt") {
-            tracing::warn!(%error, "failed to remove stale final player infos");
-        }
-        if !final_player_info_snapshot.clients.is_empty() {
-            match clonk_network::encode_player_info_list_ini(&final_player_info_snapshot) {
-                Ok(final_player_infos) => {
-                    if let Err(error) = write_folder_save_entry(
-                        &output_path,
-                        b"RecPlayerInfos.txt",
-                        &final_player_infos,
-                    ) {
-                        tracing::warn!(%error, "failed to install final player infos in record group");
-                    }
-                }
-                Err(error) => {
-                    // Native ignores this failure and still closes/packs the
-                    // recording directory.
-                    tracing::warn!(%error, "failed to serialize final record player infos");
-                }
-            }
-        }
-        let stream = writer.finish(u32::try_from(self.engine.frame()).unwrap_or(u32::MAX));
-        if let Err(error) = ctrl_rec
-            .write_all(&stream[disk_writer_pos.min(stream.len())..])
-            .and_then(|()| ctrl_rec.flush())
-        {
-            tracing::warn!(%error, "failed to append final CtrlRec marker");
-        }
-        drop(ctrl_rec);
-        let group = match Group::open(&output_path) {
-            Ok(group) => group,
-            Err(error) => {
-                tracing::warn!(%error, "failed to reopen recording directory");
-                return None;
-            }
-        };
-        let mut group = match MutableGroup::from_group(&group) {
-            Ok(group) => group,
-            Err(error) => {
-                tracing::warn!(%error, "failed to read recording directory");
-                return None;
-            }
-        };
-        if !self.process_group_maker.as_bytes().is_empty() {
-            group.set_maker_bytes_recursively(self.process_group_maker.as_bytes());
-        }
-        let packed = match group.pack() {
-            Ok(packed) => packed,
-            Err(error) => {
-                tracing::warn!(%error, "failed to pack scenario recording");
-                return None;
-            }
-        };
-        if let Err(error) = replace_file_from_same_directory(&output_path, &packed) {
-            tracing::warn!(%error, path = %output_path.display(), "failed to write scenario recording");
-            return None;
-        }
-        tracing::info!(path = %output_path.display(), "saved scenario recording");
-        if !self.network_is_league {
-            // C4Game::Evaluate passes a null SHA destination outside league
-            // play, so C4Record::Stop never rereads or hashes the packed file.
-            return None;
-        }
-        let on_disk = match fs::read(&output_path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::warn!(%error, path = %output_path.display(), "failed to read closed scenario recording");
-                return None;
-            }
-        };
-        let name = league_record_name(&output_path)?;
-        Some(LeagueEndRecord {
-            name,
-            sha1: Sha1::digest(&on_disk).into(),
-        })
+        let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+        self.records.finish_session(
+            frame,
+            self.process_group_maker.as_bytes(),
+            self.network_is_league,
+            &description_name,
+            &description,
+            &final_player_info_snapshot,
+        )
     }
 }
