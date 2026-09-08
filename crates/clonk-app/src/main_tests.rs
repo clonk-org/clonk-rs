@@ -807,6 +807,16 @@ impl PreparedRealInstalledScenario {
     }
 
     fn instantiate(&self, player_name: &str, preexisting_clonk: bool) -> RealTutorialApp {
+        self.instantiate_with_window(player_name, preexisting_clonk, 320, 200)
+    }
+
+    fn instantiate_with_window(
+        &self,
+        player_name: &str,
+        preexisting_clonk: bool,
+        window_width: u32,
+        window_height: u32,
+    ) -> RealTutorialApp {
         let scenario_key = &self.scenario_key;
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -837,8 +847,8 @@ impl PreparedRealInstalledScenario {
             ..AudioOptions::default()
         };
         let mut app = GameApp::new_with_frontend_scenarios(
-            320,
-            200,
+            window_width,
+            window_height,
             audio_options,
             Some(&paths),
             RuntimeConfig {
