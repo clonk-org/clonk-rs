@@ -1655,7 +1655,11 @@ mod tests {
         let offset = pointer - window.min;
         assert_eq!(&window.bytes[offset..offset + 32], &marker);
         let section = stack_contents_section(Some(&StackMemoryDump::Window(window)));
-        assert!(section.lines().count() <= 34, "{section}");
+        let rows = section
+            .lines()
+            .filter(|line| line.starts_with("0x"))
+            .count();
+        assert!(rows <= 33, "{rows} rows: {section}");
         assert!(section.contains("c3 c3 c3 c3"), "{section}");
     }
 }
