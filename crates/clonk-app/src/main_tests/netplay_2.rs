@@ -5868,7 +5868,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
 
     let mut observer_menu = configured("Left");
     observer_menu.clear_physical_viewport_states();
-    let observer = observer_menu.ownerless_physical_viewport_state();
+    let observer = observer_menu.viewports.ownerless_physical_viewport_state();
     observer_menu.viewports.physical_viewports.push(observer);
     observer_menu.viewports.physical_viewports_authoritative = true;
     observer_menu.ingame_menus.players.replace(

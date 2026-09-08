@@ -438,11 +438,6 @@ impl GameApp {
         viewport
     }
 
-    pub(crate) fn ownerless_physical_viewport_state(&mut self) -> PhysicalViewportState {
-        let identity = self.viewports.allocate_physical_viewport_identity();
-        PhysicalViewportState::ownerless(identity)
-    }
-
     /// Reconstruct the ordinary, non-retargeted list for tests and legacy
     /// setup code that directly changes the local-control registry. This is
     /// never used after physical identity becomes observable.
@@ -492,7 +487,7 @@ impl GameApp {
         }
         self.sort_physical_viewports_by_player_control();
         if self.viewports.physical_viewports.is_empty() {
-            let viewport = self.ownerless_physical_viewport_state();
+            let viewport = self.viewports.ownerless_physical_viewport_state();
             self.viewports.physical_viewports.push(viewport);
         }
         self.update_film_viewport_availability();
@@ -509,7 +504,7 @@ impl GameApp {
             return false;
         }
         let viewport = if player == OWNER_NONE {
-            self.ownerless_physical_viewport_state()
+            self.viewports.ownerless_physical_viewport_state()
         } else {
             self.owned_physical_viewport_state(player, expand_player_slots)
         };
