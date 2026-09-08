@@ -1395,12 +1395,12 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     );
     app.test_cursor(edit_point);
     app.test_left_button(ElementState::Pressed);
-    main_assert_eq!(app.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Left));
+    main_assert_eq!(app.dialogs.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Left));
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
     main_assert!(app.dialogs.game_option_input.is_none());
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.game_option_input_pointer_capture => None);
+    main_assert_eq!(app.dialogs.game_option_input_pointer_capture => None);
     main_assert_eq!(app.menu_state.menu.selected_index() => selected);
 
     let actions = app.scenario_game_options.handle_hotkey('P');
@@ -1408,10 +1408,10 @@ fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
     app.test_cursor(edit_point);
     app.handle_other_mouse_button(ElementState::Pressed)
         .test_value();
-    main_assert_eq!(app.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Other));
+    main_assert_eq!(app.dialogs.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Other));
     app.handle_other_mouse_button(ElementState::Released)
         .test_value();
-    main_assert_eq!(app.game_option_input_pointer_capture => None);
+    main_assert_eq!(app.dialogs.game_option_input_pointer_capture => None);
     reset_cached_app_paths();
 }
 
@@ -1427,7 +1427,7 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
     ));
     app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
     app.test_key(VirtualKeyCode::Space, ElementState::Pressed);
-    main_assert!(!app.game_option_consumed_keys.is_empty());
+    main_assert!(!app.dialogs.game_option_consumed_keys.is_empty());
     let record = app
         .scenario_game_options
         .layout()
@@ -1438,10 +1438,10 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
         f64::from(record.y + record.h / 2),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.game_option_pointer_capture);
+    main_assert!(app.dialogs.game_option_pointer_capture);
     app.resize(1024, 768).test_value();
-    main_assert!(app.game_option_consumed_keys.is_empty());
-    main_assert!(!app.game_option_pointer_capture);
+    main_assert!(app.dialogs.game_option_consumed_keys.is_empty());
+    main_assert!(!app.dialogs.game_option_pointer_capture);
     app.test_key(VirtualKeyCode::Space, ElementState::Released);
     app.test_left_button(ElementState::Released);
     main_assert!(!app.scenario_game_options.values().record);
@@ -1463,16 +1463,16 @@ fn resize_cancels_selector_option_and_input_dialog_interactions() {
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert_eq!(app.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Left));
-    main_assert!(!app.game_option_input_consumed_keys.is_empty());
-    main_assert!(app.game_option_input_pointer_position.is_some());
+    main_assert_eq!(app.dialogs.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Left));
+    main_assert!(!app.dialogs.game_option_input_consumed_keys.is_empty());
+    main_assert!(app.dialogs.game_option_input_pointer_position.is_some());
     app.resize(1280, 720).test_value();
     main_assert!(app.dialogs.game_option_input.is_some());
-    main_assert_eq!(app.game_option_input_pointer_capture => None);
-    main_assert!(app.game_option_input_consumed_keys.is_empty());
-    main_assert!(app.game_option_input_pointer_position.is_none());
-    main_assert!(app.game_option_input_last_click.is_none());
-    main_assert!(!app.game_option_pointer_capture);
+    main_assert_eq!(app.dialogs.game_option_input_pointer_capture => None);
+    main_assert!(app.dialogs.game_option_input_consumed_keys.is_empty());
+    main_assert!(app.dialogs.game_option_input_pointer_position.is_none());
+    main_assert!(app.dialogs.game_option_input_last_click.is_none());
+    main_assert!(!app.dialogs.game_option_pointer_capture);
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.game_option_input.is_some());

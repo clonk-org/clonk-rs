@@ -1952,7 +1952,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
 
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app.staged_network_host_scenario.is_none());
     main_assert!(app.startup_network.connection.is_none());
     main_assert!(app.network.is_none());
@@ -1964,7 +1964,7 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
 }
 
 enum N1MissionAccessGrant {
@@ -2082,12 +2082,12 @@ fn network_too_few_warning_persists_hide_on_cancel_and_then_continues() {
     main_assert_eq!(Config::load(paths.config_file()).unwrap().get_in(Some("Startup"), "HideMsgStartDedicated") => Some("1"));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.handle_menu_input(|_| start()).test_value();
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.definition_selector.is_some());
+    main_assert!(app.definition_selection.dialog.is_some());
     main_assert_eq!(app.pending_definition_selection.as_ref().map(|pending| pending.selector_mode) => Some(ScenarioSelectorMode::NetworkHost));
     main_assert!(app.startup_network.connection.is_none());
 }
@@ -2247,7 +2247,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     app.menu_state.definition_checkbox_checked = false;
     app.open_definition_selector(scenario.clone()).test_value();
 
-    let controller = app.definition_selector.test_ref();
+    let controller = app.definition_selection.dialog.test_ref();
     main_assert_eq!(app.pending_definition_selection.as_ref().and_then(|pending| pending.custom_definition_root.as_deref()) => Some(definition_root.as_path()));
     main_assert_eq!(controller.root_path() => format!("{}{sep}", definition_root.display(), sep = std::path::MAIN_SEPARATOR));
     main_assert!(controller
@@ -2263,7 +2263,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     let mut frame = vec![0_u8; 1280 * 720 * 4];
     app.test_render(&mut frame);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
-    main_assert!(app.definition_selector.is_some());
+    main_assert!(app.definition_selection.dialog.is_some());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error");
     main_assert_eq!(app.dialogs.messages[0].state.message() => "Please select a file first!");
@@ -2273,7 +2273,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
 
     app.test_key(VirtualKeyCode::F5, ElementState::Pressed);
-    let controller = app.definition_selector.test_ref();
+    let controller = app.definition_selection.dialog.test_ref();
     main_assert_eq!(controller.selected_index() => None);
     main_assert!(
         controller.rows().iter().all(|row| !row.is_checked()),
@@ -2294,7 +2294,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         n1_gamepad_direction(ControlButton::Down, ElementState::Pressed),
     ]);
     main_assert_eq!(
-        app.definition_selector
+        app.definition_selection.dialog
             .as_ref()
             .and_then(|controller| controller.selected_index()) =>
         Some(1),
@@ -2302,15 +2302,15 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
     );
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app.pending_definition_selection.is_none());
     main_assert!(
-        app.definition_selector_consumed_keys
+        app.definition_selection.consumed_keys
             .contains(&VirtualKeyCode::Escape),
         "close-on-key-down retains the matching physical release"
     );
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(app.definition_selector_consumed_keys.is_empty());
+    main_assert!(app.definition_selection.consumed_keys.is_empty());
     main_assert!(
         !app.menu_state.definition_checkbox_checked,
         "cancel must retain the user's current checkbox toggle"
@@ -2322,20 +2322,20 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         n1_gamepad_action(GamepadActionType::Cancel, ElementState::Pressed),
         n1_gamepad_button(GuiButtonClass::High, ElementState::Released),
     ]);
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.open_definition_selector(scenario.clone()).test_value();
     app.test_cursor(PhysicalPosition::new(10.0, 10.0));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.definition_selector_pointer_capture);
+    main_assert!(app.definition_selection.pointer_capture);
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
     .test_value();
-    main_assert!(app.definition_selector_pointer_capture);
+    main_assert!(app.definition_selection.pointer_capture);
     app.test_left_button(ElementState::Released);
-    main_assert!(!app.definition_selector_pointer_capture);
+    main_assert!(!app.definition_selection.pointer_capture);
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
 
     app.open_definition_selector(scenario.clone()).test_value();
@@ -2344,16 +2344,16 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
     .test_value();
-    main_assert!(app.definition_selector_pointer_capture);
+    main_assert!(app.definition_selection.pointer_capture);
     app.test_touch(TouchPhase::Ended, GuiPoint::new(10.0, 10.0));
-    main_assert!(!app.definition_selector_pointer_capture);
+    main_assert!(!app.definition_selection.pointer_capture);
 
     // Low activates OK on release; the remaining batch must not reach the game.
     let mut sandbox = scenario;
     sandbox.path = None;
     app.open_definition_selector(sandbox).test_value();
     let optional_index = app
-        .definition_selector
+        .definition_selection.dialog
         .test_ref()
         .rows()
         .iter()
@@ -2371,7 +2371,7 @@ fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal(
         n1_gamepad_action(GamepadActionType::MenuToggle, ElementState::Pressed),
     ]));
     main_assert!(matches!(app.mode, AppMode::Running));
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app.ingame_menus.players.is_none());
 
     // Pin the async handoff, rooted precedence, restart, and exact save/load.

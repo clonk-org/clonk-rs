@@ -307,7 +307,7 @@ impl GameApp {
                     }
                 }
                 LeagueSignupAction::ValidationFailed(failure) => {
-                    self.league_signup_pointer_capture = false;
+                    self.dialogs.league_signup_pointer_capture = false;
                     if let Some(dialog) = self.dialogs.league_signup.as_mut() {
                         dialog.controller.cancel_interaction();
                     }
@@ -324,7 +324,7 @@ impl GameApp {
                     let Some(pending) = self.dialogs.league_signup.take() else {
                         break;
                     };
-                    self.league_signup_pointer_capture = false;
+                    self.dialogs.league_signup_pointer_capture = false;
                     let mut auth = pending.auth;
                     let mode = pending.controller.mode();
                     match mode {
@@ -358,8 +358,8 @@ impl GameApp {
                     let Some(pending) = self.dialogs.league_signup.take() else {
                         break;
                     };
-                    self.league_signup_pointer_capture = false;
-                    self.cancelled_league_signup_continuation = Some(pending.continuation);
+                    self.dialogs.league_signup_pointer_capture = false;
+                    self.dialogs.cancelled_league_signup_continuation = Some(pending.continuation);
                     self.push_message_dialog(
                         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                             message,
@@ -1164,7 +1164,7 @@ impl GameApp {
     /// is conditional on the chart still being the active top dialog.
     pub(crate) fn runtime_modal_above_network_chart(&self) -> bool {
         self.dialogs.league_signup.is_some()
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.startup.options_advanced_dialog.is_some()
             || self.startup.player_properties_dialog.is_some()
             || self

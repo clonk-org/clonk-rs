@@ -4206,8 +4206,8 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
     let dialog = app.startup_network.dialog.as_ref().test_value();
     let selection = dialog.join_address_selection().test_value();
     main_assert_eq!(&dialog.join_address()[selection.0..selection.1] => "beta");
-    main_assert!(app.netdlg_last_click.is_none());
-    main_assert!(app.netdlg_join_edit_last_click.is_none());
+    main_assert!(app.startup_network.last_click.is_none());
+    main_assert!(app.startup_network.join_edit_last_click.is_none());
     app.test_left_button(ElementState::Released);
 
     app.test_right_button(ElementState::Pressed);
@@ -4219,11 +4219,11 @@ fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
 
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Pressed);
     main_assert!(app.context_menus.open.is_some());
-    main_assert!(!app.netdlg_edit_consumed_keys.contains(&VirtualKeyCode::ContextMenu));
+    main_assert!(!app.startup_network.edit_consumed_keys.contains(&VirtualKeyCode::ContextMenu));
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     app.close_context_menu_silently();
 
-    app.netdlg_join_edit_last_click = Some(Instant::now() - Duration::from_millis(450));
+    app.startup_network.join_edit_last_click = Some(Instant::now() - Duration::from_millis(450));
     app.test_left_button(ElementState::Pressed);
     main_assert_eq!(app.startup_network.dialog.test_ref().join_address_selection() => None);
     app.test_left_button(ElementState::Released);
@@ -4437,7 +4437,7 @@ fn network_row_double_click_joins_another_cpp_build() {
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.netdlg_last_click.is_none());
+    main_assert!(app.startup_network.last_click.is_none());
     main_assert_eq!(
         app.pending_network_join
             .as_ref()

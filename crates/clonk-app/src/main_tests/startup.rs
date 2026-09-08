@@ -4037,13 +4037,13 @@ fn player_selection_wheel_and_held_arrow_route_through_app() {
     app.test_cursor(first_row_name);
     app.test_left_button(ElementState::Released);
     main_assert!(
-        app.plrsel_last_click.is_none(),
+        app.startup.player_last_click.is_none(),
         "scrollbar release must not seed row double-click bookkeeping"
     );
 
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.plrsel_last_click.map(|(index, _)| index) => Some(0), "the first genuine row click must remain a single click");
+    main_assert_eq!(app.startup.player_last_click.map(|(index, _)| index) => Some(0), "the first genuine row click must remain a single click");
     main_assert!(app.startup.player_properties_dialog.is_none());
 }
 

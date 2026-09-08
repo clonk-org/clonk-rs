@@ -181,7 +181,7 @@ impl GameApp {
                 .unwrap_or_default();
             return self.finish_game_option_input_dialog_actions(actions);
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             return Ok(());
         }
         if let Some(menu) = self.context_menus.open.as_mut() {
@@ -522,7 +522,7 @@ impl GameApp {
                 .is_some_and(|pending| pending.controller.handle_wheel(native_delta));
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             let amount = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (-y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -531,14 +531,15 @@ impl GameApp {
             };
             let layout = self.definition_selector_layout();
             let point = self
-                .definition_selector
+                .definition_selection
+                .dialog
                 .as_ref()
                 .and_then(|controller| controller.pointer_position());
             let actions = layout
                 .as_ref()
                 .zip(point)
                 .and_then(|(layout, point)| {
-                    self.definition_selector.as_mut().map(|controller| {
+                    self.definition_selection.dialog.as_mut().map(|controller| {
                         // Controller takes the native wheel sign; `amount`
                         // is already the desired scroll-window displacement.
                         controller.handle_wheel(point, -amount, layout)
@@ -734,7 +735,7 @@ impl GameApp {
             }
             self.process_player_dialog_actions(actions)?;
             if scrolled {
-                self.plrsel_last_click = None;
+                self.startup.player_last_click = None;
             }
             return Ok(());
         }
@@ -905,7 +906,7 @@ impl GameApp {
         if !self.chat.external_dialog_visible && !embedded_network_chat {
             return Ok(false);
         }
-        if state == ElementState::Released && self.netdlg_edit_consumed_keys.remove(&key) {
+        if state == ElementState::Released && self.startup_network.edit_consumed_keys.remove(&key) {
             return Ok(true);
         }
         if state != ElementState::Pressed {
@@ -927,7 +928,7 @@ impl GameApp {
             && !modifiers.is_empty()
             && (!edit_focused || modifiers.contains(ModifiersState::ALT))
         {
-            self.netdlg_edit_consumed_keys.insert(key);
+            self.startup_network.edit_consumed_keys.insert(key);
             return Ok(true);
         }
         if !edit_focused {
@@ -976,7 +977,7 @@ impl GameApp {
             // The startup bootstrap guard reports missing fonts before this
             // route. Still consume the Edit-owned key rather than leaking it
             // to StartupNetBack if that invariant is broken.
-            self.netdlg_edit_consumed_keys.insert(key);
+            self.startup_network.edit_consumed_keys.insert(key);
             return Ok(true);
         };
         let clipboard = shortcut
@@ -1010,7 +1011,7 @@ impl GameApp {
         if !outcome.captured {
             return Ok(false);
         }
-        self.netdlg_edit_consumed_keys.insert(key);
+        self.startup_network.edit_consumed_keys.insert(key);
         self.process_network_dialog_actions(outcome.actions)?;
         Ok(true)
     }
@@ -1151,7 +1152,7 @@ impl GameApp {
             ElementState::Pressed => Vec::new(),
         };
         if state == ElementState::Pressed {
-            self.league_signup_consumed_keys.insert(key);
+            self.dialogs.league_signup_consumed_keys.insert(key);
         }
         self.process_league_signup_actions(actions)?;
         Ok(true)
@@ -1894,7 +1895,8 @@ impl GameApp {
                 .client_list
                 .as_ref()
                 .is_some_and(|dialog| dialog.has_pointer_capture())
-            || self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left)
+            || self.dialogs.game_option_input_pointer_capture
+                == Some(ContextMenuPointerButton::Left)
     }
 
     fn top_running_shared_pointer_target(
@@ -2099,7 +2101,7 @@ impl GameApp {
     fn custom_scoreboard_key_has_higher_priority_route(&self, key: VirtualKeyCode) -> bool {
         let modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
-        if self.game_over_dialog_is_active() || self.definition_selector.is_some() {
+        if self.game_over_dialog_is_active() || self.definition_selection.dialog.is_some() {
             return true;
         }
         if self.context_menus.open.is_some() {
@@ -2349,7 +2351,7 @@ impl GameApp {
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
             && self.dialogs.messages.is_empty()
             && self.dialogs.game_option_input.is_none()
-            && self.definition_selector.is_none()
+            && self.definition_selection.dialog.is_none()
             && self
                 .network_start_wait
                 .as_ref()
@@ -3962,7 +3964,7 @@ impl GameApp {
         }
         if state == ElementState::Released
             && self.dialogs.game_option_input.is_none()
-            && self.game_option_input_consumed_keys.remove(&key)
+            && self.dialogs.game_option_input_consumed_keys.remove(&key)
         {
             // A context/button action may close the top input dialog on
             // key-down. Its matching release still belongs to that dialog,
@@ -3970,9 +3972,9 @@ impl GameApp {
             return Ok(());
         }
         let definition_release_latched =
-            state == ElementState::Released && self.definition_selector_consumed_keys.remove(&key);
-        let input_dialog_release_latched =
-            state == ElementState::Released && self.game_option_input_consumed_keys.remove(&key);
+            state == ElementState::Released && self.definition_selection.consumed_keys.remove(&key);
+        let input_dialog_release_latched = state == ElementState::Released
+            && self.dialogs.game_option_input_consumed_keys.remove(&key);
         if self.running_chat_keyboard_active() {
             let context_menu_was_open = self.context_menus.open.is_some();
             let modifiers = self.input_routing.live.modifiers
@@ -4011,8 +4013,8 @@ impl GameApp {
                 return Ok(());
             }
         }
-        let league_signup_release_latched =
-            state == ElementState::Released && self.league_signup_consumed_keys.remove(&key);
+        let league_signup_release_latched = state == ElementState::Released
+            && self.dialogs.league_signup_consumed_keys.remove(&key);
         if league_signup_release_latched && !self.dialogs.messages.is_empty() {
             return Ok(());
         }
@@ -5610,7 +5612,7 @@ impl GameApp {
                 // legacy gamepad navigation callbacks, but the raw cluster
                 // must not leak to the lobby or running game behind it.
                 ClusterOwner::Suppressed
-            } else if self.definition_selector.is_some() {
+            } else if self.definition_selection.dialog.is_some() {
                 ClusterOwner::Definition
             } else if self.dialogs.game_option_input.is_some() {
                 ClusterOwner::Input
@@ -6499,7 +6501,7 @@ impl GameApp {
                 .is_some_and(|wait| wait.visible)
             || self.startup.options_advanced_dialog.is_some()
             || self.startup.player_properties_dialog.is_some()
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.game_over_dialog_is_active() && self.running_chat_controller().is_none()
             || !matches!(self.mode, AppMode::Running)
         {
@@ -6614,7 +6616,7 @@ impl GameApp {
         if self.startup.player_properties_dialog.is_some() {
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             return Ok(());
         }
         if self.game_over_dialog_is_active() && self.running_chat_controller().is_none() {
@@ -6735,7 +6737,7 @@ impl GameApp {
             self.process_startup_player_properties_actions(actions);
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             return self.handle_definition_selector_gamepad_event(GamepadEvent::Direction {
                 slot,
                 button,
@@ -7050,7 +7052,7 @@ impl GameApp {
             self.process_startup_player_properties_actions(actions);
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             return Ok(());
         }
         if self.game_over_dialog_is_active() {
@@ -7227,7 +7229,7 @@ impl GameApp {
         if self.dialogs.league_signup.is_none() {
             return Ok(false);
         }
-        self.league_signup_pointer_position = Some(point);
+        self.dialogs.league_signup_pointer_position = Some(point);
         let layout = self.league_signup_layout();
         let fonts = self.assets.clonk_fonts.clone();
         let actions = layout
@@ -7262,9 +7264,9 @@ impl GameApp {
                 clonk_frontend::league_signup::LeagueSignupSound::Click => "Click",
             });
         }
-        self.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_pointer_capture = false;
         if clear_position {
-            self.league_signup_pointer_position = None;
+            self.dialogs.league_signup_pointer_position = None;
         }
     }
 
@@ -7277,12 +7279,13 @@ impl GameApp {
             return Ok(false);
         }
         let Some(point) = self
+            .dialogs
             .league_signup_pointer_position
             .or(self.input_routing.live.running_pointer)
         else {
             return Ok(true);
         };
-        self.league_signup_pointer_position = Some(point);
+        self.dialogs.league_signup_pointer_position = Some(point);
         let Some(layout) = self.league_signup_layout() else {
             return Ok(true);
         };
@@ -7400,7 +7403,7 @@ impl GameApp {
                 .as_ref()
                 .is_some_and(|dialog| dialog.controller.has_positional_pointer_drag())
         {
-            self.game_option_input_pointer_position = Some(point);
+            self.dialogs.game_option_input_pointer_position = Some(point);
             let layout = self.game_option_input_layout();
             let fonts = self.assets.clonk_fonts.clone();
             let actions = layout
@@ -7462,10 +7465,11 @@ impl GameApp {
             let chat_hit = layout
                 .as_ref()
                 .is_some_and(|layout| Self::point_in_input_dialog_bounds(point, layout))
-                || self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left)
+                || self.dialogs.game_option_input_pointer_capture
+                    == Some(ContextMenuPointerButton::Left)
                 || (self.running_chat_active() && lower_capture.is_some());
             let mut shared_pointer_consumed = chat_hit;
-            self.game_option_input_pointer_position = Some(point);
+            self.dialogs.game_option_input_pointer_position = Some(point);
             if chat_hit {
                 if self.input_routing.live.primary_left_down {
                     self.set_running_chat_active(true);
@@ -7554,7 +7558,7 @@ impl GameApp {
             }
         }
         if self.dialogs.league_signup.is_some() && self.context_menus.open.is_some() {
-            self.league_signup_pointer_position = Some(point);
+            self.dialogs.league_signup_pointer_position = Some(point);
             if !context_routed_before_running_dialogs
                 && self.handle_context_menu_pointer_move(point)?
             {
@@ -7639,11 +7643,12 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             let actions = self
                 .definition_selector_layout()
                 .and_then(|layout| {
-                    self.definition_selector
+                    self.definition_selection
+                        .dialog
                         .as_mut()
                         .map(|controller| controller.handle_pointer_move(point, &layout))
                 })
@@ -7664,7 +7669,7 @@ impl GameApp {
         if self.dialogs.game_option_input.is_some()
             && self.game_option_input_owns_running_pointer_event()
         {
-            self.game_option_input_pointer_position = Some(point);
+            self.dialogs.game_option_input_pointer_position = Some(point);
             let layout = self.game_option_input_layout();
             let fonts = self.assets.clonk_fonts.clone();
             let actions = layout
@@ -7916,7 +7921,7 @@ impl GameApp {
             || !self.window_active
             || !self.dialogs.messages.is_empty()
             || self.startup.player_properties_dialog.is_some()
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.context_menus.open.is_some()
             || self.dialogs.game_option_input.is_some()
             || self.dialogs.game_over.is_some()
@@ -7948,7 +7953,7 @@ impl GameApp {
             && self.ingame_mouse_controls_owner(pointer.owner)
             && self.dialogs.messages.is_empty()
             && self.startup.player_properties_dialog.is_none()
-            && self.definition_selector.is_none()
+            && self.definition_selection.dialog.is_none()
             && self.context_menus.open.is_none()
             && self.dialogs.game_option_input.is_none()
             && self.dialogs.game_over.is_none()
@@ -8082,7 +8087,7 @@ impl GameApp {
             || !self.window_active
             || !self.dialogs.messages.is_empty()
             || self.startup.player_properties_dialog.is_some()
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.context_menus.open.is_some()
             || self.dialogs.game_option_input.is_some()
             || self.dialogs.game_over.is_some()
@@ -9515,7 +9520,7 @@ impl GameApp {
             }
             if button_state == ElementState::Pressed {
                 let layout = self.league_signup_layout();
-                let point = self.league_signup_pointer_position;
+                let point = self.dialogs.league_signup_pointer_position;
                 let actions = point
                     .zip(layout.as_ref())
                     .and_then(|(point, layout)| {
@@ -9554,7 +9559,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             return Ok(());
         }
         if !context_routed_before_running_dialogs
@@ -9592,7 +9597,7 @@ impl GameApp {
             && self.game_option_input_owns_running_pointer_event()
         {
             if button_state == ElementState::Pressed {
-                let point = self.game_option_input_pointer_position;
+                let point = self.dialogs.game_option_input_pointer_position;
                 let layout = self.game_option_input_layout();
                 let outcome = point.zip(layout.as_ref()).and_then(|(point, layout)| {
                     self.dialogs.game_option_input.as_mut().map(|dialog| {
@@ -9745,27 +9750,30 @@ impl GameApp {
         }
         if button_state == ElementState::Pressed {
             self.context_menus.pointer_capture = None;
-            self.game_option_pointer_capture = false;
+            self.dialogs.game_option_pointer_capture = false;
             let chat_hit = self.running_chat_controller().is_some()
                 && self
+                    .dialogs
                     .game_option_input_pointer_position
                     .zip(self.game_option_input_layout().as_ref())
                     .is_some_and(|(point, layout)| {
                         Self::point_in_input_dialog_bounds(point, layout)
                     });
-            self.game_option_input_pointer_capture = (self.dialogs.game_option_input.is_some()
-                && self.context_menus.open.is_none()
-                && if self.running_chat_controller().is_some() {
-                    chat_hit
-                } else {
-                    self.dialogs.messages.is_empty()
-                })
-            .then_some(ContextMenuPointerButton::Other);
+            self.dialogs.game_option_input_pointer_capture =
+                (self.dialogs.game_option_input.is_some()
+                    && self.context_menus.open.is_none()
+                    && if self.running_chat_controller().is_some() {
+                        chat_hit
+                    } else {
+                        self.dialogs.messages.is_empty()
+                    })
+                .then_some(ContextMenuPointerButton::Other);
         }
         let input_dialog_release_latched = button_state == ElementState::Released
-            && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Other);
+            && self.dialogs.game_option_input_pointer_capture
+                == Some(ContextMenuPointerButton::Other);
         if input_dialog_release_latched {
-            self.game_option_input_pointer_capture = None;
+            self.dialogs.game_option_input_pointer_capture = None;
         }
         if self
             .consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Other)
@@ -9841,7 +9849,7 @@ impl GameApp {
                 return Ok(());
             }
             if button_state == ElementState::Pressed {
-                let point = self.league_signup_pointer_position;
+                let point = self.dialogs.league_signup_pointer_position;
                 let layout = self.league_signup_layout();
                 let fonts = self.assets.clonk_fonts.clone();
                 let primary = primary_clipboard_text();
@@ -9869,7 +9877,7 @@ impl GameApp {
         if self.startup.player_properties_dialog.is_some() {
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             return Ok(());
         }
         if !context_routed_before_running_dialogs
@@ -9904,7 +9912,7 @@ impl GameApp {
             && self.game_option_input_owns_running_pointer_event()
         {
             if button_state == ElementState::Pressed {
-                let point = self.game_option_input_pointer_position;
+                let point = self.dialogs.game_option_input_pointer_position;
                 let layout = self.game_option_input_layout();
                 let fonts = self.assets.clonk_fonts.clone();
                 let primary = arboard::Clipboard::new()
@@ -10890,27 +10898,29 @@ impl GameApp {
             self.context_menus.pointer_capture = None;
             // A fresh gesture supersedes any stale modal capture. Only the
             // topmost selector itself may acquire this latch.
-            self.definition_selector_pointer_capture =
-                self.definition_selector.is_some() && self.dialogs.messages.is_empty();
-            self.league_signup_pointer_capture = self.dialogs.league_signup.is_some()
+            self.definition_selection.pointer_capture =
+                self.definition_selection.dialog.is_some() && self.dialogs.messages.is_empty();
+            self.dialogs.league_signup_pointer_capture = self.dialogs.league_signup.is_some()
                 && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty();
-            self.game_option_input_pointer_capture = (self.dialogs.game_option_input.is_some()
-                && self.running_chat_controller().is_none()
-                && self.context_menus.open.is_none()
-                && self.dialogs.messages.is_empty())
-            .then_some(ContextMenuPointerButton::Left);
+            self.dialogs.game_option_input_pointer_capture =
+                (self.dialogs.game_option_input.is_some()
+                    && self.running_chat_controller().is_none()
+                    && self.context_menus.open.is_none()
+                    && self.dialogs.messages.is_empty())
+                .then_some(ContextMenuPointerButton::Left);
         }
         let definition_selector_release_latched = button_state == ElementState::Released
-            && std::mem::take(&mut self.definition_selector_pointer_capture);
+            && std::mem::take(&mut self.definition_selection.pointer_capture);
         let league_signup_release_latched = button_state == ElementState::Released
-            && std::mem::take(&mut self.league_signup_pointer_capture);
+            && std::mem::take(&mut self.dialogs.league_signup_pointer_capture);
         let input_dialog_release_latched = button_state == ElementState::Released
-            && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
+            && self.dialogs.game_option_input_pointer_capture
+                == Some(ContextMenuPointerButton::Left);
         let network_chart_release_latched =
             button_state == ElementState::Released && self.dialogs.chart_pointer_capture;
         if input_dialog_release_latched {
-            self.game_option_input_pointer_capture = None;
+            self.dialogs.game_option_input_pointer_capture = None;
             self.stop_game_option_input_pointer_drag_at_current_position();
             if self.running_chat_controller().is_some() {
                 // CMouse stops and clears pDragElement before ordinary
@@ -11002,10 +11012,10 @@ impl GameApp {
                 if button_state == ElementState::Pressed {
                     self.set_running_chat_active(true);
                 }
-                self.game_option_input_pointer_position = point;
+                self.dialogs.game_option_input_pointer_position = point;
                 self.handle_game_option_input_primary_pointer(button_state)?;
                 if button_state == ElementState::Pressed {
-                    self.game_option_input_pointer_capture = self
+                    self.dialogs.game_option_input_pointer_capture = self
                         .running_chat_controller()
                         .is_some_and(InputDialogController::has_pointer_capture)
                         .then_some(ContextMenuPointerButton::Left);
@@ -11053,7 +11063,7 @@ impl GameApp {
                     return Ok(());
                 }
                 if button_state == ElementState::Pressed {
-                    self.league_signup_pointer_capture = true;
+                    self.dialogs.league_signup_pointer_capture = true;
                 }
             }
             if self.handle_league_signup_pointer_button(button_state, left_double_click)? {
@@ -11183,22 +11193,27 @@ impl GameApp {
             self.process_startup_player_properties_actions(actions);
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             let layout = self.definition_selector_layout();
             let point = self
-                .definition_selector
+                .definition_selection
+                .dialog
                 .as_ref()
                 .and_then(|controller| controller.pointer_position());
             let clicked_label_row = layout.as_ref().zip(point).and_then(|(layout, point)| {
-                self.definition_selector.as_ref().and_then(|controller| {
-                    definition_selector_label_row_at(controller, layout, point)
-                })
+                self.definition_selection
+                    .dialog
+                    .as_ref()
+                    .and_then(|controller| {
+                        definition_selector_label_row_at(controller, layout, point)
+                    })
             });
             let mut actions = layout
                 .as_ref()
                 .zip(point)
                 .and_then(|(layout, point)| {
-                    self.definition_selector
+                    self.definition_selection
+                        .dialog
                         .as_mut()
                         .map(|controller| match button_state {
                             ElementState::Pressed => controller.handle_pointer_down(point, layout),
@@ -11212,16 +11227,18 @@ impl GameApp {
                 {
                     let now = Instant::now();
                     let is_double =
-                        self.definition_selector_last_click
+                        self.definition_selection
+                            .last_click
                             .is_some_and(|(last_index, at)| {
                                 last_index == index
                                     && now.duration_since(at) < Duration::from_millis(500)
                             });
-                    self.definition_selector_last_click =
+                    self.definition_selection.last_click =
                         if is_double { None } else { Some((index, now)) };
                     if is_double {
                         actions.extend(
-                            self.definition_selector
+                            self.definition_selection
+                                .dialog
                                 .as_mut()
                                 .map(|controller| {
                                     controller.handle_pointer_double_click(point, layout)
@@ -11230,7 +11247,7 @@ impl GameApp {
                         );
                     }
                 } else {
-                    self.definition_selector_last_click = None;
+                    self.definition_selection.last_click = None;
                 }
             }
             self.finish_definition_selector_input(actions)?;
@@ -11321,12 +11338,14 @@ impl GameApp {
                         let row_double = if button_state == ElementState::Released {
                             let now = Instant::now();
                             let row_double = clicked_row.is_some_and(|index| {
-                                self.netdlg_last_click.is_some_and(|(last_index, at)| {
-                                    last_index == index
-                                        && now.duration_since(at) < Duration::from_millis(500)
-                                })
+                                self.startup_network
+                                    .last_click
+                                    .is_some_and(|(last_index, at)| {
+                                        last_index == index
+                                            && now.duration_since(at) < Duration::from_millis(500)
+                                    })
                             });
-                            self.netdlg_last_click = (!row_double)
+                            self.startup_network.last_click = (!row_double)
                                 .then(|| clicked_row.map(|index| (index, now)))
                                 .flatten();
                             row_double
@@ -11336,10 +11355,10 @@ impl GameApp {
                         let edit_double = if button_state == ElementState::Pressed {
                             let now = Instant::now();
                             let edit_double = clicked_edit
-                                && self.netdlg_join_edit_last_click.is_some_and(|at| {
+                                && self.startup_network.join_edit_last_click.is_some_and(|at| {
                                     now.saturating_duration_since(at) < CPP_DOUBLE_CLICK_INTERVAL
                                 });
-                            self.netdlg_join_edit_last_click =
+                            self.startup_network.join_edit_last_click =
                                 (clicked_edit && !edit_double).then_some(now);
                             edit_double
                         } else {
@@ -11383,7 +11402,7 @@ impl GameApp {
                                     })
                                     .unwrap_or_default(),
                             );
-                            self.netdlg_last_click = None;
+                            self.startup_network.last_click = None;
                         }
                         let chat_double = button_state == ElementState::Released
                             && self.startup_network.dialog.as_ref().is_some_and(|dialog| {
@@ -11470,12 +11489,14 @@ impl GameApp {
                         let is_double = if button_state == ElementState::Released {
                             let now = Instant::now();
                             let is_double = clicked_row.is_some_and(|index| {
-                                self.plrsel_last_click.is_some_and(|(last_index, at)| {
-                                    last_index == index
-                                        && now.duration_since(at) < Duration::from_millis(500)
-                                })
+                                self.startup
+                                    .player_last_click
+                                    .is_some_and(|(last_index, at)| {
+                                        last_index == index
+                                            && now.duration_since(at) < Duration::from_millis(500)
+                                    })
                             });
-                            self.plrsel_last_click = clicked_row.map(|index| (index, now));
+                            self.startup.player_last_click = clicked_row.map(|index| (index, now));
                             is_double
                         } else {
                             false
@@ -11501,7 +11522,7 @@ impl GameApp {
                                     })
                                     .unwrap_or_default(),
                             );
-                            self.plrsel_last_click = None;
+                            self.startup.player_last_click = None;
                         }
                         self.process_player_dialog_actions(actions)?;
                         self.restore_startup_crew_focus(restore_rename_focus);
@@ -11512,10 +11533,10 @@ impl GameApp {
                             self.scensel.rename_pointer_focus = None;
                         }
                         if button_state == ElementState::Released
-                            && self.game_option_pointer_capture
+                            && self.dialogs.game_option_pointer_capture
                             && self.menu_state.pointer_position().is_none()
                         {
-                            self.game_option_pointer_capture = false;
+                            self.dialogs.game_option_pointer_capture = false;
                             self.scenario_game_options.cancel_interaction();
                             self.scensel.rename_pointer_focus = None;
                             return Ok(());
@@ -11545,12 +11566,12 @@ impl GameApp {
                             self.scenario_game_options.handle_pointer_move(point);
                             match button_state {
                                 ElementState::Pressed => {
-                                    self.game_option_pointer_capture = self
+                                    self.dialogs.game_option_pointer_capture = self
                                         .scenario_game_options
                                         .hovered_button()
                                         .and_then(|button| self.scenario_game_options.view(button))
                                         .is_some_and(|view| view.enabled);
-                                    if self.game_option_pointer_capture {
+                                    if self.dialogs.game_option_pointer_capture {
                                         self.scenario_game_options.set_focused_button(
                                             self.scenario_game_options.hovered_button(),
                                         );
@@ -11563,8 +11584,10 @@ impl GameApp {
                                         return Ok(());
                                     }
                                 }
-                                ElementState::Released if self.game_option_pointer_capture => {
-                                    self.game_option_pointer_capture = false;
+                                ElementState::Released
+                                    if self.dialogs.game_option_pointer_capture =>
+                                {
+                                    self.dialogs.game_option_pointer_capture = false;
                                     let actions =
                                         self.scenario_game_options.handle_pointer_up(point);
                                     self.finish_game_option_input(actions)?;
@@ -11844,23 +11867,25 @@ impl GameApp {
             return Ok(());
         }
         if phase == TouchPhase::Started {
-            self.definition_selector_pointer_capture =
-                self.definition_selector.is_some() && self.dialogs.messages.is_empty();
-            self.league_signup_pointer_capture = self.dialogs.league_signup.is_some()
+            self.definition_selection.pointer_capture =
+                self.definition_selection.dialog.is_some() && self.dialogs.messages.is_empty();
+            self.dialogs.league_signup_pointer_capture = self.dialogs.league_signup.is_some()
                 && self.context_menus.open.is_none()
                 && self.dialogs.messages.is_empty();
-            self.game_option_input_pointer_capture = (self.dialogs.game_option_input.is_some()
-                && self.context_menus.open.is_none()
-                && (self.dialogs.messages.is_empty() || self.running_chat_controller().is_some()))
-            .then_some(ContextMenuPointerButton::Left);
-            self.game_option_pointer_capture = false;
+            self.dialogs.game_option_input_pointer_capture =
+                (self.dialogs.game_option_input.is_some()
+                    && self.context_menus.open.is_none()
+                    && (self.dialogs.messages.is_empty()
+                        || self.running_chat_controller().is_some()))
+                .then_some(ContextMenuPointerButton::Left);
+            self.dialogs.game_option_pointer_capture = false;
         }
         let definition_selector_release_latched =
             matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
-                && std::mem::take(&mut self.definition_selector_pointer_capture);
+                && std::mem::take(&mut self.definition_selection.pointer_capture);
         let league_signup_release_latched =
             matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
-                && std::mem::take(&mut self.league_signup_pointer_capture);
+                && std::mem::take(&mut self.dialogs.league_signup_pointer_capture);
         if phase == TouchPhase::Ended
             && self.consume_closed_context_pointer_release(
                 ElementState::Released,
@@ -11980,7 +12005,7 @@ impl GameApp {
             return Ok(());
         }
         if self.dialogs.league_signup.is_some() {
-            self.league_signup_pointer_position =
+            self.dialogs.league_signup_pointer_position =
                 (!matches!(phase, TouchPhase::Cancelled)).then_some(position);
             if phase == TouchPhase::Cancelled {
                 self.close_context_menu_silently();
@@ -12006,7 +12031,7 @@ impl GameApp {
                     return Ok(());
                 }
                 if phase == TouchPhase::Started {
-                    self.league_signup_pointer_capture = true;
+                    self.dialogs.league_signup_pointer_capture = true;
                 }
             }
             let layout = self.league_signup_layout();
@@ -12132,17 +12157,21 @@ impl GameApp {
             self.process_startup_player_properties_actions(actions);
             return Ok(());
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             let layout = self.definition_selector_layout();
             let clicked_label_row = layout.as_ref().and_then(|layout| {
-                self.definition_selector.as_ref().and_then(|controller| {
-                    definition_selector_label_row_at(controller, layout, position)
-                })
+                self.definition_selection
+                    .dialog
+                    .as_ref()
+                    .and_then(|controller| {
+                        definition_selector_label_row_at(controller, layout, position)
+                    })
             });
             let mut actions = layout
                 .as_ref()
                 .and_then(|layout| {
-                    self.definition_selector
+                    self.definition_selection
+                        .dialog
                         .as_mut()
                         .map(|controller| match phase {
                             TouchPhase::Started => controller.handle_touch_start(position, layout),
@@ -12159,16 +12188,18 @@ impl GameApp {
                 if let (Some(index), Some(layout)) = (clicked_label_row, layout.as_ref()) {
                     let now = Instant::now();
                     let is_double =
-                        self.definition_selector_last_click
+                        self.definition_selection
+                            .last_click
                             .is_some_and(|(last_index, at)| {
                                 last_index == index
                                     && now.duration_since(at) < Duration::from_millis(500)
                             });
-                    self.definition_selector_last_click =
+                    self.definition_selection.last_click =
                         if is_double { None } else { Some((index, now)) };
                     if is_double {
                         actions.extend(
-                            self.definition_selector
+                            self.definition_selection
+                                .dialog
                                 .as_mut()
                                 .map(|controller| {
                                     controller.handle_pointer_double_click(position, layout)
@@ -12177,10 +12208,10 @@ impl GameApp {
                         );
                     }
                 } else {
-                    self.definition_selector_last_click = None;
+                    self.definition_selection.last_click = None;
                 }
             } else if phase == TouchPhase::Cancelled {
-                self.definition_selector_last_click = None;
+                self.definition_selection.last_click = None;
             }
             self.finish_definition_selector_input(actions)?;
             return Ok(());
@@ -12211,7 +12242,7 @@ impl GameApp {
             }
         }
         if self.dialogs.game_option_input.is_some() {
-            self.game_option_input_pointer_position = Some(position);
+            self.dialogs.game_option_input_pointer_position = Some(position);
             let layout = self.game_option_input_layout();
             let fonts = self.assets.clonk_fonts.clone();
             let actions = layout
@@ -12246,7 +12277,7 @@ impl GameApp {
                 .unwrap_or_default();
             self.finish_game_option_input_dialog_actions(actions)?;
             if phase == TouchPhase::Started {
-                self.game_option_input_pointer_capture = self
+                self.dialogs.game_option_input_pointer_capture = self
                     .dialogs
                     .game_option_input
                     .as_ref()
@@ -12254,16 +12285,17 @@ impl GameApp {
                     .then_some(ContextMenuPointerButton::Left);
             }
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                self.game_option_input_pointer_capture = None;
-                self.game_option_input_pointer_position = None;
+                self.dialogs.game_option_input_pointer_capture = None;
+                self.dialogs.game_option_input_pointer_position = None;
             }
             return Ok(());
         }
         let input_dialog_release_latched =
             matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
-                && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
+                && self.dialogs.game_option_input_pointer_capture
+                    == Some(ContextMenuPointerButton::Left);
         if input_dialog_release_latched {
-            self.game_option_input_pointer_capture = None;
+            self.dialogs.game_option_input_pointer_capture = None;
             return Ok(());
         }
         if !matches!(self.mode, AppMode::Running)
@@ -12537,13 +12569,13 @@ impl GameApp {
                 }
                 self.scenario_game_options.handle_pointer_move(position);
                 if phase == TouchPhase::Started {
-                    self.game_option_pointer_capture = self
+                    self.dialogs.game_option_pointer_capture = self
                         .scenario_game_options
                         .hovered_button()
                         .and_then(|button| self.scenario_game_options.view(button))
                         .is_some_and(|view| view.enabled);
                 }
-                if self.game_option_pointer_capture {
+                if self.dialogs.game_option_pointer_capture {
                     let actions = match phase {
                         TouchPhase::Started => {
                             self.scenario_game_options
@@ -12566,7 +12598,7 @@ impl GameApp {
                         self.restore_scensel_rename_pointer_focus();
                     }
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                        self.game_option_pointer_capture = false;
+                        self.dialogs.game_option_pointer_capture = false;
                         self.pointer_left_unchecked();
                     }
                     return Ok(());
@@ -12793,14 +12825,15 @@ impl GameApp {
             self.process_startup_player_properties_actions(actions);
             return;
         }
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             if let Some(layout) = self.definition_selector_layout() {
-                if let Some(controller) = self.definition_selector.as_mut() {
+                if let Some(controller) = self.definition_selection.dialog.as_mut() {
                     controller.pointer_left(&layout);
                 }
             }
             let sounds = self
-                .definition_selector
+                .definition_selection
+                .dialog
                 .as_mut()
                 .map(|controller| controller.take_sound_events())
                 .unwrap_or_default();
@@ -12814,7 +12847,7 @@ impl GameApp {
             dialog.controller.pointer_left();
             let sounds = dialog.controller.take_sound_events();
             self.play_input_dialog_sound_events(sounds);
-            self.game_option_input_pointer_position = None;
+            self.dialogs.game_option_input_pointer_position = None;
             return;
         }
         if self
@@ -12840,8 +12873,8 @@ impl GameApp {
                     if let Some(dialog) = self.startup_network.dialog.as_mut() {
                         dialog.pointer_left();
                     }
-                    self.netdlg_last_click = None;
-                    self.netdlg_join_edit_last_click = None;
+                    self.startup_network.last_click = None;
+                    self.startup_network.join_edit_last_click = None;
                 }
                 StartupView::PlayerSelection => {
                     if let Some(dialog) = self.startup.player_dialog.as_mut() {
@@ -12924,7 +12957,7 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
-        if self.dialogs.game_over.is_some() || self.definition_selector.is_some() {
+        if self.dialogs.game_over.is_some() || self.definition_selection.dialog.is_some() {
             return Ok(());
         }
         if self.mode != AppMode::Menu
@@ -13038,7 +13071,7 @@ impl GameApp {
         let captured = outcome.captured && !outcome.pass_through;
         if captured {
             if self.running_chat_controller().is_some() {
-                self.game_option_input_consumed_keys.insert(key);
+                self.dialogs.game_option_input_consumed_keys.insert(key);
             } else {
                 self.dialogs.message_consumed_keys.insert(key);
             }

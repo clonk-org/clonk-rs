@@ -2352,7 +2352,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
             expires_at: None,
         }];
         app.sync_startup_network_game_rows();
-        app.netdlg_last_click = Some((0, Instant::now()));
+        app.startup_network.last_click = Some((0, Instant::now()));
         app.startup_network.last_refresh = Some(Instant::now() - Duration::from_secs(2));
         main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games().len() => 2);
 
@@ -2417,7 +2417,7 @@ fn reload_button_and_f5_restart_and_repopulate_search() {
         main_assert!(app.startup_network.game_references.is_empty());
         main_assert!(app.startup_network.direct_reference_queries.is_empty());
         main_assert!(app.startup_network.dialog.as_ref().unwrap().games().is_empty());
-        main_assert!(app.netdlg_last_click.is_none());
+        main_assert!(app.startup_network.last_click.is_none());
         main_assert!(app.status_text.is_empty(), "query presentation belongs to the native masterserver row");
         main_assert!(!app.take_exit_request());
 
@@ -2489,7 +2489,7 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     app.status_text = "Retained status".to_string();
     let now = Instant::now();
     app.startup_network.last_refresh = Some(now);
-    app.netdlg_last_click = Some((0, now));
+    app.startup_network.last_click = Some((0, now));
     let expected_references = app.startup_network.game_references.clone();
     let expected_queries = app.startup_network.direct_reference_queries.clone();
     let expected_games = app
@@ -2513,7 +2513,7 @@ fn subsecond_refresh_only_plays_error_and_preserves_rows() {
     main_assert_eq!(app.startup_network.direct_reference_queries => expected_queries);
     main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().games() => expected_games);
     main_assert_eq!(app.status_text => "Retained status");
-    main_assert_eq!(app.netdlg_last_click => Some((0, now)));
+    main_assert_eq!(app.startup_network.last_click => Some((0, now)));
     main_assert!(app.dialogs.messages.is_empty());
     {
         let audio = app.test_audio_ref();

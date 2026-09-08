@@ -358,7 +358,7 @@ impl GameApp {
             Vec::new()
         };
         if state == ElementState::Pressed && capture_release {
-            self.game_option_input_consumed_keys.insert(key);
+            self.dialogs.game_option_input_consumed_keys.insert(key);
         }
         self.finish_game_option_input_dialog_actions(actions)?;
         // C4GUI::Screen routes every key exclusively to the top modal. Some
@@ -380,7 +380,7 @@ impl GameApp {
             return Ok(false);
         }
         let release_latched =
-            state == ElementState::Released && self.game_option_consumed_keys.remove(&key);
+            state == ElementState::Released && self.dialogs.game_option_consumed_keys.remove(&key);
         let hotkey = context_menu_hotkey(key);
         let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
@@ -399,7 +399,7 @@ impl GameApp {
                     .scenario_game_options
                     .handle_hotkey(hotkey.expect("checked above"));
                 self.finish_game_option_input(actions)?;
-                self.game_option_consumed_keys.insert(key);
+                self.dialogs.game_option_consumed_keys.insert(key);
             }
             return Ok(true);
         }
@@ -418,11 +418,11 @@ impl GameApp {
                         self.input_routing.live.modifiers.shift_key(),
                     );
                 self.finish_game_option_input(outcome.actions)?;
-                self.game_option_consumed_keys.insert(key);
+                self.dialogs.game_option_consumed_keys.insert(key);
                 return Ok(true);
             }
             self.advance_scensel_dialog_focus(self.input_routing.live.modifiers.shift_key());
-            self.game_option_consumed_keys.insert(key);
+            self.dialogs.game_option_consumed_keys.insert(key);
             return Ok(true);
         }
         if !options_focused {
@@ -435,7 +435,7 @@ impl GameApp {
             ElementState::Released => self.scenario_game_options.handle_key_up(gui_key),
         };
         if state == ElementState::Pressed && outcome.captured {
-            self.game_option_consumed_keys.insert(key);
+            self.dialogs.game_option_consumed_keys.insert(key);
         }
         self.finish_game_option_input(outcome.actions)?;
         Ok(outcome.captured || release_latched)
@@ -1852,10 +1852,10 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::OptionsNetwork(field),
             controller,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
         Ok(())
     }
 
@@ -1885,10 +1885,10 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::OptionsGraphicsScale,
             controller,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
         Ok(())
     }
 
@@ -2523,10 +2523,10 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::GameOption(request.kind),
             controller,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
         Ok(())
     }
 
@@ -2546,7 +2546,7 @@ impl GameApp {
     pub(crate) fn game_option_input_owns_running_pointer_event(&self) -> bool {
         self.running_chat_controller().is_none()
             || self.running_shared_gui_has_keyboard_focus()
-            || self.game_option_input_pointer_capture.is_some()
+            || self.dialogs.game_option_input_pointer_capture.is_some()
             || self
                 .input_routing
                 .live
@@ -2565,7 +2565,7 @@ impl GameApp {
                 dialog.controller.take_sound_events()
             })
             .unwrap_or_default();
-        self.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_capture = None;
         self.play_input_dialog_sound_events(sounds);
     }
 
@@ -2586,7 +2586,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        let point = self.game_option_input_pointer_position;
+        let point = self.dialogs.game_option_input_pointer_position;
         let layout = self.game_option_input_layout();
         let fonts = self.assets.clonk_fonts.clone();
         let clicked_edit = point.zip(layout.as_ref()).is_some_and(|(point, layout)| {
@@ -2624,9 +2624,10 @@ impl GameApp {
         {
             let now = Instant::now();
             let is_double = self
+                .dialogs
                 .game_option_input_last_click
                 .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
-            self.game_option_input_last_click = (!is_double).then_some(now);
+            self.dialogs.game_option_input_last_click = (!is_double).then_some(now);
             if is_double {
                 let actions = point
                     .zip(layout.as_ref())
@@ -2716,7 +2717,7 @@ impl GameApp {
                     };
                     self.startup_tooltip.pointer_left();
                     self.close_context_menu_silently();
-                    self.game_option_input_last_click = None;
+                    self.dialogs.game_option_input_last_click = None;
                     match pending.purpose {
                         PendingInputDialogPurpose::RunningChat => {
                             self.submit_running_chat_text(text)?;
@@ -2789,7 +2790,7 @@ impl GameApp {
                     };
                     self.startup_tooltip.pointer_left();
                     self.close_context_menu_silently();
-                    self.game_option_input_last_click = None;
+                    self.dialogs.game_option_input_last_click = None;
                     match pending.purpose {
                         PendingInputDialogPurpose::RunningChat => {
                             self.close_running_chat()?;

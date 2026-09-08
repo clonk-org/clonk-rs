@@ -1321,7 +1321,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.loading_state.is_none());
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.dialogs.messages[0].state.caption() => "Cannot start scenario.");
@@ -1374,7 +1374,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.loading_state.is_none());
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app.status_text.is_empty());
     reset_cached_app_paths();
 }

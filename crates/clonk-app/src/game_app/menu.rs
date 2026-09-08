@@ -57,11 +57,11 @@ impl GameApp {
         let pointer_position = self.input_routing.live.running_pointer;
         self.close_context_menu_silently();
         self.cancel_underlying_interaction();
-        self.league_signup_consumed_keys.clear();
-        self.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_consumed_keys.clear();
+        self.dialogs.league_signup_pointer_capture = false;
         // MouseInput carries no coordinates. Retain the application's last
         // pointer so a stationary cursor can click the newly opened dialog.
-        self.league_signup_pointer_position = pointer_position;
+        self.dialogs.league_signup_pointer_position = pointer_position;
         self.dialogs.league_signup = Some(PendingLeagueSignupDialog {
             controller: clonk_frontend::league_signup::LeagueSignupController::new(
                 config,
@@ -91,10 +91,10 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::ScenarioMissionAccess,
             controller,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
         Ok(())
     }
 
@@ -3064,10 +3064,10 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::NetworkJoinPassword,
             controller,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
         self.status_text.clear();
         Ok(())
     }
@@ -3731,9 +3731,9 @@ impl GameApp {
         self.startup_network.game_references.clear();
         self.startup_network.discovery_reference_queries.clear();
         self.startup_network.direct_reference_queries.clear();
-        self.netdlg_last_click = None;
-        self.netdlg_join_edit_last_click = None;
-        self.netdlg_edit_consumed_keys.clear();
+        self.startup_network.last_click = None;
+        self.startup_network.join_edit_last_click = None;
+        self.startup_network.edit_consumed_keys.clear();
         self.pending_network_join = None;
         let mut dialog = self.new_network_dialog_controller();
         let mut search_config = load_network_search_settings(self.app_paths.as_ref());
@@ -3845,7 +3845,7 @@ impl GameApp {
             dialog.resize(width, height);
         }
         self.startup.player_dialog = Some(dialog);
-        self.plrsel_last_click = None;
+        self.startup.player_last_click = None;
         self.replace_startup_dialog(StartupView::PlayerSelection, StartupDialog::PlayerSelection);
         self.status_text.clear();
         if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
@@ -4537,7 +4537,9 @@ impl GameApp {
                 }
             }
             MessageDialogContinuation::LeagueSignupCancelled => {
-                if let Some(mut continuation) = self.cancelled_league_signup_continuation.take() {
+                if let Some(mut continuation) =
+                    self.dialogs.cancelled_league_signup_continuation.take()
+                {
                     Self::reject_league_auth_continuation_player(&mut continuation);
                     let _ = self.continue_league_player_auth(continuation)?;
                 }
@@ -4869,7 +4871,7 @@ impl GameApp {
         if self.chat.external_dialog_visible {
             return None;
         }
-        if let Some(controller) = self.definition_selector.as_ref() {
+        if let Some(controller) = self.definition_selection.dialog.as_ref() {
             let layout = self.definition_selector_layout()?;
             return controller.tooltip_at(point, &layout);
         }
@@ -5023,18 +5025,18 @@ impl GameApp {
         self.dialogs.message_active_index = None;
         self.dialogs.message_pointer_capture_index = None;
         self.dialogs.league_signup = None;
-        self.cancelled_league_signup_continuation = None;
-        self.league_signup_consumed_keys.clear();
-        self.league_signup_pointer_capture = false;
-        self.league_signup_pointer_position = None;
+        self.dialogs.cancelled_league_signup_continuation = None;
+        self.dialogs.league_signup_consumed_keys.clear();
+        self.dialogs.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_pointer_position = None;
         self.input_routing.live.primary_left_down = false;
         self.dialogs.message_consumed_keys.clear();
-        self.definition_selector = None;
+        self.definition_selection.dialog = None;
         self.pending_definition_selection = None;
         self.pending_lobby_player_selection = None;
-        self.definition_selector_last_click = None;
-        self.definition_selector_consumed_keys.clear();
-        self.definition_selector_pointer_capture = false;
+        self.definition_selection.last_click = None;
+        self.definition_selection.consumed_keys.clear();
+        self.definition_selection.pointer_capture = false;
         self.close_ingame_menu();
         self.ingame_menus.object = None;
         self.ingame_menus.script_presentations.clear();

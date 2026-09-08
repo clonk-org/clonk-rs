@@ -1458,7 +1458,7 @@ impl GameApp {
                         .is_some_and(|dialog| dialog.tick_scrollbar())
                 {
                     // Book-scrollbar arrows repeat once per presentation.
-                    self.plrsel_last_click = None;
+                    self.startup.player_last_click = None;
                 }
                 if self.startup.view == StartupView::About {
                     // About TextWindow arrows repeat from ScrollBar::DrawElement.
@@ -1488,7 +1488,7 @@ impl GameApp {
                         self.begin_native_text_capture(true);
                     }
                     let gamma = Some(menu_gamma_value.clone());
-                    if self.definition_selector.is_some() {
+                    if self.definition_selection.dialog.is_some() {
                         self.render_definition_selector(gamma.as_ref())?;
                         if ordered_native {
                             self.next_pending_native_overlay();
@@ -1637,7 +1637,7 @@ impl GameApp {
                     .dialog_fade
                     .as_ref()
                     .is_some_and(|fade| fade.step < STARTUP_DIALOG_FADE_STEPS);
-                let definition_selector_open = self.definition_selector.is_some();
+                let definition_selector_open = self.definition_selection.dialog.is_some();
                 let game_option_input_open = self.dialogs.game_option_input.is_some();
                 let league_signup_open = self.dialogs.league_signup.is_some();
                 // A fading C4GUI::Dialog is inactive even when it retains its

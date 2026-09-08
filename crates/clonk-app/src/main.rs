@@ -3007,6 +3007,7 @@ impl GameApp {
                     fair_crew: load_fair_crew_flag(paths),
                     record: load_recording_flag(paths),
                 },
+                player_last_click: None,
             },
             last_startup_dialog: StartupDialog::MainMenu,
             scenario_game_options,
@@ -3226,6 +3227,16 @@ impl GameApp {
                 message_active_index: None,
                 message_pointer_capture_index: None,
                 message_consumed_keys: HashSet::new(),
+                league_signup_consumed_keys: HashSet::new(),
+                league_signup_pointer_capture: false,
+                league_signup_pointer_position: None,
+                cancelled_league_signup_continuation: None,
+                game_option_input_consumed_keys: HashSet::new(),
+                game_option_input_pointer_capture: None,
+                game_option_input_pointer_position: None,
+                game_option_input_last_click: None,
+                game_option_consumed_keys: HashSet::new(),
+                game_option_pointer_capture: false,
             },
             ingame_last_left_down: None,
             ingame_ignore_left_up: false,
@@ -3240,8 +3251,6 @@ impl GameApp {
             runtime_flash_message: None,
             film_view_player: None,
             next_running_message_stack_id: 1,
-            cancelled_league_signup_continuation: None,
-            definition_selector: None,
             pending_definition_selection: None,
             pending_lobby_player_selection: None,
             context_menus: ContextMenuState {
@@ -3315,6 +3324,9 @@ impl GameApp {
                 direct_reference_queries: Vec::new(),
                 next_direct_reference_query_id: 0,
                 connection: None,
+                edit_consumed_keys: HashSet::new(),
+                last_click: None,
+                join_edit_last_click: None,
             },
             loader: LoaderScreenState {
                 screen: loader_screen,
@@ -3326,23 +3338,13 @@ impl GameApp {
                 gamma: loader_gamma,
                 terminal_frame_pending: false,
             },
-            league_signup_consumed_keys: HashSet::new(),
-            league_signup_pointer_capture: false,
-            league_signup_pointer_position: None,
-            definition_selector_consumed_keys: HashSet::new(),
-            netdlg_edit_consumed_keys: HashSet::new(),
-            definition_selector_pointer_capture: false,
-            game_option_input_consumed_keys: HashSet::new(),
-            game_option_input_pointer_capture: None,
-            game_option_input_pointer_position: None,
-            game_option_input_last_click: None,
-            game_option_consumed_keys: HashSet::new(),
-            game_option_pointer_capture: false,
+            definition_selection: DefinitionSelectionState {
+                dialog: None,
+                consumed_keys: HashSet::new(),
+                pointer_capture: false,
+                last_click: None,
+            },
             menu_backdrop_cache: StartupBackdropCache::default(),
-            definition_selector_last_click: None,
-            plrsel_last_click: None,
-            netdlg_last_click: None,
-            netdlg_join_edit_last_click: None,
             message_board: ClassicMessageBoardState::default(),
             message_input_history: VecDeque::new(),
             show_startup_hint: false,
@@ -3729,19 +3731,19 @@ impl GameApp {
             dialog.controller.cancel_interaction();
             dialog.controller.reset_location();
         }
-        self.league_signup_consumed_keys.clear();
-        self.league_signup_pointer_capture = false;
-        self.league_signup_pointer_position = None;
+        self.dialogs.league_signup_consumed_keys.clear();
+        self.dialogs.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_pointer_position = None;
         if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
             dialog.controller.cancel_interaction();
         }
         self.scenario_game_options.cancel_interaction();
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
-        self.game_option_pointer_capture = false;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
+        self.dialogs.game_option_pointer_capture = false;
         self.input_routing.live.running_pointer = None;
         self.ingame_menus.close_pointer_capture = None;
         self.ingame_menus.script_close_pointer_capture = None;
@@ -3853,7 +3855,7 @@ impl GameApp {
                 lobby.pointer_left();
             }
             self.cancel_classic_lobby_interaction();
-            if let Some(controller) = self.definition_selector.as_mut() {
+            if let Some(controller) = self.definition_selection.dialog.as_mut() {
                 controller.cancel_interaction();
             }
         }
@@ -4690,7 +4692,7 @@ impl GameApp {
             dialog.state.cancel_interaction();
         }
         self.dialogs.message_pointer_capture_index = None;
-        if let Some(controller) = self.definition_selector.as_mut() {
+        if let Some(controller) = self.definition_selection.dialog.as_mut() {
             controller.cancel_interaction();
         }
         if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
@@ -4704,16 +4706,16 @@ impl GameApp {
         self.dialogs.message_consumed_keys.clear();
         self.dialogs.chart_consumed_keys.clear();
         self.dialogs.client_list_consumed_keys.clear();
-        self.definition_selector_consumed_keys.clear();
-        self.definition_selector_pointer_capture = false;
-        self.league_signup_consumed_keys.clear();
-        self.league_signup_pointer_capture = false;
-        self.league_signup_pointer_position = None;
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_consumed_keys.clear();
-        self.game_option_pointer_capture = false;
+        self.definition_selection.consumed_keys.clear();
+        self.definition_selection.pointer_capture = false;
+        self.dialogs.league_signup_consumed_keys.clear();
+        self.dialogs.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_pointer_position = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_consumed_keys.clear();
+        self.dialogs.game_option_pointer_capture = false;
         self.chat.paste_consumed_keys.clear();
         self.input_routing.live.pressed_engine_keys.clear();
         self.input_routing.scoreboard_tab_raw_pressed = false;
@@ -5905,7 +5907,7 @@ impl GameApp {
             || !self.dialogs.stack.is_empty()
             || !self.runtime_default_dialog_order_snapshot().is_empty()
             || self.context_menus.open.is_some()
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.dialogs.game_option_input.is_some()
             || self.dialogs.league_signup.is_some()
             || !self.dialogs.messages.is_empty()
@@ -5991,7 +5993,7 @@ impl GameApp {
             || !routing_still_active
             || !self.dialogs.messages.is_empty()
             || self.startup.player_properties_dialog.is_some()
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.context_menus.open.is_some()
             || self.dialogs.game_option_input.is_some()
             || self.dialogs.game_over.is_some()
@@ -6805,14 +6807,14 @@ impl GameApp {
         }
         if let Some(dialog) = self.dialogs.league_signup.as_mut() {
             dialog.controller.cancel_interaction();
-            self.league_signup_pointer_capture = false;
+            self.dialogs.league_signup_pointer_capture = false;
             return;
         }
         if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
             dialog.controller.cancel_interaction();
             return;
         }
-        if let Some(controller) = self.definition_selector.as_mut() {
+        if let Some(controller) = self.definition_selection.dialog.as_mut() {
             controller.cancel_interaction();
             return;
         }
@@ -8478,9 +8480,10 @@ impl GameApp {
             })
         };
 
-        if self.definition_selector.is_some() {
+        if self.definition_selection.dialog.is_some() {
             let mode = self
-                .definition_selector
+                .definition_selection
+                .dialog
                 .as_ref()
                 .map(|selector| selector.mode())
                 .unwrap_or(clonk_frontend::definition_sel::FileSelMode::Definitions);
@@ -9536,10 +9539,10 @@ impl GameApp {
         self.chat.running = None;
         self.dialogs.game_option_input = None;
         self.dialogs.league_signup = None;
-        self.cancelled_league_signup_continuation = None;
-        self.league_signup_consumed_keys.clear();
-        self.league_signup_pointer_capture = false;
-        self.league_signup_pointer_position = None;
+        self.dialogs.cancelled_league_signup_continuation = None;
+        self.dialogs.league_signup_consumed_keys.clear();
+        self.dialogs.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_pointer_position = None;
         let line_height = self.rendering.graphics.message_board_line_height();
         // `C4MessageBoard::Init` reads the live `Config.Graphics.MsgBoard`
         // (C4MessageBoard.cpp:236) that `ChangeMode` wrote without saving
