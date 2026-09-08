@@ -1602,7 +1602,7 @@ fn capture_profile_is_resolved_before_profile_sensitive_assets() {
     main_assert!(!app.rendering.graphics.hd_exact_blits());
     app.configure_native_startup_fonts(1.0, false);
     main_assert!(!app
-        .loader_render_config
+        .loader.render_config
         .test_value()
         .aspect_fill());
 }
@@ -1936,12 +1936,12 @@ fn runtime_point_filtering_reloads_after_advanced_config_save() {
     app.app_paths = Some(paths.clone());
     app.synchronize_advanced_options_runtime();
     main_assert!(app.rendering.graphics.point_filtering());
-    main_assert!(app.loader_render_config.expect("loader render config remains materialized").point_filtering());
+    main_assert!(app.loader.render_config.expect("loader render config remains materialized").point_filtering());
 
     fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=false\n").test_value();
     app.synchronize_advanced_options_runtime();
     main_assert!(!app.rendering.graphics.point_filtering());
-    main_assert!(!app.loader_render_config.expect("loader config follows live advanced save").point_filtering());
+    main_assert!(!app.loader.render_config.expect("loader config follows live advanced save").point_filtering());
 }
 
 #[test]

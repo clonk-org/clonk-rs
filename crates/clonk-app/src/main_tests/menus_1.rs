@@ -2368,7 +2368,7 @@ fn loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
     let mut app = new_menu_app(320, 200);
     install_l018_cursor_atlas(&mut app);
     let fonts = app.assets.clonk_fonts.clone().test_value();
-    app.loader_screen = Some(
+    app.loader.screen = Some(
         LoaderScreen::new(
             LoaderSelection::startup("LoaderSynthetic.png")
                 .expect("valid synthetic loader selection"),
@@ -2379,8 +2379,8 @@ fn loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
         )
         .test_value(),
     );
-    app.loader_error = None;
-    app.loader_render_error = None;
+    app.loader.error = None;
+    app.loader.render_error = None;
     app.mode = AppMode::Loading;
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -3061,7 +3061,7 @@ fn menu_render_defers_or_applies_the_monitor_gamma_post_pass() {
     let mut app = new_real_classic_menu_app(320, 240);
     let configured_gamma =
         clonk_graphics::GammaRamp::from_control_points([0x101010, 0x707070, 0xe0e0e0]);
-    app.loader_gamma = Some(configured_gamma.clone());
+    app.loader.gamma = Some(configured_gamma.clone());
     app.rendering.graphics
         .set_advanced_renderer_config(clonk_frontend::AdvancedRendererConfig {
             shader: false,

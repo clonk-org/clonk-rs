@@ -373,7 +373,8 @@ mod tests {
             ]
         );
         let loader = app
-            .loader_screen
+            .loader
+            .screen
             .as_ref()
             .expect("the real scenario loader remains installed");
         assert_eq!(loader.state().progress(), 60);

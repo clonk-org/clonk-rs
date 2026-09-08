@@ -9,19 +9,19 @@ use super::*;
 impl GameApp {
     pub(crate) fn loader_presentation_active(&self) -> bool {
         self.mode == AppMode::Loading
-            || (self.mode == AppMode::Running && self.terminal_loader_frame_pending)
+            || (self.mode == AppMode::Running && self.loader.terminal_frame_pending)
     }
 
     pub(crate) fn finish_terminal_loader_frame_presentation(&mut self) -> bool {
-        std::mem::take(&mut self.terminal_loader_frame_pending)
+        std::mem::take(&mut self.loader.terminal_frame_pending)
     }
 
     pub(crate) fn arm_terminal_loader_frame_presentation(&mut self) {
-        self.terminal_loader_frame_pending = !self.console_mode && self.loader_screen.is_some();
+        self.loader.terminal_frame_pending = !self.console_mode && self.loader.screen.is_some();
     }
 
     pub(crate) fn discard_terminal_loader_frame_for_headless_render(&mut self) -> bool {
-        std::mem::take(&mut self.terminal_loader_frame_pending)
+        std::mem::take(&mut self.loader.terminal_frame_pending)
     }
 
     /// Hold a rebuilt `General.Participants` for the shutdown save.
@@ -67,12 +67,12 @@ impl GameApp {
                 let presentation_features =
                     CompatPresentationFeatures::resolve(&native_config, self.config.compat_profile);
                 let config = config.with_aspect_fill(presentation_features.loader_aspect);
-                self.loader_render_config = Some(config);
-                self.loader_render_error = None;
+                self.loader.render_config = Some(config);
+                self.loader.render_error = None;
             }
             Err(error) => {
-                self.loader_render_config = None;
-                self.loader_render_error = Some(error.to_string());
+                self.loader.render_config = None;
+                self.loader.render_error = Some(error.to_string());
             }
         }
         if scale <= 0.0 || !scale.is_finite() {
@@ -122,7 +122,8 @@ impl GameApp {
             && scale > 0.0
             && scale.is_finite()
             && self
-                .loader_render_config
+                .loader
+                .render_config
                 .is_some_and(|config| config.application_scale() == scale)
             && self
                 .native_startup_fonts
@@ -141,13 +142,13 @@ impl GameApp {
     }
 
     fn classic_loader_render_preconditions_ready(&self) -> bool {
-        if self.loader_error.is_some()
-            || self.loader_render_error.is_some()
-            || self.loader_screen.is_none()
+        if self.loader.error.is_some()
+            || self.loader.render_error.is_some()
+            || self.loader.screen.is_none()
         {
             return false;
         }
-        let Some(config) = self.loader_render_config else {
+        let Some(config) = self.loader.render_config else {
             return false;
         };
         config.application_scale() == 1.0
@@ -2314,8 +2315,8 @@ impl GameApp {
                 // reads that retained game progress on its first draw
                 // (src/C4Game.cpp:124-270,421-440).
                 loader.update(LoaderUpdate::SetProgress(4));
-                self.loader_screen = Some(loader);
-                self.loader_error = None;
+                self.loader.screen = Some(loader);
+                self.loader.error = None;
             }
             self.status_text.clear();
             self.mode = AppMode::Loading;
@@ -5325,7 +5326,7 @@ impl GameApp {
         // window, which publishes it on the taskbar (C4Game.cpp:4102-4105).
         self.taskbar_progress
             .report(u32::try_from(progress).unwrap_or(0));
-        if let Some(loader) = self.loader_screen.as_mut() {
+        if let Some(loader) = self.loader.screen.as_mut() {
             loader.update(LoaderUpdate::SetProgress(progress));
             if let Some(lines) = log {
                 loader.update(LoaderUpdate::ReplaceLog(lines));
@@ -5683,7 +5684,8 @@ impl GameApp {
         {
             startup_identity_gamma().clone()
         } else {
-            self.loader_gamma
+            self.loader
+                .gamma
                 .clone()
                 .unwrap_or_else(|| startup_gamma().clone())
         }
@@ -5807,7 +5809,8 @@ impl GameApp {
                 .surface()
                 .is_gpu_scene_capture_active();
         let scaled_output = self
-            .loader_render_config
+            .loader
+            .render_config
             .as_ref()
             .map(|config| (*config).application_scale())
             .filter(|scale| scale.is_finite() && *scale > 0.0 && retained_text_capture);
@@ -5926,14 +5929,14 @@ impl GameApp {
     pub(crate) fn reinitialize_startup_loader_screen(&mut self) {
         let Some(paths) = self.app_paths.as_ref() else {
             // Path-less state fixtures have no install to re-init from.
-            self.loader_screen = None;
-            self.loader_error = None;
+            self.loader.screen = None;
+            self.loader.error = None;
             return;
         };
         match build_startup_loader(paths, self.assets.as_ref()) {
             Ok(setup) => {
-                self.loader_screen = Some(setup.screen);
-                self.loader_error = None;
+                self.loader.screen = Some(setup.screen);
+                self.loader.error = None;
             }
             Err(error) => {
                 // Same two native lines as the initial launch, from the join
@@ -5943,13 +5946,13 @@ impl GameApp {
                     "{}",
                     self.runtime_resource_text("IDS_PRC_ERRLOADER", LOADER_INIT_FAILURE_TEXT)
                 );
-                self.loader_error = Some(LoaderScreenFailure::NativeInit(error.to_string()));
+                self.loader.error = Some(LoaderScreenFailure::NativeInit(error.to_string()));
             }
         }
     }
 
     pub(crate) fn loader_boundary(&self, detail: impl Into<String>) -> anyhow::Error {
-        let context = if self.loading_state.is_some() || self.terminal_loader_frame_pending {
+        let context = if self.loading_state.is_some() || self.loader.terminal_frame_pending {
             "scenario loading"
         } else {
             "startup loading"
@@ -5974,7 +5977,8 @@ impl GameApp {
         self.reject_classic_global_gui_bootstrap()?;
         let gamma = self.startup_fragment_gamma();
         let loader = self
-            .loader_screen
+            .loader
+            .screen
             .as_ref()
             .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?;
         let fonts = self
@@ -5982,7 +5986,8 @@ impl GameApp {
             .as_deref()
             .ok_or_else(|| self.loader_boundary("scale-native loader fonts are unavailable"))?;
         let config = self
-            .loader_render_config
+            .loader
+            .render_config
             .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
         if fonts.scale() != config.application_scale() {
             return Err(self.loader_boundary(format!(
@@ -6040,7 +6045,7 @@ impl GameApp {
         self.rendering.graphics.set_clonk_fonts(fonts.clone());
         self.main_menu_state.menu.set_clonk_fonts(fonts);
         self.native_startup_fonts = None;
-        if let Some(config) = self.loader_render_config {
+        if let Some(config) = self.loader.render_config {
             self.configure_native_startup_fonts(
                 config.application_scale(),
                 config.point_filtering(),

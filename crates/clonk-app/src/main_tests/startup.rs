@@ -3196,7 +3196,7 @@ fn a_failed_native_loader_init_is_an_ordinary_fatal_not_a_parity_boundary() {
     // path-less case above, which C++ cannot reach at all.
     let mut app = new_menu_app(320, 200);
     app.mode = AppMode::Loading;
-    app.loader_error = Some(LoaderScreenFailure::NativeInit(
+    app.loader.error = Some(LoaderScreenFailure::NativeInit(
         "No loaders found for loader specification: A.png/A.bmp/A.jpg/A.jpeg".to_string(),
     ));
     let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -3228,7 +3228,7 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
     paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let installed = app
-        .loader_screen
+        .loader.screen
         .test_ref()
         .selection()
         .selected_filename()
@@ -3238,13 +3238,13 @@ fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
     app.show_main_menu();
 
     main_assert_eq!(
-        app.loader_screen
+        app.loader.screen
             .as_ref()
             .map(|loader| loader.selection().selected_filename().to_string()) =>
         Some(installed),
         "returning to the startup menu re-enters PreInit, which reinstalls the loader"
     );
-    main_assert!(app.loader_error.is_none());
+    main_assert!(app.loader.error.is_none());
 
     // The join that follows draws behind that retained loader instead of
     // taking the loader boundary and killing the process.
@@ -3288,7 +3288,7 @@ fn startup_main_uses_classic_loader_wildcard_when_goldmine_is_absent() {
         app.assets.require_classic_startup_main_resources().is_ok(),
         "preflight must not demand the named loader once a wildcard match exists"
     );
-    main_assert_eq!(app.loader_screen.as_ref().map(|loader| loader.selection().selected_filename().to_string()) => Some("LoaderWatercave1.png".to_string()));
+    main_assert_eq!(app.loader.screen.as_ref().map(|loader| loader.selection().selected_filename().to_string()) => Some("LoaderWatercave1.png".to_string()));
 
     // A pack with no eligible loader at all still fails the preflight, so
     // the boundary is the absent wildcard rather than the absent name.
@@ -3317,7 +3317,7 @@ fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
     let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
     paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
-    main_assert!(app.loader_screen.is_some());
+    main_assert!(app.loader.screen.is_some());
 
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
@@ -3326,13 +3326,13 @@ fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
         .test_value();
 
     main_assert_eq!(
-        app.loader_screen
+        app.loader.screen
             .as_ref()
             .map(|loader| loader.selection().selected_filename().to_string()) =>
         Some("LoaderGoldmine1.png".to_string()),
         "PreInit reinstalls the startup background loader for the next game"
     );
-    main_assert!(app.loader_error.is_none());
+    main_assert!(app.loader.error.is_none());
 }
 
 #[test]
@@ -3347,7 +3347,7 @@ fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
     let (_guard, paths) = isolated_test_app_paths(install.path(), user_data.path());
     paths.ensure_user_dirs().test_value();
     let mut app = new_menu_app_with_paths(640, 480, &paths);
-    main_assert!(app.loader_screen.is_some());
+    main_assert!(app.loader.screen.is_some());
     app.mode = AppMode::Loading;
 
     app.finish_scenario_loading_failure("controlled local load failure".to_string(), false)
@@ -3355,13 +3355,13 @@ fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(
-        app.loader_screen
+        app.loader.screen
             .as_ref()
             .map(|loader| loader.selection().selected_filename().to_string()) =>
         Some("LoaderGoldmine1.png".to_string()),
         "PreInit reinstalls the startup background loader for the next game"
     );
-    main_assert!(app.loader_error.is_none());
+    main_assert!(app.loader.error.is_none());
 }
 
 #[test]
@@ -3405,7 +3405,7 @@ fn missing_explicit_definition_during_scenario_start_returns_to_startup() {
     );
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert!(!app.take_exit_request());
-    main_assert!(app.loader_screen.is_some());
+    main_assert!(app.loader.screen.is_some());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert!(
@@ -3838,10 +3838,10 @@ fn startup_loader_render_uses_configured_user_gamma() {
     config.set_in(Some("Graphics"), "Gamma3", "13158600");
     config.save(paths.config_file()).test_value();
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
-    main_assert_eq!(app.loader_gamma => Some(clonk_graphics::GammaRamp::from_control_points([0, 0x646464, 0xc8c8c8,])));
+    main_assert_eq!(app.loader.gamma => Some(clonk_graphics::GammaRamp::from_control_points([0, 0x646464, 0xc8c8c8,])));
     let mut corrected = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut corrected);
-    app.loader_gamma = Some(clonk_graphics::GammaRamp::standard());
+    app.loader.gamma = Some(clonk_graphics::GammaRamp::standard());
     let mut standard = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut standard);
     main_assert_ne!(corrected => standard);
@@ -3849,7 +3849,7 @@ fn startup_loader_render_uses_configured_user_gamma() {
     config.set_in(Some("Graphics"), "DisableGamma", "true");
     config.save(paths.config_file()).test_value();
     main_assert_eq!(load_classic_loader_gamma(Some(&paths)) => None);
-    app.loader_gamma = None;
+    app.loader.gamma = None;
     let current_renderer_config = app.rendering.graphics.advanced_renderer_config();
     app.rendering.graphics
         .set_advanced_renderer_config(clonk_frontend::AdvancedRendererConfig {
@@ -3869,7 +3869,7 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     let user_data = tempdir();
     let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
-    let resources = app.loader_screen.test_ref().resources().clone();
+    let resources = app.loader.screen.test_ref().resources().clone();
     let (sender, receiver) = mpsc::channel();
     app.loading_state = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
@@ -3884,7 +3884,7 @@ fn app_loader_keeps_progress_monotonic_and_retains_phase_status() {
     reporter.report(45, "");
     reporter.send(ScenarioLoadingEvent::RefreshResources);
     app.poll_loading().test_value();
-    let state = app.loader_screen.test_ref().state();
+    let state = app.loader.screen.test_ref().state();
     main_assert_eq!(state.progress() => 45);
     main_assert_eq!(state.process() => None);
     main_assert!(matches!(
@@ -3923,9 +3923,9 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     wait_for_running_with_attempts(&mut app, 2_400);
 
     main_assert_eq!(app.mode => AppMode::Running);
-    main_assert!(app.terminal_loader_frame_pending);
+    main_assert!(app.loader.terminal_frame_pending);
     main_assert!(app.loader_presentation_active());
-    let state = app.loader_screen.test_ref().state();
+    let state = app.loader.screen.test_ref().state();
     main_assert_eq!(state.progress() => 100);
     let clonk_frontend::loader_screen::LoaderLog::Visible(lines) = state.log() else {
         panic!("worker phase status must make the live loader log visible");
@@ -3960,12 +3960,12 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     let mut frame = vec![0; app.rendering.graphics.surface().pixels().len()];
     app.render(&mut frame).test_value();
     main_assert!(
-        app.terminal_loader_frame_pending,
+        app.loader.terminal_frame_pending,
         "preparing a frame is not a successful window presentation"
     );
     main_assert!(app.finish_terminal_loader_frame_presentation());
     main_assert!(!app.loader_presentation_active());
-    app.terminal_loader_frame_pending = true;
+    app.loader.terminal_frame_pending = true;
     main_assert!(app.discard_terminal_loader_frame_for_headless_render());
     main_assert!(!app.loader_presentation_active());
     app.console_mode = true;

@@ -1216,7 +1216,7 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
         .test_value();
     main_assert_eq!(app.mode => AppMode::Loading);
     main_assert!(app.status_text.is_empty());
-    main_assert_eq!(some(&app.loader_screen).state().title() => expected_title);
+    main_assert_eq!(some(&app.loader.screen).state().title() => expected_title);
     app.poll_startup_network_connection().test_value();
 
     main_assert_eq!(app.mode => AppMode::Menu);
@@ -1290,9 +1290,9 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
     let layout = lobby.layout(surface.width() as i32, surface.height() as i32, fonts);
     main_assert_eq!(app.scenario_game_options.layout().bounds => layout.game_option_strip);
 
-    let config = app.loader_render_config.test_value();
+    let config = app.loader.render_config.test_value();
     let mut background = Surface::new(800, 600, PixelFormat::Rgba8888);
-    some(&app.loader_screen).render_background(&mut background, config, app.loader_gamma.as_ref());
+    some(&app.loader.screen).render_background(&mut background, config, app.loader.gamma.as_ref());
     let expected_corner = background.pixels()[..4].to_vec();
     let mut frame = vec![0_u8; 800 * 600 * 4];
     main_assert!(app.render(&mut frame).expect("render exact host lobby"));
@@ -5738,7 +5738,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     app.control_player_infos
         .apply(lobby_fixture!(player_data: 8, vec![lobby_fixture!(player { id: 9 })]));
     app.executing_ready_tick = Some(6);
-    main_assert!(app.loader_screen.is_some());
+    main_assert!(app.loader.screen.is_some());
 
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
@@ -5748,7 +5748,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     main_assert!(app.staged_network_host_scenario.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
-    main_assert!(app.loader_screen.is_some());
+    main_assert!(app.loader.screen.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     main_assert!(app.startup_network.connection.is_none());
@@ -7011,7 +7011,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     // OpenScenario publishes 4 before InitNetworkHost begins, so the
     // loader installed around host preparation must retain that value
     // (src/C4Game.cpp:124-270,421-440).
-    main_assert_eq!(some(&app.loader_screen).state().progress() => 4);
+    main_assert_eq!(some(&app.loader.screen).state().progress() => 4);
 
     for _ in 0..3_000 {
         app.poll_startup_network_connection().test_value();
@@ -7185,7 +7185,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     // InitGame's script and definition phases
     // (src/C4Game.cpp:438-457,3872-3913).
     main_assert_eq!(some(&app.loading_state).last_progress => 7);
-    main_assert_eq!(some(&app.loader_screen).state().progress() => 7);
+    main_assert_eq!(some(&app.loader.screen).state().progress() => 7);
     main_assert!(app
         .network_start_wait
         .as_ref()
@@ -7234,7 +7234,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    main_assert_eq!(some(&app.loader_screen).state().progress() => 97);
+    main_assert_eq!(some(&app.loader.screen).state().progress() => 97);
     main_assert!(app.loading_state.as_ref().is_some_and(|loading| loading
         .log
         .iter()
@@ -7435,7 +7435,7 @@ fn compatibility_profile_notice_cannot_reopen_a_client_after_go_or_pause() {
     ] {
         let mut app = new_menu_app(320, 200);
         let fonts = app.assets.clonk_fonts.clone().test_value();
-        app.loader_screen = Some(
+        app.loader.screen = Some(
             LoaderScreen::new(
                 LoaderSelection::startup("LoaderCompatNotice.png")
                     .expect("valid client loader selection"),
@@ -7446,8 +7446,8 @@ fn compatibility_profile_notice_cannot_reopen_a_client_after_go_or_pause() {
             )
             .test_value(),
         );
-        app.loader_error = None;
-        app.loader_render_error = None;
+        app.loader.error = None;
+        app.loader.render_error = None;
         let (mut app, events, _commands) =
             networked_client_lobby_with_commands(app, "Client", client_lobby_state());
         app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
@@ -8165,7 +8165,7 @@ fn configured_automatic_lobby_preload_runs_off_thread_and_activation_reuses_it()
         .test_value();
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     let mut staged = prepare_tutorial_host_lobby(&app, repository);
-    app.loader_screen = staged.loader_screen.take();
+    app.loader.screen = staged.loader_screen.take();
     app.staged_network_host_scenario = Some(staged);
     let (manager, _events) = NetworkManager::test_stub();
     let mode = NetworkMode::Host(lobby_fixture!(host: 11_112, "Exact Host".to_string(), None));
@@ -9144,7 +9144,7 @@ fn go_status_request_deletes_client_lobby_and_suppresses_stale_ready_reply() {
     // a reply (src/C4Network2.cpp:475-515,1673-1695,2010-2029).
     let mut app = new_menu_app(320, 200);
     let fonts = app.assets.clonk_fonts.clone().test_value();
-    app.loader_screen = Some(
+    app.loader.screen = Some(
         LoaderScreen::new(
             LoaderSelection::startup("LoaderClientGo.png").expect("valid client loader selection"),
             ImageData::new(1, 1, vec![7, 8, 9, 255]),
@@ -9154,8 +9154,8 @@ fn go_status_request_deletes_client_lobby_and_suppresses_stale_ready_reply() {
         )
         .test_value(),
     );
-    app.loader_error = None;
-    app.loader_render_error = None;
+    app.loader.error = None;
+    app.loader.render_error = None;
     let (mut app, event_tx, mut commands) =
         networked_client_lobby_with_commands(app, "Client", client_lobby_state());
     app.startup.view = StartupView::NetworkLobby;

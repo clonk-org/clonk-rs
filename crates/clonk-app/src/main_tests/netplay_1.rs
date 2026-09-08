@@ -117,7 +117,7 @@ fn n1_joined_client_app_with_commands() -> (GameApp, network::TestNetworkCommand
 }
 
 fn n1_install_loading_state(app: &mut GameApp) {
-    let resources = app.loader_screen.test_ref().resources().clone();
+    let resources = app.loader.screen.test_ref().resources().clone();
     let (_sender, receiver) = mpsc::channel();
     app.loading_state = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
@@ -2715,7 +2715,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
     );
     main_assert!(app.staged_network_host_scenario.is_none());
     // PreInit rebuilds the loader screen (src/C4Application.cpp:242-247,373-389).
-    main_assert!(app.loader_screen.is_some());
+    main_assert!(app.loader.screen.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     let mut frame = vec![0x4c; 800 * 600 * 4];
@@ -2939,7 +2939,7 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
             if detail.contains("transferable scenario")
     ));
 
-    app.loader_render_config = Some(LoaderRenderConfig::new(2.0, false).test_value());
+    app.loader.render_config = Some(LoaderRenderConfig::new(2.0, false).test_value());
     app.prepare_network_host_scenario(make_frontend(), definition_load())
         .test_value();
     main_assert!(app.network.is_none());
@@ -4693,7 +4693,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
 
     app.synchronize_advanced_options_runtime();
     main_assert!(app.rendering.graphics.advanced_renderer_config().disable_gamma);
-    main_assert_eq!(app.loader_gamma => None);
+    main_assert_eq!(app.loader.gamma => None);
     main_assert_eq!(app.startup_active_gamma() => clonk_graphics::GammaRamp::identity());
     main_assert!(app.menu_backdrop_cache.key.is_none());
     main_assert!(app.menu_backdrop_cache.pixels.is_empty());
@@ -4706,7 +4706,7 @@ fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
     .test_value();
     app.synchronize_advanced_options_runtime();
     main_assert!(!app.rendering.graphics.advanced_renderer_config().disable_gamma);
-    main_assert_eq!(app.loader_gamma => Some(clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,])));
+    main_assert_eq!(app.loader.gamma => Some(clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,])));
     main_assert_eq!(app.startup_active_gamma() => clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,]));
 }
 
@@ -5481,7 +5481,7 @@ fn all_graphical_modes_produce_retained_scenes() {
     loading.rendering.graphics.set_runtime_sprite_filtering(1.0, false);
     loading.configure_native_startup_fonts(1.0, false);
     let fonts = loading.assets.clonk_fonts.clone().test_value();
-    loading.loader_screen = Some(
+    loading.loader.screen = Some(
         LoaderScreen::new(
             LoaderSelection::startup("LoaderRetained.png")
                 .expect("valid retained loader selection"),
@@ -5492,8 +5492,8 @@ fn all_graphical_modes_produce_retained_scenes() {
         )
         .test_value(),
     );
-    loading.loader_error = None;
-    loading.loader_render_error = None;
+    loading.loader.error = None;
+    loading.loader.render_error = None;
     loading.mode = AppMode::Loading;
     let loading_presentation = retained_test_presentation(&loading);
     let loading_frame = loading
@@ -5592,13 +5592,13 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
     for client in [false, true] {
         let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
         app.configure_native_startup_fonts(0.5, false);
-        app.loader_screen
+        app.loader.screen
             .test_mut()
             .update(LoaderUpdate::SetTitle("scale-fifty loader".into()));
-        app.loader_screen
+        app.loader.screen
             .test_mut()
             .update(LoaderUpdate::ReplaceLog(vec!["process".into()]));
-        app.loader_screen
+        app.loader.screen
             .test_mut()
             .update(LoaderUpdate::SetProcess(Some(50)));
         n1_install_loading_state(&mut app);
@@ -5644,13 +5644,13 @@ fn scale_three_host_start_wait_renders_after_native_loader_text() {
     let (_user_data, _guard, paths) = n1_repository_paths();
     let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     app.configure_native_startup_fonts(3.0, false);
-    app.loader_screen
+    app.loader.screen
         .test_mut()
         .update(LoaderUpdate::SetTitle("Session|host loader".into()));
-    app.loader_screen
+    app.loader.screen
         .test_mut()
         .update(LoaderUpdate::ReplaceLog(vec!["process".into()]));
-    app.loader_screen
+    app.loader.screen
         .test_mut()
         .update(LoaderUpdate::SetProcess(Some(73)));
     n1_install_loading_state(&mut app);
@@ -5674,7 +5674,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     let (_user_data, _guard, paths) = n1_repository_paths();
     let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     app.configure_native_startup_fonts(1.5, false);
-    app.loader_screen
+    app.loader.screen
         .test_mut()
         .update(LoaderUpdate::SetTitle("client loader".into()));
     n1_install_loading_state(&mut app);
@@ -5740,7 +5740,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
     main_assert!(tooltip_batch > upper_batch);
     main_assert!(plan.batches[tooltip_batch].logical_layer.is_some());
 
-    app.loader_screen = None;
+    app.loader.screen = None;
     let mut failed_frame = vec![0_u8; 640 * 480 * 4];
     let error = app
         .render_ordered_native_base(&mut failed_frame)

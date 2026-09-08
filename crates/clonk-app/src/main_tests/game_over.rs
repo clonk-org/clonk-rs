@@ -262,7 +262,7 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     wait_for_scenario_selector_discovery(&mut app);
 
     let (sender, receiver) = mpsc::channel();
-    app.loader_screen = loader_screen;
+    app.loader.screen = loader_screen;
     app.loading_state = Some(ScenarioLoadingState::new(
         frontend,
         loader_refreshed_resources,
@@ -287,8 +287,8 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     main_assert!(app.loading_state.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
-    main_assert!(app.loader_screen.is_some());
-    main_assert!(app.loader_error.is_none());
+    main_assert!(app.loader.screen.is_some());
+    main_assert!(app.loader.error.is_none());
     main_assert!(app.active_scenario.is_none());
     main_assert!(app.active_definition_load.is_none());
     main_assert!(app.active_global_gui_failures.is_empty());
@@ -1601,8 +1601,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         &mut host,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
     );
-    main_assert!(host.network.is_some(), "restart dropped the live host before its peer could follow: status={:?} loader={:?}", host.status_text, host.loader_render_error);
-    main_assert!(host.classic_host_lobby.is_some(), "restart did not rebuild the host lobby: status={:?} loader={:?}", host.status_text, host.loader_render_error);
+    main_assert!(host.network.is_some(), "restart dropped the live host before its peer could follow: status={:?} loader={:?}", host.status_text, host.loader.render_error);
+    main_assert!(host.classic_host_lobby.is_some(), "restart did not rebuild the host lobby: status={:?} loader={:?}", host.status_text, host.loader.render_error);
     pump_live_restart_apps_until(
         &mut host,
         &mut client,
@@ -6307,7 +6307,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
     let film_dialog = film_client.dialogs.messages.last().test_value();
     main_assert_eq!(film_dialog.state.buttons() => clonk_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO);
     main_assert_eq!(film_dialog.state.size() => clonk_frontend::message_dialog::MessageDialogSize::Fixed(400));
-    film_client.loader_render_error = Some("test restart blocker".to_string());
+    film_client.loader.render_error = Some("test restart blocker".to_string());
     finish_abort_dialog(
         &mut film_client,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,

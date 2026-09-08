@@ -4215,7 +4215,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     main_assert!(matches!(restart_host.mode, AppMode::Running));
     main_assert!(restart_host.abort_restart_pending, "a rejected vote leaves Application.NextMission scheduled");
     main_assert!(restart_host.dialogs.messages.iter().any(|dialog| matches!(dialog.continuation, MessageDialogContinuation::LeagueSurrender)));
-    restart_host.loader_render_error = Some("test restart blocker".to_string());
+    restart_host.loader.render_error = Some("test restart blocker".to_string());
     restart_host.hard_abort_running_game().test_value();
     main_assert!(!restart_host.abort_restart_pending);
     main_assert_eq!(restart_host.scensel.mode => ScenarioSelectorMode::NetworkHost);

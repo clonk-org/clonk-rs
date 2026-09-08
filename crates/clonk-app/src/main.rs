@@ -3037,13 +3037,6 @@ impl GameApp {
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,
-            loader_screen,
-            loader_error,
-            loader_render_config: Some(LoaderRenderConfig::scale_one(
-                DisplayOptions::load(paths).point_filtering,
-            )),
-            loader_render_error: None,
-            loader_gamma,
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
             classic_record_stream_activation_pending: false,
@@ -3196,7 +3189,6 @@ impl GameApp {
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
-            terminal_loader_frame_pending: false,
             boot_loading,
             auto_start_sandbox: false,
             auto_start_classic_command_line_scenario: false,
@@ -3324,6 +3316,16 @@ impl GameApp {
                 next_direct_reference_query_id: 0,
                 connection: None,
             },
+            loader: LoaderScreenState {
+                screen: loader_screen,
+                error: loader_error,
+                render_config: Some(LoaderRenderConfig::scale_one(
+                    DisplayOptions::load(paths).point_filtering,
+                )),
+                render_error: None,
+                gamma: loader_gamma,
+                terminal_frame_pending: false,
+            },
             league_signup_consumed_keys: HashSet::new(),
             league_signup_pointer_capture: false,
             league_signup_pointer_position: None,
@@ -3428,7 +3430,7 @@ impl GameApp {
         &self,
         source: Option<&ClassicNativeFontSource>,
     ) -> Option<Arc<clonk_frontend::clonk_fonts::NativeClonkFontSet>> {
-        let scale = self.loader_render_config?.application_scale();
+        let scale = self.loader.render_config?.application_scale();
         if scale <= 0.0 || !scale.is_finite() {
             return None;
         }
@@ -3481,7 +3483,8 @@ impl GameApp {
                     .as_ref()
                     .is_some_and(|wait| wait.visible))
             && self
-                .loader_render_config
+                .loader
+                .render_config
                 .is_some_and(|config| config.application_scale() == scale);
         (matches!(self.mode, AppMode::Menu | AppMode::Running) || ordered_loading_overlay)
             && scale > 0.0
@@ -8134,7 +8137,7 @@ impl GameApp {
         if let Some(resources) = resources {
             let fonts = resources.fonts().clone();
             self.install_active_classic_fonts(fonts, tooltip_font, native_font_source);
-            if let Some(loader) = self.loader_screen.as_mut() {
+            if let Some(loader) = self.loader.screen.as_mut() {
                 loader.replace_resources(resources);
             }
         }
@@ -9393,7 +9396,7 @@ impl GameApp {
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
         self.install_session_game_tick_delay();
-        self.terminal_loader_frame_pending = false;
+        self.loader.terminal_frame_pending = false;
         let retain_prepared_client_queues =
             matches!(self.network_mode, Some(NetworkMode::Client(_)))
                 && self
