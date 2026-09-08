@@ -32,19 +32,6 @@ impl GameApp {
                     || self.classic_host_lobby.is_some()))
     }
 
-    /// `Application.UseStartupDialog`: whether this session has a startup
-    /// generation for `QuitGame` to return to (C4Application.cpp:373-405)
-    /// rather than falling through to `Quit()`.
-    ///
-    /// `ParseCommandLine` computes it from the launch parameters
-    /// (C4Game.cpp:3321) — which is what
-    /// [`Self::failed_open_game_returns_to_startup`] already reports — and a
-    /// console `/open` or `/close` puts it back afterwards
-    /// (C4Application.cpp:598-612,617-624).
-    pub(crate) fn startup_dialog_in_use(&self) -> bool {
-        self.console_session.restored_startup_dialog || self.failed_open_game_returns_to_startup()
-    }
-
     /// Return a finished console round to the state its next command is
     /// accepted from, the way `QuitGame` reaches `C4AS_PreInit` and `PreInit`
     /// then settles on `C4AS_Startup` (C4Application.cpp:373-405,239-293).
@@ -94,10 +81,6 @@ impl GameApp {
         if boot_still_loading {
             self.mode = AppMode::Loading;
         }
-    }
-
-    pub(crate) fn developer_console_editing(&self) -> bool {
-        self.console_session.enabled && self.developer.console_editing_enabled
     }
 
     fn developer_console_strings(&self) -> ConsoleStrings {
@@ -159,7 +142,9 @@ impl GameApp {
         let network_enabled = self.network.is_some();
         let network_host =
             network_enabled && matches!(self.network_mode, Some(NetworkMode::Host(_)));
-        let editing = self.developer_console_editing();
+        let editing = self
+            .console_session
+            .developer_console_editing(&self.developer);
         let players = self.developer_console_player_menu_entries(editing);
         let clients = self.developer_console_net_menu_entries();
         let completions = developer_console_completion_entries(
@@ -199,7 +184,9 @@ impl GameApp {
                 } else {
                     self.runtime_halt_active()
                 },
-            runtime_record_possible: self.developer_console_runtime_record_possible(),
+            runtime_record_possible: self
+                .records
+                .runtime_record_possible(self.mode == AppMode::Running),
             network_enabled,
             network_host,
             players,
@@ -223,16 +210,6 @@ impl GameApp {
         }
         let view = self.developer_console_view_model();
         self.developer.console.set_view_model(view)
-    }
-
-    pub(crate) fn drain_console_log_capture(&mut self) {
-        let Some(capture) = self.console_session.log_capture.as_ref() else {
-            return;
-        };
-        let output = capture.take();
-        if !output.is_empty() {
-            self.developer.console.out(&output);
-        }
     }
 
     pub(crate) fn show_developer_console_message(
@@ -379,17 +356,23 @@ impl GameApp {
                     self.apply_developer_cursor_mode_change(previous);
                 }
                 DeveloperConsoleAction::SubmitInput(input) => {
-                    let editing = self.developer_console_editing();
+                    let editing = self
+                        .console_session
+                        .developer_console_editing(&self.developer);
                     self.process_developer_console_input(&input, editing)?;
                 }
                 DeveloperConsoleAction::JoinPlayers(paths) => {
-                    let editing = self.developer_console_editing();
+                    let editing = self
+                        .console_session
+                        .developer_console_editing(&self.developer);
                     if let Err(error) = self.developer_console_join_players(&paths, editing) {
                         self.developer.console.out(&error);
                     }
                 }
                 DeveloperConsoleAction::EliminatePlayer(player) => {
-                    let editing = self.developer_console_editing();
+                    let editing = self
+                        .console_session
+                        .developer_console_editing(&self.developer);
                     if let Err(error) = self.developer_console_quit_player(player, editing) {
                         self.developer.console.out(&error);
                     }
@@ -906,20 +889,16 @@ impl GameApp {
         Ok(true)
     }
 
-    pub(crate) fn developer_console_runtime_record_possible(&self) -> bool {
-        self.mode == AppMode::Running
-            && !self.records.runtime_requested
-            && self.records.playback.is_none()
-            && self.records.session.is_none()
-    }
-
     /// `C4GameControl::RequestRuntimeRecord`: disable the item immediately,
     /// then let the next ordinary queued Synchronize start the recorder with
     /// that complete executing control list as its first chunk.
     pub(crate) fn developer_console_request_runtime_record(
         &mut self,
     ) -> std::result::Result<bool, String> {
-        if !self.developer_console_runtime_record_possible() {
+        if !self
+            .records
+            .runtime_record_possible(self.mode == AppMode::Running)
+        {
             return Ok(false);
         }
         self.records.runtime_requested = true;
@@ -1825,84 +1804,18 @@ impl GameApp {
     }
 
     pub(crate) fn start_recording(&mut self, force: bool) -> std::result::Result<bool, String> {
-        self.engine.set_recording_active(false);
-        if !force && !self.records.enabled {
-            self.records.session = None;
-            return Ok(false);
-        }
-        let Some(mut template) = self.records.template.take() else {
-            self.records.session = None;
-            return Err("recording storage was not prepared".to_string());
-        };
-        // C++ creates and unpacks the record group before it opens CtrlRec.
-        // Persist the initial group now so a league start cannot succeed with
-        // an unwritable destination and a crash still leaves the initial save.
-        if !self.process_group_maker.as_bytes().is_empty() {
-            template
-                .group
-                .set_maker_bytes_recursively(self.process_group_maker.as_bytes());
-        }
-        let initial_group = template.group.pack().map_err(|error| error.to_string())?;
-        replace_file_from_same_directory(&template.output_path, &initial_group).map_err(
-            |error| {
-                format!(
-                    "failed to create {}: {error}",
-                    template.output_path.display()
-                )
-            },
-        )?;
-        let packed = Group::open(&template.output_path).map_err(|error| error.to_string())?;
-        unpack_recording_group(&packed, &template.output_path)
-            .map_err(|error| format!("failed to unpack record group: {error}"))?;
-        let ctrl_rec_path = template.output_path.join("CtrlRec.c4b");
-        let ctrl_rec = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&ctrl_rec_path)
-            .map_err(|error| format!("failed to create {}: {error}", ctrl_rec_path.display()))?;
-        // Only initial league records call C4GameControl::StartRecord with
-        // streaming enabled. FileRecord's non-initial StartRecord(false,
-        // false) remains a local record even during a league session.
-        let league_streaming = !template.initial_stream_chunk.is_empty()
-            && self
-                .network
-                .as_ref()
-                .is_some_and(NetworkManager::league_record_stream_available);
-        if league_streaming {
-            let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
-            let network = self
-                .network
-                .as_ref()
-                .expect("stream availability requires a network manager");
-            network
-                .start_league_record_stream(now)
-                .map_err(|error| error.to_string())?;
-            network
-                .append_league_record_bytes(&template.initial_stream_chunk)
-                .map_err(|error| error.to_string())?;
-        }
-        self.records.session = Some(RecordingSession::new(template, league_streaming, ctrl_rec));
-        self.engine.set_recording_active(true);
-        Ok(true)
+        self.records.start(
+            force,
+            &mut self.engine,
+            self.process_group_maker.as_bytes(),
+            self.network.as_ref(),
+        )
     }
 
     pub(crate) fn record_control_packet(&mut self, packet: &clonk_engine::ControlPacket) {
         self.record_control_resource_file(packet);
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-        let stream_delta = if let Some(session) = self.records.session.as_mut() {
-            if let Err(error) = session.writer.record_packet(frame, packet) {
-                tracing::warn!(%error, "failed to append immediate CtrlRec packet");
-                None
-            } else {
-                if let Err(error) = session.flush_control_delta() {
-                    tracing::warn!(%error, "failed to flush immediate CtrlRec packet");
-                }
-                session.take_stream_delta()
-            }
-        } else {
-            None
-        };
+        let stream_delta = self.records.record_packet(frame, packet);
         self.append_league_record_stream_bytes(stream_delta);
     }
 
@@ -1911,19 +1824,7 @@ impl GameApp {
             self.record_control_resource_file(packet);
         }
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-        let stream_delta = if let Some(session) = self.records.session.as_mut() {
-            if let Err(error) = session.writer.record_controls(frame, packets) {
-                tracing::warn!(%error, "failed to append CtrlRec control list");
-                None
-            } else {
-                if let Err(error) = session.flush_control_delta() {
-                    tracing::warn!(%error, "failed to flush CtrlRec control list");
-                }
-                session.take_stream_delta()
-            }
-        } else {
-            None
-        };
+        let stream_delta = self.records.record_batch(frame, packets);
         self.append_league_record_stream_bytes(stream_delta);
     }
 

@@ -5349,7 +5349,7 @@ fn a_dedicated_server_quits_when_its_command_line_record_stream_fails() {
     app.records.classic_stream_activation_pending = true;
     app.mode = AppMode::Loading;
 
-    main_assert!(!app.startup_dialog_in_use());
+    main_assert!(!app.console_session.startup_dialog_in_use(app.failed_open_game_returns_to_startup()));
     app.finish_scenario_loading_failure("controlled headless load failure".to_string(), false)
         .test_value();
 

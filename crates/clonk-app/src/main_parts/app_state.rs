@@ -491,6 +491,117 @@ pub(crate) struct RecordingState {
     pub(crate) classic_stream_activation_pending: bool,
 }
 
+impl RecordingState {
+    pub(crate) fn start(
+        &mut self,
+        force: bool,
+        engine: &mut Engine,
+        maker_bytes: &[u8],
+        network: Option<&NetworkManager>,
+    ) -> std::result::Result<bool, String> {
+        engine.set_recording_active(false);
+        if !force && !self.enabled {
+            self.session = None;
+            return Ok(false);
+        }
+        let Some(mut template) = self.template.take() else {
+            self.session = None;
+            return Err("recording storage was not prepared".to_string());
+        };
+        // C++ creates and unpacks the record group before it opens CtrlRec.
+        // Persist the initial group now so a league start cannot succeed with
+        // an unwritable destination and a crash still leaves the initial save.
+        if !maker_bytes.is_empty() {
+            template.group.set_maker_bytes_recursively(maker_bytes);
+        }
+        let initial_group = template.group.pack().map_err(|error| error.to_string())?;
+        replace_file_from_same_directory(&template.output_path, &initial_group).map_err(
+            |error| {
+                format!(
+                    "failed to create {}: {error}",
+                    template.output_path.display()
+                )
+            },
+        )?;
+        let packed = Group::open(&template.output_path).map_err(|error| error.to_string())?;
+        unpack_recording_group(&packed, &template.output_path)
+            .map_err(|error| format!("failed to unpack record group: {error}"))?;
+        let ctrl_rec_path = template.output_path.join("CtrlRec.c4b");
+        let ctrl_rec = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&ctrl_rec_path)
+            .map_err(|error| format!("failed to create {}: {error}", ctrl_rec_path.display()))?;
+        // Only initial league records call C4GameControl::StartRecord with
+        // streaming enabled. FileRecord's non-initial StartRecord(false,
+        // false) remains a local record even during a league session.
+        let league_streaming = !template.initial_stream_chunk.is_empty()
+            && network.is_some_and(NetworkManager::league_record_stream_available);
+        if league_streaming {
+            let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+            let network = network.expect("stream availability requires a network manager");
+            network
+                .start_league_record_stream(now)
+                .map_err(|error| error.to_string())?;
+            network
+                .append_league_record_bytes(&template.initial_stream_chunk)
+                .map_err(|error| error.to_string())?;
+        }
+        self.session = Some(RecordingSession::new(template, league_streaming, ctrl_rec));
+        engine.set_recording_active(true);
+        Ok(true)
+    }
+
+    /// One CtrlRec write: append it, flush the live file, and hand back the
+    /// league stream delta it produced. A failed append is logged and yields
+    /// nothing, as `C4Record::Rec` never fails the control it records.
+    fn record_delta<E: std::fmt::Display>(
+        &mut self,
+        append_failure: &'static str,
+        flush_failure: &'static str,
+        write: impl FnOnce(&mut ControlRecordWriter) -> std::result::Result<(), E>,
+    ) -> Option<Vec<u8>> {
+        let session = self.session.as_mut()?;
+        if let Err(error) = write(&mut session.writer) {
+            tracing::warn!(%error, "{append_failure}");
+            return None;
+        }
+        if let Err(error) = session.flush_control_delta() {
+            tracing::warn!(%error, "{flush_failure}");
+        }
+        session.take_stream_delta()
+    }
+
+    pub(crate) fn record_packet(
+        &mut self,
+        frame: u32,
+        packet: &clonk_engine::ControlPacket,
+    ) -> Option<Vec<u8>> {
+        self.record_delta(
+            "failed to append immediate CtrlRec packet",
+            "failed to flush immediate CtrlRec packet",
+            |writer| writer.record_packet(frame, packet),
+        )
+    }
+
+    pub(crate) fn record_batch(
+        &mut self,
+        frame: u32,
+        packets: &[clonk_engine::ControlPacket],
+    ) -> Option<Vec<u8>> {
+        self.record_delta(
+            "failed to append CtrlRec control list",
+            "failed to flush CtrlRec control list",
+            |writer| writer.record_controls(frame, packets),
+        )
+    }
+
+    pub(crate) fn runtime_record_possible(&self, running: bool) -> bool {
+        running && !self.runtime_requested && self.playback.is_none() && self.session.is_none()
+    }
+}
+
 /// The presentation half of the app: frame counters and refresh ceilings
 /// the event loop paces by, the plan that carries scale-native text over
 /// the upscaled base, and the retained-GPU capture flags. `GameApp`
@@ -1131,6 +1242,35 @@ pub(crate) struct ConsoleSessionState {
     /// Thread-safe tracing mirror drained by the console window each app
     /// iteration. It remains `None` for the fullscreen client.
     pub(crate) log_capture: Option<clonk_logging::ConsoleLogCapture>,
+}
+
+impl ConsoleSessionState {
+    /// `Application.UseStartupDialog`: whether this session has a startup
+    /// generation for `QuitGame` to return to (C4Application.cpp:373-405)
+    /// rather than falling through to `Quit()`.
+    ///
+    /// `ParseCommandLine` computes it from the launch parameters
+    /// (C4Game.cpp:3321) — which is what
+    /// [`GameApp::failed_open_game_returns_to_startup`] already reports — and a
+    /// console `/open` or `/close` puts it back afterwards
+    /// (C4Application.cpp:598-612,617-624).
+    pub(crate) fn startup_dialog_in_use(&self, failed_open_game_returns_to_startup: bool) -> bool {
+        self.restored_startup_dialog || failed_open_game_returns_to_startup
+    }
+
+    pub(crate) fn developer_console_editing(&self, developer: &DeveloperToolsState) -> bool {
+        self.enabled && developer.console_editing_enabled
+    }
+
+    pub(crate) fn drain_log_capture(&self, console: &mut DeveloperConsole) {
+        let Some(capture) = self.log_capture.as_ref() else {
+            return;
+        };
+        let output = capture.take();
+        if !output.is_empty() {
+            console.out(&output);
+        }
+    }
 }
 
 pub(crate) struct GameApp {

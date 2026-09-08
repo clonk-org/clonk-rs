@@ -1544,7 +1544,8 @@ fn run() -> Result<()> {
                     }
                     app.console_edit_cursor_tick();
                     app.poll_developer_file_monitor();
-                    app.drain_console_log_capture();
+                    app.console_session
+                        .drain_log_capture(&mut app.developer.console);
                     app.drain_game_log_capture();
                     // Ahead of every path that can leave this arm early, so a
                     // password the last frame's script earned is already on disk

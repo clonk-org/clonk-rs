@@ -3362,10 +3362,10 @@ fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
     let tick = app.local_control_submission_tick();
 
-    main_assert!(app.developer_console_runtime_record_possible());
+    main_assert!(app.records.runtime_record_possible(app.mode == AppMode::Running));
     main_assert!(app.developer_console_request_runtime_record().expect("queue console runtime record"));
     main_assert!(app.records.runtime_requested);
-    main_assert!(!app.developer_console_runtime_record_possible());
+    main_assert!(!app.records.runtime_record_possible(app.mode == AppMode::Running));
     main_assert!(app.records.session.is_none());
 
     let decided = commands.take_submitted_decided_controls();

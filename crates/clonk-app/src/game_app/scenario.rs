@@ -879,7 +879,11 @@ impl GameApp {
         // with no startup generation behind it ends the process rather than
         // settling into a menu it never came from — which on a headless server
         // is a silent hang with nothing left to run.
-        if prepared_go || !self.startup_dialog_in_use() {
+        if prepared_go
+            || !self
+                .console_session
+                .startup_dialog_in_use(self.failed_open_game_returns_to_startup())
+        {
             self.request_exit("a scenario failed to load with no menu to return to");
         } else if returns_to_startup {
             if let Some(audio) = self.sound.context.as_ref() {

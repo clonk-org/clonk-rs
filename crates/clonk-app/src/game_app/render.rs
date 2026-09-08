@@ -3116,7 +3116,9 @@ impl GameApp {
         let Some(projection) = self.console_viewports.projections.get(&identity).copied() else {
             return;
         };
-        let editing = self.developer_console_editing();
+        let editing = self
+            .console_session
+            .developer_console_editing(&self.developer);
         let outcome = {
             // `drop_file` asks its three questions strictly in sequence — the
             // id, whether it is already loaded, and only then the load — and
@@ -3224,7 +3226,8 @@ impl GameApp {
             .map_or(0, |object| object.contents.len());
         let enablement = context_menu(
             self.console_cursor_mode(),
-            self.developer_console_editing(),
+            self.console_session
+                .developer_console_editing(&self.developer),
             !selection.is_empty(),
             contents,
         );
@@ -4260,7 +4263,8 @@ impl GameApp {
                     &text,
                     self.developer.property_scroll,
                     &script,
-                    self.developer_console_editing(),
+                    self.console_session
+                        .developer_console_editing(&self.developer),
                     &self.runtime_resource_text("IDS_BTN_RELOADDEF", "Reload def"),
                 );
             }
@@ -4540,7 +4544,8 @@ impl GameApp {
     /// `Console.Editing` alone (`C4PropertyDlg.cpp:117`), and its argument is
     /// `idSelectedDef`, which only a single selection ever sets.
     pub(crate) fn developer_property_reload_target(&self) -> Option<String> {
-        self.developer_console_editing()
+        self.console_session
+            .developer_console_editing(&self.developer)
             .then(|| self.developer_property_selected_definition())
             .flatten()
     }
@@ -4556,7 +4561,11 @@ impl GameApp {
     /// (`C4PropertyDlg.cpp:117`) is the entry's whole gate; a disabled combo
     /// box takes no keystroke. Returns whether it did.
     pub(crate) fn type_developer_property_script(&mut self, text: &str) -> bool {
-        if !self.developer_console_editing() || text.is_empty() {
+        if !self
+            .console_session
+            .developer_console_editing(&self.developer)
+            || text.is_empty()
+        {
             return false;
         }
         self.developer.property_script_input.push_str(text);
@@ -4565,7 +4574,10 @@ impl GameApp {
 
     /// Remove the last character, if the control is enabled.
     pub(crate) fn backspace_developer_property_script(&mut self) -> bool {
-        if !self.developer_console_editing() {
+        if !self
+            .console_session
+            .developer_console_editing(&self.developer)
+        {
             return false;
         }
         self.developer.property_script_input.pop().is_some()
@@ -4578,7 +4590,11 @@ impl GameApp {
     /// the `EMMO_Script` control this already had. Returns whether anything
     /// was submitted.
     pub(crate) fn submit_developer_property_script(&mut self) -> Result<bool, EngineError> {
-        if !self.developer_console_editing() || self.developer.property_script_input.is_empty() {
+        if !self
+            .console_session
+            .developer_console_editing(&self.developer)
+            || self.developer.property_script_input.is_empty()
+        {
             return Ok(false);
         }
         let script = std::mem::take(&mut self.developer.property_script_input);
@@ -5099,7 +5115,10 @@ impl GameApp {
     /// the port's own choice of surface, the one the save and reload notices
     /// already use.
     pub(crate) fn console_editing_ok(&mut self) -> bool {
-        if self.developer_console_editing() {
+        if self
+            .console_session
+            .developer_console_editing(&self.developer)
+        {
             return true;
         }
         self.developer.tools.clear_hold();
@@ -5315,7 +5334,9 @@ impl GameApp {
     /// (!Game.HaltCount) if (Console.Editing) ApplyToolFill();` (`:60-67`).
     fn console_draw_tools_tick(&mut self) {
         let halted = self.runtime_halt_active();
-        let editing = self.developer_console_editing();
+        let editing = self
+            .console_session
+            .developer_console_editing(&self.developer);
         let Some(control) = self.developer.tools.execute_frame(halted, editing) else {
             self.edit_cursor.tick_frame = None;
             return;

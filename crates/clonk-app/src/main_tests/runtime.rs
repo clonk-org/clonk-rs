@@ -6012,7 +6012,7 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
     );
 
     // Editing, but nothing selected.
-    runtime_assert!(app.developer_console_editing());
+    runtime_assert!(app.console_session.developer_console_editing(&app.developer));
     runtime_assert_eq!(app.developer_property_reload_target() => None);
     runtime_assert!(
         !app.developer_property_page_click(button, extent),
@@ -6184,7 +6184,7 @@ fn the_property_script_entry_is_gated_on_editing_and_survives_a_refresh() {
     let mut app = new_lightweight_running_sandbox_app();
     app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
-    runtime_assert!(app.developer_console_editing());
+    runtime_assert!(app.console_session.developer_console_editing(&app.developer));
 
     runtime_assert!(app.developer_property_script_input().is_empty());
     runtime_assert!(app.type_developer_property_script("Mark("));
@@ -6211,7 +6211,7 @@ fn the_property_script_entry_is_gated_on_editing_and_survives_a_refresh() {
 
     // Editing off: the control is disabled and takes nothing.
     app.developer.console_editing_enabled = false;
-    runtime_assert!(!app.developer_console_editing());
+    runtime_assert!(!app.console_session.developer_console_editing(&app.developer));
     runtime_assert!(
         !app.type_developer_property_script("X"),
         "a disabled combo box accepts no input"
