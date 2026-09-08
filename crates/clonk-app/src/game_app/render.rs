@@ -1445,7 +1445,8 @@ impl GameApp {
                     // C4GUI::ScrollBar repeats held arrows from DrawElement,
                     // so advance once per presentation rather than per update.
                     let _ = self
-                        .startup_network_dialog
+                        .startup_network
+                        .dialog
                         .as_mut()
                         .is_some_and(|dialog| dialog.tick_scrollbar());
                 }
@@ -1666,7 +1667,7 @@ impl GameApp {
                     &mut self.menu_state,
                     &self.scensel.entry_enabled,
                     scenario_loading_label.as_deref(),
-                    self.startup_network_dialog.as_ref(),
+                    self.startup_network.dialog.as_ref(),
                     self.startup.player_dialog.as_ref(),
                     &self.startup.player_models,
                     &self.startup.crew_models,

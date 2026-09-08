@@ -1201,7 +1201,7 @@ impl GameApp {
     }
 
     pub(crate) fn show_irc_login_on_all_controllers(&mut self) {
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.show_chat_login();
         }
         if let Some(dialog) = self.chat.external_dialog.as_mut() {

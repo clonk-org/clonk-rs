@@ -2982,21 +2982,8 @@ impl GameApp {
             menu_state,
             main_menu_state,
             startup_tooltip: ClassicTooltipTracker::new(),
-            startup_network_dialog: None,
             chat: ChatState::default(),
             pending_editor_launch: None,
-            startup_game_search: None,
-            #[cfg(test)]
-            startup_game_search_test_events: VecDeque::new(),
-            startup_network_last_refresh: None,
-            startup_masterserver_next_query_at: None,
-            startup_masterserver_request_timeout_at: None,
-            startup_network_refresh_waiting_for_clear: false,
-            startup_network_ignore_redirect: false,
-            startup_game_references: Vec::new(),
-            startup_discovery_reference_queries: Vec::new(),
-            startup_direct_reference_queries: Vec::new(),
-            next_startup_direct_reference_query_id: 0,
             network_game_advertiser: None,
             advertised_game_reference: None,
             startup: StartupDialogState {
@@ -3130,7 +3117,6 @@ impl GameApp {
             ready_check_toast_backend: ready_check_backend::ReadyCheckToastBackend::default(),
             control_messages,
             league_votes: LeagueVoteState::default(),
-            startup_network_connection: None,
             pending_network_host_preparation: None,
             classic_direct_reference_query: None,
             pending_network_join: None,
@@ -3321,6 +3307,22 @@ impl GameApp {
                 key_event_suppresses_text: false,
                 runtime_key_config_cache: OnceLock::new(),
                 scoreboard_tab_raw_pressed: false,
+            },
+            startup_network: StartupNetworkState {
+                dialog: None,
+                game_search: None,
+                #[cfg(test)]
+                game_search_test_events: VecDeque::new(),
+                last_refresh: None,
+                masterserver_next_query_at: None,
+                masterserver_request_timeout_at: None,
+                refresh_waiting_for_clear: false,
+                ignore_redirect: false,
+                game_references: Vec::new(),
+                discovery_reference_queries: Vec::new(),
+                direct_reference_queries: Vec::new(),
+                next_direct_reference_query_id: 0,
+                connection: None,
             },
             league_signup_consumed_keys: HashSet::new(),
             league_signup_pointer_capture: false,
@@ -3798,7 +3800,7 @@ impl GameApp {
         self.main_menu_state.set_pointer_position(None);
 
         if self.mode == AppMode::Menu {
-            if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            if let Some(dialog) = self.startup_network.dialog.as_mut() {
                 dialog.resize(width as i32, height as i32);
                 dialog.pointer_left();
             }
@@ -6814,7 +6816,7 @@ impl GameApp {
         if matches!(self.mode, AppMode::Menu) {
             match self.startup.view {
                 StartupView::NetworkGame => {
-                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                    if let Some(dialog) = self.startup_network.dialog.as_mut() {
                         dialog.cancel_interaction();
                     }
                 }

@@ -4681,7 +4681,7 @@ fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
     app.test_cursor(games);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::GameList);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::GameList);
 
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
@@ -4855,7 +4855,7 @@ fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
         "Network D-left traverses focus",
     );
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::ChatButton);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().focused_control() => clonk_frontend::startup_netdlg::NetDlgControl::ChatButton);
 
     app.startup.player_models
         .push(clonk_frontend::startup_plrsel::PlrSelPlayer {
@@ -6588,13 +6588,13 @@ fn platform_ime_follows_the_shell_mode_and_console_ownership() {
     app.window_active = true;
 
     let (_startup_sender, startup_receiver) = mpsc::channel();
-    app.startup_network_connection = Some(StartupNetworkConnection::new(
+    app.startup_network.connection = Some(StartupNetworkConnection::new(
         startup_receiver,
         None,
         StartupNetworkPurpose::StagedHost,
     ));
     main_assert!(!app.platform_ime_allowed());
-    app.startup_network_connection = None;
+    app.startup_network.connection = None;
 
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(

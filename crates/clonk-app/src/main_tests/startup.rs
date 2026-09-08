@@ -617,7 +617,7 @@ fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
         net_metrics,
     );
     network.resize(640, 480);
-    app.startup_network_dialog = Some(network);
+    app.startup_network.dialog = Some(network);
     let net_layout = clonk_frontend::startup_netdlg::net_dlg_layout(640, 480, &net_metrics);
     main_assert_eq!(app.network_game_tooltip_target_at(at_anchor(net_layout.title_anchor)) => Some(StartupTooltip::text("&Netzwerkstart")));
 
@@ -806,8 +806,8 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     activate_startup_network_chat(&mut app);
     main_assert!(app.network.is_none());
     main_assert_eq!(app.status_text => browser_status);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().chat_connection_state() => clonk_frontend::startup_netdlg::NetDlgChatConnectionState::Connected);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().chat_connection_state() => clonk_frontend::startup_netdlg::NetDlgChatConnectionState::Connected);
 
     let mut frame = vec![0xa5; 640 * 480 * 4];
     app.test_render(&mut frame);
@@ -828,14 +828,14 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     app.test_cursor(point);
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.startup_network_dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::GameList);
+    main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::GameList);
 
     app.show_main_menu();
     app.open_network_game_dialog();
     activate_startup_network_chat(&mut app);
     main_assert!(app.chat.client.is_some());
     main_assert_eq!(
-        app.startup_network_dialog
+        app.startup_network.dialog
             .as_ref()
             .unwrap()
             .chat_connection_state() =>
@@ -942,7 +942,7 @@ fn missing_startup_models_precede_status_and_leave_pixels_untouched() {
 
     for (view, missing) in cases {
         app.startup.view = view;
-        app.startup_network_dialog = None;
+        app.startup_network.dialog = None;
         app.startup.player_dialog = None;
         app.startup.options_dialog = None;
         app.startup.about_dialog = None;

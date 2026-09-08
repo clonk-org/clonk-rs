@@ -11,7 +11,7 @@ impl GameApp {
         self.loading_state.is_some()
             || self.auto_start_classic_command_line_scenario
             || self.classic_direct_reference_query.is_some()
-            || self.startup_network_connection.is_some()
+            || self.startup_network.connection.is_some()
             || self.pending_network_join.is_some()
             || self.staged_network_host_scenario.is_some()
             || self.lobby_preload_task.is_some()
@@ -65,7 +65,7 @@ impl GameApp {
             || self.network_mode.is_some()
             || self.network_lobby.is_some()
             || self.classic_host_lobby.is_some()
-            || self.startup_network_connection.is_some()
+            || self.startup_network.connection.is_some()
             || self.classic_direct_reference_query.is_some()
             || self.pending_network_join.is_some()
             || self.staged_network_host_scenario.is_some()

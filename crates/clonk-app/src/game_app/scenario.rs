@@ -727,7 +727,7 @@ impl GameApp {
                 self.scenario_game_options.cancel_interaction();
                 self.refresh_retained_network_dialog_internet();
                 self.replace_startup_view(StartupView::NetworkGame);
-                if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                if let Some(dialog) = self.startup_network.dialog.as_mut() {
                     dialog.pointer_left();
                 }
                 self.status_text.clear();

@@ -26,7 +26,7 @@ pub(crate) fn stage_network_lobby_checkpoint(
     scenario: FrontendScenario,
 ) -> Result<StartupPixelCheckpoint> {
     anyhow::ensure!(
-        app.startup_network_connection.is_none() && app.network.is_none(),
+        app.startup_network.connection.is_none() && app.network.is_none(),
         "network-lobby capture requires an idle network session"
     );
     let definition_load = app.scenario_seed_definition_load();
@@ -35,7 +35,7 @@ pub(crate) fn stage_network_lobby_checkpoint(
         .context("staging the real network host for presentation capture")?;
 
     let deadline = Instant::now() + CHECKPOINT_TIMEOUT;
-    while app.startup_network_connection.is_some() || app.pending_network_host_preparation.is_some()
+    while app.startup_network.connection.is_some() || app.pending_network_host_preparation.is_some()
     {
         app.poll_startup_network_connection()
             .map_err(anyhow::Error::from)
@@ -47,7 +47,7 @@ pub(crate) fn stage_network_lobby_checkpoint(
             Instant::now() < deadline,
             "network host did not reach its live lobby capture checkpoint"
         );
-        if app.startup_network_connection.is_some()
+        if app.startup_network.connection.is_some()
             || app.pending_network_host_preparation.is_some()
         {
             std::thread::sleep(Duration::from_millis(1));

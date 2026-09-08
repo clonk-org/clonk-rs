@@ -506,7 +506,8 @@ impl GameApp {
                     .as_mut()
                     .is_some_and(|dialog| dialog.controller.tick_edit_blink());
                 let _ = self
-                    .startup_network_dialog
+                    .startup_network
+                    .dialog
                     .as_mut()
                     .is_some_and(|dialog| dialog.tick_join_address_cursor());
                 let fade_finished = self.sound.resume_frontend_after_fade

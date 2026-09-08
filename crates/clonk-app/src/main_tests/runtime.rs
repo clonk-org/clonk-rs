@@ -8282,7 +8282,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     );
 
     attach_l040_network_dialog(&mut app);
-    app.startup_game_references = vec![clonk_network::NetworkGameReference {
+    app.startup_network.game_references = vec![clonk_network::NetworkGameReference {
         title: "HarpoonRace".to_string(),
         host_name: "Host".to_string(),
         state: "Lobby".to_string(),
@@ -8296,7 +8296,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     );
     for _ in 0..3 {
         app.sync_startup_network_game_rows();
-        let row = &app.startup_network_dialog.test_ref().games()[0];
+        let row = &app.startup_network.dialog.test_ref().games()[0];
         assert_eq!(row.title, "Loaded HarpoonRace on Host");
         let mut frame = vec![0_u8; 640 * 480 * 4];
         app.test_render(&mut frame);
