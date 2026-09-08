@@ -1837,7 +1837,7 @@ fn published_definition_wire_names(prepared: &PreparedHostBootstrap) -> Vec<Vec<
 
 fn install_test_classic_host_lobby(app: &mut GameApp) {
     app.startup.view = StartupView::NetworkLobby;
-    app.classic_host_lobby = Some(ClassicHostLobbyState {
+    app.lobby.classic_host = Some(ClassicHostLobbyState {
         controller: ClassicGameLobby::new(
             LobbyRole::Host,
             "Probe",
@@ -1880,7 +1880,7 @@ fn install_test_classic_host_team_lobby(
     clonk_engine::ControlPlayerInfoEntry,
 ) {
     install_test_classic_host_lobby(app);
-    let client = app.classic_host_lobby.test_ref().controller.rows()[0].clone();
+    let client = app.lobby.classic_host.test_ref().controller.rows()[0].clone();
     let player = LobbyRosterRow::Player(clonk_frontend::game_lobby::LobbyPlayerRow {
         id: 7,
         client_id: 0,
@@ -1908,7 +1908,7 @@ fn install_test_classic_host_team_lobby(
         5,
         vec![client, player],
     );
-    app.classic_host_lobby.test_mut().controller = controller;
+    app.lobby.classic_host.test_mut().controller = controller;
     let teams = [
         clonk_engine::TeamInfo::new(1, "Full current", 0x00f4_0000)
             .with_player_ids(vec![7])
@@ -1984,8 +1984,8 @@ fn install_classic_host_network_stub(
 
 fn install_test_free_savegame_player_row(app: &mut GameApp, player_id: i32) {
     install_test_classic_host_lobby(app);
-    let client = app.classic_host_lobby.test_ref().controller.rows()[0].clone();
-    app.classic_host_lobby.test_mut().controller.set_rows(vec![
+    let client = app.lobby.classic_host.test_ref().controller.rows()[0].clone();
+    app.lobby.classic_host.test_mut().controller.set_rows(vec![
         LobbyRosterRow::Header(LobbyHeaderRow {
             kind: LobbyRosterHeader::UnassignedSavegamePlayers,
             label: "Player assignment".to_string(),
@@ -3222,7 +3222,7 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     let mut settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Observer");
     settings.resource_directory = directory.path().to_path_buf();
     app.network_mode = Some(NetworkMode::Client(settings));
-    app.network_lobby = Some(
+    app.lobby.session = Some(
         NetworkLobbyState::new(7, "Observer".to_string(), false)
             .with_preloading(false, LobbyLabels::default()),
     );
@@ -3308,7 +3308,8 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
     }
     app.process_network_events().test_value();
     assert!(app
-        .network_lobby
+        .lobby
+        .session
         .as_ref()
         .is_some_and(|lobby| lobby.preload.eligible));
 
@@ -3336,12 +3337,12 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while !matches!(
-        app.lobby_preload_task.as_ref().map(|task| &task.state),
+        app.lobby.preload_task.as_ref().map(|task| &task.state),
         Some(LobbyPreloadTaskState::RemovingClientResource { .. })
     ) {
         app.poll_lobby_preload().test_value();
         assert!(
-            app.lobby_preload_task.is_some(),
+            app.lobby.preload_task.is_some(),
             "client preload ended before asynchronous removal"
         );
         assert!(Instant::now() < deadline, "client preload did not commit");
@@ -3356,9 +3357,9 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         b"preloaded"
     );
     assert!(app.client_combined_preload_file.is_owned());
-    assert!(app.lobby_preload_artifact.is_none());
+    assert!(app.lobby.preload_artifact.is_none());
     let (expected_hud, expected_textures, expected_render_info) = {
-        let task = app.lobby_preload_task.as_ref().test_value();
+        let task = app.lobby.preload_task.as_ref().test_value();
         let LobbyPreloadTaskState::RemovingClientResource { artifact, .. } = &task.state else {
             unreachable!("client removal is pending")
         };
@@ -3375,12 +3376,12 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         71
     );
     app.poll_lobby_preload().test_value();
-    assert!(app.lobby_preload_task.is_some());
+    assert!(app.lobby.preload_task.is_some());
     assert!(app.scenario_lifecycle.loading.is_none());
 
     release_tx.send(()).test_value();
     let mut commands = removal_observer.test_join();
-    while app.lobby_preload_task.is_some() {
+    while app.lobby.preload_task.is_some() {
         app.poll_lobby_preload().test_value();
         assert!(Instant::now() < deadline, "client preload did not install");
         thread::yield_now();
@@ -3399,7 +3400,8 @@ fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
         "C++ skips the already-preloaded first part and resumes at GraphicsResource::Init"
     );
     assert!(app
-        .lobby_preload_artifact
+        .lobby
+        .preload_artifact
         .as_ref()
         .and_then(|artifact| artifact.client.as_ref())
         .is_some_and(|client| client.scenario.is_none()));
@@ -3850,7 +3852,7 @@ fn runtime_join_data_loads_once_and_replays_catch_up_ticks_after_final_init() {
             .progress(),
         100
     );
-    assert!(app.network_start_wait.is_none());
+    assert!(app.lobby.start_wait.is_none());
     assert!(app.dialogs.messages.iter().all(|dialog| !matches!(
         dialog.continuation,
         MessageDialogContinuation::NetworkClientStartWait

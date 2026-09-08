@@ -62,12 +62,13 @@ impl GameApp {
     }
 
     pub(crate) fn sync_network_lobby_game_option_state(&mut self) {
-        if self.classic_host_lobby.is_some() {
+        if self.lobby.classic_host.is_some() {
             // The exact host lobby owns the retained strip lifecycle.
             return;
         }
         let Some((is_host, countdown)) = self
-            .network_lobby
+            .lobby
+            .session
             .as_ref()
             .map(|lobby| (lobby.is_host, lobby.controller.countdown().is_locked()))
         else {
@@ -108,23 +109,23 @@ impl GameApp {
     pub(crate) fn joined_network_lobby_active(&self) -> bool {
         self.mode == AppMode::Menu
             && self.startup.view == StartupView::NetworkLobby
-            && self.classic_host_lobby.is_none()
-            && self.network_lobby.is_some()
+            && self.lobby.classic_host.is_none()
+            && self.lobby.session.is_some()
     }
 
     pub(crate) fn classic_host_lobby_active(&self) -> bool {
         self.mode == AppMode::Menu
             && self.startup.view == StartupView::NetworkLobby
-            && self.classic_host_lobby.is_some()
+            && self.lobby.classic_host.is_some()
     }
 
     pub(crate) fn note_classic_lobby_non_pointer_input(&mut self) {
         if self.mode != AppMode::Menu || self.startup.view != StartupView::NetworkLobby {
             return;
         }
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.note_non_pointer_input();
-        } else if let Some(lobby) = self.network_lobby.as_mut() {
+        } else if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.sync_classic_controller();
             lobby.controller.note_non_pointer_input();
         } else {
@@ -136,7 +137,7 @@ impl GameApp {
     pub(crate) fn has_or_will_have_network_lobby(&self) -> bool {
         self.network.is_some()
             && matches!(self.mode, AppMode::Menu)
-            && (self.network_lobby.is_some() || self.classic_host_lobby.is_some())
+            && (self.lobby.session.is_some() || self.lobby.classic_host.is_some())
     }
 
     /// `C4Network2::isLobbyActive` is false as soon as a non-lobby status is
@@ -152,12 +153,12 @@ impl GameApp {
         {
             return false;
         }
-        self.network_lobby.is_some() || self.classic_host_lobby_active()
+        self.lobby.session.is_some() || self.classic_host_lobby_active()
     }
 
     pub(crate) fn acknowledge_initial_lobby_status_if_ready(&mut self) {
         if !self.initial_lobby_status_ack_pending
-            || self.network_lobby.is_none()
+            || self.lobby.session.is_none()
             || self.startup.view != StartupView::NetworkLobby
         {
             return;
@@ -380,7 +381,8 @@ impl GameApp {
     fn current_classic_lobby_option_rows(&self) -> Option<Vec<LobbyOptionRow>> {
         let mode = self.network_mode.as_ref()?;
         let runtime_join_allowed = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .is_some_and(|lobby| lobby.runtime_join_allowed);
         let control_rate = self
@@ -421,11 +423,13 @@ impl GameApp {
     /// controller is refreshed on exactly the same cadence as the host's.
     pub(crate) fn refresh_classic_lobby_options(&mut self, force: bool) -> bool {
         let host_active = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .is_some_and(|lobby| lobby.controller.active_sheet() == LobbySheet::Options);
         let joined_active = self
-            .network_lobby
+            .lobby
+            .session
             .as_ref()
             .is_some_and(|lobby| lobby.active_sheet == LobbySheet::Options);
         if !host_active && !joined_active {
@@ -436,7 +440,7 @@ impl GameApp {
         };
         let mut changed = false;
         if host_active {
-            if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.classic_host.as_mut() {
                 let host_changed = lobby.controller.option_rows() != rows;
                 if force || host_changed {
                     lobby.controller.set_option_rows(rows.clone());
@@ -445,7 +449,7 @@ impl GameApp {
             }
         }
         if joined_active {
-            if let Some(lobby) = self.network_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.session.as_mut() {
                 let joined_changed = lobby.controller.option_rows() != rows;
                 if force || joined_changed {
                     lobby.controller.set_option_rows(rows);
@@ -926,17 +930,19 @@ impl GameApp {
     }
 
     pub(crate) fn visible_classic_lobby_controller(&self) -> Option<&ClassicGameLobby> {
-        self.classic_host_lobby
+        self.lobby
+            .classic_host
             .as_ref()
             .map(|lobby| &lobby.controller)
-            .or_else(|| self.network_lobby.as_ref().map(|lobby| &lobby.controller))
+            .or_else(|| self.lobby.session.as_ref().map(|lobby| &lobby.controller))
     }
 
     pub(crate) fn visible_classic_lobby_controller_mut(&mut self) -> Option<&mut ClassicGameLobby> {
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             Some(&mut lobby.controller)
         } else {
-            self.network_lobby
+            self.lobby
+                .session
                 .as_mut()
                 .map(|lobby| &mut lobby.controller)
         }
@@ -1026,7 +1032,7 @@ impl GameApp {
 
     pub(crate) fn set_context_menu_lobby_option(&mut self, option: Option<LobbyOptionKind>) {
         self.context_menus.lobby_option = option;
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_open_option_combo(option);
         }
         if let Some(dialog) = self.dialogs.client_list.as_mut() {
@@ -1068,7 +1074,7 @@ impl GameApp {
             },
         );
         let stale_option = self.context_menus.lobby_option.is_some_and(|option| {
-            let lobby_owns = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            let lobby_owns = self.lobby.classic_host.as_ref().is_some_and(|lobby| {
                 lobby.controller.active_sheet() == LobbySheet::Options
                     && lobby.controller.open_option_combo() == Some(option)
             });
@@ -1086,7 +1092,7 @@ impl GameApp {
     }
 
     pub(crate) fn refresh_classic_lobby_client_telemetry(&mut self) -> bool {
-        if self.classic_host_lobby.is_none() && self.network_lobby.is_none() {
+        if self.lobby.classic_host.is_none() && self.lobby.session.is_none() {
             return false;
         }
         let Some(network) = self.network.as_ref() else {
@@ -1094,12 +1100,14 @@ impl GameApp {
         };
         let local_client_id = network.local_client_id();
         let mut client_ids = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .into_iter()
             .flat_map(|lobby| lobby.controller.rows())
             .chain(
-                self.network_lobby
+                self.lobby
+                    .session
                     .as_ref()
                     .into_iter()
                     .flat_map(|lobby| lobby.roster_rows.iter()),
@@ -1109,7 +1117,8 @@ impl GameApp {
                 _ => None,
             })
             .chain(
-                self.network_lobby
+                self.lobby
+                    .session
                     .as_ref()
                     .into_iter()
                     .flat_map(|lobby| lobby.participants.keys().copied()),
@@ -1130,31 +1139,33 @@ impl GameApp {
         };
 
         let mut changed = false;
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             let mut rows = lobby.controller.rows().to_vec();
             if apply_classic_lobby_client_telemetry(&mut rows, local_client_id, &telemetry) {
                 lobby.controller.set_rows(rows);
                 changed = true;
             }
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             changed |= lobby.set_client_telemetry(telemetry);
         }
         changed
     }
 
     pub(crate) fn sync_classic_lobby_roster(&mut self) {
-        if self.classic_host_lobby.is_none() && self.network_lobby.is_none() {
+        if self.lobby.classic_host.is_none() && self.lobby.session.is_none() {
             return;
         }
         self.submit_restart_restore_script_players();
         self.submit_restart_restore_team_updates_for_new_roster_items();
         let active_sheet = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .map(|lobby| lobby.controller.active_sheet())
             .or_else(|| {
-                self.network_lobby
+                self.lobby
+                    .session
                     .as_ref()
                     .map(|lobby| lobby.controller.active_sheet())
             })
@@ -1319,11 +1330,13 @@ impl GameApp {
             rows = rich_restore_rows;
         }
         let previous_clients = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .map(|lobby| lobby.controller.rows())
             .or_else(|| {
-                self.network_lobby
+                self.lobby
+                    .session
                     .as_ref()
                     .map(|lobby| lobby.controller.rows())
             })
@@ -1359,11 +1372,11 @@ impl GameApp {
             }
         }
         let maximum = i32::try_from(self.network_max_players).unwrap_or(i32::MAX);
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_rows(rows.clone());
             lobby.controller.set_player_count(active_players, maximum);
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.roster_rows = rows.clone();
             lobby.roster_rows_authoritative = true;
             lobby.active_players = active_players;
@@ -1380,7 +1393,7 @@ impl GameApp {
     }
 
     fn sync_visible_classic_lobby_resources(&mut self) {
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+        let Some(lobby) = self.lobby.classic_host.as_mut() else {
             return;
         };
         if lobby.controller.resource_sheet_active() {
@@ -1549,7 +1562,7 @@ impl GameApp {
             return;
         }
         let save_possible = self.lobby_resource_save_possible(core.id);
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.resource_rows.insert(
                 core.id,
                 LobbyResourceRow {
@@ -1560,7 +1573,7 @@ impl GameApp {
                 },
             );
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.resource_rows.insert(
                 core.id,
                 LobbyResourceRow {
@@ -1610,14 +1623,16 @@ impl GameApp {
 
     pub(crate) fn update_classic_lobby_resource_progress(&mut self, resource_id: i32, percent: u8) {
         if let Some(row) = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_mut()
             .and_then(|lobby| lobby.resource_rows.get_mut(&resource_id))
         {
             row.present_percent = percent.min(100);
         }
         if let Some(row) = self
-            .network_lobby
+            .lobby
+            .session
             .as_mut()
             .and_then(|lobby| lobby.resource_rows.get_mut(&resource_id))
         {
@@ -1627,10 +1642,10 @@ impl GameApp {
     }
 
     pub(crate) fn remove_classic_lobby_resource(&mut self, resource_id: i32) {
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.resource_rows.remove(&resource_id);
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.resource_rows.remove(&resource_id);
         }
         self.sync_visible_classic_lobby_resources();
@@ -1647,12 +1662,12 @@ impl GameApp {
         self.admission_resources
             .present_percent
             .retain(|resource_id, _| !owned(resource_id));
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby
                 .resource_rows
                 .retain(|resource_id, _| !owned(resource_id));
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby
                 .resource_rows
                 .retain(|resource_id, _| !owned(resource_id));
@@ -1736,11 +1751,11 @@ impl GameApp {
     }
 
     pub(crate) fn refresh_lobby_scenario_description(&mut self) -> bool {
-        let host_active = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+        let host_active = self.lobby.classic_host.as_ref().is_some_and(|lobby| {
             lobby.controller.active_sheet() == LobbySheet::Scenario
                 && !lobby.scenario_description.finished
         });
-        let client_active = self.network_lobby.as_ref().is_some_and(|lobby| {
+        let client_active = self.lobby.session.as_ref().is_some_and(|lobby| {
             lobby.active_sheet == LobbySheet::Scenario && !lobby.scenario_description.finished
         });
         if !host_active && !client_active {
@@ -1750,7 +1765,7 @@ impl GameApp {
         let update = self.current_lobby_scenario_description_update();
         let mut changed = false;
         if host_active {
-            if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.classic_host.as_mut() {
                 let host_changed = lobby.scenario_description.apply(update.clone());
                 if host_changed {
                     lobby
@@ -1761,7 +1776,7 @@ impl GameApp {
             }
         }
         if client_active {
-            if let Some(lobby) = self.network_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.session.as_mut() {
                 changed |= lobby.scenario_description.apply(update);
             }
         }
@@ -1793,7 +1808,7 @@ impl GameApp {
             self.close_context_menu_silently();
         }
         {
-            let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            let Some(lobby) = self.lobby.classic_host.as_mut() else {
                 return false;
             };
             lobby.last_roster_click = None;
@@ -1854,7 +1869,7 @@ impl GameApp {
                     .is_some_and(|assignment| assignment.teams().active),
                 true,
             )
-        } else if let Some(lobby) = self.network_lobby.as_ref() {
+        } else if let Some(lobby) = self.lobby.session.as_ref() {
             // C++ offers Options to every participant (src/C4GameLobby.cpp:223).
             (lobby.has_teams, true)
         } else {
@@ -2015,7 +2030,8 @@ impl GameApp {
     }
 
     fn visible_lobby_client_is_local(&self, client_id: i32) -> Option<bool> {
-        self.classic_host_lobby
+        self.lobby
+            .classic_host
             .as_ref()
             .and_then(|lobby| {
                 lobby.controller.rows().iter().find_map(|row| match row {
@@ -2024,7 +2040,8 @@ impl GameApp {
                 })
             })
             .or_else(|| {
-                self.network_lobby
+                self.lobby
+                    .session
                     .as_ref()
                     .and_then(|lobby| lobby.visible_client_is_local(client_id))
             })
@@ -2484,7 +2501,7 @@ impl GameApp {
     }
 
     fn classic_lobby_option_is_editable(&self, option: LobbyOptionKind) -> bool {
-        self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+        self.lobby.classic_host.as_ref().is_some_and(|lobby| {
             lobby.controller.active_sheet() == LobbySheet::Options
                 && lobby
                     .controller
@@ -2495,7 +2512,7 @@ impl GameApp {
     }
 
     fn classic_lobby_option_accepts_choice(&self, option: LobbyOptionKind, selected: i32) -> bool {
-        self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+        self.lobby.classic_host.as_ref().is_some_and(|lobby| {
             lobby.controller.active_sheet() == LobbySheet::Options
                 && lobby.controller.option_rows().iter().any(|row| {
                     row.kind == option
@@ -2525,7 +2542,7 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let Some(choices) = self.classic_host_lobby.as_ref().and_then(|lobby| {
+        let Some(choices) = self.lobby.classic_host.as_ref().and_then(|lobby| {
             (lobby.controller.active_sheet() == LobbySheet::Options)
                 .then(|| {
                     lobby
@@ -2706,7 +2723,7 @@ impl GameApp {
         {
             return;
         }
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+        let Some(lobby) = self.lobby.classic_host.as_mut() else {
             return;
         };
         lobby.runtime_join_allowed = allowed;
@@ -3025,7 +3042,7 @@ impl GameApp {
     }
 
     fn prepare_network_lobby_countdown(&mut self) -> Result<bool, EngineError> {
-        if self.classic_host_lobby.is_some() {
+        if self.lobby.classic_host.is_some() {
             if let Some(overrides) = self
                 .staged_network_host_scenario
                 .as_ref()
@@ -3069,7 +3086,7 @@ impl GameApp {
         if countdown_seconds <= 0 || self.network.is_none() {
             return self.start_network_game_now();
         }
-        self.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(countdown_seconds));
+        self.lobby.host_countdown = Some(HostLobbyCountdown::with_seconds(countdown_seconds));
         let packet = clonk_network::LobbyCountdownPacket::new(countdown_seconds);
         self.submit_and_apply_lobby_countdown(packet);
         Ok(())
@@ -3088,13 +3105,13 @@ impl GameApp {
         if self.network.is_none() {
             return self.start_network_game_now();
         }
-        self.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(0));
+        self.lobby.host_countdown = Some(HostLobbyCountdown::with_seconds(0));
         self.submit_and_apply_lobby_countdown(clonk_network::LobbyCountdownPacket::new(0));
         Ok(())
     }
 
     pub(crate) fn abort_network_lobby_countdown(&mut self) -> bool {
-        if self.host_lobby_countdown.take().is_none() {
+        if self.lobby.host_countdown.take().is_none() {
             return false;
         }
         let packet =
@@ -3106,7 +3123,7 @@ impl GameApp {
     fn submit_and_apply_lobby_countdown(&mut self, packet: clonk_network::LobbyCountdownPacket) {
         if let Some(network) = self.network.as_ref() {
             match network.submit_lobby_countdown(packet) {
-                Ok(()) => self.pending_local_lobby_countdown_echoes.push_back(packet),
+                Ok(()) => self.lobby.pending_local_countdown_echoes.push_back(packet),
                 Err(error) => {
                     tracing::error!(%error, "failed to submit host lobby countdown");
                 }
@@ -3158,12 +3175,12 @@ impl GameApp {
             .visible_classic_lobby_controller()
             .is_some_and(|controller| controller.countdown().is_locked());
         self.log_dialogless_lobby_countdown(packet, !was_counting_down);
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.apply_lobby_countdown(packet);
         }
-        let actions = if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        let actions = if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.apply_countdown_packet(frontend_packet)
-        } else if let Some(lobby) = self.network_lobby.as_mut() {
+        } else if let Some(lobby) = self.lobby.session.as_mut() {
             // A joined client owns the same long-lived MainDlg as the host.
             // Initialize it before applying the packet so the controller,
             // log, sounds and focus transition all observe the event once.
@@ -3217,13 +3234,13 @@ impl GameApp {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return Ok(false);
         }
-        if !self.lobby_ready_check_cooldown.try_reset_at(now) {
-            let remaining = self.lobby_ready_check_cooldown.remaining_seconds_at(now);
+        if !self.lobby.ready_check_cooldown.try_reset_at(now) {
+            let remaining = self.lobby.ready_check_cooldown.remaining_seconds_at(now);
             self.status_text = format!("Too early! Please wait {remaining} seconds.");
             return Ok(false);
         }
         self.abort_network_lobby_countdown();
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             for (client_id, participant) in &mut lobby.participants {
                 if *client_id != 0 {
                     participant.ready = false;
@@ -3292,7 +3309,7 @@ impl GameApp {
         if !matches!(self.network_mode, Some(NetworkMode::Client(_))) || packet.client_id != 0 {
             return Ok(());
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             for (client_id, participant) in &mut lobby.participants {
                 if *client_id != 0 {
                     participant.ready = false;
@@ -3331,7 +3348,7 @@ impl GameApp {
         // Raising the window for an unfocused client is the separate
         // `NotifyUserIfInactive` request the same handler makes
         // (`src/C4Network2.cpp:1670`), which the lobby already models.
-        if self.ready_check_toasts_enabled {
+        if self.lobby.ready_check_toasts_enabled {
             let notification = DesktopNotification::new(
                 "Are you ready?",
                 lobby_ready_check_message(remaining_seconds).replace('|', "\n"),
@@ -3340,13 +3357,13 @@ impl GameApp {
             // A check that somehow starts over an unresolved one takes the
             // older toast down first, so only the live prompt is ever shown.
             self.dismiss_ready_check_notification();
-            match self.ready_check_toast_backend.sink_for(&notification) {
+            match self.lobby.ready_check_toast_backend.sink_for(&notification) {
                 Some(sink) => {
                     // The watcher shows the toast and routes its buttons into
                     // this continuation; the app keeps the same sink so an
                     // answer from the dialog hides that toast
                     // (`src/C4Network2.cpp:176-178`).
-                    self.lobby_ready_check_sink = sink.clone();
+                    self.lobby.ready_check_sink = sink.clone();
                     if let Err(error) = crate::ready_check_backend::watch_on_thread(
                         sink,
                         self.lobby_ready_check_actions(),
@@ -3361,14 +3378,14 @@ impl GameApp {
                 None => {
                     // No actionable backend: keep the silent sink and the
                     // plain toast, whose only job is to draw attention.
-                    self.lobby_ready_check_sink =
+                    self.lobby.ready_check_sink =
                         std::sync::Arc::new(crate::ready_check_notification::SilentSink);
-                    self.live_ready_check_notification =
+                    self.lobby.live_ready_check_notification =
                         Some(self.queue_desktop_notification(notification));
                 }
             }
         }
-        self.lobby_ready_check_continuation = Some(continuation);
+        self.lobby.ready_check_continuation = Some(continuation);
         Ok(())
     }
 
@@ -3392,9 +3409,10 @@ impl GameApp {
     /// Returns whether there was one to close.
     pub(crate) fn close_lobby_ready_check_continuation(&mut self) -> bool {
         self.dismiss_ready_check_notification();
-        self.lobby_ready_check_continuation
+        self.lobby
+            .ready_check_continuation
             .take()
-            .is_some_and(|continuation| continuation.close(self.lobby_ready_check_sink.as_ref()))
+            .is_some_and(|continuation| continuation.close(self.lobby.ready_check_sink.as_ref()))
     }
 
     /// Take the live ready check's toast back off the desktop.
@@ -3406,7 +3424,7 @@ impl GameApp {
     /// property structurally, being the destructor of the object that owns
     /// the toast (`src/C4Network2.cpp:176-183`).
     pub(crate) fn dismiss_ready_check_notification(&mut self) {
-        if let Some(id) = self.live_ready_check_notification.take() {
+        if let Some(id) = self.lobby.live_ready_check_notification.take() {
             self.pending_desktop_notification_dismissals.push_back(id);
         }
     }
@@ -3426,7 +3444,8 @@ impl GameApp {
         // raises rather than flashes, because it is answering a click that
         // already said "come back to the game".
         if self
-            .lobby_ready_check_continuation
+            .lobby
+            .ready_check_continuation
             .as_ref()
             .is_some_and(crate::ready_check_notification::ReadyCheckContinuation::take_attention)
         {
@@ -3445,13 +3464,14 @@ impl GameApp {
             }
         }
         let Some(outcome) = self
-            .lobby_ready_check_continuation
+            .lobby
+            .ready_check_continuation
             .as_ref()
             .and_then(crate::ready_check_notification::ReadyCheckContinuation::outcome)
         else {
             return Ok(());
         };
-        self.lobby_ready_check_continuation = None;
+        self.lobby.ready_check_continuation = None;
         self.dismiss_ready_check_notification();
         // The prompt is still open: the claim happened outside it. Drop it
         // without running its continuation, which is already resolved.
@@ -3490,7 +3510,7 @@ impl GameApp {
             })
         };
         let first_unready_generic_lobby_client = || {
-            self.network_lobby.as_ref().and_then(|lobby| {
+            self.lobby.session.as_ref().and_then(|lobby| {
                 lobby
                     .participants
                     .iter()
@@ -3505,7 +3525,7 @@ impl GameApp {
         };
         let first_relevant_unready = if self.classic_host_lobby_active() {
             first_unready_control_client()
-        } else if self.network_lobby.is_some() {
+        } else if self.lobby.session.is_some() {
             first_unready_generic_lobby_client()
         } else {
             first_unready_control_client()
@@ -3516,7 +3536,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.host_lobby_countdown.is_none() {
+        if self.lobby.host_countdown.is_none() {
             let countdown_seconds = self
                 .staged_network_host_scenario
                 .as_ref()
@@ -3547,13 +3567,14 @@ impl GameApp {
     }
 
     pub(crate) fn paste_network_lobby_chat_text(&mut self, text: &str) -> Result<(), EngineError> {
-        if self.network_lobby.is_none() {
+        if self.lobby.session.is_none() {
             return Ok(());
         }
         let (layout, fonts) = self.active_lobby_chat_scroll_context()?;
         let (mut view, local_client_id) = {
             let lobby = self
-                .network_lobby
+                .lobby
+                .session
                 .as_mut()
                 .expect("joined lobby was checked above");
             (std::mem::take(&mut lobby.chat_edit), lobby.local_client_id)
@@ -3572,7 +3593,8 @@ impl GameApp {
                 self.process_lobby_action(LobbyAction::SubmitMessage(submission))?;
                 Ok(self.startup.view == StartupView::NetworkLobby
                     && self
-                        .network_lobby
+                        .lobby
+                        .session
                         .as_ref()
                         .is_some_and(|lobby| lobby.local_client_id == local_client_id))
             },
@@ -3585,7 +3607,8 @@ impl GameApp {
         }
         let still_active = self.startup.view == StartupView::NetworkLobby
             && self
-                .network_lobby
+                .lobby
+                .session
                 .as_ref()
                 .is_some_and(|lobby| lobby.local_client_id == local_client_id);
         if still_active {
@@ -3593,7 +3616,8 @@ impl GameApp {
         }
         if completed_lines {
             if let Some(lobby) = self
-                .network_lobby
+                .lobby
+                .session
                 .as_mut()
                 .filter(|lobby| lobby.local_client_id == local_client_id)
             {
@@ -3610,7 +3634,7 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup.view != StartupView::NetworkLobby
-            || self.network_lobby.is_none()
+            || self.lobby.session.is_none()
         {
             return Ok(false);
         }
@@ -3625,7 +3649,8 @@ impl GameApp {
             return Ok(false);
         };
         let exit_hotkey = self
-            .network_lobby
+            .lobby
+            .session
             .as_ref()
             .and_then(NetworkLobbyState::exit_hotkey);
         if Some(hotkey) == exit_hotkey {
@@ -3643,7 +3668,8 @@ impl GameApp {
         }
         if state == ElementState::Pressed {
             let actions = self
-                .network_lobby
+                .lobby
+                .session
                 .as_mut()
                 .expect("joined lobby was checked above")
                 .classic_hotkey(hotkey);
@@ -3681,7 +3707,7 @@ impl GameApp {
             // Dialog::KeyEscape aborts from any focus at PRIO_Dlg
             // (src/C4GuiDialogs.cpp:371-378); the chat-focused default keeps
             // the adapter's own silent Exit route below.
-            let non_chat_focus = self.network_lobby.as_mut().is_some_and(|lobby| {
+            let non_chat_focus = self.lobby.session.as_mut().is_some_and(|lobby| {
                 lobby.sync_classic_controller();
                 lobby.controller.focus() != LobbyControl::ChatInput
             });
@@ -3695,7 +3721,7 @@ impl GameApp {
             }
             return Ok(true);
         }
-        let controller_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
+        let controller_focused = self.lobby.session.as_mut().is_some_and(|lobby| {
             lobby.sync_classic_controller();
             matches!(
                 lobby.controller.focus(),
@@ -3719,7 +3745,8 @@ impl GameApp {
         let assets = Arc::clone(&self.assets);
         let actions = {
             let lobby = self
-                .network_lobby
+                .lobby
+                .session
                 .as_mut()
                 .expect("joined lobby was checked above");
             match state {
@@ -3750,11 +3777,11 @@ impl GameApp {
     ) -> Result<bool, EngineError> {
         if self.startup.view != StartupView::NetworkLobby
             || self.classic_host_lobby_active()
-            || self.network_lobby.is_none()
+            || self.lobby.session.is_none()
         {
             return Ok(false);
         }
-        let chat_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
+        let chat_focused = self.lobby.session.as_mut().is_some_and(|lobby| {
             lobby.sync_classic_controller();
             lobby.controller.focus() == LobbyControl::ChatInput
         });
@@ -3861,7 +3888,7 @@ impl GameApp {
                     return Ok(());
                 }
                 if let Some((changed_client_id, ready)) =
-                    self.network_lobby.as_mut().and_then(|lobby| {
+                    self.lobby.session.as_mut().and_then(|lobby| {
                         let client_id = lobby.local_client_id;
                         lobby
                             .participants
@@ -3873,7 +3900,7 @@ impl GameApp {
                 }
             }
             LobbyAction::SelectSheet(sheet) => {
-                let selected = self.network_lobby.as_mut().is_some_and(|lobby| {
+                let selected = self.lobby.session.as_mut().is_some_and(|lobby| {
                     let supported = matches!(
                         sheet,
                         LobbySheet::Players
@@ -3917,7 +3944,7 @@ impl GameApp {
             LobbyAction::Preload => self.request_lobby_preload(),
             LobbyAction::OpenExternalIrcChat => self.show_external_irc_dialog()?,
             LobbyAction::SubmitMessage(text) => {
-                if let Some(lobby) = self.network_lobby.as_mut() {
+                if let Some(lobby) = self.lobby.session.as_mut() {
                     lobby.chat_history_index = -1;
                     lobby_chat_clear_preserving_scroll(&mut lobby.chat_edit);
                     lobby.controller.set_chat_edit_view(lobby.chat_edit.clone());
@@ -4009,7 +4036,7 @@ impl GameApp {
         })?;
         let surface = self.rendering.graphics.surface();
         let (width, height) = (surface.width() as i32, surface.height() as i32);
-        let state = self.classic_host_lobby.as_mut().ok_or_else(|| {
+        let state = self.lobby.classic_host.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
                     detail: "exact host lobby state is absent".to_string(),
@@ -4034,7 +4061,7 @@ impl GameApp {
         })?;
         let surface = self.rendering.graphics.surface();
         let (width, height) = (surface.width() as i32, surface.height() as i32);
-        let state = self.network_lobby.as_mut().ok_or_else(|| {
+        let state = self.lobby.session.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
                     detail: "exact joined lobby state is absent".to_string(),
@@ -4053,7 +4080,7 @@ impl GameApp {
     fn visible_classic_lobby_layouts(
         &mut self,
     ) -> std::result::Result<(LobbyLayout, LobbyRosterLayout), EngineError> {
-        if self.classic_host_lobby.is_some() {
+        if self.lobby.classic_host.is_some() {
             self.classic_host_lobby_layouts()
         } else {
             self.joined_lobby_layouts()
@@ -4100,11 +4127,11 @@ impl GameApp {
         if self.mode != AppMode::Menu || self.startup.view != StartupView::NetworkLobby {
             return false;
         }
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.pointer = None;
             lobby.last_roster_click = None;
             lobby.controller.cancel_interaction();
-        } else if let Some(lobby) = self.network_lobby.as_mut() {
+        } else if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.pointer = None;
             lobby.last_roster_click = None;
             lobby.sync_classic_controller();
@@ -4122,11 +4149,11 @@ impl GameApp {
         if self.mode != AppMode::Menu || self.startup.view != StartupView::NetworkLobby {
             return false;
         }
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.pointer = None;
             lobby.last_roster_click = None;
             lobby.controller.pointer_left();
-        } else if let Some(lobby) = self.network_lobby.as_mut() {
+        } else if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.pointer_left();
         } else {
             return false;
@@ -4162,11 +4189,13 @@ impl GameApp {
         joined: bool,
     ) -> Option<&mut ClassicGameLobby> {
         if joined {
-            self.network_lobby
+            self.lobby
+                .session
                 .as_mut()
                 .map(|lobby| &mut lobby.controller)
         } else {
-            self.classic_host_lobby
+            self.lobby
+                .classic_host
                 .as_mut()
                 .map(|state| &mut state.controller)
         }
@@ -4585,7 +4614,7 @@ impl GameApp {
             self.status_text = "Local client ID exceeds the ready-check wire field".to_string();
             return Ok(());
         };
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_ready(ready);
         }
         if self
@@ -4610,7 +4639,8 @@ impl GameApp {
 
     pub(crate) fn select_network_lobby_scenario(&mut self, identifier: &str, title: &str) -> bool {
         let Some(current_identifier) = self
-            .network_lobby
+            .lobby
+            .session
             .as_ref()
             .map(|lobby| lobby.selected_identifier().map(str::to_owned))
         else {
@@ -4619,11 +4649,11 @@ impl GameApp {
         let changed = current_identifier.as_deref() != Some(identifier);
         if changed {
             self.clear_lobby_preload();
-            if let Some(lobby) = self.network_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.session.as_mut() {
                 lobby.preload.reset_for_context();
             }
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.select_scenario(identifier, title);
             self.scenario_label = lobby.scenario_label();
         }
@@ -4639,7 +4669,7 @@ impl GameApp {
             || self.pending_network_join_data.is_some()
             || self.catalog_host_preload_scenario().is_some();
         let mut automatic_preload = false;
-        let actions = if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        let actions = if let Some(lobby) = self.lobby.classic_host.as_mut() {
             let actions = lobby.controller.set_resources_loaded(ready);
             automatic_preload = lobby.preload.synchronize(ready, context_ready);
             lobby.controller.set_preload_button_state(
@@ -4650,7 +4680,7 @@ impl GameApp {
         } else {
             Vec::new()
         };
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.resources_loaded = ready;
             automatic_preload |= lobby.preload.synchronize(ready, context_ready);
         }
@@ -4669,20 +4699,21 @@ impl GameApp {
     }
 
     fn active_lobby_preload_state(&self) -> Option<&LobbyPreloadState> {
-        self.classic_host_lobby
+        self.lobby
+            .classic_host
             .as_ref()
             .map(|lobby| &lobby.preload)
-            .or_else(|| self.network_lobby.as_ref().map(|lobby| &lobby.preload))
+            .or_else(|| self.lobby.session.as_ref().map(|lobby| &lobby.preload))
     }
 
     fn record_lobby_preload_result(&mut self, succeeded: bool) {
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.preload.record_result(succeeded);
             lobby.controller.set_preload_button_state(
                 lobby.preload.manual_button_present,
                 lobby.preload.eligible,
             );
-        } else if let Some(lobby) = self.network_lobby.as_mut() {
+        } else if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.preload.record_result(succeeded);
         }
     }
@@ -4695,7 +4726,7 @@ impl GameApp {
             {
                 return Err("Game.CanPreload() is false".to_string());
             }
-            if self.lobby_preload_task.is_some() || self.lobby_preload_artifact.is_some() {
+            if self.lobby.preload_task.is_some() || self.lobby.preload_artifact.is_some() {
                 return Err("a lobby preload has already been launched".to_string());
             }
             let job = self.prepare_lobby_preload_job()?;
@@ -4711,7 +4742,7 @@ impl GameApp {
                     }
                 })
                 .map_err(|error| format!("failed to launch lobby preload worker: {error}"))?;
-            self.lobby_preload_task = Some(LobbyPreloadTask {
+            self.lobby.preload_task = Some(LobbyPreloadTask {
                 state: LobbyPreloadTaskState::Loading(receiver),
                 start_host_when_ready: false,
                 worker: LobbyPreloadWorker::new(worker),
@@ -5108,13 +5139,13 @@ impl GameApp {
     }
 
     pub(crate) fn clear_lobby_preload(&mut self) {
-        if let Some(mut task) = self.lobby_preload_task.take() {
+        if let Some(mut task) = self.lobby.preload_task.take() {
             Self::join_lobby_preload_worker(&mut task.worker);
             if let LobbyPreloadTaskState::RemovingClientResource { artifact, .. } = task.state {
                 Self::discard_lobby_preload_artifact(artifact);
             }
         }
-        if let Some(artifact) = self.lobby_preload_artifact.take() {
+        if let Some(artifact) = self.lobby.preload_artifact.take() {
             Self::discard_lobby_preload_artifact(artifact);
         }
         self.clear_client_preload_projection();
@@ -5167,12 +5198,12 @@ impl GameApp {
                 return Err("host preload completed for a stale scenario".to_string());
             }
         }
-        self.lobby_preload_artifact = Some(artifact);
+        self.lobby.preload_artifact = Some(artifact);
         Ok(())
     }
 
     pub(crate) fn poll_lobby_preload(&mut self) -> Result<(), EngineError> {
-        let Some(task) = self.lobby_preload_task.take() else {
+        let Some(task) = self.lobby.preload_task.take() else {
             return Ok(());
         };
         let start_host_when_ready = task.start_host_when_ready;
@@ -5237,7 +5268,7 @@ impl GameApp {
                                 .map_err(|error| error.to_string())
                         }) {
                             Ok(receiver) => {
-                                self.lobby_preload_task = Some(LobbyPreloadTask {
+                                self.lobby.preload_task = Some(LobbyPreloadTask {
                                     state: LobbyPreloadTaskState::RemovingClientResource {
                                         artifact,
                                         receiver,
@@ -5269,7 +5300,7 @@ impl GameApp {
                     finished = true;
                 }
                 Err(TryRecvError::Empty) => {
-                    self.lobby_preload_task = Some(LobbyPreloadTask {
+                    self.lobby.preload_task = Some(LobbyPreloadTask {
                         state: LobbyPreloadTaskState::Loading(receiver),
                         start_host_when_ready,
                         worker,
@@ -5297,7 +5328,7 @@ impl GameApp {
                     finished = true;
                 }
                 Err(TryRecvError::Empty) => {
-                    self.lobby_preload_task = Some(LobbyPreloadTask {
+                    self.lobby.preload_task = Some(LobbyPreloadTask {
                         state: LobbyPreloadTaskState::RemovingClientResource { artifact, receiver },
                         start_host_when_ready,
                         worker,
@@ -5360,7 +5391,7 @@ impl GameApp {
 
         // A synthetic/fallback lobby has no retained restore packet. Keep the
         // visible-header projection as its best available approximation.
-        self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+        self.lobby.classic_host.as_ref().is_some_and(|lobby| {
             lobby.controller.rows().iter().any(|row| {
                 matches!(
                     row,
@@ -5380,13 +5411,13 @@ impl GameApp {
 
     fn append_lobby_command_log(&mut self, message: String) {
         let color = readable_lobby_rgba(0x00ff_1f1f);
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.push_log(LobbyLogLine {
                 text: message.clone(),
                 color,
             });
         } else if self.startup.view == StartupView::NetworkLobby {
-            if let Some(lobby) = self.network_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.session.as_mut() {
                 lobby.push_log(LobbyLogLine {
                     text: message,
                     color,
@@ -5412,9 +5443,9 @@ impl GameApp {
     }
 
     pub(crate) fn clear_lobby_log(&mut self) {
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_logs(Vec::new());
-        } else if let Some(lobby) = self.network_lobby.as_mut() {
+        } else if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.logs.clear();
             lobby.controller.set_logs(Vec::new());
         }
@@ -5821,13 +5852,15 @@ impl GameApp {
     }
 
     fn active_lobby_chat_view(&self) -> Option<LobbyChatEditView> {
-        self.classic_host_lobby
+        self.lobby
+            .classic_host
             .as_ref()
             .map(|lobby| lobby.controller.chat_edit_view().clone())
             .or_else(|| {
                 (self.startup.view == StartupView::NetworkLobby)
                     .then(|| {
-                        self.network_lobby
+                        self.lobby
+                            .session
                             .as_ref()
                             .map(|lobby| lobby.chat_edit.clone())
                     })
@@ -5836,10 +5869,10 @@ impl GameApp {
     }
 
     pub(crate) fn install_active_lobby_chat_view(&mut self, view: LobbyChatEditView) {
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_chat_edit_view(view);
         } else if self.startup.view == StartupView::NetworkLobby {
-            if let Some(lobby) = self.network_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.session.as_mut() {
                 lobby.chat_edit = view.clone();
                 lobby.controller.set_chat_edit_view(view);
             }
@@ -5869,7 +5902,7 @@ impl GameApp {
         }
         let assets = Arc::clone(&self.assets);
         let surface = self.rendering.graphics.surface();
-        let lobby = self.network_lobby.as_mut().ok_or_else(|| {
+        let lobby = self.lobby.session.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
                     detail: "joined lobby state is absent".to_string(),
@@ -5959,7 +5992,8 @@ impl GameApp {
         }
         let host = self.classic_host_lobby_active();
         let joined_client = self
-            .network_lobby
+            .lobby
+            .session
             .as_ref()
             .map(|lobby| lobby.local_client_id);
         let result = lobby_chat_paste_text(
@@ -5974,7 +6008,8 @@ impl GameApp {
                 } else {
                     self.startup.view == StartupView::NetworkLobby
                         && self
-                            .network_lobby
+                            .lobby
+                            .session
                             .as_ref()
                             .map(|lobby| lobby.local_client_id)
                             == joined_client
@@ -5993,7 +6028,8 @@ impl GameApp {
         } else {
             self.startup.view == StartupView::NetworkLobby
                 && self
-                    .network_lobby
+                    .lobby
+                    .session
                     .as_ref()
                     .map(|lobby| lobby.local_client_id)
                     == joined_client
@@ -6133,11 +6169,11 @@ impl GameApp {
                 }
                 if !self.classic_host_lobby_active()
                     && self.startup.view == StartupView::NetworkLobby
-                    && self.network_lobby.is_some()
+                    && self.lobby.session.is_some()
                 {
                     return self.process_lobby_action(LobbyAction::SubmitMessage(text));
                 }
-                if let Some(lobby) = self.classic_host_lobby.as_mut() {
+                if let Some(lobby) = self.lobby.classic_host.as_mut() {
                     lobby.chat_history_index = -1;
                     let mut view = lobby.controller.chat_edit_view().clone();
                     lobby_chat_clear_preserving_scroll(&mut view);
@@ -6188,7 +6224,7 @@ impl GameApp {
                 }
                 if !self.classic_host_lobby_active() {
                     let history = self.message_input_history.clone();
-                    let view = self.network_lobby.as_mut().map(|lobby| {
+                    let view = self.lobby.session.as_mut().map(|lobby| {
                         let inserted = lobby.browse_chat_history(older, &history);
                         (lobby.chat_edit.clone(), inserted)
                     });
@@ -6201,7 +6237,7 @@ impl GameApp {
                     return Ok(());
                 }
                 let (mut view, inserted) = {
-                    let Some(lobby) = self.classic_host_lobby.as_mut() else {
+                    let Some(lobby) = self.lobby.classic_host.as_mut() else {
                         return Ok(());
                     };
                     lobby.chat_history_index += if older { 1 } else { -1 };
@@ -6315,7 +6351,8 @@ impl GameApp {
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if state == ElementState::Pressed {
             let chat_focused = self
-                .classic_host_lobby
+                .lobby
+                .classic_host
                 .as_ref()
                 .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::ChatInput);
             let chat_command_key = matches!(
@@ -6326,7 +6363,8 @@ impl GameApp {
                     | VirtualKeyCode::ArrowDown
             );
             let chat_actions = if key == VirtualKeyCode::ContextMenu && c4_modifiers.is_empty() {
-                self.classic_host_lobby
+                self.lobby
+                    .classic_host
                     .as_ref()
                     .map(|lobby| {
                         let actions = lobby.controller.chat_context_from_key(&layout);
@@ -6364,7 +6402,7 @@ impl GameApp {
                 if c4_modifiers.is_empty() {
                     map_key_code(key)
                         .and_then(|key| {
-                            self.classic_host_lobby.as_mut().map(|lobby| {
+                            self.lobby.classic_host.as_mut().map(|lobby| {
                                 lobby.controller.key_down(
                                     key,
                                     false,
@@ -6392,7 +6430,8 @@ impl GameApp {
                 };
                 if let Some(shortcut) = shortcut {
                     let actions = self
-                        .classic_host_lobby
+                        .lobby
+                        .classic_host
                         .as_ref()
                         .map(|lobby| lobby.controller.chat_clipboard(shortcut))
                         .unwrap_or_default();
@@ -6416,7 +6455,7 @@ impl GameApp {
                     };
                     edit_key
                         .and_then(|edit_key| {
-                            self.classic_host_lobby.as_ref().map(|lobby| {
+                            self.lobby.classic_host.as_ref().map(|lobby| {
                                 lobby.controller.chat_edit_key(
                                     edit_key,
                                     LobbyChatKeyModifiers {
@@ -6440,13 +6479,14 @@ impl GameApp {
             && self.input_routing.live.modifiers.alt_key()
             && matches!(key, VirtualKeyCode::ArrowDown | VirtualKeyCode::Space)
             && self
-                .classic_host_lobby
+                .lobby
+                .classic_host
                 .as_ref()
                 .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::RosterTeam);
         let actions = if alt_combo_open {
             map_key_code(key)
                 .and_then(|key| {
-                    self.classic_host_lobby.as_mut().map(|lobby| {
+                    self.lobby.classic_host.as_mut().map(|lobby| {
                         lobby.controller.key_down(
                             key,
                             self.input_routing.live.modifiers.shift_key(),
@@ -6463,7 +6503,8 @@ impl GameApp {
         {
             startup_dialog_hotkey(key)
                 .and_then(|hotkey| {
-                    self.classic_host_lobby
+                    self.lobby
+                        .classic_host
                         .as_mut()
                         .map(|lobby| lobby.controller.hotkey(hotkey, Instant::now()))
                 })
@@ -6480,7 +6521,8 @@ impl GameApp {
                     | VirtualKeyCode::Delete
             )
             && self
-                .classic_host_lobby
+                .lobby
+                .classic_host
                 .as_ref()
                 .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::ChatInput)
         {
@@ -6488,7 +6530,8 @@ impl GameApp {
         } else if let Some(key) = map_key_code(key) {
             match state {
                 ElementState::Pressed => self
-                    .classic_host_lobby
+                    .lobby
+                    .classic_host
                     .as_mut()
                     .map(|lobby| {
                         lobby.controller.key_down(
@@ -6501,7 +6544,8 @@ impl GameApp {
                     })
                     .unwrap_or_default(),
                 ElementState::Released => self
-                    .classic_host_lobby
+                    .lobby
+                    .classic_host
                     .as_mut()
                     .map(|lobby| lobby.controller.key_up(key))
                     .unwrap_or_default(),
@@ -6563,7 +6607,7 @@ impl GameApp {
                     // src/C4GameLobby.cpp:329-344). Mirror the accepted value
                     // onto the adapter's authoritative participant row before
                     // publishing it.
-                    let changed = self.network_lobby.as_mut().and_then(|lobby| {
+                    let changed = self.lobby.session.as_mut().and_then(|lobby| {
                         let client_id = lobby.local_client_id;
                         lobby.participants.get_mut(&client_id).map(|participant| {
                             participant.ready = ready;
@@ -6624,7 +6668,8 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let assets = Arc::clone(&self.assets);
         let actions = self
-            .network_lobby
+            .lobby
+            .session
             .as_mut()
             .map(|lobby| {
                 lobby.handle_panel_pointer_move(point);
@@ -6647,13 +6692,14 @@ impl GameApp {
         state: ElementState,
         double_click: bool,
     ) -> Result<(), EngineError> {
-        let Some(point) = self.network_lobby.as_ref().and_then(|lobby| lobby.pointer) else {
+        let Some(point) = self.lobby.session.as_ref().and_then(|lobby| lobby.pointer) else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
         let actions = {
             let lobby = self
-                .network_lobby
+                .lobby
+                .session
                 .as_mut()
                 .expect("joined lobby pointer came from live state");
             match state {
@@ -6719,7 +6765,8 @@ impl GameApp {
         let assets = Arc::clone(&self.assets);
         let actions = {
             let lobby = self
-                .network_lobby
+                .lobby
+                .session
                 .as_mut()
                 .expect("joined lobby touch requires live state");
             let actions = lobby
@@ -6751,7 +6798,8 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
         let actions = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_mut()
             .map(|lobby| {
                 lobby.pointer = Some(point);
@@ -6767,7 +6815,8 @@ impl GameApp {
         double_click: bool,
     ) -> Result<(), EngineError> {
         let Some(point) = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .and_then(|lobby| lobby.pointer)
         else {
@@ -6776,7 +6825,8 @@ impl GameApp {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
         let actions = match state {
             ElementState::Pressed => self
-                .classic_host_lobby
+                .lobby
+                .classic_host
                 .as_mut()
                 .map(|lobby| {
                     if double_click {
@@ -6790,7 +6840,8 @@ impl GameApp {
                 })
                 .unwrap_or_default(),
             ElementState::Released => self
-                .classic_host_lobby
+                .lobby
+                .classic_host
                 .as_mut()
                 .map(|lobby| {
                     let now = Instant::now();
@@ -6825,7 +6876,8 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         let Some(focus) = self
-            .network_lobby
+            .lobby
+            .session
             .as_ref()
             .map(|lobby| lobby.controller.focus())
         else {
@@ -6841,7 +6893,8 @@ impl GameApp {
         let combo_open_modifiers =
             no_modifiers || self.input_routing.live.modifiers == ModifiersState::ALT;
         let roster_has_rows = self
-            .network_lobby
+            .lobby
+            .session
             .as_ref()
             .is_some_and(|lobby| !lobby.controller.rows().is_empty());
         // C4GUI::Dialog advances focus for Tab regardless of which control
@@ -6899,7 +6952,8 @@ impl GameApp {
         let (layout, roster) = self.joined_lobby_layouts()?;
         let shift = self.input_routing.live.modifiers.shift_key();
         let actions = self
-            .network_lobby
+            .lobby
+            .session
             .as_mut()
             .map(|lobby| match state {
                 ElementState::Pressed => {
@@ -6919,14 +6973,15 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         let Some(point) = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .and_then(|lobby| lobby.pointer)
         else {
             return Ok(());
         };
         let (layout, roster) = self.classic_host_lobby_layouts()?;
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby
                 .controller
                 .note_pointer_button(point, &layout, &roster);
@@ -6936,7 +6991,8 @@ impl GameApp {
             return Ok(());
         }
         let actions = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_mut()
             .map(|lobby| {
                 lobby
@@ -6951,11 +7007,12 @@ impl GameApp {
         &mut self,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        let Some(point) = self.network_lobby.as_ref().and_then(|lobby| lobby.pointer) else {
+        let Some(point) = self.lobby.session.as_ref().and_then(|lobby| lobby.pointer) else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
-        self.network_lobby
+        self.lobby
+            .session
             .as_mut()
             .expect("network lobby was checked above")
             .classic_note_pointer_button(
@@ -6970,7 +7027,8 @@ impl GameApp {
             return Ok(());
         }
         let actions = self
-            .network_lobby
+            .lobby
+            .session
             .as_mut()
             .expect("network lobby was checked above")
             .classic_secondary_down(
@@ -6992,7 +7050,8 @@ impl GameApp {
     pub(crate) fn handle_network_lobby_context_key(&mut self) -> Result<(), EngineError> {
         let assets = Arc::clone(&self.assets);
         let actions = self
-            .network_lobby
+            .lobby
+            .session
             .as_mut()
             .expect("network lobby context key requires live state")
             .classic_context_key(
@@ -7009,14 +7068,15 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         let Some(point) = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .and_then(|lobby| lobby.pointer)
         else {
             return Ok(());
         };
         let (layout, roster) = self.classic_host_lobby_layouts()?;
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby
                 .controller
                 .note_pointer_button(point, &layout, &roster);
@@ -7026,7 +7086,8 @@ impl GameApp {
             return Ok(());
         }
         let actions = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_mut()
             .map(|lobby| {
                 lobby
@@ -7041,11 +7102,12 @@ impl GameApp {
         &mut self,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        let Some(point) = self.network_lobby.as_ref().and_then(|lobby| lobby.pointer) else {
+        let Some(point) = self.lobby.session.as_ref().and_then(|lobby| lobby.pointer) else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
-        self.network_lobby
+        self.lobby
+            .session
             .as_mut()
             .expect("network lobby was checked above")
             .classic_note_pointer_button(
@@ -7060,7 +7122,8 @@ impl GameApp {
             return Ok(());
         }
         let actions = self
-            .network_lobby
+            .lobby
+            .session
             .as_mut()
             .expect("network lobby was checked above")
             .classic_middle_down(
@@ -7078,7 +7141,8 @@ impl GameApp {
             return Ok(());
         }
         let Some(point) = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_ref()
             .and_then(|lobby| lobby.pointer)
         else {
@@ -7093,13 +7157,13 @@ impl GameApp {
         };
         let scroll_window_captured =
             contains(layout.chat_log_client) || contains(layout.roster_client);
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.note_pointer_wheel();
         }
         self.scenario_game_options.note_pointer_wheel();
         let outside_scroll_window = contains(layout.chat_log) && !contains(layout.chat_log_client)
             || contains(layout.roster) && !contains(layout.roster_client);
-        let _ = self.classic_host_lobby.as_mut().is_some_and(|lobby| {
+        let _ = self.lobby.classic_host.as_mut().is_some_and(|lobby| {
             !outside_scroll_window && lobby.controller.wheel(point, delta, &layout, &roster)
         });
         if scroll_window_captured {
@@ -7120,7 +7184,8 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
         let actions = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_mut()
             .map(|lobby| {
                 lobby.pointer = (!matches!(phase, TouchPhase::Cancelled)).then_some(point);
@@ -7158,7 +7223,8 @@ impl GameApp {
             ControlButton::Down => (0, 1),
         };
         let actions = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_mut()
             .map(|lobby| {
                 lobby
@@ -7176,7 +7242,8 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
         let actions = self
-            .classic_host_lobby
+            .lobby
+            .classic_host
             .as_mut()
             .map(|lobby| match action {
                 GamepadActionType::Select => match state {
@@ -7334,7 +7401,7 @@ impl GameApp {
             tracing::error!(error = %err, "failed to select default scenario entry");
         }
         let labels = self.classic_lobby_labels();
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.labels = labels;
             lobby.update_layout(width, height);
             self.scenario_label = lobby.scenario_label();
@@ -7419,7 +7486,7 @@ impl GameApp {
         self.dialogs.league_signup_pointer_position = None;
         self.definition_selection.dialog = None;
         self.definition_selection.pending = None;
-        self.pending_lobby_player_selection = None;
+        self.lobby.pending_player_selection = None;
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();
         self.definition_selection.pointer_capture = false;
@@ -7431,14 +7498,15 @@ impl GameApp {
             return false;
         }
         let Some((next, broadcast)) = self
-            .host_lobby_countdown
+            .lobby
+            .host_countdown
             .as_mut()
             .map(HostLobbyCountdown::advance)
         else {
             return false;
         };
         if next == 0 {
-            self.host_lobby_countdown = None;
+            self.lobby.host_countdown = None;
         }
         if broadcast {
             self.submit_and_apply_lobby_countdown(clonk_network::LobbyCountdownPacket::new(next));
@@ -7477,7 +7545,7 @@ impl GameApp {
             return false;
         }
         // An undetermined minimum never quits a running server.
-        let Some(minimum) = self.network_lobby_min_players else {
+        let Some(minimum) = self.lobby.min_players else {
             return false;
         };
         let players =
@@ -7707,16 +7775,16 @@ impl GameApp {
         // No continuation means no check is outstanding — one was answered
         // already, or the lobby tore down. C++ cannot reach this at all: the
         // answer *is* the modal's return value, so there is nothing to call.
-        let Some(continuation) = self.lobby_ready_check_continuation.clone() else {
+        let Some(continuation) = self.lobby.ready_check_continuation.clone() else {
             return Ok(());
         };
-        if !continuation.answer(ready, self.lobby_ready_check_sink.as_ref()) {
+        if !continuation.answer(ready, self.lobby.ready_check_sink.as_ref()) {
             // A notification answered first. Leave the continuation in place
             // so the loop's poll can still deliver *its* answer — taking it
             // here would drop the winning one on the floor.
             return Ok(());
         }
-        self.lobby_ready_check_continuation = None;
+        self.lobby.ready_check_continuation = None;
         self.dismiss_ready_check_notification();
         self.submit_lobby_ready_check_response(ready)
     }
@@ -7729,11 +7797,11 @@ impl GameApp {
         let status_left_lobby = self
             .pending_client_start_status
             .is_some_and(|status| status.state != clonk_network::NETWORK_STATE_LOBBY);
-        if !matches!(self.mode, AppMode::Menu) || status_left_lobby || self.network_lobby.is_none()
+        if !matches!(self.mode, AppMode::Menu) || status_left_lobby || self.lobby.session.is_none()
         {
             return Ok(());
         }
-        let changed_client_id = self.network_lobby.as_mut().and_then(|lobby| {
+        let changed_client_id = self.lobby.session.as_mut().and_then(|lobby| {
             let local_client_id = lobby.local_client_id;
             let participant = lobby.participants.get_mut(&local_client_id)?;
             (participant.ready != ready).then(|| {
@@ -7797,7 +7865,7 @@ impl GameApp {
                 detail: error.to_string(),
             })
         })?;
-        let lobby = self.classic_host_lobby.as_mut().ok_or_else(|| {
+        let lobby = self.lobby.classic_host.as_mut().ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
                 detail: "exact host lobby state is absent".to_string(),
             })
@@ -7834,7 +7902,7 @@ impl GameApp {
                 detail: error.to_string(),
             })
         })?;
-        let lobby = self.classic_host_lobby.as_mut().ok_or_else(|| {
+        let lobby = self.lobby.classic_host.as_mut().ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
                 detail: "exact host lobby state is absent".to_string(),
             })

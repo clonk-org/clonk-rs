@@ -33,12 +33,12 @@ impl GameApp {
             return;
         };
         let surface = self.rendering.graphics.surface();
-        let bounds = if let Some(lobby) = self.classic_host_lobby.as_ref() {
+        let bounds = if let Some(lobby) = self.lobby.classic_host.as_ref() {
             lobby
                 .controller
                 .layout(surface.width() as i32, surface.height() as i32, fonts)
                 .game_option_strip
-        } else if let Some(lobby) = self.network_lobby.as_mut() {
+        } else if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.sync_classic_controller();
             lobby
                 .controller
@@ -982,7 +982,7 @@ impl GameApp {
                     self.play_ui_sound("ArrowHit");
                 }
                 OptionsDlgAction::WhiteChatLobbyChanged(enabled) => {
-                    self.white_lobby_chat = enabled;
+                    self.lobby.white_chat = enabled;
                     self.play_ui_sound("ArrowHit");
                 }
                 OptionsDlgAction::PreloadingChanged(_) => {
@@ -1413,10 +1413,10 @@ impl GameApp {
         let is_fullscreen = self.rendering.display_flags.is_fullscreen;
         self.rendering.display_flags = load_display_flags(paths);
         self.rendering.display_flags.is_fullscreen = is_fullscreen;
-        self.white_lobby_chat = load_white_lobby_chat(paths);
+        self.lobby.white_chat = load_white_lobby_chat(paths);
         self.show_log_timestamps = load_show_log_timestamps(paths);
         self.config.show_folder_maps = load_show_folder_maps(paths);
-        self.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
+        self.lobby.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
         let native_config = load_native_config_bytes(paths);
         let presentation_features =
             CompatPresentationFeatures::resolve(&native_config, self.config.compat_profile);

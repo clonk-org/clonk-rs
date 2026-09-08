@@ -1195,7 +1195,7 @@ impl GameApp {
             root,
             custom_definition_root,
         });
-        self.pending_lobby_player_selection = None;
+        self.lobby.pending_player_selection = None;
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();
         self.definition_selection.pointer_capture = false;
@@ -1269,7 +1269,7 @@ impl GameApp {
             clonk_frontend::definition_sel::DefinitionSelController::new_player(root, entries),
         );
         self.definition_selection.pending = None;
-        self.pending_lobby_player_selection = Some(PendingLobbyPlayerSelection {
+        self.lobby.pending_player_selection = Some(PendingLobbyPlayerSelection {
             client_id,
             config,
             candidates,
@@ -1583,9 +1583,10 @@ impl GameApp {
                 | DefinitionSelAction::SelectionChanged(_)
                 | DefinitionSelAction::CheckedChanged { .. } => {}
                 DefinitionSelAction::RefreshRequested => {
-                    if self.pending_lobby_player_selection.is_some() {
+                    if self.lobby.pending_player_selection.is_some() {
                         let refreshed = self.app_paths.clone().zip(
-                            self.pending_lobby_player_selection
+                            self.lobby
+                                .pending_player_selection
                                 .as_ref()
                                 .map(|pending| pending.config.clone()),
                         );
@@ -1594,7 +1595,7 @@ impl GameApp {
                             .transpose();
                         match refreshed {
                             Ok(Some((_root, entries, candidates))) => {
-                                if let Some(pending) = self.pending_lobby_player_selection.as_mut()
+                                if let Some(pending) = self.lobby.pending_player_selection.as_mut()
                                 {
                                     pending.candidates = candidates;
                                 }
@@ -1613,7 +1614,7 @@ impl GameApp {
                             }
                             Err(error) => {
                                 tracing::error!(%error, "failed to refresh lobby player selector");
-                                if let Some(pending) = self.pending_lobby_player_selection.as_mut()
+                                if let Some(pending) = self.lobby.pending_player_selection.as_mut()
                                 {
                                     pending.candidates.clear();
                                 }
@@ -1669,7 +1670,7 @@ impl GameApp {
                     )?;
                 }
                 DefinitionSelAction::Accepted(modules) => {
-                    if let Some(pending) = self.pending_lobby_player_selection.take() {
+                    if let Some(pending) = self.lobby.pending_player_selection.take() {
                         self.startup_tooltip.pointer_left();
                         self.definition_selection.dialog = None;
                         self.definition_selection.last_click = None;
@@ -1715,7 +1716,7 @@ impl GameApp {
                     self.startup_tooltip.pointer_left();
                     self.definition_selection.dialog = None;
                     self.definition_selection.pending = None;
-                    self.pending_lobby_player_selection = None;
+                    self.lobby.pending_player_selection = None;
                     self.definition_selection.last_click = None;
                     break;
                 }

@@ -130,7 +130,7 @@ fn networked_client_lobby(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         player_name,
     )));
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     (app, event_tx)
 }
 
@@ -179,7 +179,7 @@ fn networked_client_lobby_with_commands(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         player_name,
     )));
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     (app, event_tx, commands)
 }
 
@@ -192,7 +192,7 @@ fn networked_host_lobby_with_commands(
     crate::network::TestNetworkCommands,
 ) {
     let (mut app, event_tx, commands) = networked_host_with_commands(app);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     (app, event_tx, commands)
 }
 
@@ -435,7 +435,7 @@ fn joined_lobby_row_point(app: &mut GameApp, id: LobbyRosterId) -> GuiPoint {
 }
 
 fn joined_lobby_tab_point(app: &mut GameApp, sheet: LobbySheet) -> GuiPoint {
-    let layout = app_lobby_mut(&mut app.network_lobby)
+    let layout = app_lobby_mut(&mut app.lobby.session)
         .update_layout(640.0, 480.0)
         .clone();
     let rect = layout
@@ -490,7 +490,7 @@ fn join_team_selection_player(
 }
 
 fn app_lobby(app: &GameApp) -> &NetworkLobbyState {
-    app.network_lobby.as_ref().test_value()
+    app.lobby.session.as_ref().test_value()
 }
 
 fn app_lobby_mut(lobby: &mut Option<NetworkLobbyState>) -> &mut NetworkLobbyState {
@@ -498,7 +498,7 @@ fn app_lobby_mut(lobby: &mut Option<NetworkLobbyState>) -> &mut NetworkLobbyStat
 }
 
 fn app_classic_lobby(app: &GameApp) -> &ClassicHostLobbyState {
-    app.classic_host_lobby.as_ref().test_value()
+    app.lobby.classic_host.as_ref().test_value()
 }
 
 fn app_classic_lobby_mut(lobby: &mut Option<ClassicHostLobbyState>) -> &mut ClassicHostLobbyState {
@@ -545,7 +545,7 @@ fn classic_command_line_lobby_timeout_starts_the_host_countdown() {
         .insert(scenario.identifier.clone(), scenario.clone());
     let mut lobby = host_lobby_state();
     lobby.select_scenario(&scenario.identifier, &scenario.title);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     let (_events, mut commands) = install_network_commands(&mut app);
     app.apply_classic_command_line(&ClassicCommandLine {
@@ -559,7 +559,7 @@ fn classic_command_line_lobby_timeout_starts_the_host_countdown() {
     app.finish_classic_command_line_host_entry().test_value();
 
     assert_lobby_countdowns(&mut commands, &[120]);
-    main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown::with_seconds(120)));
+    main_assert_eq!(app.lobby.host_countdown => Some(HostLobbyCountdown::with_seconds(120)));
 }
 
 #[test]
@@ -567,7 +567,7 @@ fn classic_command_line_network_scenario_skips_unrequested_lobby() {
     let mut app = new_state_only_menu_app(320, 200);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     let (_sender, receiver) = mpsc::channel();
-    app.lobby_preload_task = Some(LobbyPreloadTask {
+    app.lobby.preload_task = Some(LobbyPreloadTask {
         state: LobbyPreloadTaskState::Loading(receiver),
         start_host_when_ready: false,
         worker: LobbyPreloadWorker::new(thread::spawn(|| {})),
@@ -581,7 +581,7 @@ fn classic_command_line_network_scenario_skips_unrequested_lobby() {
 
     app.finish_classic_command_line_host_entry().test_value();
 
-    main_assert!(some(&app.lobby_preload_task).start_host_when_ready);
+    main_assert!(some(&app.lobby.preload_task).start_host_when_ready);
     main_assert_eq!(app.mode => AppMode::Loading);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
 }
@@ -829,7 +829,7 @@ fn network_too_few_warning_then_profile_ack_stages_and_enters_exact_lobby() {
         .test_value();
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network.is_some());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert!(app.status_text.is_empty());
     let lobby = &app_classic_lobby(&app).controller;
     main_assert_eq!(lobby.role() => LobbyRole::Host);
@@ -855,11 +855,11 @@ fn network_too_few_warning_then_profile_ack_stages_and_enters_exact_lobby() {
 #[test]
 fn joined_lobby_tooltips_survive_frames_and_use_shared_delay() {
     let mut app = new_menu_app(640, 480);
-    app.network_lobby = Some(client_lobby_state().with_preloading(false, LobbyLabels::default()));
+    app.lobby.session = Some(client_lobby_state().with_preloading(false, LobbyLabels::default()));
     app.startup.view = StartupView::NetworkLobby;
     app.sync_network_lobby_game_option_state();
     let assets = Arc::clone(&app.assets);
-    let layout = app_lobby_mut(&mut app.network_lobby)
+    let layout = app_lobby_mut(&mut app.lobby.session)
         .with_classic_controller_input(
             app.rendering.graphics.surface(),
             assets.as_ref(),
@@ -872,13 +872,13 @@ fn joined_lobby_tooltips_survive_frames_and_use_shared_delay() {
         (layout.chat_edit.y + 2) as f32,
     );
     let tooltip_at = |app: &GameApp, now: Instant| {
-        app.network_lobby
+        app.lobby.session
             .as_ref()
             .and_then(|lobby| lobby.controller.tooltip_state_at(now))
             .is_some()
     };
     let tooltip_text = |app: &GameApp| {
-        app.network_lobby.as_ref().and_then(|lobby| {
+        app.lobby.session.as_ref().and_then(|lobby| {
             lobby
                 .controller
                 .tooltip_state_at(Instant::now() + Duration::from_secs(1))
@@ -898,7 +898,7 @@ fn joined_lobby_tooltips_survive_frames_and_use_shared_delay() {
     // rebuilt: a reconstructed controller would restart the clock at draw
     // time and lose the hover owner.
     let mut surface = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .render_classic(
             &mut surface,
             assets.as_ref(),
@@ -974,7 +974,7 @@ fn persistent_classic_lobby_non_pointer_input_suppresses_tooltip_until_motion() 
         (layout.chat_edit.y + 2) as f32,
     );
     let tooltip_visible = |app: &GameApp| {
-        app.classic_host_lobby
+        app.lobby.classic_host
             .as_ref()
             .and_then(|lobby| {
                 lobby
@@ -1084,7 +1084,7 @@ fn captured_classic_lobby_wheel_releases_tooltip_hover_ownership() {
             _ => unreachable!("test lobby starts with a client row"),
         })
         .collect();
-    app_classic_lobby_mut(&mut app.classic_host_lobby)
+    app_classic_lobby_mut(&mut app.lobby.classic_host)
         .controller
         .set_rows(rows);
 
@@ -1133,7 +1133,7 @@ fn captured_classic_lobby_wheel_releases_tooltip_hover_ownership() {
         .handle_classic_lobby_pointer_move(row_point)
         .test_value();
     main_assert!(short_lobby
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .expect("test lobby")
         .controller
@@ -1142,7 +1142,7 @@ fn captured_classic_lobby_wheel_releases_tooltip_hover_ownership() {
     short_lobby.handle_classic_lobby_wheel(60).test_value();
     main_assert!(
         short_lobby
-            .classic_host_lobby
+            .lobby.classic_host
             .as_ref()
             .expect("test lobby")
             .controller
@@ -1227,8 +1227,8 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
         "host listener remains owned by lobby"
     );
     main_assert!(matches!(app.network_mode, Some(NetworkMode::Host(_))));
-    main_assert!(app.network_lobby.is_none());
-    main_assert!(app.classic_host_lobby.is_some());
+    main_assert!(app.lobby.session.is_none());
+    main_assert!(app.lobby.classic_host.is_some());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.scenario_game_options.context() => GameOptionContext::LobbyHost);
     main_assert_eq!(app.scenario_game_options.values().password => accepted.password);
@@ -1372,7 +1372,7 @@ fn staged_host_installs_activated_participant_before_building_lobby_roster() {
 
     main_assert!(app.status_text.is_empty(), "{}", app.status_text);
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert_eq!(
         app.players.host_local_alternate_colors => expected_alternate_colors,
         "the prepared host retains its process-local AlternateColorDw sidecar"
@@ -2040,7 +2040,7 @@ fn countdown_zero_quits_a_dialogless_host_that_is_short_of_min_players() {
         let mut app = new_menu_app(640, 480);
         let (events, commands) = install_classic_host_network_stub(&mut app);
         app.headless = dialogless;
-        app.network_lobby_min_players = Some(2);
+        app.lobby.min_players = Some(2);
         app.players.infos.replace_snapshot(
             1,
             [lobby_fixture!(player_data:
@@ -2051,7 +2051,7 @@ fn countdown_zero_quits_a_dialogless_host_that_is_short_of_min_players() {
                 })],
             )],
         );
-        app.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(1));
+        app.lobby.host_countdown = Some(HostLobbyCountdown::with_seconds(1));
         (app, events, commands)
     };
 
@@ -2061,7 +2061,7 @@ fn countdown_zero_quits_a_dialogless_host_that_is_short_of_min_players() {
         server.take_exit_request(),
         "a dialogless host quits instead of starting a short round"
     );
-    main_assert!(server.host_lobby_countdown.is_none());
+    main_assert!(server.lobby.host_countdown.is_none());
     main_assert_ne!(server.mode => AppMode::Loading, "the aborted round must not begin loading");
 
     // The same shortfall in front of a lobby dialog still starts: C++ gates
@@ -2072,7 +2072,7 @@ fn countdown_zero_quits_a_dialogless_host_that_is_short_of_min_players() {
 
     // And a dialogless host that has its minimum starts normally.
     let (mut ready, _events, _commands) = short_host(true);
-    ready.network_lobby_min_players = Some(1);
+    ready.lobby.min_players = Some(1);
     ready.tick_network_lobby_countdown();
     main_assert!(!ready.take_exit_request());
 }
@@ -2096,7 +2096,7 @@ fn classic_host_configured_countdown_uses_sparse_packets_and_abort_unlocks_optio
 
     process_classic_lobby_action(&mut app, ClassicLobbyAction::AbortCountdownRequested);
     assert_lobby_countdowns(&mut commands, &[-1]);
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert_eq!(app_classic_lobby(&app).controller.countdown() => clonk_frontend::game_lobby::LobbyCountdownState::None);
     main_assert!(!app.scenario_game_options.values().countdown);
     main_assert_eq!(app_classic_lobby(&app).controller.logs().last().map(|line| line.text.as_str()) => Some("Game start aborted."));
@@ -2124,18 +2124,18 @@ fn classic_host_zero_countdown_enters_go_without_a_countdown_packet() {
     let (_events, mut commands) = install_network_commands(&mut app);
     let mut generic_lobby = NetworkLobbyState::new(0, "Exact Host".to_string(), true);
     generic_lobby.select_scenario(&scenario.identifier, &scenario.title);
-    app.network_lobby = Some(generic_lobby);
+    app.lobby.session = Some(generic_lobby);
     install_test_classic_host_lobby(&mut app);
     let go_observer = thread::spawn(move || commands.complete_lobby_start(Ok(())));
 
     request_classic_lobby_start(&mut app, 0);
 
     main_assert_eq!(go_observer.join().expect("atomic Go observer") => vec![network::TestLobbyStartCommand::BeginGo {status: expected_go, join_allowed: false,}]);
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert!(matches!(app.mode, AppMode::Loading));
-    main_assert!(app.classic_host_lobby.is_none());
+    main_assert!(app.lobby.classic_host.is_none());
     main_assert!(app
-        .network_start_wait
+        .lobby.start_wait
         .as_ref()
         .is_some_and(|wait| !wait.visible));
 }
@@ -2162,7 +2162,7 @@ fn atomic_go_worker_failure_is_reported_before_lobby_teardown() {
     let (_events, mut commands) = install_network_commands(&mut app);
     let mut generic_lobby = NetworkLobbyState::new(0, "Exact Host".to_string(), true);
     generic_lobby.select_scenario(&scenario.identifier, &scenario.title);
-    app.network_lobby = Some(generic_lobby);
+    app.lobby.session = Some(generic_lobby);
     install_test_classic_host_lobby(&mut app);
     let go_observer = thread::spawn(move || {
         commands.complete_lobby_start(Err("host loop rejected Go".to_string()))
@@ -2173,8 +2173,8 @@ fn atomic_go_worker_failure_is_reported_before_lobby_teardown() {
     main_assert_eq!(go_observer.join().expect("atomic Go observer") => vec![network::TestLobbyStartCommand::BeginGo {status: expected_go, join_allowed: false,}]);
     main_assert!(!matches!(app.mode, AppMode::Loading));
     main_assert!(app.scenario_lifecycle.loading.is_none());
-    main_assert!(app.classic_host_lobby.is_some());
-    main_assert!(app.network_lobby.is_some());
+    main_assert!(app.lobby.classic_host.is_some());
+    main_assert!(app.lobby.session.is_some());
     main_assert!(app.status_text.contains("host loop rejected Go"));
 }
 
@@ -2229,7 +2229,7 @@ fn classic_ready_packets_update_roster_and_start_when_relevant_clients_are_ready
     process_classic_lobby_action(&mut app, ClassicLobbyAction::ReadyChanged(true));
     assert_ready_checks(&mut commands, 0, clonk_network::ReadyCheckData::Ready);
     main_assert!(app_classic_lobby(&app).controller.ready());
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
 
     events
         .send(NetworkEvent::ReadyCheck(
@@ -2244,7 +2244,7 @@ fn classic_ready_packets_update_roster_and_start_when_relevant_clients_are_ready
                 .iter()
                 .any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == 7 && client.status == LobbyClientStatus::Ready)));
     assert_lobby_countdowns(&mut commands, &[5]);
-    main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown::new()));
+    main_assert_eq!(app.lobby.host_countdown => Some(HostLobbyCountdown::new()));
     main_assert_eq!(
         app_classic_lobby(&app)
             .controller
@@ -2298,7 +2298,7 @@ fn classic_host_chat_start_abort_and_readycheck_use_live_lobby_actions() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
 
-    if let Some(lobby) = app.classic_host_lobby.as_mut() {
+    if let Some(lobby) = app.lobby.classic_host.as_mut() {
         lobby.chat_history_index = 3;
         lobby.controller.set_chat_draft("stale");
     }
@@ -2432,7 +2432,7 @@ fn reached_network_start_wait_uses_host_roster_and_client_abort_dialog() {
     host.begin_network_start_wait(status);
     host.show_reached_network_start_wait().test_value();
     main_assert!(host
-        .network_start_wait
+        .lobby.start_wait
         .as_ref()
         .is_some_and(|wait| wait.visible && wait.expected_status == status));
     main_assert!(host.dialogs.messages.is_empty());
@@ -2441,7 +2441,7 @@ fn reached_network_start_wait_uses_host_roster_and_client_abort_dialog() {
     client.mode = AppMode::Loading;
     client.network_mode = Some(NetworkMode::Client(client_network_settings()));
     client.show_reached_network_start_wait().test_value();
-    main_assert!(client.network_start_wait.is_none());
+    main_assert!(client.lobby.start_wait.is_none());
     let [dialog] = client.dialogs.messages.as_slice() else {
         panic!("client should have exactly one start-wait dialog");
     };
@@ -2470,7 +2470,7 @@ fn reached_network_start_wait_uses_host_roster_and_client_abort_dialog() {
 fn classic_lobby_resource_sheet_refreshes_only_while_active() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
-    app_classic_lobby_mut(&mut app.classic_host_lobby)
+    app_classic_lobby_mut(&mut app.lobby.classic_host)
         .resource_rows
         .insert(
             7,
@@ -2608,9 +2608,9 @@ fn generic_client_lobby_external_irc_button_is_retained_and_emits_typed_action()
 fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     let mut app = new_menu_app(640, 480);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     {
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         lobby.chat_edit = LobbyChatEditView {
             text: "alpha beta".to_string(),
             caret: 10,
@@ -2626,7 +2626,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     }
 
     let assets = Arc::clone(&app.assets);
-    let (layout, max_scroll) = app_lobby_mut(&mut app.network_lobby)
+    let (layout, max_scroll) = app_lobby_mut(&mut app.lobby.session)
         .with_classic_controller_input(
             app.rendering.graphics.surface(),
             assets.as_ref(),
@@ -2665,7 +2665,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     app.handle_network_lobby_middle_button(ElementState::Released)
         .test_value();
     app.context_menus.open = None;
-    app_lobby_mut(&mut app.network_lobby).pointer = None;
+    app_lobby_mut(&mut app.lobby.session).pointer = None;
     app.handle_network_lobby_context_key().test_value();
     main_assert!(app.context_menus.open.is_some());
     process_lobby_chat_request(
@@ -2693,7 +2693,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     app.input_routing.live.modifiers = ModifiersState::empty();
     main_assert_eq!(app_lobby(&app).chat_edit.text => "alpha ",);
     {
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         let caret = lobby.chat_edit.caret;
         main_assert_eq!(lobby.handle_key(KeyCode::Enter, ElementState::Pressed) => None, "an unfocused joined edit must not submit through the reduced adapter",);
         main_assert_eq!(lobby.handle_key(KeyCode::Left, ElementState::Pressed) => None, "an unfocused joined edit must not consume cursor keys",);
@@ -2738,7 +2738,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     main_assert!(wheel_scroll < max_scroll);
 
     let assets = Arc::clone(&app.assets);
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .classic_render_state(
             app.rendering.graphics.surface(),
             assets.as_ref(),
@@ -2761,7 +2761,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     let scrollbar_scroll = app_lobby(&app).controller.chat_scroll();
     main_assert!(scrollbar_scroll < wheel_scroll);
     let assets = Arc::clone(&app.assets);
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .classic_render_state(
             app.rendering.graphics.surface(),
             assets.as_ref(),
@@ -3034,7 +3034,7 @@ fn joined_lobby_options_sheet_projects_read_only_rows() {
     // C4GameOptionsList::Activate forces one Update, and its Sec1 timer
     // keeps the visible sheet current (src/C4GameOptions.cpp:302-308).
     {
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         lobby.controller.set_option_rows(Vec::new());
     }
     app.sec1_timer().test_value();
@@ -3043,7 +3043,7 @@ fn joined_lobby_options_sheet_projects_read_only_rows() {
     // An inactive sheet does no periodic work.
     process_joined_lobby_action(&mut app, LobbyAction::SelectSheet(LobbySheet::Players));
     {
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         lobby.controller.set_option_rows(Vec::new());
     }
     app.sec1_timer().test_value();
@@ -3068,7 +3068,7 @@ fn joined_lobby_options_tab_click_opens_the_read_only_sheet() {
     app.test_network_events();
 
     let assets = Arc::clone(&app.assets);
-    let options_tab = app_lobby_mut(&mut app.network_lobby)
+    let options_tab = app_lobby_mut(&mut app.lobby.session)
         .with_classic_controller_input(
             app.rendering.graphics.surface(),
             assets.as_ref(),
@@ -3096,7 +3096,7 @@ fn joined_lobby_options_tab_click_opens_the_read_only_sheet() {
     );
 
     let mut surface = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .render_classic(
             &mut surface,
             assets.as_ref(),
@@ -3109,7 +3109,7 @@ fn joined_lobby_options_tab_click_opens_the_read_only_sheet() {
 
     // Every joined row is a read-only ComboBox, so clicking its value opens
     // no selection popup (src/C4GameOptions.cpp:80,126).
-    let combo = app_lobby_mut(&mut app.network_lobby)
+    let combo = app_lobby_mut(&mut app.lobby.session)
         .with_classic_controller_input(
             app.rendering.graphics.surface(),
             assets.as_ref(),
@@ -3154,7 +3154,7 @@ fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
     main_assert_eq!(app_lobby(&app).resource_rows[&9].present_percent => 37);
 
     {
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         let layout = lobby.update_layout(640.0, 480.0).clone();
         let rect = layout
             .sheet_buttons
@@ -3172,7 +3172,7 @@ fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
     main_assert_eq!(app_lobby(&app).active_sheet => LobbySheet::Resources);
     let (controller, _) = {
         let surface = app.rendering.graphics.surface();
-        app_lobby_mut(&mut app.network_lobby).classic_render_state(
+        app_lobby_mut(&mut app.lobby.session).classic_render_state(
             surface,
             app.assets.as_ref(),
             &app.scenario_game_options,
@@ -3189,7 +3189,7 @@ fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
     process_joined_lobby_action(&mut app, LobbyAction::SelectSheet(LobbySheet::Resources));
     let (controller, _) = {
         let surface = app.rendering.graphics.surface();
-        app_lobby_mut(&mut app.network_lobby).classic_render_state(
+        app_lobby_mut(&mut app.lobby.session).classic_render_state(
             surface,
             app.assets.as_ref(),
             &app.scenario_game_options,
@@ -3199,7 +3199,7 @@ fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
     main_assert_eq!(controller.resource_rows().iter().find(|row| row.id == 9).unwrap().present_percent => 73);
 
     {
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         for id in 100..150 {
             lobby.resource_rows.insert(
                 id,
@@ -3402,7 +3402,7 @@ fn lobby_resource_save_dialogs_cover_overwrite_decline_accept_success_and_failur
     let mut settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client");
     settings.resource_directory = work.clone();
     app.network_mode = Some(NetworkMode::Client(settings));
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     let core = lobby_fixture!(resource {
         resource_type: clonk_network::HostResourceType::Scenario as u8,
         id: 47,
@@ -3464,7 +3464,7 @@ fn classic_lobby_client_removal_evicts_its_resource_namespace() {
     let remote_resource = (7 << 16) | 1;
     let host_resource = 2;
     for resource_id in [host_resource, remote_resource] {
-        app_classic_lobby_mut(&mut app.classic_host_lobby)
+        app_classic_lobby_mut(&mut app.lobby.classic_host)
             .resource_rows
             .insert(
                 resource_id,
@@ -3536,7 +3536,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
 
     fn right_caption_context_point(app: &mut GameApp) -> GuiPoint {
         let surface = app.rendering.graphics.surface();
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         let (controller, _) = lobby
             .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
             .test_value();
@@ -3602,15 +3602,15 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     let mut app = joined_app();
 
     let caption = right_caption_context_point(&mut app);
-    app_lobby_mut(&mut app.network_lobby).handle_panel_pointer_move(caption);
+    app_lobby_mut(&mut app.lobby.session).handle_panel_pointer_move(caption);
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
     main_assert_eq!(some(&app.context_menus.open).layout().panels[0].rows.len() => 3, "without teams: Players, Resources and Options");
     app.close_context_menu_silently();
 
-    app_lobby_mut(&mut app.network_lobby).has_teams = true;
+    app_lobby_mut(&mut app.lobby.session).has_teams = true;
     let caption = right_caption_context_point(&mut app);
-    app_lobby_mut(&mut app.network_lobby).handle_panel_pointer_move(caption);
+    app_lobby_mut(&mut app.lobby.session).handle_panel_pointer_move(caption);
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
     let resource_point = {
@@ -3633,7 +3633,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
 
     let exit = {
         let rect = app
-            .network_lobby
+            .lobby.session
             .as_ref()
             .and_then(|lobby| lobby.layout.as_ref())
             .test_value()
@@ -3643,14 +3643,14 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
             rect.origin.y + rect.size.height / 2.0,
         )
     };
-    app_lobby_mut(&mut app.network_lobby).handle_panel_pointer_move(exit);
+    app_lobby_mut(&mut app.lobby.session).handle_panel_pointer_move(exit);
     app.sound.ui_log.clear();
     app.test_left_button(ElementState::Pressed);
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string()]);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
 
@@ -3658,7 +3658,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     escape.sound.ui_log.clear();
     escape.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert_eq!(escape.startup.view => StartupView::MainMenu);
-    main_assert!(escape.network_lobby.is_none());
+    main_assert!(escape.lobby.session.is_none());
     main_assert!(escape.network.is_none());
     main_assert!(escape.network_mode.is_none());
     main_assert!(escape.sound.ui_log.is_empty(), "Escape is silent");
@@ -3668,7 +3668,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     hotkey.sound.ui_log.clear();
     hotkey.test_key(VirtualKeyCode::KeyX, ElementState::Pressed);
     main_assert_eq!(hotkey.startup.view => StartupView::MainMenu);
-    main_assert!(hotkey.network_lobby.is_none());
+    main_assert!(hotkey.lobby.session.is_none());
     main_assert!(hotkey.network.is_none());
     main_assert!(hotkey.network_mode.is_none());
     main_assert!(hotkey.sound.ui_log.is_empty(), "the Exit hotkey is silent");
@@ -3705,7 +3705,7 @@ fn joined_client_roster_context_reaches_mute_and_info_without_host_actions() {
 
     let point = {
         let surface = app.rendering.graphics.surface();
-        let lobby = app_lobby_mut(&mut app.network_lobby);
+        let lobby = app_lobby_mut(&mut app.lobby.session);
         let (mut controller, _) = lobby
             .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
             .test_value();
@@ -3727,7 +3727,7 @@ fn joined_client_roster_context_reaches_mute_and_info_without_host_actions() {
             (row.rect.y + row.rect.h / 2) as f32,
         )
     };
-    app_lobby_mut(&mut app.network_lobby).handle_panel_pointer_move(point);
+    app_lobby_mut(&mut app.lobby.session).handle_panel_pointer_move(point);
     app.handle_network_lobby_secondary_button(ElementState::Pressed)
         .test_value();
     main_assert_eq!(some(&app.context_menus.open).layout().panels[0].rows.len() => 2);
@@ -3878,7 +3878,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert_eq!(lobby.controller.focus() => LobbyControl::Roster);
 
     for modifiers in [ModifiersState::empty(), ModifiersState::SHIFT] {
-        app_lobby_mut(&mut app.network_lobby).chat_edit = LobbyChatEditView::default();
+        app_lobby_mut(&mut app.lobby.session).chat_edit = LobbyChatEditView::default();
         app.joined_lobby_layouts().test_value();
         app.input_routing.live.modifiers = modifiers;
         // Dialog::CharIn refocuses the default edit for unprocessed
@@ -3895,7 +3895,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     }
     app.input_routing.live.modifiers = ModifiersState::empty();
 
-    app_lobby_mut(&mut app.network_lobby).chat_edit = LobbyChatEditView {
+    app_lobby_mut(&mut app.lobby.session).chat_edit = LobbyChatEditView {
         text: "draft".into(),
         caret: 5,
         cursor_visible: true,
@@ -3916,7 +3916,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert_eq!(lobby.chat_edit.caret => 5);
     main_assert_eq!(lobby.controller.focus() => LobbyControl::Roster);
 
-    app_lobby_mut(&mut app.network_lobby).chat_edit = LobbyChatEditView::default();
+    app_lobby_mut(&mut app.lobby.session).chat_edit = LobbyChatEditView::default();
     app.joined_lobby_layouts().test_value();
     app.test_text_input('x');
     let lobby = app_lobby(&app);
@@ -3981,7 +3981,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert!(lobby.controller.roster_scroll() > 0);
     tap_test_key(&mut app, VirtualKeyCode::Home);
 
-    app_lobby_mut(&mut app.network_lobby).chat_edit = LobbyChatEditView {
+    app_lobby_mut(&mut app.lobby.session).chat_edit = LobbyChatEditView {
         text: "focus me".to_string(),
         caret: 0,
         cursor_visible: false,
@@ -4263,7 +4263,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     );
     click_network_lobby(&mut app, add_point);
     main_assert!(app.definition_selection.dialog.is_some());
-    main_assert_eq!(some(&app.pending_lobby_player_selection).client_id => 7);
+    main_assert_eq!(some(&app.lobby.pending_player_selection).client_id => 7);
 }
 
 #[test]
@@ -4362,7 +4362,7 @@ fn joined_roster_double_click_is_roster_scoped() {
 fn unstaged_host_retained_roster_routes_script_player_add() {
     let mut app = new_menu_app(640, 480);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(host_lobby_state());
+    app.lobby.session = Some(host_lobby_state());
     let (_events, mut commands) = install_client_network_commands(&mut app, 0);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.control_clients
@@ -4431,7 +4431,7 @@ fn joined_option_point(app: &GameApp, button: GameOptionButton) -> GuiPoint {
 }
 
 fn joined_option_controller_focus(app: &mut GameApp) -> LobbyControl {
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.sync_classic_controller();
     lobby.controller.focus()
 }
@@ -4698,7 +4698,7 @@ fn network_lobby_game_option_state_matches_role_and_render_focus() {
         );
     }
     let surface = app.rendering.graphics.surface();
-    let (controller, options) = app_lobby_mut(&mut app.network_lobby)
+    let (controller, options) = app_lobby_mut(&mut app.lobby.session)
         .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
         .test_value();
     main_assert_eq!(controller.focus() => LobbyControl::GameOption(GameOptionButton::League));
@@ -4709,7 +4709,7 @@ fn network_lobby_game_option_state_matches_role_and_render_focus() {
     // render-time context checks and native enable rules hold.
     let mut host = new_menu_app(640, 480);
     host.startup.view = StartupView::NetworkLobby;
-    host.network_lobby = Some(host_lobby_state());
+    host.lobby.session = Some(host_lobby_state());
     host.sync_network_lobby_game_option_state();
     main_assert_eq!(host.scenario_game_options.context() => GameOptionContext::LobbyHost);
     main_assert!(
@@ -4725,7 +4725,7 @@ fn network_lobby_game_option_state_matches_role_and_render_focus() {
     // not clobber it.
     let mut classic = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut classic);
-    classic.network_lobby = Some(host_lobby_state());
+    classic.lobby.session = Some(host_lobby_state());
     let before = classic.scenario_game_options.values().clone();
     classic.network_is_league = true;
     classic.sync_network_lobby_game_option_state();
@@ -4830,10 +4830,10 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
     main_assert!(app.dialogs.client_list.is_none());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
-    main_assert!(app.network_lobby.is_some());
+    main_assert!(app.lobby.session.is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Released);
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
-    main_assert!(app.network_lobby.is_some());
+    main_assert!(app.lobby.session.is_some());
 
     main_assert!(app
         .open_classic_lobby_client_info(0)
@@ -4853,7 +4853,7 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
     ]);
     main_assert!(app.dialogs.client_list.is_none());
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
-    main_assert!(app.network_lobby.is_some());
+    main_assert!(app.lobby.session.is_some());
 }
 
 #[test]
@@ -4906,12 +4906,12 @@ fn classic_lobby_add_player_picker_publishes_relative_file_and_projects_echo() {
         .to_string();
     main_assert_eq!(some(&app.definition_selection.dialog).root_path() => player_dir.to_string_lossy(), "C4PlayerSelDlg snapshots the configured PlayerPath root");
     main_assert_eq!(
-        some(&app.pending_lobby_player_selection).candidates[&selected].wire_filename =>
+        some(&app.lobby.pending_player_selection).candidates[&selected].wire_filename =>
         "Players/Alice.c4p",
         "the physical picker path must not leak onto the wire"
     );
     main_assert_eq!(
-        some(&app.pending_lobby_player_selection).candidates[&selected].source_path =>
+        some(&app.lobby.pending_player_selection).candidates[&selected].source_path =>
         player_path,
         "the exact physical path must survive the string-keyed selector"
     );
@@ -5007,7 +5007,7 @@ fn classic_lobby_team_combo_filters_teams_and_submits_the_full_player_packet() {
         "the combo text waits for the authoritative player-info echo"
     );
 
-    app.network_lobby = Some(NetworkLobbyState::new(0, "Peer view".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(0, "Peer view".to_string(), false));
     app.apply_direct_player_info_control(
         lobby_fixture!(player_data: updates[0].client_id, flags: updates[0].flags, updates[0].players.clone(), by: 0),
         false,
@@ -5111,7 +5111,7 @@ fn classic_lobby_client_telemetry_refreshes_on_the_one_second_timer() {
             ping_ms: None,
         })
     };
-    let lobby = app_classic_lobby_mut(&mut app.classic_host_lobby);
+    let lobby = app_classic_lobby_mut(&mut app.lobby.classic_host);
     let mut rows = lobby.controller.rows().to_vec();
     rows.push(client_row(7, "Downloading"));
     rows.push(client_row(8, "Disconnected"));
@@ -5568,7 +5568,7 @@ fn lobby_paste_submits_each_line_and_retains_the_tail() {
 
     let mut app = new_menu_app(640, 480);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     let (_events, mut commands) = install_client_network_commands(&mut app, 7);
     app.paste_network_lobby_chat_text("one\r\ntwo\nthree")
         .test_value();
@@ -5700,7 +5700,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     let staged = prepare_tutorial_host_lobby(&app, repository);
     app.staged_network_host_scenario = Some(staged);
     install_test_classic_host_lobby(&mut app);
-    let _ = app_classic_lobby_mut(&mut app.classic_host_lobby)
+    let _ = app_classic_lobby_mut(&mut app.lobby.classic_host)
         .controller
         .apply_countdown_packet(clonk_frontend::game_lobby::LobbyCountdownPacket::Seconds(3));
     main_assert!(app_classic_lobby(&app).controller.countdown().is_any());
@@ -5709,7 +5709,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     app.network_mode = Some(NetworkMode::Host(
         lobby_fixture!(host: 11112, "Exact Host".to_string(), None),
     ));
-    app.network_lobby = Some(NetworkLobbyState::new(0, "Exact Host".to_string(), true));
+    app.lobby.session = Some(NetworkLobbyState::new(0, "Exact Host".to_string(), true));
     app.network_ticks.queue(0, 4, Vec::new());
     app.network_sync.queue(0, 5, Vec::new());
     let local_check = SyncCheckPacket {
@@ -5743,8 +5743,8 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
-    main_assert!(app.classic_host_lobby.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.classic_host.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert!(app.staged_network_host_scenario.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
@@ -5793,7 +5793,7 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
 
     for _ in 0..10 {
         if app
-            .classic_host_lobby
+            .lobby.classic_host
             .as_ref()
             .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::Roster)
         {
@@ -5810,7 +5810,7 @@ fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
 fn generic_client_lobby_chat_submits_private_delivery_message_controls() {
     let mut app = new_menu_app(640, 480);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     let (_events, mut commands) = install_client_network_commands(&mut app, 7);
 
     for character in "hello".chars() {
@@ -5862,7 +5862,7 @@ fn classic_host_lobby_network_events_update_supported_live_state() {
         .test_value();
     app.test_network_events();
     main_assert!(app.status_text.is_empty());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
 
     app.players.infos.replace_snapshot(
         7,
@@ -5961,8 +5961,8 @@ fn classic_host_lobby_network_events_update_supported_live_state() {
     // (src/C4GameLobby.cpp:669-675; src/C4Control.cpp:554-565;
     // src/C4Log.cpp:227-239).
     main_assert!(app.status_text.is_empty());
-    main_assert!(app.network_lobby.is_none());
-    main_assert!(app.classic_host_lobby.is_some());
+    main_assert!(app.lobby.session.is_none());
+    main_assert!(app.lobby.classic_host.is_some());
     main_assert_eq!(
         app_classic_lobby(&app).controller.logs().last() =>
         Some(&LobbyLogLine {
@@ -5986,7 +5986,7 @@ fn classic_host_lobby_cancel_paths_clear_pressed_activation_latches() {
     install_test_classic_host_lobby(&mut app);
     for _ in 0..20 {
         if app
-            .classic_host_lobby
+            .lobby.classic_host
             .as_ref()
             .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::Exit)
         {
@@ -6025,7 +6025,7 @@ fn classic_host_lobby_cancel_paths_clear_pressed_activation_latches() {
     app.pointer_left().test_value();
     app.test_key(VirtualKeyCode::Enter, ElementState::Released);
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
-    main_assert!(app.classic_host_lobby.is_none());
+    main_assert!(app.lobby.classic_host.is_none());
 }
 
 #[test]
@@ -6054,7 +6054,7 @@ fn connected_client_enters_exact_classic_lobby() {
     app.poll_startup_network_connection().test_value();
     main_assert!(app.network.is_some());
     main_assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
-    main_assert!(app.classic_host_lobby.is_none());
+    main_assert!(app.lobby.classic_host.is_none());
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     let lobby = app_lobby(&app);
     main_assert_eq!(lobby.local_client_id => 7);
@@ -6118,14 +6118,14 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
     .test_value();
     wait_for_menu(&mut app);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     app.sync_network_lobby_game_option_state();
     let mut frame = vec![0x5a; 640 * 480 * 4];
 
     app.test_render(&mut frame);
 
     let layout = app
-        .network_lobby
+        .lobby.session
         .as_ref()
         .and_then(|lobby| lobby.layout.as_ref())
         .test_value();
@@ -6146,7 +6146,7 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
         (classic_layout.exit_button.x + 1) as f32,
         (classic_layout.exit_button.y + 1) as f32,
     );
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .controller
         .pointer_move(exit, &classic_layout, &roster);
     main_assert!(app_lobby(&app)
@@ -6169,7 +6169,7 @@ fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
         .remove("GUIButtonDown.png")
         .test_value();
     assetless.startup.view = StartupView::NetworkLobby;
-    assetless.network_lobby = Some(client_lobby_state());
+    assetless.lobby.session = Some(client_lobby_state());
     let mut untouched = vec![0x3c; 320 * 200 * 4];
     let error = assetless
         .render(&mut untouched)
@@ -6249,7 +6249,7 @@ fn saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
 fn network_lobby_renders_live_without_a_deferred_native_text_pass() {
     let mut app = new_real_classic_menu_app(320, 200);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
     app.sync_network_lobby_game_option_state();
     main_assert!(app.status_text.is_empty());
 
@@ -6315,7 +6315,7 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
     ])
     .test_value();
     main_assert!(!app.rendering.display_flags.white_chat);
-    main_assert!(!app.white_lobby_chat);
+    main_assert!(!app.lobby.white_chat);
     app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
         .test_value();
 
@@ -6492,7 +6492,7 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
                     && join.parameters.scenario.filename.as_bytes()
                         == scenario.identifier.as_bytes()
                     && client
-                        .network_lobby
+                        .lobby.session
                         .as_ref()
                         .is_some_and(|lobby| lobby.scenario_label() == "Fixture")
             });
@@ -6511,11 +6511,11 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
                 && client.control_clients.is_activated(local_client_id)
                 && host.control_clients.contains(local_client_id)
                 && host.control_clients.is_activated(local_client_id)
-                && client.network_lobby.as_ref().is_some_and(|lobby| {
+                && client.lobby.session.as_ref().is_some_and(|lobby| {
                     lobby.roster_rows_authoritative
                         && client_ids(lobby.controller.rows()) == [0, local_client_id]
                 })
-                && host.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                && host.lobby.classic_host.as_ref().is_some_and(|lobby| {
                     client_ids(lobby.controller.rows()) == [0, local_client_id]
                 })
         });
@@ -6580,7 +6580,7 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
                     .iter()
                     .all(|(client_id, resource_id)| resource_id >> 16 == *client_id)
                 && player_resources[0].1 != player_resources[1].1
-                && client.network_lobby.as_ref().is_some_and(|lobby| {
+                && client.lobby.session.as_ref().is_some_and(|lobby| {
                     !lobby.resource_rows.is_empty()
                         && lobby
                             .resource_rows
@@ -6593,7 +6593,7 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
                                 .is_some_and(|row| row.present_percent == 100)
                         })
                 })
-                && host.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                && host.lobby.classic_host.as_ref().is_some_and(|lobby| {
                     !lobby.resource_rows.is_empty()
                         && lobby
                             .resource_rows
@@ -6935,7 +6935,7 @@ fn prepared_host_transport_swap_retains_automatic_preload_state() {
     let preliminary_preload = app_classic_lobby(&app).preload;
     main_assert!(preliminary_preload.spent);
     main_assert!(!preliminary_preload.eligible);
-    main_assert!(app.lobby_preload_task.is_some() || app.lobby_preload_artifact.is_some());
+    main_assert!(app.lobby.preload_task.is_some() || app.lobby.preload_artifact.is_some());
 
     while app.pending_network_host_preparation.is_some()
         || app.startup_network.connection.is_some()
@@ -7070,10 +7070,10 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     main_assert_eq!(app.players.infos.player_count() => 0);
     main_assert_eq!(prepared.scenario_wire_name().as_bytes() => scenario.identifier.as_bytes(), "the prepared host retains the selected scenario's wire identity");
     main_assert!(
-        app.network_lobby.is_none(),
+        app.lobby.session.is_none(),
         "a staged host uses the exact C++ lobby instead of the generic projection"
     );
-    main_assert!(app.classic_host_lobby.is_some());
+    main_assert!(app.lobby.classic_host.is_some());
     let local_addresses = some(&app.network).local_addresses();
     main_assert!(matches!(local_addresses.len(), 1 | 2));
     let tcp = local_addresses.first().test_value();
@@ -7169,7 +7169,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         ]
     );
     main_assert!(
-        app.host_lobby_countdown.is_none(),
+        app.lobby.host_countdown.is_none(),
         "natural zero releases C4Network2::pLobbyCountdown ownership before GO"
     );
     app.sec1_timer().test_value();
@@ -7187,7 +7187,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     main_assert_eq!(some(&app.scenario_lifecycle.loading).last_progress => 7);
     main_assert_eq!(some(&app.loader.screen).state().progress() => 7);
     main_assert!(app
-        .network_start_wait
+        .lobby.start_wait
         .as_ref()
         .is_some_and(|wait| !wait.visible));
     // C4GameParameters chooses the host seed before InitNetworkHost and
@@ -7252,7 +7252,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     main_assert!(matches!(app.mode, AppMode::Loading));
     main_assert!(app.scenario_lifecycle.loading.is_some());
     main_assert!(app
-        .network_start_wait
+        .lobby.start_wait
         .as_ref()
         .is_some_and(|wait| wait.visible));
     main_assert!(
@@ -7269,7 +7269,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     app.test_network_events();
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(app.scenario_lifecycle.loading.is_none());
-    main_assert!(app.network_start_wait.is_none());
+    main_assert!(app.lobby.start_wait.is_none());
     main_assert!(
         app.network_game_advertiser.is_some(),
         "native keeps the reference listener alive during play"
@@ -7410,7 +7410,7 @@ fn compatibility_profile_notice_overlays_the_cpp_lobby_and_leaves_its_log_native
     main_assert!(host.dialogs.messages.is_empty());
     main_assert!(
         !host
-            .network_lobby
+            .lobby.session
             .as_ref()
             .test_value()
             .logs
@@ -7466,7 +7466,7 @@ fn compatibility_profile_notice_cannot_reopen_a_client_after_go_or_pause() {
             .test_value();
 
         main_assert!(matches!(app.mode, AppMode::Loading));
-        main_assert!(app.network_lobby.is_none());
+        main_assert!(app.lobby.session.is_none());
         main_assert!(app.dialogs.messages.is_empty());
     }
 }
@@ -7491,8 +7491,8 @@ fn cancelling_compatibility_profile_notice_fully_tears_down_the_visible_lobby() 
 
     main_assert!(host.network.is_none());
     main_assert!(host.network_mode.is_none());
-    main_assert!(host.network_lobby.is_none());
-    main_assert!(host.classic_host_lobby.is_none());
+    main_assert!(host.lobby.session.is_none());
+    main_assert!(host.lobby.classic_host.is_none());
     main_assert!(host.dialogs.messages.is_empty());
 }
 
@@ -7570,7 +7570,7 @@ fn host_reports_the_session_profile_while_a_client_reports_only_its_own_refusal(
 
     for app in [&client, &host] {
         main_assert!(
-            !app.network_lobby.test_ref().logs.iter().any(|line| line
+            !app.lobby.session.test_ref().logs.iter().any(|line| line
                 .text
                 .to_ascii_lowercase()
                 .contains("compatibility profile")),
@@ -7617,7 +7617,7 @@ fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
     }
     main_assert_eq!(client.startup.view => StartupView::NetworkLobby);
     main_assert!(
-        !client.network_lobby.test_ref().logs.iter().any(|line| line
+        !client.lobby.session.test_ref().logs.iter().any(|line| line
             .text
             .to_ascii_lowercase()
             .contains("compatibility profile")),
@@ -7677,7 +7677,7 @@ fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
     host.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     main_assert!(
-        !host.network_lobby.test_ref().logs.iter().any(|line| line
+        !host.lobby.session.test_ref().logs.iter().any(|line| line
             .text
             .to_ascii_lowercase()
             .contains("compatibility profile")),
@@ -7692,7 +7692,7 @@ fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
     ordinary.open_network_lobby();
     main_assert!(
         !ordinary
-            .network_lobby
+            .lobby.session
             .as_ref()
             .test_value()
             .logs
@@ -7830,7 +7830,7 @@ fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
     // src/C4Gui.cpp:71-89).
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
-    app.white_lobby_chat = false;
+    app.lobby.white_chat = false;
     app.show_log_timestamps = false;
     app.control_clients
         .replace_snapshot([message_client(0, b"Local"), message_client(7, b"Remote")]);
@@ -7887,7 +7887,7 @@ fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
     main_assert_eq!(line.color => [0xaf, 0xaf, 0xaf, 0xff]);
 
     app.show_log_timestamps = false;
-    app.white_lobby_chat = true;
+    app.lobby.white_chat = true;
     app.execute_message_control(message_control(
         MESSAGE_TYPE_NORMAL,
         -1,
@@ -7971,7 +7971,7 @@ fn client_join_data_replaces_the_lobby_participant_snapshot() {
     let event_tx = install_client_network_stub(&mut app, 7);
     let mut lobby = NetworkLobbyState::new(7, "stale local".to_string(), false);
     lobby.register_peer(99, "stale peer".to_string(), ParticipantKind::Player);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
 
     let host_config = clonk_network::HostConfig::default();
     let mut snapshot = host_config.initial_join_snapshot.test_value();
@@ -8172,34 +8172,34 @@ fn configured_automatic_lobby_preload_runs_off_thread_and_activation_reuses_it()
     let (lobby, options) = app.build_classic_host_lobby(&mode, &manager).test_value();
     main_assert!(lobby.preload.automatic);
     main_assert!(!lobby.preload.manual_button_present);
-    app.classic_host_lobby = Some(lobby);
+    app.lobby.classic_host = Some(lobby);
     app.scenario_game_options = options;
     app.network_mode = Some(mode);
     app.network = Some(manager);
 
     app.sync_classic_lobby_resource_ready();
     let preload = app
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .map(|lobby| lobby.preload)
         .test_value();
     main_assert!(preload.spent, "successful worker launch is one-shot");
-    main_assert!(app.lobby_preload_task.is_some());
+    main_assert!(app.lobby.preload_task.is_some());
 
     let deadline = Instant::now() + Duration::from_secs(180);
-    while app.lobby_preload_task.is_some() {
+    while app.lobby.preload_task.is_some() {
         app.poll_lobby_preload().test_value();
         main_assert!(Instant::now() < deadline, "lobby preload did not finish");
         thread::yield_now();
     }
-    let artifact = some(&app.lobby_preload_artifact);
+    let artifact = some(&app.lobby.preload_artifact);
     let expected_hud = Arc::clone(&artifact.game_graphics.hud_graphics);
     let expected_textures = Arc::clone(&artifact.material_texture_images);
     let expected_render_info = Arc::clone(&artifact.material_render_info);
 
     app.network = None;
     app.network_mode = None;
-    app.classic_host_lobby = None;
+    app.lobby.classic_host = None;
     let staged = app.staged_network_host_scenario.take().test_value();
     app.activate_loaded_scenario(
         staged.frontend,
@@ -8236,29 +8236,29 @@ fn catalog_host_lobby_preload_is_eligible_and_caches_the_selected_scenario() {
     let mut lobby = NetworkLobbyState::new(0, "Catalog Host".to_string(), true)
         .with_preloading(true, LobbyLabels::default());
     lobby.select_scenario(&frontend.identifier, &frontend.title);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     app.network_mode = Some(NetworkMode::Host(
         lobby_fixture!(host: 11_112, "Catalog Host".to_string(), None),
     ));
     let _events = install_network_stub(&mut app);
 
     app.sync_classic_lobby_resource_ready();
-    main_assert!(app.lobby_preload_task.is_some());
+    main_assert!(app.lobby.preload_task.is_some());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while app.lobby_preload_task.is_some() {
+    while app.lobby.preload_task.is_some() {
         app.poll_lobby_preload().test_value();
         main_assert!(Instant::now() < deadline, "catalog preload did not finish");
         thread::yield_now();
     }
     main_assert!(
-        app.lobby_preload_artifact
+        app.lobby.preload_artifact
             .as_ref()
             .and_then(|artifact| artifact.catalog_host.as_ref())
             .is_some_and(|catalog_host| catalog_host.scenario.is_some()),
         "catalog preload retains the parsed scenario for the start path"
     );
     let catalog_host = app
-        .lobby_preload_artifact
+        .lobby.preload_artifact
         .as_mut()
         .and_then(|artifact| artifact.catalog_host.as_mut())
         .test_value();
@@ -8269,7 +8269,7 @@ fn catalog_host_lobby_preload_is_eligible_and_caches_the_selected_scenario() {
         catalog_host.scenario.is_some(),
         "a changed raw load key must leave the cached scenario untouched"
     );
-    let artifact = some(&app.lobby_preload_artifact);
+    let artifact = some(&app.lobby.preload_artifact);
     let expected_hud = Arc::clone(&artifact.game_graphics.hud_graphics);
     let expected_textures = Arc::clone(&artifact.material_texture_images);
     let expected_render_info = Arc::clone(&artifact.material_render_info);
@@ -8279,7 +8279,7 @@ fn catalog_host_lobby_preload_is_eligible_and_caches_the_selected_scenario() {
         .test_value();
 
     main_assert!(
-        app.lobby_preload_artifact
+        app.lobby.preload_artifact
             .as_ref()
             .and_then(|artifact| artifact.catalog_host.as_ref())
             .is_some_and(|catalog_host| catalog_host.scenario.is_none()),
@@ -8313,7 +8313,7 @@ fn lobby_preload_launch_failure_logs_red_without_error_sound_and_stays_retryable
     let mut app = new_state_only_menu_app(320, 200);
     install_test_classic_host_lobby(&mut app);
     {
-        let lobby = app_classic_lobby_mut(&mut app.classic_host_lobby);
+        let lobby = app_classic_lobby_mut(&mut app.lobby.classic_host);
         lobby.preload = LobbyPreloadState::new(false);
         main_assert!(!lobby.preload.synchronize(true, true));
         lobby.controller.set_preload_button_state(true, true);
@@ -8337,7 +8337,7 @@ fn lobby_ready_toggle_is_disabled_while_non_player_resource_loads() {
     // 329-343).
     let mut app = new_state_only_menu_app(320, 200);
     let (_events, mut commands) = install_client_network_commands(&mut app, 7);
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
     app.admission_resources
         .register_lobby_resource(&lobby_fixture!(resource {
             resource_type: clonk_network::HostResourceType::Scenario as u8,
@@ -8363,7 +8363,7 @@ fn join_data_resources_keep_lobby_ready_disabled_until_completion_events() {
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Observer",
     )));
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
     let resource = |resource_type, id| {
         lobby_fixture!(resource {
             resource_type,
@@ -8455,9 +8455,9 @@ fn host_ready_check_request_aborts_countdown_and_clears_only_nonhosts() {
         participant.ready = true;
     }
     lobby.countdown = Some(5);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.host_lobby_countdown = Some(HostLobbyCountdown::new());
+    app.lobby.host_countdown = Some(HostLobbyCountdown::new());
     for client_id in [0, 7, 9] {
         app.control_clients.register(client_id, true, false);
         main_assert!(app.control_clients.set_lobby_ready(client_id, true));
@@ -8476,7 +8476,7 @@ fn host_ready_check_request_aborts_countdown_and_clears_only_nonhosts() {
     main_assert!(!app.control_clients.state(7).unwrap().lobby_ready);
     main_assert!(!app.control_clients.state(9).unwrap().lobby_ready);
     main_assert_eq!(lobby.countdown => None);
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     assert_ready_checks(&mut commands, 0, clonk_network::ReadyCheckData::Request);
 }
 
@@ -8490,25 +8490,25 @@ fn host_ready_check_uses_cpp_ten_second_default_cooldown() {
     let mut lobby = host_lobby_state();
     lobby.register_peer(7, "Player".to_string(), ParticipantKind::Player);
     lobby.participants.get_mut(&7).test_value().ready = true;
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     let (_events, mut commands) = install_network_commands(&mut app);
     let now = Instant::now();
 
     main_assert!(app.request_lobby_ready_check_at(now).unwrap());
     main_assert_eq!(commands.take_submitted_ready_checks().len() => 1);
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .participants
         .get_mut(&7)
         .test_value()
         .ready = true;
-    app.host_lobby_countdown = Some(HostLobbyCountdown::new());
+    app.lobby.host_countdown = Some(HostLobbyCountdown::new());
 
     main_assert!(!app
         .request_lobby_ready_check_at(now + Duration::from_secs(9))
         .unwrap());
     main_assert!(app_lobby(&app).participants[&7].ready);
-    main_assert!(app.host_lobby_countdown.is_some());
+    main_assert!(app.lobby.host_countdown.is_some());
     main_assert!(commands.take_submitted_ready_checks().is_empty());
     main_assert_eq!(app.status_text => "Too early! Please wait 1 seconds.");
 
@@ -8516,7 +8516,7 @@ fn host_ready_check_uses_cpp_ten_second_default_cooldown() {
         .request_lobby_ready_check_at(now + Duration::from_secs(10))
         .unwrap());
     main_assert!(!app_lobby(&app).participants[&7].ready);
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert_eq!(commands.take_submitted_ready_checks().len() => 1);
 }
 
@@ -8576,9 +8576,9 @@ fn ready_check_toast_follows_the_config_flag_rather_than_window_focus() {
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
             "Client",
         )));
-        app.network_lobby = Some(client_lobby_state());
+        app.lobby.session = Some(client_lobby_state());
         app.window_active = window_active;
-        app.ready_check_toasts_enabled = toasts_enabled;
+        app.lobby.ready_check_toasts_enabled = toasts_enabled;
         app
     }
 
@@ -8656,9 +8656,9 @@ fn answering_a_ready_check_dismisses_its_notification_exactly_once() {
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     app.window_active = false;
-    app.ready_check_toasts_enabled = true;
+    app.lobby.ready_check_toasts_enabled = true;
 
     let packet = clonk_network::ReadyCheckPacket::new(0, clonk_network::ReadyCheckData::Request);
     app.handle_lobby_ready_check_request(packet).test_value();
@@ -8697,7 +8697,7 @@ fn a_timed_out_ready_check_dismisses_its_notification() {
         client_lobby_state(),
     );
     app.window_active = false;
-    app.ready_check_toasts_enabled = true;
+    app.lobby.ready_check_toasts_enabled = true;
     send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
     app.test_network_events();
 
@@ -8729,9 +8729,9 @@ fn lobby_teardown_dismisses_a_live_ready_check_notification() {
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     app.window_active = false;
-    app.ready_check_toasts_enabled = true;
+    app.lobby.ready_check_toasts_enabled = true;
 
     let packet = clonk_network::ReadyCheckPacket::new(0, clonk_network::ReadyCheckData::Request);
     app.handle_lobby_ready_check_request(packet).test_value();
@@ -8802,11 +8802,11 @@ fn an_actionable_desktop_shows_the_ready_check_toast_through_its_watcher() {
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     app.window_active = false;
-    app.ready_check_toasts_enabled = true;
+    app.lobby.ready_check_toasts_enabled = true;
     let actionable: Arc<dyn ActionableSink> = sink.clone();
-    app.ready_check_toast_backend = ReadyCheckToastBackend::with_sink(actionable);
+    app.lobby.ready_check_toast_backend = ReadyCheckToastBackend::with_sink(actionable);
 
     let packet = clonk_network::ReadyCheckPacket::new(0, clonk_network::ReadyCheckData::Request);
     app.handle_lobby_ready_check_request(packet).test_value();
@@ -8890,7 +8890,7 @@ fn complete_client_ready_check_opens_one_exact_fifteen_second_prompt() {
     main_assert_eq!(prompt.focused_button() => None);
     main_assert!(commands.take_submitted_ready_checks().is_empty());
 
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .participants
         .get_mut(&9)
         .test_value()
@@ -8971,10 +8971,10 @@ fn ready_check_notification_actions_submit_the_answer_and_close_the_prompt() {
         app.test_network_events();
         main_assert!(!app.dialogs.messages.is_empty());
 
-        let continuation = app.lobby_ready_check_continuation.clone().test_value();
+        let continuation = app.lobby.ready_check_continuation.clone().test_value();
         main_assert!(continuation.activate(
             NotificationActivation::Chosen(action),
-            app.lobby_ready_check_sink.as_ref()
+            app.lobby.ready_check_sink.as_ref()
         ));
         app.poll_lobby_ready_check_notification().test_value();
 
@@ -8988,7 +8988,7 @@ fn ready_check_notification_actions_submit_the_answer_and_close_the_prompt() {
         // all inert: the continuation is claimed exactly once.
         main_assert!(!continuation.activate(
             NotificationActivation::Chosen(NotificationAction::No),
-            app.lobby_ready_check_sink.as_ref()
+            app.lobby.ready_check_sink.as_ref()
         ));
         app.poll_lobby_ready_check_notification().test_value();
         app.complete_lobby_ready_check_response(false).test_value();
@@ -9020,15 +9020,15 @@ fn a_ready_check_notification_body_click_raises_without_answering() {
     app.test_network_events();
     main_assert!(!app.dialogs.messages.is_empty(), "the prompt is up");
 
-    let continuation = app.lobby_ready_check_continuation.clone().test_value();
+    let continuation = app.lobby.ready_check_continuation.clone().test_value();
     main_assert!(
-        !continuation.activate(NotificationActivation::Default, app.lobby_ready_check_sink.as_ref()),
+        !continuation.activate(NotificationActivation::Default, app.lobby.ready_check_sink.as_ref()),
         "a body click resolves nothing"
     );
     app.poll_lobby_ready_check_notification().test_value();
 
     main_assert!(
-        app.lobby_ready_check_continuation.is_some(),
+        app.lobby.ready_check_continuation.is_some(),
         "the continuation outlives a body click"
     );
     main_assert!(
@@ -9066,10 +9066,10 @@ fn a_ready_check_timeout_and_a_notification_answer_cannot_both_submit() {
     send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
     app.test_network_events();
 
-    let continuation = app.lobby_ready_check_continuation.clone().test_value();
+    let continuation = app.lobby.ready_check_continuation.clone().test_value();
     main_assert!(continuation.activate(
         NotificationActivation::Chosen(NotificationAction::Yes),
-        app.lobby_ready_check_sink.as_ref()
+        app.lobby.ready_check_sink.as_ref()
     ));
 
     // The timer fires before the loop has polled the notification.
@@ -9098,16 +9098,16 @@ fn lobby_teardown_closes_the_ready_check_notification_and_makes_it_inert() {
     );
     send_ready_check(&event_tx, 0, clonk_network::ReadyCheckData::Request);
     app.test_network_events();
-    let continuation = app.lobby_ready_check_continuation.clone().test_value();
+    let continuation = app.lobby.ready_check_continuation.clone().test_value();
 
     app.close_lobby_child_dialogs_silently();
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.lobby_ready_check_continuation.is_none());
+    main_assert!(app.lobby.ready_check_continuation.is_none());
     main_assert!(continuation.resolved());
 
     main_assert!(!continuation.activate(
         NotificationActivation::Chosen(NotificationAction::Yes),
-        app.lobby_ready_check_sink.as_ref()
+        app.lobby.ready_check_sink.as_ref()
     ));
     app.poll_lobby_ready_check_notification().test_value();
     main_assert!(commands.take_submitted_ready_checks().is_empty());
@@ -9128,7 +9128,7 @@ fn ready_check_prompt_sends_no_reply_after_lobby_ends() {
     app.test_network_events();
 
     app.mode = AppMode::Running;
-    app.network_lobby = None;
+    app.lobby.session = None;
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Yes)
         .test_value();
 
@@ -9186,7 +9186,7 @@ fn go_status_request_deletes_client_lobby_and_suppresses_stale_ready_reply() {
     main_assert!(matches!(app.mode, AppMode::Loading));
     main_assert_eq!(app.pending_client_start_status => Some(go));
     main_assert!(
-        app.network_lobby.is_none(),
+        app.lobby.session.is_none(),
         "native pLobby is deleted as soon as GS_Go is installed"
     );
     main_assert!(
@@ -9238,7 +9238,7 @@ fn lobby_ready_toggle_broadcasts_cpp_ready_packet() {
     // (src/C4GameLobby.cpp:329-343).
     let mut app = new_state_only_menu_app(320, 200);
     let (_events, mut commands) = install_client_network_commands(&mut app, 7);
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
 
     process_joined_lobby_action(&mut app, LobbyAction::ToggleReady);
     main_assert!(app_lobby(&app).local_ready());
@@ -9262,7 +9262,7 @@ fn joined_lobby_long_countdown_keeps_game_options_unlocked_and_renderable() {
     app.startup.view = StartupView::NetworkLobby;
     let event_tx = install_client_network_stub(&mut app, 7);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
     app.sync_network_lobby_game_option_state();
 
     send_lobby_countdown(&event_tx, 12);
@@ -9276,7 +9276,7 @@ fn joined_lobby_long_countdown_keeps_game_options_unlocked_and_renderable() {
         "ordinary lobby synchronization must preserve LongCountdown's unlocked strip"
     );
     let assets = Arc::clone(&app.assets);
-    let (_, options) = app_lobby_mut(&mut app.network_lobby)
+    let (_, options) = app_lobby_mut(&mut app.lobby.session)
         .classic_render_state(
             app.rendering.graphics.surface(),
             assets.as_ref(),
@@ -9309,7 +9309,7 @@ fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     app.startup.view = StartupView::NetworkLobby;
     app.show_log_timestamps = false;
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
 
     for (countdown, expected, expected_controller, expected_logs) in [
         (
@@ -9342,7 +9342,7 @@ fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
             lobby.logs.clone()
         };
         let assets = Arc::clone(&app.assets);
-        let (projection, _) = app_lobby_mut(&mut app.network_lobby)
+        let (projection, _) = app_lobby_mut(&mut app.lobby.session)
             .classic_render_state(
                 app.rendering.graphics.surface(),
                 assets.as_ref(),
@@ -9353,7 +9353,7 @@ fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
         main_assert_eq!(projection.logs() => retained_logs);
         main_assert_eq!(app_lobby(&app).controller.logs() => retained_logs,);
         main_assert!(matches!(app.mode, AppMode::Menu));
-        main_assert!(app.host_lobby_countdown.is_none());
+        main_assert!(app.lobby.host_countdown.is_none());
         main_assert!(
             !app.sec1_timer().expect("pulse client second timer"),
             "client packet state never installs a one-second callback"
@@ -9376,7 +9376,7 @@ fn host_start_begins_default_cpp_lobby_countdown_without_leaving_lobby() {
 
     assert_lobby_countdowns(&mut commands, &[5]);
     main_assert_eq!(app_lobby(&app).countdown => Some(5));
-    main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown {remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,}));
+    main_assert_eq!(app.lobby.host_countdown => Some(HostLobbyCountdown {remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,}));
     main_assert!(matches!(app.mode, AppMode::Menu));
 }
 
@@ -9390,18 +9390,18 @@ fn host_start_preserves_scenario_selection_guards_before_arming_countdown() {
     // src/C4StartupScenSelDlg.cpp:1635-1666; src/C4Game.cpp:421-438).
     let mut app = new_state_only_menu_app(320, 200);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(host_lobby_state());
+    app.lobby.session = Some(host_lobby_state());
     let (_events, mut commands) = install_network_commands(&mut app);
 
     process_joined_lobby_action(&mut app, LobbyAction::StartGame);
     main_assert_eq!(app.status_text => "Select a scenario before starting");
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert!(commands.take_lobby_start_commands().is_empty());
 
-    app_lobby_mut(&mut app.network_lobby).select_scenario("missing.c4s", "Missing");
+    app_lobby_mut(&mut app.lobby.session).select_scenario("missing.c4s", "Missing");
     process_joined_lobby_action(&mut app, LobbyAction::StartGame);
     main_assert_eq!(app.status_text => "Scenario `missing.c4s` is not available in the catalog");
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert!(commands.take_lobby_start_commands().is_empty());
     main_assert!(matches!(app.mode, AppMode::Menu));
 }
@@ -9422,7 +9422,7 @@ fn host_start_cancels_an_active_cpp_lobby_countdown() {
 
     assert_lobby_countdowns(&mut commands, &[-1]);
     main_assert_eq!(app_lobby(&app).countdown => None);
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert!(matches!(app.mode, AppMode::Menu));
     main_assert!(
         !app.sec1_timer().expect("pulse aborted countdown timer"),
@@ -9486,7 +9486,7 @@ fn connected_observer_starts_not_ready_and_retains_explicit_ready_state() {
     // (src/C4Client.cpp:32-36; src/C4Network2.cpp:1625-1635,1703-1731).
     let mut app = new_state_only_menu_app(320, 200);
     let event_tx = install_client_network_stub(&mut app, 7);
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Local".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Local".to_string(), false));
 
     event_tx
         .send(NetworkEvent::PeerConnected {
@@ -9504,7 +9504,7 @@ fn connected_observer_starts_not_ready_and_retains_explicit_ready_state() {
         ))
         .test_value();
     app.test_network_events();
-    app_lobby_mut(&mut app.network_lobby).register_peer(
+    app_lobby_mut(&mut app.lobby.session).register_peer(
         9,
         "Renamed observer".to_string(),
         ParticipantKind::Observer,
@@ -9524,7 +9524,7 @@ fn inbound_ready_check_updates_the_claimed_lobby_participant() {
     let event_tx = install_client_network_stub(&mut app, 7);
     let mut lobby = NetworkLobbyState::new(7, "Local".to_string(), false);
     lobby.register_peer(9, "Remote".to_string(), ParticipantKind::Player);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     app.control_clients.register(9, true, false);
 
     event_tx
@@ -9548,7 +9548,7 @@ fn final_remote_ready_transition_starts_cpp_default_countdown() {
     // src/C4Network2.cpp:1721-1729).
     let (mut app, event_tx, mut commands) =
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
     app.players.infos.apply(lobby_player_infos(7, &[1]));
@@ -9558,7 +9558,7 @@ fn final_remote_ready_transition_starts_cpp_default_countdown() {
 
     assert_lobby_countdowns(&mut commands, &[5]);
     main_assert_eq!(app_lobby(&app).countdown => Some(5));
-    main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown {remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,}));
+    main_assert_eq!(app.lobby.host_countdown => Some(HostLobbyCountdown {remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,}));
 }
 
 #[test]
@@ -9568,7 +9568,7 @@ fn empty_nonhost_does_not_block_ready_autostart() {
     // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-888).
     let (mut app, event_tx, mut commands) =
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Player client".to_string(), ParticipantKind::Player);
     lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
@@ -9588,7 +9588,7 @@ fn host_without_players_still_blocks_ready_autostart() {
     // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
     let (mut app, event_tx, mut commands) =
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
     app.players.infos.apply(lobby_player_infos(7, &[1]));
     send_ready_check(&event_tx, 7, clonk_network::ReadyCheckData::Ready);
@@ -9596,7 +9596,7 @@ fn host_without_players_still_blocks_ready_autostart() {
     app.test_network_events();
 
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert!(!app_lobby(&app).participants[&0].ready);
 }
 
@@ -9607,7 +9607,7 @@ fn unready_nonhost_with_player_blocks_ready_autostart() {
     // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
     let (mut app, event_tx, mut commands) =
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Unready".to_string(), ParticipantKind::Player);
     lobby.register_peer(9, "Changed".to_string(), ParticipantKind::Player);
@@ -9620,7 +9620,7 @@ fn unready_nonhost_with_player_blocks_ready_autostart() {
     app.test_network_events();
 
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert!(!app_lobby(&app).participants[&7].ready);
 }
 
@@ -9633,7 +9633,7 @@ fn final_local_host_ready_transition_starts_cpp_default_countdown() {
     // src/C4Network2.cpp:1721-1729).
     let (mut app, _events, mut commands) =
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
     lobby.participants.get_mut(&7).test_value().ready = true;
     app.players.infos.apply(lobby_player_infos(7, &[1]));
@@ -9653,7 +9653,7 @@ fn changed_relevant_client_becoming_unready_aborts_active_countdown() {
     // src/C4Network2.cpp:1721-1729).
     let (mut app, event_tx, mut commands) =
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
     lobby.participants.get_mut(&7).test_value().ready = true;
@@ -9665,7 +9665,7 @@ fn changed_relevant_client_becoming_unready_aborts_active_countdown() {
     app.test_network_events();
 
     assert_lobby_countdowns(&mut commands, &[-1]);
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert_eq!(app_lobby(&app).countdown => None);
 }
 
@@ -9683,9 +9683,9 @@ fn host_countdown_disconnect_fixture(
     let mut lobby = host_lobby_state();
     lobby.register_peer(client_id, "Remote".to_string(), kind);
     lobby.countdown = Some(remaining);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.host_lobby_countdown = Some(HostLobbyCountdown { remaining });
+    app.lobby.host_countdown = Some(HostLobbyCountdown { remaining });
     app.players.infos.apply(lobby_player_infos(
         i32::try_from(client_id).test_value(),
         player_ids,
@@ -9719,7 +9719,7 @@ fn host_disconnect_of_player_owning_client_aborts_lobby_countdown() {
         "raw disconnect must not poison the exact lobby renderer"
     );
     main_assert!(!app_lobby(&app).participants.contains_key(&client_id));
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     main_assert_eq!(app_lobby(&app).countdown => None);
     assert_lobby_countdowns(&mut commands, &[clonk_network::LobbyCountdownPacket::ABORT]);
 
@@ -9739,7 +9739,7 @@ fn host_disconnect_of_playerless_observer_keeps_lobby_countdown() {
     app.test_network_events();
 
     main_assert!(!app_lobby(&app).participants.contains_key(&client_id));
-    main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown::new()));
+    main_assert_eq!(app.lobby.host_countdown => Some(HostLobbyCountdown::new()));
     main_assert_eq!(app_lobby(&app).countdown => Some(5));
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
 }
@@ -9754,7 +9754,7 @@ fn host_disconnect_during_long_countdown_keeps_native_timer() {
 
     app.test_network_events();
 
-    main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown { remaining: 11 }));
+    main_assert_eq!(app.lobby.host_countdown => Some(HostLobbyCountdown { remaining: 11 }));
     main_assert_eq!(app_lobby(&app).countdown => Some(11));
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
 }
@@ -9768,7 +9768,7 @@ fn client_host_disconnect_aborts_lobby_and_restores_network_dialog() {
     // src/C4Game.cpp:405-411).
     let mut app = new_real_classic_menu_app(320, 200);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     app.control_clients.replace_snapshot([
         lobby_fixture!(client {
@@ -9791,7 +9791,7 @@ fn client_host_disconnect_aborts_lobby_and_restores_network_dialog() {
     main_assert!(app.startup_network.dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     assert_startup_error_log(&app, "Network: host Oracle Host disconnected!");
     let engine_results = app.engine.snapshot().round_results;
     main_assert_eq!(engine_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::NetworkError));
@@ -9811,7 +9811,7 @@ fn repeated_or_irrelevant_unready_does_not_abort_manual_countdown() {
     // src/C4Network2.cpp:1721-1729).
     let (mut app, event_tx, mut commands) =
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
-    let lobby = app_lobby_mut(&mut app.network_lobby);
+    let lobby = app_lobby_mut(&mut app.lobby.session);
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Unready player".to_string(), ParticipantKind::Player);
     lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
@@ -9828,7 +9828,7 @@ fn repeated_or_irrelevant_unready_does_not_abort_manual_countdown() {
         send_network_event(&event_tx, NetworkEvent::ReadyCheck(packet));
         app.test_network_events();
         main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-        main_assert!(app.host_lobby_countdown.is_some());
+        main_assert!(app.lobby.host_countdown.is_some());
         main_assert_eq!(app_lobby(&app).countdown => Some(5));
     }
 }
@@ -9849,7 +9849,7 @@ fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
     lobby.participants.get_mut(&7).test_value().ready = true;
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     event_tx
@@ -9862,9 +9862,9 @@ fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
 
     main_assert_eq!(app.players.infos.client_info_ids(7) => vec![1]);
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
 
-    app_lobby_mut(&mut app.network_lobby)
+    app_lobby_mut(&mut app.lobby.session)
         .participants
         .get_mut(&7)
         .test_value()
@@ -9879,7 +9879,7 @@ fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
 
     main_assert!(app.players.infos.client_info_ids(7).is_empty());
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
 }
 
 #[test]
@@ -10338,7 +10338,7 @@ fn client_join_publishes_selected_players_before_info_and_lobby_ack() {
     let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-    app.network_lobby = Some(client_lobby_state());
+    app.lobby.session = Some(client_lobby_state());
     app.startup.view = StartupView::NetworkLobby;
     // The visible startup list is deliberately stale: production joining
     // must use Config.General.Participants directly, not this UI model.
@@ -10468,7 +10468,7 @@ fn startup_network_client_enters_and_acknowledges_lobby_when_boot_completes() {
 
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.network.is_some());
-    main_assert!(app.network_lobby.is_some());
+    main_assert!(app.lobby.session.is_some());
     main_assert_eq!(commands.take_framed_status_acknowledgements() => vec![(clonk_network::NetworkStatus {target_tick: 23,..host_config.initial_status}, 0,)]);
 }
 
@@ -10912,7 +10912,7 @@ fn host_remote_lobby_player_info_assigns_the_unique_least_used_free_team() {
     ));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(host_lobby_state());
+    app.lobby.session = Some(host_lobby_state());
     let original_color = 0x0012_3456;
     send_added_player_infos(
         &event_tx,
@@ -10955,7 +10955,7 @@ fn loading_host_with_retained_lobby_does_not_assign_a_free_team() {
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(host_lobby_state());
+    app.lobby.session = Some(host_lobby_state());
     app.mode = AppMode::Loading;
     send_added_player_infos(
         &event_tx,
@@ -10991,7 +10991,7 @@ fn lobby_admission_does_not_gain_join_eligibility_before_delayed_echo() {
         .mark_complete(resource.id, PathBuf::from("Lobby.c4p"));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(host_lobby_state());
+    app.lobby.session = Some(host_lobby_state());
     send_added_player_infos(
         &event_tx,
         3,
@@ -11034,7 +11034,7 @@ fn queued_lobby_admissions_observe_synchronously_filled_explicit_team() {
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(host_lobby_state());
+    app.lobby.session = Some(host_lobby_state());
     for (client_id, name, color) in [
         (3, b"First".as_slice(), 0x00f4_0000),
         (4, b"Second".as_slice(), 0x0000_00f4),
@@ -11082,7 +11082,7 @@ fn admission_that_requires_generated_team_generates_and_broadcasts() {
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     let (event_tx, mut commands) = install_network_commands(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(host_lobby_state());
+    app.lobby.session = Some(host_lobby_state());
     send_added_player_infos(
         &event_tx,
         3,
@@ -11815,7 +11815,7 @@ fn frozen_lobby_executes_synchronized_activation_immediately() {
     install_test_recording_template(&mut app, directory.path().join("001-FrozenLobbySync.c4s"));
     let event_tx = install_network_stub(&mut app);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(0, "Host".to_string(), false));
     app.startup.view = StartupView::NetworkLobby;
     app.control_clients.register(3, false, false);
     event_tx

@@ -32,6 +32,7 @@ impl GameApp {
         let player_name = self.players.local_name.clone();
         let app_paths = self.app_paths.clone();
         let group_maker = self
+            .lobby
             .configured_client_player_selection
             .as_ref()
             .map(|selection| selection.group_maker().clone());
@@ -1168,7 +1169,8 @@ impl GameApp {
             || self.startup.options_advanced_dialog.is_some()
             || self.startup.player_properties_dialog.is_some()
             || self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
     }
@@ -2825,7 +2827,7 @@ impl GameApp {
         let Some(join_data) = self.pending_network_join_data.clone() else {
             return Ok(());
         };
-        if self.lobby_preload_task.is_some() {
+        if self.lobby.preload_task.is_some() {
             return Ok(());
         }
         let Some(NetworkMode::Client(settings)) = self.network_mode.as_ref() else {
@@ -2914,7 +2916,8 @@ impl GameApp {
             })?);
         }
         let preloaded_scenario = self
-            .lobby_preload_artifact
+            .lobby
+            .preload_artifact
             .as_mut()
             .filter(|artifact| artifact.scenario_path == combined_path)
             .and_then(|artifact| artifact.client.as_mut())
@@ -3314,7 +3317,7 @@ impl GameApp {
     }
 
     pub(crate) fn freeze_configured_client_players_for_game(&mut self) -> Result<()> {
-        self.configured_client_player_selection = self
+        self.lobby.configured_client_player_selection = self
             .app_paths
             .as_ref()
             .map(|paths| {
@@ -3342,7 +3345,7 @@ impl GameApp {
         let request = self
             .app_paths
             .as_ref()
-            .zip(self.configured_client_player_selection.as_ref())
+            .zip(self.lobby.configured_client_player_selection.as_ref())
             .map(|(paths, selection)| {
                 let configured = load_snapshotted_client_players(paths, selection);
                 publish_initial_configured_client_players(client_id, &configured, |publication| {
@@ -3509,7 +3512,8 @@ impl GameApp {
         require_player_client: bool,
     ) -> Result<(), String> {
         let fallback_group_maker = || {
-            self.configured_client_player_selection
+            self.lobby
+                .configured_client_player_selection
                 .as_ref()
                 .map(|selection| selection.group_maker().clone())
                 .or_else(|| {
@@ -3930,8 +3934,8 @@ impl GameApp {
                     let network_control_active = self.network_control_clock.is_some()
                         && (self.mode == AppMode::Running
                             || (self.mode == AppMode::Loading
-                                && self.network_lobby.is_none()
-                                && self.classic_host_lobby.is_none()));
+                                && self.lobby.session.is_none()
+                                && self.lobby.classic_host.is_none()));
                     if network_control_active {
                         // Clear on loss of the live network invokes
                         // ChangeToLocal whenever Game.Control is already in
@@ -4310,7 +4314,7 @@ impl GameApp {
                         );
                         let scenario_title =
                             legacy_presentation_text(join_data.parameters.title.as_bytes());
-                        if let Some(lobby) = self.network_lobby.as_mut() {
+                        if let Some(lobby) = self.lobby.session.as_mut() {
                             lobby.replace_participants_from_clients(
                                 &join_data.parameters.clients.clients,
                             );
@@ -4362,7 +4366,7 @@ impl GameApp {
                         )
                         .then_some(join_data.status);
                         self.clear_lobby_preload();
-                        if let Some(lobby) = self.network_lobby.as_mut() {
+                        if let Some(lobby) = self.lobby.session.as_mut() {
                             lobby.preload.reset_for_context();
                         }
                         self.pending_network_join_data = Some(join_data);
@@ -4378,9 +4382,9 @@ impl GameApp {
                             }
                             if self.joined_network_lobby_active() {
                                 self.close_lobby_child_dialogs_silently();
-                                self.network_lobby = None;
-                                self.host_lobby_countdown = None;
-                                self.pending_local_lobby_countdown_echoes.clear();
+                                self.lobby.session = None;
+                                self.lobby.host_countdown = None;
+                                self.lobby.pending_local_countdown_echoes.clear();
                             }
                             self.mode = AppMode::Loading;
                         }
@@ -4414,7 +4418,8 @@ impl GameApp {
                                 .control_clients
                                 .set_lobby_ready(packet.client_id, packet.data.is_ready());
                             let lobby_changed_client_id = self
-                                .network_lobby
+                                .lobby
+                                .session
                                 .as_mut()
                                 .and_then(|lobby| lobby.apply_ready_check(packet));
                             if ready_state_changed {
@@ -4433,11 +4438,12 @@ impl GameApp {
                     NetworkEvent::LobbyCountdown(packet) => {
                         let local_echo = matches!(self.network_mode, Some(NetworkMode::Host(_)))
                             && self
-                                .pending_local_lobby_countdown_echoes
+                                .lobby
+                                .pending_local_countdown_echoes
                                 .front()
                                 .is_some_and(|pending| *pending == packet);
                         if local_echo {
-                            self.pending_local_lobby_countdown_echoes.pop_front();
+                            self.lobby.pending_local_countdown_echoes.pop_front();
                         } else {
                             self.apply_lobby_countdown_presentation(packet);
                         }
@@ -4455,9 +4461,9 @@ impl GameApp {
                             // pLobby immediately (src/C4Network2.cpp:475-515,
                             // 2010-2029).
                             self.close_lobby_child_dialogs_silently();
-                            self.network_lobby = None;
-                            self.host_lobby_countdown = None;
-                            self.pending_local_lobby_countdown_echoes.clear();
+                            self.lobby.session = None;
+                            self.lobby.host_countdown = None;
+                            self.lobby.pending_local_countdown_echoes.clear();
                             self.mode = AppMode::Loading;
                         }
                         if self.mode == AppMode::Running {
@@ -4473,9 +4479,10 @@ impl GameApp {
                             // is the reach condition and control stays stopped.
                             self.network_control_running = false;
                             if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
-                                let first_part_preloaded = self.lobby_preload_task.is_some()
+                                let first_part_preloaded = self.lobby.preload_task.is_some()
                                     || self
-                                        .lobby_preload_artifact
+                                        .lobby
+                                        .preload_artifact
                                         .as_ref()
                                         .and_then(|artifact| artifact.client.as_ref())
                                         .is_some_and(|client| client.scenario.is_some());
@@ -4533,13 +4540,14 @@ impl GameApp {
                     }
                     NetworkEvent::StatusCommitted(status) => {
                         let closes_start_wait = self
-                            .network_start_wait
+                            .lobby
+                            .start_wait
                             .as_ref()
                             .is_some_and(|wait| wait.expected_status == status);
                         self.handle_status_committed(status)?;
                         if self.mode == AppMode::Running {
                             if closes_start_wait {
-                                self.network_start_wait = None;
+                                self.lobby.start_wait = None;
                             }
                             self.dismiss_network_client_start_wait();
                         }
@@ -4819,11 +4827,11 @@ impl GameApp {
                         kind,
                     } => {
                         tracing::info!(%client_id, %name, ?kind, "network client connected");
-                        if let Some(lobby) = self.network_lobby.as_mut() {
+                        if let Some(lobby) = self.lobby.session.as_mut() {
                             lobby.register_peer(client_id, name.clone(), kind);
                         }
                         if let (Ok(client_id), Some(wait)) =
-                            (i32::try_from(client_id), self.network_start_wait.as_mut())
+                            (i32::try_from(client_id), self.lobby.start_wait.as_mut())
                         {
                             wait.controller.update_client(
                                 clonk_frontend::network_start_wait::NetworkStartWaitClient::new(
@@ -4857,18 +4865,19 @@ impl GameApp {
                         self.forget_pending_runtime_join_client(client_id);
                         let abort_countdown_for_disconnected_client =
                             matches!(self.network_mode, Some(NetworkMode::Host(_)))
-                                && (self.network_lobby.as_ref().is_some_and(|lobby| {
+                                && (self.lobby.session.as_ref().is_some_and(|lobby| {
                                     lobby.countdown.is_some_and(|remaining| {
                                         remaining <= ALMOST_START_LOBBY_COUNTDOWN_SECONDS
                                     })
                                 }) || self
-                                    .classic_host_lobby
+                                    .lobby
+                                    .classic_host
                                     .as_ref()
                                     .is_some_and(|lobby| lobby.controller.countdown().is_locked()))
                                 && i32::try_from(client_id).ok().is_some_and(|client_id| {
                                     !self.players.infos.client_info_ids(client_id).is_empty()
                                 });
-                        if let Some(lobby) = self.network_lobby.as_mut() {
+                        if let Some(lobby) = self.lobby.session.as_mut() {
                             lobby.unregister_peer(client_id);
                         }
                         self.mark_network_start_wait_client_kick(client_id);
@@ -5563,6 +5572,7 @@ impl GameApp {
         let player_name = self.players.local_name.clone();
         let app_paths = self.app_paths.clone();
         let group_maker = self
+            .lobby
             .configured_client_player_selection
             .as_ref()
             .map(|selection| selection.group_maker().clone());
@@ -5725,7 +5735,7 @@ impl GameApp {
                 return Ok(());
             }
         };
-        if let Some(selection) = self.configured_client_player_selection.as_ref() {
+        if let Some(selection) = self.lobby.configured_client_player_selection.as_ref() {
             settings.group_maker = selection.group_maker().clone();
         }
         let settings = settings
@@ -6151,13 +6161,13 @@ impl GameApp {
             }
             return Ok(());
         }
-        if let Some(task) = self.lobby_preload_task.as_mut() {
+        if let Some(task) = self.lobby.preload_task.as_mut() {
             // C++ blocks InitGame on PreloadMutex. Keep the lobby responsive
             // while the worker runs, then resume this exact start request.
             task.start_host_when_ready = true;
             return Ok(());
         }
-        let classic_start = self.classic_host_lobby.is_some();
+        let classic_start = self.lobby.classic_host.is_some();
         let prepared = self.network_mode.as_ref().and_then(|mode| match mode {
             NetworkMode::Host(HostSettings {
                 prepared: Some(prepared),
@@ -6229,7 +6239,8 @@ impl GameApp {
             )
             .unwrap_or(serialized_startup_player_count);
             let host_first_part_preloaded =
-                self.lobby_preload_artifact
+                self.lobby
+                    .preload_artifact
                     .as_ref()
                     .is_some_and(|artifact| {
                         artifact.catalog_host.is_none() && artifact.client.is_none()
@@ -6355,14 +6366,14 @@ impl GameApp {
             // InitGame begins its staged work (src/C4Game.cpp:438-457).
             self.apply_scenario_loader_frame(7, None);
             self.begin_network_start_wait(status);
-            self.host_lobby_countdown = None;
-            self.pending_local_lobby_countdown_echoes.clear();
-            self.classic_host_lobby = None;
-            self.network_lobby = None;
+            self.lobby.host_countdown = None;
+            self.lobby.pending_local_countdown_echoes.clear();
+            self.lobby.classic_host = None;
+            self.lobby.session = None;
             self.mode = AppMode::Loading;
             return Ok(());
         }
-        let Some(lobby) = self.network_lobby.as_ref() else {
+        let Some(lobby) = self.lobby.session.as_ref() else {
             return Ok(());
         };
         let Some(identifier) = lobby.selected_identifier() else {
@@ -6388,7 +6399,7 @@ impl GameApp {
         if let Some(staged) = self.staged_network_host_scenario.as_ref() {
             return Some(staged.frontend.clone());
         }
-        let Some(lobby) = self.network_lobby.as_ref() else {
+        let Some(lobby) = self.lobby.session.as_ref() else {
             self.status_text = "Network lobby state is unavailable".to_string();
             return None;
         };
@@ -6425,7 +6436,7 @@ impl GameApp {
                     )
                 })
             });
-        self.network_start_wait = Some(NetworkStartWaitDialogState {
+        self.lobby.start_wait = Some(NetworkStartWaitDialogState {
             controller: clonk_frontend::network_start_wait::NetworkStartWaitState::with_clients(
                 clients,
             ),
@@ -6437,7 +6448,7 @@ impl GameApp {
 
     pub(crate) fn show_reached_network_start_wait(&mut self) -> Result<(), EngineError> {
         if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
-            if let Some(wait) = self.network_start_wait.as_mut() {
+            if let Some(wait) = self.lobby.start_wait.as_mut() {
                 wait.visible = true;
             }
             return Ok(());
@@ -6470,7 +6481,7 @@ impl GameApp {
     }
 
     fn retarget_network_start_wait(&mut self, status: clonk_network::NetworkStatus) {
-        let Some(wait) = self.network_start_wait.as_mut() else {
+        let Some(wait) = self.lobby.start_wait.as_mut() else {
             return;
         };
         if wait.expected_status == status {
@@ -6498,7 +6509,7 @@ impl GameApp {
         let Ok(client_id) = i32::try_from(client_id) else {
             return;
         };
-        let Some(wait) = self.network_start_wait.as_mut() else {
+        let Some(wait) = self.lobby.start_wait.as_mut() else {
             return;
         };
         if status.state != wait.expected_status.state
@@ -6538,7 +6549,7 @@ impl GameApp {
         let Ok(client_id) = i32::try_from(client_id) else {
             return;
         };
-        let _ = self.network_start_wait.as_mut().is_some_and(|wait| {
+        let _ = self.lobby.start_wait.as_mut().is_some_and(|wait| {
             wait.controller.update_client_status(
                 client_id,
                 clonk_frontend::network_start_wait::NetworkStartWaitClientStatus::Kick,
@@ -6569,10 +6580,10 @@ impl GameApp {
                 "Unable to start prepared host: initial JoinData is missing".to_string();
             return false;
         }
-        if self.staged_network_host_scenario.is_some() || self.classic_host_lobby.is_some() {
+        if self.staged_network_host_scenario.is_some() || self.lobby.classic_host.is_some() {
             return true;
         }
-        let Some(lobby) = self.network_lobby.as_ref() else {
+        let Some(lobby) = self.lobby.session.as_ref() else {
             self.status_text = "Network lobby state is unavailable".to_string();
             return false;
         };
@@ -6599,7 +6610,8 @@ impl GameApp {
             // staging-lobby frame.
             self.start_network_game_now()?;
             if self
-                .lobby_preload_task
+                .lobby
+                .preload_task
                 .as_ref()
                 .is_some_and(|task| task.start_host_when_ready)
                 && self.mode == AppMode::Menu
@@ -6616,10 +6628,7 @@ impl GameApp {
     pub(crate) fn network_start_wait_layout(
         &self,
     ) -> Option<clonk_frontend::network_start_wait::NetworkStartWaitLayout> {
-        let wait = self
-            .network_start_wait
-            .as_ref()
-            .filter(|wait| wait.visible)?;
+        let wait = self.lobby.start_wait.as_ref().filter(|wait| wait.visible)?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.rendering.graphics.surface();
         Some(
@@ -6630,7 +6639,8 @@ impl GameApp {
 
     pub(crate) fn play_network_start_wait_sounds(&mut self) {
         let sounds = self
-            .network_start_wait
+            .lobby
+            .start_wait
             .as_mut()
             .map(|wait| wait.controller.take_sound_events())
             .unwrap_or_default();
@@ -6652,11 +6662,11 @@ impl GameApp {
         };
         match action {
             clonk_frontend::network_start_wait::NetworkStartWaitAction::Restart => {
-                self.network_start_wait = None;
+                self.lobby.start_wait = None;
                 self.restart_current_network_scenario()?;
             }
             clonk_frontend::network_start_wait::NetworkStartWaitAction::Cancel => {
-                self.network_start_wait = None;
+                self.lobby.start_wait = None;
                 self.return_to_menu();
             }
             clonk_frontend::network_start_wait::NetworkStartWaitAction::Kick(client_id) => {
@@ -6785,8 +6795,8 @@ impl GameApp {
             lobby.select_scenario(&identifier, &title);
             self.scenario_label = lobby.scenario_label();
         }
-        self.network_lobby = Some(lobby);
-        self.classic_host_lobby = None;
+        self.lobby.session = Some(lobby);
+        self.lobby.classic_host = None;
         self.network_control_running = false;
         self.mode = AppMode::Menu;
         self.open_network_lobby();
@@ -6795,7 +6805,7 @@ impl GameApp {
 
     fn sync_network_lobby_participants(&mut self) {
         let clients = self.control_clients.snapshot();
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.replace_participants_from_clients(&clients);
         }
     }
@@ -7198,7 +7208,7 @@ impl GameApp {
             self.loader.screen = Some(loader);
             self.loader.error = None;
         }
-        self.network_lobby_min_players = Some(staged.lobby.min_players);
+        self.lobby.min_players = Some(staged.lobby.min_players);
         self.staged_network_host_scenario = Some(staged);
 
         if let Some(snapshot) = fresh_snapshot.as_ref() {
@@ -7261,8 +7271,8 @@ impl GameApp {
         };
         match built {
             Ok((lobby, options)) => {
-                self.classic_host_lobby = Some(lobby);
-                self.network_lobby = None;
+                self.lobby.classic_host = Some(lobby);
+                self.lobby.session = None;
                 self.scenario_game_options = options;
                 self.sync_classic_lobby_roster();
                 self.sync_classic_lobby_resource_ready();
@@ -7353,7 +7363,7 @@ impl GameApp {
         if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
             return None;
         }
-        let lobby = self.network_lobby.as_ref().filter(|lobby| lobby.is_host)?;
+        let lobby = self.lobby.session.as_ref().filter(|lobby| lobby.is_host)?;
         self.scensel.catalog.get(lobby.selected_identifier()?)
     }
 
@@ -7543,10 +7553,10 @@ impl GameApp {
         self.runtime_network_join_allowed = None;
         self.host_join_snapshot = None;
         self.pending_runtime_dynamic_request = None;
-        self.network_lobby = None;
-        self.network_start_wait = None;
-        self.host_lobby_countdown = None;
-        self.pending_local_lobby_countdown_echoes.clear();
+        self.lobby.session = None;
+        self.lobby.start_wait = None;
+        self.lobby.host_countdown = None;
+        self.lobby.pending_local_countdown_echoes.clear();
         self.network_control_clock = None;
         self.network_ticks.clear();
         self.network_sync.clear();
@@ -7558,7 +7568,7 @@ impl GameApp {
         // beneath the evaluation dialog (src/C4GameControl.cpp:121-127).
         self.network_control_running = !game_over_dialog_shown;
         self.runtime_network_status_barrier = None;
-        self.league_votes.clear();
+        self.lobby.league_votes.clear();
         self.clear_blocking_resource_wait();
         if self.saves.network_recreation_progress.is_some() {
             let loading_resources = self
@@ -8070,7 +8080,7 @@ impl GameApp {
             return Ok(());
         }
         let subject = LeagueVoteSubject::from(vote);
-        self.league_votes.add(vote);
+        self.lobby.league_votes.add(vote);
         self.pause_host_for_league_vote();
         self.open_next_league_vote_dialog()?;
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
@@ -8122,6 +8132,7 @@ impl GameApp {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let origin = self
+            .lobby
             .league_votes
             .end(subject, result.approve, local_client_id);
         if let Some(index) = self.dialogs.messages.iter().position(|dialog| {
@@ -8209,7 +8220,7 @@ impl GameApp {
     pub(crate) fn pause_host_for_league_vote(&mut self) {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
             || self.runtime_network_is_paused()
-            || self.league_votes.paused_for_vote
+            || self.lobby.league_votes.paused_for_vote
         {
             return;
         }
@@ -8222,7 +8233,7 @@ impl GameApp {
         if let Err(error) = self.change_runtime_network_status(status) {
             tracing::error!(%error, "failed to pause host for league vote");
         }
-        self.league_votes.paused_for_vote = true;
+        self.lobby.league_votes.paused_for_vote = true;
         self.host_reference_paused = true;
         self.publish_running_host_reference();
     }
@@ -8232,9 +8243,9 @@ impl GameApp {
             return;
         }
         if result.approve && result.vote_type == clonk_engine::VOTE_TYPE_PAUSE {
-            self.league_votes.paused_for_vote = result.data == 0;
+            self.lobby.league_votes.paused_for_vote = result.data == 0;
         }
-        if !self.league_votes.ballots.is_empty() || !self.league_votes.paused_for_vote {
+        if !self.lobby.league_votes.ballots.is_empty() || !self.lobby.league_votes.paused_for_vote {
             return;
         }
         let current_tick = self
@@ -8248,7 +8259,7 @@ impl GameApp {
         if let Err(error) = self.change_runtime_network_status(status) {
             tracing::error!(%error, "failed to restore host after league vote");
         }
-        self.league_votes.paused_for_vote = false;
+        self.lobby.league_votes.paused_for_vote = false;
         self.host_reference_paused = false;
         self.publish_running_host_reference();
     }
@@ -8313,6 +8324,7 @@ impl GameApp {
             let (positive, negative) = team_players.iter().fold(
                 (0usize, 0usize),
                 |(positive, negative), (client_id, _)| match self
+                    .lobby
                     .league_votes
                     .first_ballot(*client_id, subject)
                 {
@@ -8900,7 +8912,7 @@ impl GameApp {
         let Some(network) = self.network.as_ref() else {
             return false;
         };
-        let Some(subject) = self.league_votes.take_timed_out_subject_at(now) else {
+        let Some(subject) = self.lobby.league_votes.take_timed_out_subject_at(now) else {
             return false;
         };
         if let Err(error) = network.submit_vote_end(subject.vote_type, false, subject.data) {
@@ -9477,7 +9489,7 @@ impl GameApp {
         );
         self.scenario_game_options
             .set_lobby_league(self.network_is_league);
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_league_mode(self.network_is_league);
         }
         self.sync_classic_lobby_roster();
@@ -9564,7 +9576,7 @@ impl GameApp {
             &self.players.infos,
         );
         self.scenario_game_options.set_lobby_league(false);
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_league_mode(false);
         }
         self.sync_classic_lobby_roster();
@@ -9720,7 +9732,7 @@ impl GameApp {
         subject: LeagueVoteSubject,
         approve: bool,
     ) {
-        if !self.league_votes.subject_active(subject) {
+        if !self.lobby.league_votes.subject_active(subject) {
             return;
         }
         self.submit_own_league_vote(subject, approve);
@@ -9749,13 +9761,14 @@ impl GameApp {
             return false;
         };
         if self
+            .lobby
             .league_votes
             .first_ballot(local_client_id, subject)
             .is_some()
         {
             return false;
         }
-        if !self.league_votes.try_submit_own_vote_at(subject, now) {
+        if !self.lobby.league_votes.try_submit_own_vote_at(subject, now) {
             let message = self.runtime_resource_string("IDS_TEXT_YOUCANONLYSTARTONEVOTINGE");
             self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
             let opens_surrender = subject.vote_type == clonk_engine::VOTE_TYPE_CANCEL
@@ -9957,7 +9970,7 @@ impl GameApp {
         let selected = staged.frontend.clone();
         // Retained past the staged scenario's own lifetime: the countdown that
         // reads it can expire after the round has been handed to the engine.
-        self.network_lobby_min_players = Some(staged.lobby.min_players);
+        self.lobby.min_players = Some(staged.lobby.min_players);
         self.staged_network_host_scenario = Some(staged);
         let (_, configured_port) = load_network_startup_settings(self.app_paths.as_ref());
         let port = self

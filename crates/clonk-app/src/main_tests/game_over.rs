@@ -89,9 +89,9 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     main_assert_eq!(commands.take_submitted_lobby_countdowns() => vec![clonk_network::LobbyCountdownPacket::new(7)]);
     host.process_console_command("/abort").test_value();
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-    main_assert_eq!(host.host_lobby_countdown => Some(HostLobbyCountdown::with_seconds(7)));
+    main_assert_eq!(host.lobby.host_countdown => Some(HostLobbyCountdown::with_seconds(7)));
     main_assert!(host
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .expect("classic host lobby")
         .controller
@@ -105,7 +105,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
     main_assert!(host.sound.ui_log.is_empty(), "native console validation only logs the usage error");
     main_assert_eq!(
-        host.classic_host_lobby
+        host.lobby.classic_host
             .as_ref()
             .expect("classic host lobby")
             .controller
@@ -116,7 +116,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     );
     host.process_console_command("/start 0").test_value();
     main_assert_eq!(commands.take_submitted_lobby_countdowns() => vec![clonk_network::LobbyCountdownPacket::new(-1), clonk_network::LobbyCountdownPacket::new(0),]);
-    main_assert_eq!(host.host_lobby_countdown => Some(HostLobbyCountdown::with_seconds(0)));
+    main_assert_eq!(host.lobby.host_countdown => Some(HostLobbyCountdown::with_seconds(0)));
     main_assert_eq!(host.mode => AppMode::Menu);
 
     install_message_fixture(&mut host);
@@ -125,7 +125,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
         .test_value();
     main_assert!(commands.take_submitted_messages().is_empty());
     main_assert!(host
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .expect("classic host lobby")
         .controller
@@ -148,7 +148,7 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
     host.process_console_command("^hidden").test_value();
     main_assert!(commands.take_submitted_messages().is_empty());
     main_assert_eq!(
-        host.classic_host_lobby
+        host.lobby.classic_host
             .as_ref()
             .expect("classic host lobby")
             .controller
@@ -160,9 +160,9 @@ fn console_lobby_start_is_host_only_and_restarts_countdown() {
 
     let mut client = new_menu_app(640, 480);
     client.startup.view = StartupView::NetworkLobby;
-    client.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    client.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     client.process_console_command("/start 3").test_value();
-    main_assert_eq!(client.network_lobby.as_ref().expect("generic client lobby").logs.last().map(|line| line.text.as_str()) => Some("Host only!"));
+    main_assert_eq!(client.lobby.session.as_ref().expect("generic client lobby").logs.last().map(|line| line.text.as_str()) => Some("Host only!"));
 }
 
 #[test]
@@ -752,7 +752,7 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
     main_assert!(app.network_mode.is_some(), "a retained session keeps the host mode that describes it");
     main_assert!(commands.take_host_round_lobby_restarts().is_empty(), "the synchronous restart command was consumed exactly once by the completion worker");
     main_assert!(commands.take_host_restart_broadcasts().is_empty(), "the reconnect notice would send every client to re-dial a host that never left");
-    main_assert!(app.classic_host_lobby.is_some(), "the host lands back in its own lobby");
+    main_assert!(app.lobby.classic_host.is_some(), "the host lands back in its own lobby");
     main_assert_eq!(app.mode => AppMode::Menu);
 }
 
@@ -828,7 +828,7 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
     let _commands = restart_completion.join().test_value();
 
     main_assert!(app.network.is_some(), "the live session must survive restart");
-    main_assert!(app.classic_host_lobby.is_some(), "the running scenario's effective definitions must rebuild its lobby");
+    main_assert!(app.lobby.classic_host.is_some(), "the running scenario's effective definitions must rebuild its lobby");
     // The retained round has already performed OpenScenario while staging, so
     // the host-preparation handoff must consume that exact scenario instead
     // of reopening it for a second full load (src/C4Game.cpp:421-440).
@@ -858,7 +858,7 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
     main_assert!(!hosted_resource_localities.is_empty(), "the rebuilt host lobby must install its prepared local files");
     main_assert!(hosted_resource_localities.into_iter().all(|local| local), "temporary ownership must not relabel a host-prepared local file as remote");
     main_assert!(
-        app.classic_host_lobby
+        app.lobby.classic_host
             .test_ref()
             .controller
             .rows()
@@ -1336,7 +1336,7 @@ fn observer_host_round_restart_without_profile_does_not_open_first_player_dialog
     app.restart_current_network_scenario().test_value();
     let _commands = restart_completion.join().test_value();
 
-    main_assert!(app.classic_host_lobby.is_some());
+    main_assert!(app.lobby.classic_host.is_some());
     main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(
         app.startup.player_properties_dialog.is_none(),
@@ -1536,8 +1536,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
             else {
                 return false;
             };
-            host.classic_host_lobby.is_some()
-                && client.network_lobby.is_some()
+            host.lobby.classic_host.is_some()
+                && client.lobby.session.is_some()
                 && host.control_clients.contains(client_id)
                 && !host.players.infos.client_info_ids(client_id).is_empty()
         },
@@ -1602,7 +1602,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
     );
     main_assert!(host.network.is_some(), "restart dropped the live host before its peer could follow: status={:?} loader={:?}", host.status_text, host.loader.render_error);
-    main_assert!(host.classic_host_lobby.is_some(), "restart did not rebuild the host lobby: status={:?} loader={:?}", host.status_text, host.loader.render_error);
+    main_assert!(host.lobby.classic_host.is_some(), "restart did not rebuild the host lobby: status={:?} loader={:?}", host.status_text, host.loader.render_error);
     pump_live_restart_apps_until(
         &mut host,
         &mut client,
@@ -1610,8 +1610,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         |host, client| {
             matches!(host.mode, AppMode::Menu)
                 && matches!(client.mode, AppMode::Menu)
-                && host.classic_host_lobby.is_some()
-                && client.network_lobby.is_some()
+                && host.lobby.classic_host.is_some()
+                && client.lobby.session.is_some()
                 && host.control_clients.is_activated(client_id)
                 && client.control_clients.is_activated(client_id)
         },
@@ -1630,9 +1630,9 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     let client_routes_after = route_keys(&client);
     main_assert_eq!(host_routes_after => host_routes, "the host must reuse exactly its original connection IDs and peer endpoints");
     main_assert_eq!(client_routes_after => client_routes, "the client must reuse exactly its original connection IDs and peer endpoints");
-    main_assert!(host.classic_host_lobby.test_ref().controller.rows().iter().any(|row| row.id() == LobbyRosterId::Client(client_id)), "the connected client must remain in the host lobby");
-    main_assert!(client.network_lobby.test_ref().participants.contains_key(&0));
-    main_assert!(client.network_lobby.test_ref().participants.contains_key(&client_local_id));
+    main_assert!(host.lobby.classic_host.test_ref().controller.rows().iter().any(|row| row.id() == LobbyRosterId::Client(client_id)), "the connected client must remain in the host lobby");
+    main_assert!(client.lobby.session.test_ref().participants.contains_key(&0));
+    main_assert!(client.lobby.session.test_ref().participants.contains_key(&client_local_id));
     main_assert_eq!(host.players.infos.client_info_ids(client_id) => host_player_ids, "the host must retain the connected player's row");
     main_assert_eq!(client.players.infos.client_info_ids(client_id) => client_player_ids, "the client must retain its player row");
     let rebuilt_host_packet = host
@@ -1649,8 +1649,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     main_assert_eq!(host.staged_network_host_scenario.test_ref().frontend.identifier => host_scenario.identifier);
     // A client executes a local Combined<ID>.c4s artifact, while the title and
     // network resource core below identify it with the host's scenario.
-    main_assert_eq!(client.network_lobby.test_ref().selected_identifier() => Some(client_scenario.identifier.as_str()));
-    main_assert_eq!(client.network_lobby.test_ref().scenario_label() => host_scenario.title);
+    main_assert_eq!(client.lobby.session.test_ref().selected_identifier() => Some(client_scenario.identifier.as_str()));
+    main_assert_eq!(client.lobby.session.test_ref().scenario_label() => host_scenario.title);
 
     let mut joining_client = new_menu_app_with_paths(800, 600, &joining_client_paths);
     joining_client.players.local_name = "Joining Client".to_string();
@@ -1674,8 +1674,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
             let Ok(joining_client_id) = i32::try_from(joining_client_network_id) else {
                 return false;
             };
-            host.classic_host_lobby.is_some()
-                && joining_client.network_lobby.is_some()
+            host.lobby.classic_host.is_some()
+                && joining_client.lobby.session.is_some()
                 && host.control_clients.contains(joining_client_id)
                 && retained_client.control_clients.contains(joining_client_id)
                 && !host
@@ -1693,7 +1693,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     let joining_client_network_id = u32::try_from(joining_client_id).test_value();
     main_assert_ne!(joining_client_id => client_id);
     main_assert!(client
-        .network_lobby
+        .lobby.session
         .test_ref()
         .participants
         .contains_key(&joining_client_network_id));
@@ -1706,7 +1706,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     main_assert!(!host_joining_player_ids.is_empty());
     main_assert_eq!(retained_joining_player_ids => host_joining_player_ids);
     main_assert_eq!(client.players.infos.client_packet(joining_client_id) => host.players.infos.client_packet(joining_client_id));
-    main_assert_eq!(joining_client.network_lobby.test_ref().scenario_label() => host_scenario.title);
+    main_assert_eq!(joining_client.lobby.session.test_ref().scenario_label() => host_scenario.title);
 
     pump_live_restart_three_apps_until(
         &mut host,
@@ -3520,7 +3520,7 @@ fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries
             }
             StartupView::NetworkLobby => {
                 app.startup.view = StartupView::NetworkLobby;
-                app.classic_host_lobby = None;
+                app.lobby.classic_host = None;
             }
             StartupView::NetworkGame => app.startup.view = StartupView::NetworkGame,
             StartupView::Options => app.startup.view = StartupView::Options,

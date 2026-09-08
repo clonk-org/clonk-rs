@@ -872,7 +872,7 @@ impl GameApp {
         self.active_global_gui_failures.clear();
         self.status_text = message;
         self.scenario_lifecycle.loading = None;
-        self.network_start_wait = None;
+        self.lobby.start_wait = None;
         self.mode = AppMode::Menu;
         self.restore_startup_fonts();
         // `QuitGame` reconstructs a startup dialog only when one is in use and
@@ -1093,7 +1093,7 @@ impl GameApp {
         self.close_context_menu_silently();
         self.definition_selection.dialog = None;
         self.definition_selection.pending = None;
-        self.pending_lobby_player_selection = None;
+        self.lobby.pending_player_selection = None;
         self.definition_selection.last_click = None;
         self.dialogs.game_over = None;
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
@@ -1274,7 +1274,8 @@ impl GameApp {
                 .as_ref()
                 .is_none_or(|savegame| !savegame.save_game);
         let preloaded_scenario = self
-            .lobby_preload_artifact
+            .lobby
+            .preload_artifact
             .as_mut()
             .and_then(|artifact| artifact.catalog_host.as_mut())
             .and_then(|catalog_host| catalog_host.take_matching_scenario(&catalog_preload_key));
@@ -1508,7 +1509,7 @@ impl GameApp {
             // selected during this load. C++ backs up that effective vector.
             definition_root: None,
         };
-        let matching_preload = self.lobby_preload_artifact.take().filter(|artifact| {
+        let matching_preload = self.lobby.preload_artifact.take().filter(|artifact| {
             artifact.scenario_path == path
                 && artifact.definition_paths == effective_definition_paths
         });

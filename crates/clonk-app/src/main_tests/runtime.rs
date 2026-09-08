@@ -3004,7 +3004,7 @@ fn team_options_submit_exact_sets_and_refresh_from_echoes() {
     app.execute_control_set(sets[0]);
     app.execute_control_set(sets[1]);
     let options = app
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .test_value()
         .controller
@@ -8321,7 +8321,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/help".to_string()))
         .test_value();
     runtime_assert!(app
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .expect("classic host lobby")
         .controller
@@ -9323,14 +9323,14 @@ fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
         if local_client_id == 0 {
             let pause = app.runtime_network_status_barrier.test_value().status;
             assert_eq!(pause.state, clonk_network::NETWORK_STATE_PAUSE);
-            assert!(app.league_votes.paused_for_vote);
+            assert!(app.lobby.league_votes.paused_for_vote);
         } else {
             runtime_assert!(
                 app.runtime_network_status_barrier.is_none(),
                 "client {local_client_id} left an unexpected barrier for {script:?}: {:?}",
                 app.runtime_network_status_barrier
             );
-            assert!(!app.league_votes.paused_for_vote);
+            assert!(!app.lobby.league_votes.paused_for_vote);
         }
         let expected_votes = expected_vote_data
             .into_iter()

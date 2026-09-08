@@ -314,7 +314,7 @@ fn classic_host_start_honors_the_league_split_screen_gate() {
     .test_value();
 
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
-    main_assert!(app.host_lobby_countdown.is_none());
+    main_assert!(app.lobby.host_countdown.is_none());
     let warning = app.dialogs.messages.last().test_value();
     main_assert_eq!(warning.state.caption() => "League error");
     main_assert_eq!(warning.state.icon() => clonk_frontend::message_dialog::MessageDialogIcon::Standard(46));
@@ -368,7 +368,7 @@ fn classic_league_start_removes_a_known_remote_split_screen_client() {
                     by_client: 0,
                 }]
             );
-    main_assert_eq!(app.host_lobby_countdown => Some(HostLobbyCountdown::new()));
+    main_assert_eq!(app.lobby.host_countdown => Some(HostLobbyCountdown::new()));
     main_assert!(app.dialogs.messages.is_empty());
 }
 
@@ -400,7 +400,7 @@ fn forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
     ))
     .test_value();
     main_assert_eq!(
-        app.classic_host_lobby
+        app.lobby.classic_host
             .as_ref()
             .unwrap()
             .controller
@@ -412,13 +412,13 @@ fn forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
 
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/help".to_string()))
         .test_value();
-    main_assert!(app.classic_host_lobby.as_ref().unwrap().controller.logs().iter().any(|line| line.text.contains("/set maxplayer")));
+    main_assert!(app.lobby.classic_host.as_ref().unwrap().controller.logs().iter().any(|line| line.text.contains("/set maxplayer")));
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/clear".to_string()))
         .test_value();
-    main_assert!(app.classic_host_lobby.as_ref().unwrap().controller.logs().is_empty());
+    main_assert!(app.lobby.classic_host.as_ref().unwrap().controller.logs().is_empty());
     app.process_classic_lobby_chat_request(LobbyChatRequest::OpenExternalDialog)
         .test_value();
-    main_assert!(app.classic_host_lobby.is_some());
+    main_assert!(app.lobby.classic_host.is_some());
     main_assert!(app.chat.external_dialog_visible);
 }
 
@@ -465,7 +465,7 @@ fn network_start_wait_kick_click_reuses_direct_and_league_paths() {
             ModifiersState::empty(),
             ModifiersState::empty(),
         );
-        main_assert!(app.network_start_wait.as_ref().is_some_and(|wait| wait.visible));
+        main_assert!(app.lobby.start_wait.as_ref().is_some_and(|wait| wait.visible));
         (app, commands)
     };
 
@@ -506,7 +506,7 @@ fn remove_aborts_countdown_before_swap_removed_update_and_clears_league_password
         ..Default::default()
     });
     app.network_is_league = true;
-    app.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(5));
+    app.lobby.host_countdown = Some(HostLobbyCountdown::with_seconds(5));
     app.apply_lobby_countdown_presentation(clonk_network::LobbyCountdownPacket::new(5));
 
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
@@ -530,8 +530,8 @@ fn remove_aborts_countdown_before_swap_removed_update_and_clears_league_password
         ],
         "RemoveInfo swap-removes the target only after the host abort packet"
     );
-    main_assert!(app.host_lobby_countdown.is_none());
-    main_assert!(!app.classic_host_lobby.as_ref().unwrap().controller.countdown().is_locked());
+    main_assert!(app.lobby.host_countdown.is_none());
+    main_assert!(!app.lobby.classic_host.as_ref().unwrap().controller.countdown().is_locked());
     main_assert!(app.league_auth_session.as_ref().expect("league session").password.is_empty());
     main_assert!(load_league_auth_settings(Some(&paths)).password.is_empty(), "league removal rerequires authentication");
 }
@@ -3355,7 +3355,7 @@ fn league_lobby_checks_only_new_ids_removes_failures_and_consumes_successful_aui
     app.network_is_league = true;
     app.network_league_name = b"Cup".to_vec();
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+    app.lobby.session = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
     app.players.infos.replace_snapshot(
         1,
         [league_fixture!(player_data:
@@ -4114,7 +4114,7 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
         if local_client_id == 0 && !paused {
             let barrier = league.runtime_network_status_barrier.test_value();
             main_assert_eq!((barrier.status.state, barrier.status.target_tick) => (clonk_network::NETWORK_STATE_PAUSE, pause_target));
-            main_assert!(league.league_votes.paused_for_vote);
+            main_assert!(league.lobby.league_votes.paused_for_vote);
             main_assert!(league.host_reference_paused);
         }
         main_assert_eq!(
@@ -4207,7 +4207,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     let restart_vote = league_fixture!(vote: clonk_engine::VOTE_TYPE_CANCEL, true, 0, 0);
     main_assert_eq!(restart_commands.take_submitted_votes() => vec![restart_vote]);
     main_assert!(restart_host.scenario_lifecycle.abort_restart_pending);
-    restart_host.league_votes.add(restart_vote);
+    restart_host.lobby.league_votes.add(restart_vote);
     restart_host.execute_league_vote_end(clonk_engine::VoteControlData {
         approve: false,
         ..restart_vote
@@ -4513,7 +4513,7 @@ fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
         .into_iter()
         .next()
         .test_value();
-    app.league_votes.add_at(own_ballot, 100);
+    app.lobby.league_votes.add_at(own_ballot, 100);
 
     main_assert!(!app.submit_own_league_vote_at(subject, true, 101));
     main_assert!(commands.take_submitted_votes().is_empty());
@@ -4589,7 +4589,7 @@ fn host_sec1_vote_timeout_queues_negative_vote_end() {
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
     let vote = league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, 7, 2);
-    app.league_votes.add_at(vote, 100);
+    app.lobby.league_votes.add_at(vote, 100);
 
     main_assert!(!app.tick_host_league_vote_timeout_at(110));
     main_assert!(commands.take_submitted_vote_ends().is_empty());
@@ -4654,7 +4654,7 @@ fn only_host_vote_end_clears_its_exact_subject() {
         })],
     )
     .test_value();
-    main_assert_eq!(app.league_votes.ballots => vec![kick, cancel]);
+    main_assert_eq!(app.lobby.league_votes.ballots => vec![kick, cancel]);
 
     app.apply_ready_controls(
         24,
@@ -4666,7 +4666,7 @@ fn only_host_vote_end_clears_its_exact_subject() {
     )
     .test_value();
 
-    main_assert_eq!(app.league_votes.ballots => vec![cancel]);
+    main_assert_eq!(app.lobby.league_votes.ballots => vec![cancel]);
 }
 
 #[test]
@@ -5034,7 +5034,7 @@ fn host_vote_pause_lifecycle_matches_pause_vote_result() {
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
     unpause_app.network_control_running = false;
-    unpause_app.league_votes.paused_for_vote = true;
+    unpause_app.lobby.league_votes.paused_for_vote = true;
     unpause_app.host_reference_paused = true;
     unpause_app.publish_running_host_reference();
     let unpause = clonk_engine::VoteControlData { data: 0, ..pause };

@@ -3903,6 +3903,7 @@ impl GameApp {
             return Ok(());
         }
         let Some(origin) = self
+            .lobby
             .league_votes
             .first_subject_needing_vote(local_client_id)
         else {
@@ -5002,9 +5003,9 @@ impl GameApp {
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.close_context_menu_silently();
-        self.network_start_wait = None;
-        self.host_lobby_countdown = None;
-        self.pending_local_lobby_countdown_echoes.clear();
+        self.lobby.start_wait = None;
+        self.lobby.host_countdown = None;
+        self.lobby.pending_local_countdown_echoes.clear();
         self.finish_recording();
         // C4Game::Clear ends the network session for every round it tears
         // down, after the evaluation and record work that still needs it and
@@ -5033,7 +5034,7 @@ impl GameApp {
         self.dialogs.message_consumed_keys.clear();
         self.definition_selection.dialog = None;
         self.definition_selection.pending = None;
-        self.pending_lobby_player_selection = None;
+        self.lobby.pending_player_selection = None;
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();
         self.definition_selection.pointer_capture = false;
@@ -5107,7 +5108,7 @@ impl GameApp {
         self.offline_halt_count = 0;
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
-        self.league_votes.clear();
+        self.lobby.league_votes.clear();
         self.presentation.frames_per_second = 0;
         self.presentation.frames_since_second = 0;
         self.presentation.presentation_stats = PresentationStats::default();

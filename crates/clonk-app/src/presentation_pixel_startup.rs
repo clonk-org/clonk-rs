@@ -64,7 +64,7 @@ pub(crate) fn stage_network_lobby_checkpoint(
         app.startup.view == crate::StartupView::NetworkLobby
             && app.network.is_some()
             && matches!(app.network_mode, Some(crate::NetworkMode::Host(_)))
-            && (app.classic_host_lobby.is_some() || app.network_lobby.is_some()),
+            && (app.lobby.classic_host.is_some() || app.lobby.session.is_some()),
         "network host did not leave a live lobby ready for capture: view={:?}, network={}, mode={:?}, classic_lobby={}, fallback_lobby={}, status={:?}, dialogs={dialogs:?}",
         app.startup.view,
         app.network.is_some(),
@@ -72,8 +72,8 @@ pub(crate) fn stage_network_lobby_checkpoint(
             crate::NetworkMode::Host(_) => "host",
             crate::NetworkMode::Client(_) => "client",
         }),
-        app.classic_host_lobby.is_some(),
-        app.network_lobby.is_some(),
+        app.lobby.classic_host.is_some(),
+        app.lobby.session.is_some(),
         app.status_text,
     );
     let notice_count = app
@@ -402,7 +402,7 @@ mod tests {
             app.network_mode,
             Some(crate::NetworkMode::Host(_))
         ));
-        assert!(app.classic_host_lobby.is_some() || app.network_lobby.is_some());
+        assert!(app.lobby.classic_host.is_some() || app.lobby.session.is_some());
         assert!(app.dialogs.messages.is_empty());
         assert!(app.status_text.is_empty());
         Ok(())
