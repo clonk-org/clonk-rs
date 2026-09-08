@@ -59,3 +59,32 @@ Both scenarios exceeded the decision threshold. The next bounded experiment
 is loop-control lowering, tracked in clonk-org/clonk-rs#1565. The observed
 timer-on tick differences were slightly negative; treat those as noise rather
 than evidence that instrumentation makes execution faster.
+
+## Loop-control lowering (clonk-org/clonk-rs#1565)
+
+`break` and `continue` now lower into the compiled plan's `while` and
+classic-`for` forms. The probe above was re-run against the change and against
+its parent commit back to back in one session, so only
+`crates/clonk-script/src/vm.rs` differs between the two sets. Do not compare
+against the numbers in the previous section: they predate later landed
+performance work, and this session measured the parent commit at
+2.0719 ms/frame where that section recorded 2.1779.
+
+| Scenario | Newly compiled invocations / 400 frames | AST invocations | Median AST ms/frame | Median tick ms/frame (timed) | Median tick ms/frame (untimed) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Tower of Magic | +117 | 23,504 → 23,387 (−0.50%) | 2.0719 → 2.0475 (−1.18%) | 4.3703 → 4.3204 (−1.14%) | 4.3068 → 4.3184 (+0.27%) |
+| Seven Keys | +57 | 4,444 → 4,387 (−1.28%) | 0.4556 → 0.4419 (−3.00%) | 1.3145 → 1.2922 (−1.69%) | 1.3334 → 1.2861 (−3.55%) |
+
+Total invocation counts are unchanged in both scenarios, so the moved
+invocations are the same work on a different executor. Coverage grew by less
+than the 7,563 and 183 loop-control blocker counts suggested, because those
+counts overlap: most of those functions have another blocker that still keeps
+them interpreted. The elapsed differences span −3.55% to +0.27%, inside the
+noise band this document already recorded for identical binaries (−1.99% and
+−0.72%), so no elapsed benefit is resolvable at this sample size.
+
+Every window is in
+[`benchmarks/results/loop-control-lowering.json`](../benchmarks/results/loop-control-lowering.json).
+The remaining mass in Tower of Magic is `special_or_forwarded_call` (12,750)
+and `method_or_optional_call` (10,765); measure a family that large before
+lowering another one.
