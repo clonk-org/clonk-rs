@@ -31,24 +31,6 @@ impl GameApp {
             })
     }
 
-    fn set_runtime_music_playback(&mut self, enabled: bool) {
-        self.sound.runtime_music_enabled = enabled;
-        if enabled {
-            if let Some(path) = self
-                .scenario_lifecycle
-                .active
-                .as_ref()
-                .and_then(|scenario| scenario.path.clone())
-            {
-                self.sound.play_scenario_audio(&path);
-            } else {
-                self.sound.play_sandbox_audio();
-            }
-        } else if let Some(audio) = self.sound.context.as_ref() {
-            audio.borrow_mut().stop_music();
-        }
-    }
-
     /// Running global F3 calls `ToggleOnOff(false)`: it changes
     /// `Game.IsMusicEnabled`/playback without changing RXMusic.
     pub(crate) fn toggle_runtime_music_playback(&mut self) -> Result<(), EngineError> {
@@ -65,7 +47,13 @@ impl GameApp {
                 ))
             })?;
         let flash_message = self.prepare_runtime_music_flash(enabled)?;
-        self.set_runtime_music_playback(enabled);
+        let active_scenario_path = self
+            .scenario_lifecycle
+            .active
+            .as_ref()
+            .and_then(|scenario| scenario.path.as_deref());
+        self.sound
+            .set_runtime_music_playback(enabled, active_scenario_path);
         self.runtime_flash_message = flash_message;
         Ok(())
     }
@@ -98,7 +86,13 @@ impl GameApp {
             })
             .expect("audio availability preflighted above");
         self.persist_audio_option("Music", enabled);
-        self.set_runtime_music_playback(enabled);
+        let active_scenario_path = self
+            .scenario_lifecycle
+            .active
+            .as_ref()
+            .and_then(|scenario| scenario.path.as_deref());
+        self.sound
+            .set_runtime_music_playback(enabled, active_scenario_path);
         self.runtime_flash_message = flash_message;
         Ok(())
     }

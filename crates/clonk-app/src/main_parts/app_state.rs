@@ -1730,6 +1730,26 @@ impl SoundState {
             }
         }
     }
+
+    /// Turn runtime music on or off. `active_scenario_path` is the running
+    /// scenario's file, whose own music is played when there is one; the
+    /// sandbox music otherwise.
+    pub(crate) fn set_runtime_music_playback(
+        &mut self,
+        enabled: bool,
+        active_scenario_path: Option<&Path>,
+    ) {
+        self.runtime_music_enabled = enabled;
+        if enabled {
+            if let Some(path) = active_scenario_path {
+                self.play_scenario_audio(path);
+            } else {
+                self.play_sandbox_audio();
+            }
+        } else if let Some(audio) = self.context.as_ref() {
+            audio.borrow_mut().stop_music();
+        }
+    }
 }
 
 /// The shared classic context menu: the recursively open tree, the owner
