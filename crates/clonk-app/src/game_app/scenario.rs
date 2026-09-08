@@ -405,7 +405,7 @@ impl GameApp {
             return Ok(());
         }
         if record_stream.is_some() {
-            self.classic_record_stream_activation_pending = true;
+            self.records.classic_stream_activation_pending = true;
         }
         if self.boot_loading.is_some() {
             self.auto_start_classic_command_line_scenario = true;
@@ -1914,7 +1914,11 @@ impl GameApp {
         engine.set_fair_crew_strength(fair_crew_strength);
         engine.set_fair_crew_forced(fair_crew_forced);
         engine.set_allow_debug(allow_debug);
-        arm_configured_engine_debug_mode(&mut engine, self.app_paths.as_ref(), self.console_mode);
+        arm_configured_engine_debug_mode(
+            &mut engine,
+            self.app_paths.as_ref(),
+            self.console_session.enabled,
+        );
         if network_game {
             // Runtime player numbers are assigned only when synchronized
             // JoinPlayer controls execute. Until then no provisional number
@@ -2748,7 +2752,7 @@ impl GameApp {
         arm_configured_engine_debug_mode(
             &mut self.engine,
             self.app_paths.as_ref(),
-            self.console_mode,
+            self.console_session.enabled,
         );
         let spawn_definition = {
             let mut audio = borrow_audio_context_mut(self.sound.context.as_ref());

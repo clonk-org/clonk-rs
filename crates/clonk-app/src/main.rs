@@ -1089,8 +1089,8 @@ fn run() -> Result<()> {
             let caption = app.update_check_caption();
             app.show_update_notice(message, caption)?;
         }
-        app.console_mode = classic.console;
-        app.console_log_capture = console_log_capture;
+        app.console_session.enabled = classic.console;
+        app.console_session.log_capture = console_log_capture;
         app.game_log_capture = Some(game_log_capture);
         if classic.console {
             arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
@@ -1304,7 +1304,7 @@ fn run() -> Result<()> {
             // can only create a window from the event loop's target, so the same
             // decisions are taken here instead, before the shell record is
             // borrowed for the rest of the pass.
-            if app.console_mode && matches!(event, Event::AboutToWait) {
+            if app.console_session.enabled && matches!(event, Event::AboutToWait) {
                 let scale = developer_windows
                     .shell_mut()
                     .and_then(developer_host::DeveloperHost::as_shell_mut)
@@ -1830,7 +1830,7 @@ fn run() -> Result<()> {
                     && !render_inactive_allows_drawing(
                         render_inactive_mask,
                         app.window_active,
-                        app.console_mode,
+                        app.console_session.enabled,
                         render_floor.has_presented(),
                         app.window_occluded,
                     ) =>
@@ -1907,7 +1907,7 @@ fn run() -> Result<()> {
                                     app.finish_terminal_loader_frame_presentation();
                                 if app.mode == AppMode::Running
                                     && !presented_terminal_loader
-                                    && !app.console_mode
+                                    && !app.console_session.enabled
                                 {
                                     app.finish_rendered_object_audibility_pass();
                                 }
@@ -2056,8 +2056,8 @@ fn run() -> Result<()> {
                             return;
                         }
                     }
-                    let ordered_native_text =
-                        !app.console_mode && app.can_present_ordered_native_text(presenter.scale());
+                    let ordered_native_text = !app.console_session.enabled
+                        && app.can_present_ordered_native_text(presenter.scale());
                     let defer_native_main_text = !ordered_native_text
                         && app.can_defer_native_main_menu_text(presenter.scale());
                     let defer_native_loader_text =
@@ -2184,7 +2184,7 @@ fn run() -> Result<()> {
                             if refreshed
                                 && app.mode == AppMode::Running
                                 && !presented_terminal_loader
-                                && !app.console_mode
+                                && !app.console_session.enabled
                             {
                                 app.finish_rendered_object_audibility_pass();
                             }
@@ -2263,7 +2263,7 @@ fn run() -> Result<()> {
                     }
                 }
                 Event::LoopExiting => {
-                    if app.console_mode {
+                    if app.console_session.enabled {
                         app.finish_console_shutdown();
                     }
                     // `~C4Application` spawns the editor only after subsystem
@@ -2313,7 +2313,9 @@ fn run() -> Result<()> {
             // C4MouseControl/C4GUI draw the selected themed cell themselves.
             window.set_cursor_visible(app.platform_cursor_visible());
             if let Some(paths) = app_paths.as_ref().filter(|_| {
-                event_target.exiting() && !app.config.reset_requested && !app.console_mode
+                event_target.exiting()
+                    && !app.config.reset_requested
+                    && !app.console_session.enabled
             }) {
                 display_options.persist_if_dirty(paths.as_ref());
             }
@@ -2340,8 +2342,9 @@ fn run() -> Result<()> {
                     }
                 }
             }
-            let console_shutdown =
-                event_target.exiting() && app.console_mode && !app.config.reset_requested;
+            let console_shutdown = event_target.exiting()
+                && app.console_session.enabled
+                && !app.config.reset_requested;
             if let (true, Some(paths), Some((x, y))) = (
                 console_shutdown,
                 app_paths.as_ref(),
@@ -3041,18 +3044,19 @@ impl GameApp {
             native_startup_fonts: None,
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
-            classic_record_stream_activation_pending: false,
             initial_definition_seed: Some(classic_command_line_definition_modules(
                 &load_native_config_bytes(paths),
                 &[],
             )),
-            console_mode: false,
+            console_session: ConsoleSessionState {
+                enabled: false,
+                restored_startup_dialog: false,
+                log_capture: None,
+            },
             headless: false,
             discarded_control_ticks: 0,
             last_reported_discarded_control_tick: None,
-            console_restored_startup_dialog: false,
             file_monitor: None,
-            console_log_capture: None,
             game_log_capture: None,
             script_created_objects: false,
             sandbox_crew_definition_paths: None,
@@ -3158,6 +3162,7 @@ impl GameApp {
                 session: None,
                 runtime_requested: false,
                 playback: None,
+                classic_stream_activation_pending: false,
             },
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
@@ -3384,7 +3389,7 @@ impl GameApp {
         compat_profile: crate::settings::CompatProfile,
     ) -> Result<()> {
         self.classic_command_line = classic.clone();
-        self.classic_record_stream_activation_pending = false;
+        self.records.classic_stream_activation_pending = false;
         self.initial_definition_seed = Some(classic_command_line_definition_modules(
             &load_native_config_bytes(self.app_paths.as_ref()),
             &classic.definition_files,
@@ -7479,7 +7484,7 @@ impl GameApp {
         let require_live_network = self.network.is_some();
         let replaying = self.records.playback.is_some();
         let allow_scripting_in_replays = replaying && self.allow_scripting_in_replays;
-        let console_active = self.console_mode;
+        let console_active = self.console_session.enabled;
         let mut result = Ok(());
         for control in controls {
             result = match control {
@@ -8339,7 +8344,7 @@ impl GameApp {
                     }
                     let activation = self.activate_loaded_scenario(scenario.clone(), &data);
                     if activation.is_ok() {
-                        self.classic_record_stream_activation_pending = false;
+                        self.records.classic_stream_activation_pending = false;
                     }
                     if let Err(error) = activation {
                         let ScenarioActivationError::Recoverable(message) = error;
@@ -8948,7 +8953,7 @@ impl GameApp {
             arm_configured_engine_debug_mode(
                 &mut self.engine,
                 self.app_paths.as_ref(),
-                self.console_mode,
+                self.console_session.enabled,
             );
             let mut audio = borrow_audio_context_mut(self.sound.context.as_ref());
             configure_sandbox_engine(&mut self.engine, definition_load, audio.as_deref_mut())
@@ -9007,7 +9012,7 @@ impl GameApp {
             arm_configured_engine_debug_mode(
                 &mut self.engine,
                 self.app_paths.as_ref(),
-                self.console_mode,
+                self.console_session.enabled,
             );
             let sound_samples = {
                 let mut audio = borrow_audio_context_mut(self.sound.context.as_ref());
@@ -9067,7 +9072,7 @@ impl GameApp {
         arm_configured_engine_debug_mode(
             &mut self.engine,
             self.app_paths.as_ref(),
-            self.console_mode,
+            self.console_session.enabled,
         );
         // InitControl starts fInitial before InitPlayers mutates current
         // takeover rows through SetSavegameResume.

@@ -408,7 +408,7 @@ impl GameApp {
     /// and the sort follows at `:339`, so in console mode every viewport keeps
     /// the position it was created at.
     fn sort_physical_viewports_by_player_control(&mut self) {
-        if self.console_mode {
+        if self.console_session.enabled {
             return;
         }
         let engine = &self.engine;
@@ -1391,7 +1391,7 @@ impl GameApp {
         self.rendering
             .graphics
             .set_pxs_graphics(self.rendering.display_flags.pxs_gfx);
-        if self.console_mode {
+        if self.console_session.enabled {
             self.sync_developer_console_view();
             let font = self.assets.font_arc();
             self.developer
@@ -2567,7 +2567,7 @@ impl GameApp {
             }
             mode => mode,
         };
-        let ordered_native = !self.console_mode
+        let ordered_native = !self.console_session.enabled
             && (self.can_present_ordered_native_text(presentation.scale)
                 || self.can_defer_native_loader_text(presentation.scale));
 
@@ -5353,7 +5353,7 @@ impl GameApp {
         // fullscreen session never watches, however the key is set.
         if !should_arm_file_monitor(
             auto_file_reload,
-            !self.console_mode,
+            !self.console_session.enabled,
             self.file_monitor.is_some(),
         ) {
             return;

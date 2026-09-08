@@ -485,6 +485,10 @@ pub(crate) struct RecordingState {
     /// `CID_Synchronize` starts the record (or submission fails).
     pub(crate) runtime_requested: bool,
     pub(crate) playback: Option<ControlRecordPlayback>,
+    /// A converted command-line stream still owns the initial OpenGame
+    /// attempt. Clear this after successful activation so later rounds do not
+    /// inherit the native no-startup failure policy.
+    pub(crate) classic_stream_activation_pending: bool,
 }
 
 /// The presentation half of the app: frame counters and refresh ceilings
@@ -1110,6 +1114,25 @@ pub(crate) struct DeveloperToolsState {
     pub(crate) console_pointer: GuiPoint,
 }
 
+/// The `/console` session: whether the developer-window policy is on, the
+/// startup generation a console command has handed back, and the tracing
+/// mirror the console window drains. `GameApp` composes it as
+/// `console_session`.
+pub(crate) struct ConsoleSessionState {
+    /// Persistent developer-window policy selected by `/console`. Unlike
+    /// per-round classic arguments, `/open` must not reset this.
+    pub(crate) enabled: bool,
+    /// A console command has put `Application.UseStartupDialog` back, so this
+    /// session has a startup generation to return to even though it was
+    /// launched without one. `/open` and `/close` both set it
+    /// (C4Application.cpp:598-612,617-624), which is what lets a dedicated
+    /// server park for the next command instead of ending its process.
+    pub(crate) restored_startup_dialog: bool,
+    /// Thread-safe tracing mirror drained by the console window each app
+    /// iteration. It remains `None` for the fullscreen client.
+    pub(crate) log_capture: Option<clonk_logging::ConsoleLogCapture>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -1295,17 +1318,12 @@ pub(crate) struct GameApp {
     /// Process-local compatibility arguments applied after configuration is
     /// loaded. They must never be written back to the selected config file.
     pub(crate) classic_command_line: ClassicCommandLine,
-    /// A converted command-line stream still owns the initial OpenGame
-    /// attempt. Clear this after successful activation so later rounds do not
-    /// inherit the native no-startup failure policy.
-    pub(crate) classic_record_stream_activation_pending: bool,
     /// ParseCommandLine snapshots the config/`.c4d` definition vector once
     /// for the next game init. Later startup rounds begin from an empty Game
     /// and the unchecked selector appends only Objects.c4d.
     pub(crate) initial_definition_seed: Option<Vec<String>>,
-    /// Persistent developer-window policy selected by `/console`. Unlike
-    /// per-round classic arguments, `/open` must not reset this.
-    pub(crate) console_mode: bool,
+    /// The `/console` session (clonk-org/clonk-rs#1242).
+    pub(crate) console_session: ConsoleSessionState,
     /// Dedicated-server policy selected by `--headless`: no window, no render
     /// device, no sound. C++ makes this a build (`USE_CONSOLE`,
     /// CMakeLists.txt:178) whose `DDrawInit` compiles the OpenGL arm out
@@ -1331,19 +1349,10 @@ pub(crate) struct GameApp {
     /// loses several ticks in a burst is described once per tick rather than
     /// once per redelivery.
     pub(crate) last_reported_discarded_control_tick: Option<i32>,
-    /// A console command has put `Application.UseStartupDialog` back, so this
-    /// session has a startup generation to return to even though it was
-    /// launched without one. `/open` and `/close` both set it
-    /// (C4Application.cpp:598-612,617-624), which is what lets a dedicated
-    /// server park for the next command instead of ending its process.
-    pub(crate) console_restored_startup_dialog: bool,
     /// `C4Game::FileMonitor`. Armed once per game when
     /// `Developer.AutoFileReload` is set and the app is windowed
     /// (`C4Game.cpp:2413-2424`), started after definitions have loaded.
     pub(crate) file_monitor: Option<clonk_platform::file_monitor::DirectoryMonitor>,
-    /// Thread-safe tracing mirror drained by the console window each app
-    /// iteration. It remains `None` for the fullscreen client.
-    pub(crate) console_log_capture: Option<clonk_logging::ConsoleLogCapture>,
     /// `C4LogSystem::GuiSink`'s message-board attachment: the C4Script log
     /// stream the running board draws (`src/C4Log.cpp:226-240`). Fixtures that
     /// never install a subscriber leave it `None`.

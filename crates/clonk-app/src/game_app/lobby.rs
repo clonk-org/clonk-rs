@@ -3131,7 +3131,7 @@ impl GameApp {
         packet: clonk_network::LobbyCountdownPacket,
         initial: bool,
     ) {
-        if !(self.console_mode || self.headless) {
+        if !(self.console_session.enabled || self.headless) {
             return;
         }
         let labels = self.classic_lobby_labels();
@@ -7283,7 +7283,7 @@ impl GameApp {
             return Ok(());
         }
         if let Some((report, blocked)) = self.compat_profile_lobby_notice_report() {
-            if self.console_mode || self.headless {
+            if self.console_session.enabled || self.headless {
                 if blocked {
                     for line in report.lines() {
                         tracing::error!(message = line, "compatibility-profile notice");
@@ -7473,7 +7473,7 @@ impl GameApp {
     /// both take this arm, and a windowed host never does. Returns whether the
     /// round was aborted.
     fn abort_dialogless_round_short_of_min_players(&mut self) -> bool {
-        if !(self.console_mode || self.headless) {
+        if !(self.console_session.enabled || self.headless) {
             return false;
         }
         // An undetermined minimum never quits a running server.

@@ -301,7 +301,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     fs::remove_file(global.join("Final Base.ogg")).test_value();
     fs::remove_file(extras.join("Final Match.ogg")).test_value();
     fs::write(global.join("Console Only.ogg"), b"console").test_value();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.sound.resume_frontend_after_fade = true;
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
@@ -329,7 +329,7 @@ fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
     }
     main_assert!(app.sound.resume_frontend_after_fade);
 
-    app.console_mode = false;
+    app.console_session.enabled = false;
     app.classic_command_line.scenario = Some(dir.path().join("Explicit.c4s"));
     app.startup_restart_diagnostics.mark_quit_with_error();
     app.startup_restart_diagnostics
@@ -3491,7 +3491,7 @@ fn a_command_line_scenario_that_fails_to_load_ends_the_process() {
     let mut opened = new_state_only_menu_app(320, 200);
     opened.headless = true;
     opened.classic_command_line.scenario = Some(PathBuf::from("Broken.c4s"));
-    opened.console_restored_startup_dialog = true;
+    opened.console_session.restored_startup_dialog = true;
     opened.mode = AppMode::Loading;
 
     opened
@@ -3968,7 +3968,7 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     app.loader.terminal_frame_pending = true;
     main_assert!(app.discard_terminal_loader_frame_for_headless_render());
     main_assert!(!app.loader_presentation_active());
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.arm_terminal_loader_frame_presentation();
     main_assert!(!app.loader_presentation_active());
 }
@@ -5346,7 +5346,7 @@ fn a_dedicated_server_quits_when_its_command_line_record_stream_fails() {
     let mut app = new_state_only_menu_app(320, 200);
     app.headless = true;
     app.classic_command_line.record_stream = Some(PathBuf::from("Broken.c4r"));
-    app.classic_record_stream_activation_pending = true;
+    app.records.classic_stream_activation_pending = true;
     app.mode = AppMode::Loading;
 
     main_assert!(!app.startup_dialog_in_use());
@@ -5457,7 +5457,7 @@ fn explicit_launch_failures_exit_instead_of_reconstructing_startup() {
         }),
     ] {
         let mut app = new_state_only_menu_app(320, 200);
-        app.console_mode = false;
+        app.console_session.enabled = false;
         apply(&mut app);
         main_assert!(
             !app.failed_open_game_returns_to_startup(),

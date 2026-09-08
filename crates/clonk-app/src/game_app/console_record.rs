@@ -42,7 +42,7 @@ impl GameApp {
     /// console `/open` or `/close` puts it back afterwards
     /// (C4Application.cpp:598-612,617-624).
     pub(crate) fn startup_dialog_in_use(&self) -> bool {
-        self.console_restored_startup_dialog || self.failed_open_game_returns_to_startup()
+        self.console_session.restored_startup_dialog || self.failed_open_game_returns_to_startup()
     }
 
     /// Return a finished console round to the state its next command is
@@ -54,8 +54,8 @@ impl GameApp {
         self.classic_command_line.scenario = None;
         self.classic_command_line.record_stream = None;
         self.classic_command_line.direct_join = None;
-        self.classic_record_stream_activation_pending = false;
-        self.console_restored_startup_dialog = true;
+        self.records.classic_stream_activation_pending = false;
+        self.console_session.restored_startup_dialog = true;
         self.close_console_game();
     }
 
@@ -97,7 +97,7 @@ impl GameApp {
     }
 
     pub(crate) fn developer_console_editing(&self) -> bool {
-        self.console_mode && self.developer.console_editing_enabled
+        self.console_session.enabled && self.developer.console_editing_enabled
     }
 
     fn developer_console_strings(&self) -> ConsoleStrings {
@@ -215,7 +215,7 @@ impl GameApp {
     }
 
     pub(crate) fn sync_developer_console_view(&mut self) -> bool {
-        if !self.console_mode {
+        if !self.console_session.enabled {
             return false;
         }
         if self.records.playback.is_some() {
@@ -226,7 +226,7 @@ impl GameApp {
     }
 
     pub(crate) fn drain_console_log_capture(&mut self) {
-        let Some(capture) = self.console_log_capture.as_ref() else {
+        let Some(capture) = self.console_session.log_capture.as_ref() else {
             return;
         };
         let output = capture.take();
@@ -469,7 +469,7 @@ impl GameApp {
             // `/close` clears the round and sets `UseStartupDialog`
             // (C4Application.cpp:617-624), so the session has a startup
             // generation again whatever it was launched with.
-            self.console_restored_startup_dialog = true;
+            self.console_session.restored_startup_dialog = true;
             self.close_console_game();
             return Ok(());
         }
@@ -488,7 +488,7 @@ impl GameApp {
                 // though the parse just filled in a scenario filename that
                 // would otherwise clear it (C4Game.cpp:3299). That is what
                 // returns the console to `C4AS_Startup` when this round ends.
-                self.console_restored_startup_dialog = true;
+                self.console_session.restored_startup_dialog = true;
                 self.launch_classic_command_line_join()?;
                 self.launch_classic_command_line_scenario()?;
             }

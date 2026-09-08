@@ -17,7 +17,8 @@ impl GameApp {
     }
 
     pub(crate) fn arm_terminal_loader_frame_presentation(&mut self) {
-        self.loader.terminal_frame_pending = !self.console_mode && self.loader.screen.is_some();
+        self.loader.terminal_frame_pending =
+            !self.console_session.enabled && self.loader.screen.is_some();
     }
 
     pub(crate) fn discard_terminal_loader_frame_for_headless_render(&mut self) -> bool {
@@ -5370,7 +5371,7 @@ impl GameApp {
             self.boot_loading = None;
             self.rendering.material_library = library;
             self.apply_material_library();
-            if !self.console_mode
+            if !self.console_session.enabled
                 && !self.headless
                 && self.loading_state.is_none()
                 && !self.classic_loader_render_preconditions_ready()
@@ -6066,7 +6067,7 @@ impl GameApp {
         // is `isFullScreen && ...` (C4Game.cpp:3321) and only `/console` clears
         // `isFullScreen` (C4Game.cpp:3317-3318), so a dedicated server keeps the
         // fullscreen lineage and the gate takes no `headless` term.
-        !self.console_mode
+        !self.console_session.enabled
             && self
                 .classic_command_line
                 .scenario

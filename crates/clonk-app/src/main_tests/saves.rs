@@ -503,7 +503,7 @@ fn classic_record_stream_is_converted_and_activated() {
     main_assert!(app.records.playback.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(!app.classic_record_stream_activation_pending);
+    main_assert!(!app.records.classic_stream_activation_pending);
     main_assert!(output_path.is_dir());
     for child in ["OriginChild.c4g", "InitialChild.c4g", "LaterChild.c4g"] {
         main_assert!(output_path.join(child).is_file(), "folder-backed conversion must retain {child} as a packed file");

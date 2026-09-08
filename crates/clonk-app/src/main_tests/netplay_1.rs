@@ -5511,7 +5511,7 @@ fn all_graphical_modes_produce_retained_scenes() {
     assert_retained_frame_has_commands("running", &running_frame);
 
     let mut console = new_state_only_menu_app(320, 200);
-    console.console_mode = true;
+    console.console_session.enabled = true;
     let console_presentation = retained_test_presentation(&console);
     let console_frame = console
         .render_retained_gpu_frame(console_presentation)

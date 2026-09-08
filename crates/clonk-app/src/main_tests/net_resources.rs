@@ -137,7 +137,7 @@ fn nonhost_console_packet_uses_console_active_policy() {
     main_assert_eq!(inactive.engine.physics().gravity => initial_gravity);
 
     let mut active = new_state_only_running_sandbox_app();
-    active.console_mode = true;
+    active.console_session.enabled = true;
     active.apply_ready_controls(0, vec![packet()]).test_value();
     main_assert_eq!(active.engine.physics().gravity => 77);
 }

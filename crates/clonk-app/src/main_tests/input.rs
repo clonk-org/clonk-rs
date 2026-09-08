@@ -6577,7 +6577,7 @@ fn open_platform_ime_test_context(app: &mut GameApp) {
 #[test]
 fn platform_ime_follows_the_shell_mode_and_console_ownership() {
     let mut app = platform_ime_test_app();
-    app.console_mode = false;
+    app.console_session.enabled = false;
 
     app.mode = AppMode::Loading;
     main_assert!(!app.platform_ime_allowed());
@@ -6612,7 +6612,7 @@ fn platform_ime_follows_the_shell_mode_and_console_ownership() {
     app.mode = AppMode::Running;
     main_assert!(!app.platform_ime_allowed());
 
-    app.console_mode = true;
+    app.console_session.enabled = true;
     main_assert!(app.platform_ime_allowed());
 }
 

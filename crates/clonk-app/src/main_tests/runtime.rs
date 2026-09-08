@@ -134,7 +134,7 @@ fn runtime_console_network_fixture(
     u64,
 ) {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = mode;
     let (events, commands) = install_running_network_stub(&mut app, 7, 0, 2);
     let identity = open_test_console_viewport(&mut app, None);
@@ -488,7 +488,7 @@ fn console_open_real_scenario_reaches_running() {
         .test_value();
     let (boot_sender, boot_receiver) = mpsc::channel();
     app.boot_loading = Some(BootLoadingState::new(boot_receiver));
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let command = format!(
         "/open \"{}\" \"{}\" \"{}\"",
         scenario_path.display(),
@@ -4852,7 +4852,7 @@ fn retargeted_primary_survives_its_original_local_player() {
 #[test]
 fn console_viewport_creation_announces_itself_and_keeps_list_order() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     // Layout order 3 then 1 (C4Console-side control sets 1 and 2), so a
     // fullscreen sort would swap them and a console one must not.
     let late_layout = app.players.local_owner + 1;
@@ -4900,7 +4900,7 @@ fn console_viewport_creation_announces_itself_and_keeps_list_order() {
 #[test]
 fn console_viewport_render_uses_the_windows_own_extent_and_identity() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let second = app.players.local_owner + 1;
     app.engine
         .register_player(PlayerConfig::new(second, "Second window"))
@@ -4944,7 +4944,7 @@ fn console_viewport_render_applies_the_live_pxs_graphics_flag() {
     // A windowed viewport still reaches the same C4PXSSystem::Draw flag
     // (src/C4GraphicsSystem.cpp:167-169; src/C4PXS.cpp:259-260,279-281).
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let identity = open_test_console_viewport(&mut app, None);
     app.rendering.display_flags.pxs_gfx = false;
     assert!(app.rendering.graphics.pxs_graphics_enabled());
@@ -4964,7 +4964,7 @@ fn console_shell_render_applies_the_live_pxs_graphics_flag() {
     // global PXSGfx check
     // (src/C4GraphicsSystem.cpp:167-177; src/C4PXS.cpp:259-260,279-281).
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.rendering.display_flags.pxs_gfx = false;
     assert!(app.rendering.graphics.pxs_graphics_enabled());
     let frame_len = app.rendering.graphics.surface().pixels().len();
@@ -4989,7 +4989,7 @@ fn console_shell_render_applies_the_live_pxs_graphics_flag() {
 #[test]
 fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     // An owned viewport follows the player, so the crew object it follows
     // is inside the view — an ownerless one is centred on the map and the
@@ -5049,12 +5049,12 @@ fn developer_file_monitor_arms_registers_then_dispatches_definition_reloads() {
     app.engine.register_test_definition(definition);
 
     // A fullscreen session never watches, however the key is set.
-    app.console_mode = false;
+    app.console_session.enabled = false;
     app.arm_developer_file_monitor(true);
     assert!(app.file_monitor.is_none());
 
     // Nor does a console session with the key off.
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.arm_developer_file_monitor(false);
     assert!(app.file_monitor.is_none());
 
@@ -5100,7 +5100,7 @@ fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
     use clonk_engine::developer_tools::Tool;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Draw;
     let identity = open_test_console_viewport(&mut app, None);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -5145,7 +5145,7 @@ fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
 #[test]
 fn a_detached_viewport_can_be_the_mouse_control_viewport() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -5170,7 +5170,7 @@ fn a_detached_viewport_can_be_the_mouse_control_viewport() {
 #[test]
 fn detached_play_mode_motion_drives_the_gameplay_mouse() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -5199,7 +5199,7 @@ fn detached_play_mode_motion_drives_the_gameplay_mouse() {
 #[test]
 fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -5236,7 +5236,7 @@ fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
 #[test]
 fn detached_play_mode_right_button_is_a_gameplay_click() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -5272,7 +5272,7 @@ fn detached_play_mode_right_button_is_a_gameplay_click() {
 #[test]
 fn detached_middle_and_wheel_follow_their_native_arms() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Play;
     let owning = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(owning, 320, 200).is_some());
@@ -5321,7 +5321,7 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
 #[test]
 fn the_detached_double_click_stamp_is_shared_across_windows() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Play;
     let owning = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(owning, 320, 200).is_some());
@@ -5346,7 +5346,7 @@ fn the_detached_double_click_stamp_is_shared_across_windows() {
 #[test]
 fn console_viewport_pointer_gestures_select_move_and_frame() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let identity = open_test_console_viewport(&mut app, None);
     // Drawing is what publishes this window's own projection.
@@ -5623,7 +5623,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     use clonk_engine::developer_components::{ComponentSaveAction, EditableComponent};
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
 
     // The scenario the components are read from and written back to.
     let directory = tempfile::tempdir().test_value();
@@ -5759,7 +5759,7 @@ fn press_console_key(app: &mut GameApp, key: VirtualKeyCode, modifiers: Modifier
 #[test]
 fn console_edit_cursor_keys_cycle_the_mode_and_delete_the_selection() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Play;
 
     for expected in [
@@ -5804,7 +5804,7 @@ fn console_scope_gamepad_overrides_reach_the_edit_cursor_and_tools() {
     let bound = |name: &str, console: bool| {
         let source = format!("[Keys]\n{name}=\\x0042000a\n");
         let mut app = new_running_sandbox_app();
-        app.console_mode = console;
+        app.console_session.enabled = console;
         app.input_routing.runtime_key_config_cache = OnceLock::new();
         app.input_routing.runtime_key_config_cache
             .set(Ok(parse_runtime_key_config(source.as_bytes()).test_value()))
@@ -5849,7 +5849,7 @@ fn console_tool_keys_drive_the_retained_tools_dialog_state() {
     use clonk_engine::developer_tools::{Tool, GRADE_MAX, GRADE_MIN};
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
 
     let grade = app.developer.tools.grade();
@@ -5913,7 +5913,7 @@ fn console_pop_keys_need_the_tools_page_the_way_cpp_needs_its_dialog() {
     use crate::developer_toolbox_view::ToolsCombo;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     // Draw mode is what opens the Tools page; `open_developer_prop_tools`
     // lands on Property in any other mode.
     app.developer.console_edit_mode = ConsoleEditMode::Draw;
@@ -5948,7 +5948,7 @@ fn the_property_page_reload_target_is_the_single_selected_definition() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
 
     runtime_assert_eq!(
@@ -5999,7 +5999,7 @@ fn the_property_page_reload_button_dispatches_only_a_single_selection() {
     let output = (layout.output.x + 1, layout.output.y + 1);
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     app.open_developer_prop_tools();
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::SetEditMode(
@@ -6068,7 +6068,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     use clonk_engine::developer_viewport::{scroll_bar_layout, scroll_ranges, ScrollAxis};
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     // A viewport starts player-locked, and a locked one has no bars at all
     // (`C4Viewport.cpp:272`), so unlocking is what puts them on screen.
     let identity = open_local_test_console_viewport(&mut app);
@@ -6182,7 +6182,7 @@ fn the_property_script_entry_is_gated_on_editing_and_survives_a_refresh() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     runtime_assert!(app.developer_console_editing());
 
@@ -6230,7 +6230,7 @@ fn the_property_script_entry_submits_the_live_selection_on_enter() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_state_only_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
     let subject = app.snapshot.objects.first().test_value().id;
@@ -6280,7 +6280,7 @@ fn the_property_script_completion_is_the_public_engine_and_selected_definition()
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.engine
         .register_script_definition(
             "CMPL",
@@ -6356,7 +6356,7 @@ fn the_developer_pane_scroll_bars_page_step_and_drag_without_reaching_the_pane()
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let definition = app
         .snapshot
         .objects
@@ -6468,7 +6468,7 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let definition = app
         .snapshot
         .objects
@@ -6571,7 +6571,7 @@ fn object_list_arrow_keys_move_the_selection_and_ctrl_moves_only_the_cursor() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let definition = app
         .snapshot
         .objects
@@ -6657,7 +6657,7 @@ fn the_object_tree_opens_on_its_expander_and_stays_open_across_a_rebuild() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let container = app.snapshot.objects.first().test_value().id;
     let definition = app
         .snapshot
@@ -6737,7 +6737,7 @@ fn the_object_list_scroll_survives_rebuilds_and_follows_only_a_new_selection() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let definition = app
         .snapshot
         .objects
@@ -6816,7 +6816,7 @@ fn the_property_output_scroll_survives_a_refresh_and_clamps_for_a_shorter_object
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     // A box two lines tall, so the fixture object's three-line detail
     // overflows it — the whole point of the pane being scrollable.
@@ -6881,7 +6881,7 @@ fn developer_object_list_opens_and_binds_the_selection_both_ways() {
     use clonk_engine::developer_selection::SelectionWriter;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     assert!(!app.developer.object_list_open);
 
@@ -7031,7 +7031,7 @@ fn viewport_window_geometry_round_trips_through_the_console_subkey() {
 #[test]
 fn console_viewport_draws_scroll_bars_only_while_unlocked() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let identity = open_test_console_viewport(&mut app, None);
 
@@ -7199,7 +7199,7 @@ fn developer_toolbox_opens_by_mode_and_its_mode_buttons_emit_controls() {
     use crate::developer_windows::ToolboxPage;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Draw;
 
     // Nothing opens the toolbox on its own: `SetMode` reopens it only when
@@ -7368,7 +7368,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
     use clonk_frontend::developer_context_menu::ViewportContextItem;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Edit;
     let identity = open_test_console_viewport(&mut app, None);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
@@ -7639,7 +7639,7 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
     use clonk_engine::developer_tools::Tool;
 
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.developer.console_edit_mode = ConsoleEditMode::Draw;
     // `ApplyToolPicker` samples nothing outside Static and Exact.
     app.apply_ready_controls(
@@ -7694,7 +7694,7 @@ fn console_draw_alt_picks_the_landscape_into_the_tools_without_drawing() {
 #[test]
 fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     let mut app = new_lightweight_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
 
@@ -10053,7 +10053,7 @@ fn a_rebound_pause_chord_loses_to_the_player_control_on_the_same_key() {
 #[test]
 fn console_play_and_halt_track_the_live_offline_halt_count() {
     let mut app = new_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     runtime_assert!(
         !app.developer_console_view_model().halted,
         "a running offline round starts unhalted"

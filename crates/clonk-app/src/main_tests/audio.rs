@@ -121,7 +121,7 @@ fn console_quit_is_global_and_headless_loop_exits_cleanly() {
     sender.send(BootLoadingEvent::Finished(None)).test_value();
     boot.boot_loading = Some(BootLoadingState::new(receiver));
     boot.mode = AppMode::Loading;
-    boot.console_mode = true;
+    boot.console_session.enabled = true;
     boot.loader.screen = None;
     boot.poll_boot_loading();
     main_assert_eq!(boot.mode => AppMode::Menu);
@@ -158,7 +158,7 @@ fn headless_boot_leaves_loading_without_a_loader_screen_or_console_authority() {
     server.poll_boot_loading();
     main_assert_eq!(server.mode => AppMode::Menu);
     main_assert!(server.boot_loading.is_none());
-    main_assert!(!server.console_mode, "headless must not grant developer-console authority");
+    main_assert!(!server.console_session.enabled, "headless must not grant developer-console authority");
 }
 
 /// `CStdApp::Execute` abandons a deadline more than two seconds overdue -
