@@ -13,7 +13,7 @@ impl GameApp {
     /// the policy: an observer never opens the microphone, and a client with
     /// several local players speaks as `local_owner`.
     pub(crate) fn local_voice_identity(&self) -> Option<(i32, i32)> {
-        let network = self.network.as_ref()?;
+        let network = self.netplay.manager.as_ref()?;
         let client_id = i32::try_from(network.local_client_id()).ok()?;
         if self.mode == AppMode::Running {
             crate::voice_chat::authenticated_selected_voice_crew(
@@ -23,7 +23,7 @@ impl GameApp {
             )?;
             return Some((client_id, self.players.local_owner));
         }
-        (self.network_lobby_voice_active() && self.control_clients.contains(client_id))
+        (self.network_lobby_voice_active() && self.netplay.control_clients.contains(client_id))
             .then_some((client_id, crate::voice_chat::LOBBY_VOICE_PLAYER_ID))
     }
 
@@ -48,7 +48,7 @@ impl GameApp {
     fn authenticated_lobby_voice_client(&self, client_id: i32, player_id: i32) -> bool {
         self.network_lobby_voice_active()
             && player_id == crate::voice_chat::LOBBY_VOICE_PLAYER_ID
-            && self.control_clients.contains(client_id)
+            && self.netplay.control_clients.contains(client_id)
     }
 
     fn voice_activation(&self) -> Option<crate::settings::VoiceActivation> {
@@ -85,7 +85,8 @@ impl GameApp {
             && self.window_active
             && keyboard_scope_available
             && self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .is_some_and(NetworkManager::voice_available)
             && self.local_voice_identity().is_some();
@@ -114,7 +115,8 @@ impl GameApp {
         if !self.voice_chat_context_active()
             || !self.window_active
             || self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .is_none_or(|network| !network.voice_available())
             || self.local_voice_identity().is_none()
@@ -194,12 +196,14 @@ impl GameApp {
 
     pub(crate) fn update_voice_chat_at(&mut self, now: Instant) {
         let received = self
-            .network
+            .netplay
+            .manager
             .as_mut()
             .map(NetworkManager::poll_voice_frames)
             .unwrap_or_default();
         let voice_available = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .is_some_and(NetworkManager::voice_available);
         if !self.voice_chat_enabled() || !voice_available {
@@ -335,7 +339,8 @@ impl GameApp {
                 }
             };
             let sent = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .is_some_and(|network| network.try_send_voice(frame).is_ok());
             if sent {

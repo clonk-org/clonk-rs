@@ -12,15 +12,15 @@ impl GameApp {
             || self
                 .scenario_lifecycle
                 .auto_start_classic_command_line_scenario
-            || self.classic_direct_reference_query.is_some()
+            || self.netplay.classic_direct_reference_query.is_some()
             || self.startup_network.connection.is_some()
-            || self.pending_network_join.is_some()
-            || self.staged_network_host_scenario.is_some()
+            || self.netplay.pending_join.is_some()
+            || self.netplay.staged_host_scenario.is_some()
             || self.lobby.preload_task.is_some()
             || self.lobby.preload_artifact.is_some()
             || self.lobby.start_wait.is_some()
-            || self.pending_network_join_data.is_some()
-            || self.pending_client_start_status.is_some()
+            || self.netplay.pending_join_data.is_some()
+            || self.netplay.pending_client_start_status.is_some()
     }
 
     pub(crate) fn console_game_active(&self) -> bool {
@@ -28,8 +28,8 @@ impl GameApp {
             || self.console_lobby_active()
             || self.console_game_initialization_active()
             || (self.scenario_lifecycle.boot_loading.is_none()
-                && (self.network.is_some()
-                    || self.network_mode.is_some()
+                && (self.netplay.manager.is_some()
+                    || self.netplay.mode.is_some()
                     || self.lobby.session.is_some()
                     || self.lobby.classic_host.is_some()))
     }
@@ -50,23 +50,23 @@ impl GameApp {
 
     pub(crate) fn close_console_game(&mut self) {
         let boot_still_loading = self.scenario_lifecycle.boot_loading.is_some();
-        let network_game_active = self.network.is_some()
-            || self.network_mode.is_some()
+        let network_game_active = self.netplay.manager.is_some()
+            || self.netplay.mode.is_some()
             || self.lobby.session.is_some()
             || self.lobby.classic_host.is_some()
             || self.startup_network.connection.is_some()
-            || self.classic_direct_reference_query.is_some()
-            || self.pending_network_join.is_some()
-            || self.staged_network_host_scenario.is_some()
+            || self.netplay.classic_direct_reference_query.is_some()
+            || self.netplay.pending_join.is_some()
+            || self.netplay.staged_host_scenario.is_some()
             || self.lobby.preload_task.is_some()
             || self.lobby.preload_artifact.is_some()
             || self.lobby.start_wait.is_some()
-            || self.pending_network_join_data.is_some()
-            || self.pending_client_start_status.is_some();
+            || self.netplay.pending_join_data.is_some()
+            || self.netplay.pending_client_start_status.is_some();
         self.scenario_lifecycle.auto_start_sandbox = false;
         self.scenario_lifecycle
             .auto_start_classic_command_line_scenario = false;
-        self.classic_direct_reference_query = None;
+        self.netplay.classic_direct_reference_query = None;
         if network_game_active {
             // `show_main_menu` owns the complete native network teardown for
             // a lobby. Async console startup can be between lobby views, so
@@ -142,9 +142,9 @@ impl GameApp {
         // Native C4Console sets fGameOpen only after Game.Init returns. Keep
         // save/close/component controls disabled throughout Rust's async load.
         let game_open = self.mode == AppMode::Running;
-        let network_enabled = self.network.is_some();
+        let network_enabled = self.netplay.manager.is_some();
         let network_host =
-            network_enabled && matches!(self.network_mode, Some(NetworkMode::Host(_)));
+            network_enabled && matches!(self.netplay.mode, Some(NetworkMode::Host(_)));
         let editing = self
             .console_session
             .developer_console_editing(&self.developer);
@@ -184,7 +184,7 @@ impl GameApp {
             lobby_active: self.console_lobby_active(),
             editing,
             halted: !matches!(self.mode, AppMode::Running)
-                || if self.network.is_some() {
+                || if self.netplay.manager.is_some() {
                     self.runtime_network_is_paused()
                 } else {
                     self.runtime_halt_active()
@@ -552,7 +552,7 @@ impl GameApp {
     pub(crate) fn record_network_stats_control_frame(&mut self) {
         let control_rate = self.engine.control_rate();
         if !matches!(self.mode, AppMode::Running)
-            || self.network_stats.is_none()
+            || self.netplay.stats.is_none()
             || control_rate <= 0
             || !self.engine.frame().is_multiple_of(control_rate as u64)
         {
@@ -569,13 +569,13 @@ impl GameApp {
                 actions,
             })
             .collect::<Vec<_>>();
-        if let Some(stats) = self.network_stats.as_mut() {
+        if let Some(stats) = self.netplay.stats.as_mut() {
             stats.record_control_frame(control_rate, samples);
         }
     }
 
     pub(crate) fn record_network_stats_frame(&mut self) {
-        if !matches!(self.mode, AppMode::Running) || self.network_stats.is_none() {
+        if !matches!(self.mode, AppMode::Running) || self.netplay.stats.is_none() {
             return;
         }
         let object_count = self
@@ -586,19 +586,20 @@ impl GameApp {
             // both Normal (1) and Inactive (2) objects are represented.
             .filter(|object| object.status != clonk_engine::ObjectStatus::Deleted)
             .count();
-        if let Some(stats) = self.network_stats.as_mut() {
+        if let Some(stats) = self.netplay.stats.as_mut() {
             stats.record_frame(i32::try_from(object_count).unwrap_or(i32::MAX));
         }
     }
 
     pub(crate) fn record_network_stats_second(&mut self) {
-        if !matches!(self.mode, AppMode::Running) || self.network_stats.is_none() {
+        if !matches!(self.mode, AppMode::Running) || self.netplay.stats.is_none() {
             return;
         }
         self.reconcile_network_stats_series();
         let mut message_pings = BTreeMap::<ClientId, i32>::new();
         if let Some(connections) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .map(NetworkManager::runtime_connections_snapshot)
             .map(|snapshot| snapshot.connections)
@@ -620,8 +621,8 @@ impl GameApp {
                 lag_ms: Some(lag_ms),
             })
             .collect::<Vec<_>>();
-        if let Some(stats) = self.network_stats.as_mut() {
-            let (input, output) = self.network.as_ref().map_or(
+        if let Some(stats) = self.netplay.stats.as_mut() {
+            let (input, output) = self.netplay.manager.as_ref().map_or(
                 (ProtocolRateSample::new(0, 0), ProtocolRateSample::new(0, 0)),
                 NetworkManager::protocol_rate_samples,
             );
@@ -694,9 +695,9 @@ impl GameApp {
         &self,
         editing: bool,
     ) -> Vec<ConsolePlayerRow> {
-        let network_enabled = self.network.is_some();
+        let network_enabled = self.netplay.manager.is_some();
         let enabled = editing
-            && (!network_enabled || matches!(self.network_mode, Some(NetworkMode::Host(_))));
+            && (!network_enabled || matches!(self.netplay.mode, Some(NetworkMode::Host(_))));
         self.engine
             .players()
             .map(|player| {
@@ -737,7 +738,7 @@ impl GameApp {
         if !editing || self.mode != AppMode::Running || self.records.playback.is_some() {
             return Ok(0);
         }
-        let network_enabled = self.network.is_some();
+        let network_enabled = self.netplay.manager.is_some();
         let mut joined = 0usize;
         let mut errors = Vec::new();
         for path in paths {
@@ -776,15 +777,16 @@ impl GameApp {
             return Ok(false);
         }
         let tick = self.local_control_submission_tick();
-        if let Some(network) = self.network.as_ref() {
-            if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if let Some(network) = self.netplay.manager.as_ref() {
+            if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
                 return Ok(false);
             }
             network
                 .submit_eliminate_player(tick, player)
                 .map_err(|error| error.to_string())?;
         } else {
-            self.offline_control_input
+            self.netplay
+                .offline_control_input
                 .push(NetworkControl::EliminatePlayer(
                     clonk_engine::EliminatePlayerControlData {
                         player,
@@ -799,16 +801,16 @@ impl GameApp {
     /// host is always first; remaining synchronized clients keep client-ID
     /// order and expose their activated/deactivated native captions.
     pub(crate) fn developer_console_net_menu_entries(&self) -> Vec<ConsoleClientRow> {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             return Vec::new();
         }
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return Vec::new();
         };
         let Ok(local_client_id) = i32::try_from(network.local_client_id()) else {
             return Vec::new();
         };
-        let clients = self.control_clients.snapshot();
+        let clients = self.netplay.control_clients.snapshot();
         let mut entries = Vec::with_capacity(clients.len());
         if let Some(host) = clients
             .iter()
@@ -859,13 +861,13 @@ impl GameApp {
         &mut self,
         client_id: i32,
     ) -> std::result::Result<bool, String> {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             || !self.engine.is_control_host()
-            || !self.control_clients.contains(client_id)
+            || !self.netplay.control_clients.contains(client_id)
         {
             return Ok(false);
         }
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return Ok(false);
         };
         let reason = self.runtime_resource_text("IDS_MSG_KICKBYMENU", "kicked from host menu");
@@ -896,7 +898,7 @@ impl GameApp {
         }
         self.records.runtime_requested = true;
         let tick = self.local_control_submission_tick();
-        let result = if let Some(network) = self.network.as_ref() {
+        let result = if let Some(network) = self.netplay.manager.as_ref() {
             network
                 .submit_queued_synchronize(tick, false, true)
                 .map_err(|error| error.to_string())
@@ -1003,10 +1005,10 @@ impl GameApp {
     }
 
     pub(crate) fn tick_league_record_stream_at(&self, now: i64) {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             return;
         }
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return;
         };
         if let Err(error) = network.pump_league_record_stream(now) {
@@ -1015,7 +1017,8 @@ impl GameApp {
     }
 
     pub(crate) fn league_record_stream_status(&self) -> LeagueRecordStreamStatus {
-        self.network
+        self.netplay
+            .manager
             .as_ref()
             .and_then(NetworkManager::league_record_stream_status)
             .unwrap_or_default()
@@ -1073,6 +1076,7 @@ impl GameApp {
                 .unwrap_or_default()
         };
         let mut parameters = self
+            .netplay
             .host_join_snapshot
             .as_ref()
             .map(|snapshot| snapshot.parameters.clone())
@@ -1083,12 +1087,12 @@ impl GameApp {
                 fair_crew_forced: self.engine.fair_crew_forced(),
                 fair_crew_strength: self.engine.fair_crew_strength(),
                 allow_debug: self.engine.allow_debug(),
-                is_network_game: self.network.is_some(),
+                is_network_game: self.netplay.manager.is_some(),
                 control_rate: self.engine.control_rate(),
                 auto_frame_skip: self.auto_frame_skip,
                 rules: defaults.rules.clone(),
                 goals: defaults.goals.clone(),
-                league: legacy_text(&self.network_league_name),
+                league: legacy_text(&self.netplay.league_name),
                 league_address: LegacyCString::default(),
                 title: legacy_text(scenario.title.as_bytes()),
                 player_infos: empty_players.clone(),
@@ -1106,12 +1110,12 @@ impl GameApp {
         parameters.fair_crew_forced = self.engine.fair_crew_forced();
         parameters.fair_crew_strength = self.engine.fair_crew_strength();
         parameters.allow_debug = self.engine.allow_debug();
-        parameters.is_network_game = self.network.is_some();
+        parameters.is_network_game = self.netplay.manager.is_some();
         parameters.control_rate = self.engine.control_rate();
         parameters.auto_frame_skip = self.auto_frame_skip;
         parameters.player_infos = self.recording_player_info_snapshot();
         parameters.clients =
-            clonk_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+            clonk_network::JoinClientRegistrySnapshot::new(self.netplay.control_clients.snapshot());
         Ok((parameters, defaults))
     }
 
@@ -1167,7 +1171,7 @@ impl GameApp {
         self.records.prepare_for(
             RecordingPreparation {
                 engine: &mut self.engine,
-                network: self.network.as_ref(),
+                network: self.netplay.manager.as_ref(),
                 app_paths: self.app_paths.as_ref(),
                 maker_bytes: self.process_group_maker.as_bytes(),
                 records_title: &records_title,
@@ -1189,13 +1193,13 @@ impl GameApp {
         let player_infos = self.recording_player_info_snapshot();
         let nonremoved_player_count = self.players.infos.nonremoved_player_count();
         let client_registry =
-            clonk_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+            clonk_network::JoinClientRegistrySnapshot::new(self.netplay.control_clients.snapshot());
         let player_save_options = self.developer_console_player_save_options();
         self.records
             .prepare_runtime_at_synchronize(RuntimeRecordingPreparation {
                 base: RecordingPreparation {
                     engine: &mut self.engine,
-                    network: self.network.as_ref(),
+                    network: self.netplay.manager.as_ref(),
                     app_paths: self.app_paths.as_ref(),
                     maker_bytes: self.process_group_maker.as_bytes(),
                     records_title: &records_title,
@@ -1214,7 +1218,7 @@ impl GameApp {
             force,
             &mut self.engine,
             self.process_group_maker.as_bytes(),
-            self.network.as_ref(),
+            self.netplay.manager.as_ref(),
         )
     }
 
@@ -1222,7 +1226,7 @@ impl GameApp {
         self.record_control_resource_file(packet);
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
         let stream_delta = self.records.record_packet(frame, packet);
-        queue_league_record_bytes(self.network.as_ref(), stream_delta);
+        queue_league_record_bytes(self.netplay.manager.as_ref(), stream_delta);
     }
 
     pub(crate) fn record_control_batch(&mut self, packets: &[clonk_engine::ControlPacket]) {
@@ -1231,7 +1235,7 @@ impl GameApp {
         }
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
         let stream_delta = self.records.record_batch(frame, packets);
-        queue_league_record_bytes(self.network.as_ref(), stream_delta);
+        queue_league_record_bytes(self.netplay.manager.as_ref(), stream_delta);
     }
 
     /// `C4ControlJoinPlayer::PreRec` copies resource-backed player groups into
@@ -1246,6 +1250,7 @@ impl GameApp {
             return;
         };
         let Some(path) = self
+            .netplay
             .admission_resources
             .complete_player_path(core)
             .map(Path::to_path_buf)
@@ -1340,7 +1345,7 @@ impl GameApp {
         // C4Record::AddFile streams first. A stream failure prevents the local
         // add, while a later local-disk failure cannot retract streamed data.
         if let Some(stream_chunk) = stream_chunk {
-            let Some(network) = self.network.as_ref() else {
+            let Some(network) = self.netplay.manager.as_ref() else {
                 tracing::warn!(
                     ?target,
                     "league record stream disappeared before player-group append"
@@ -1401,7 +1406,7 @@ impl GameApp {
         self.records.runtime_requested = false;
         self.engine.set_recording_active(false);
         let (description_title, description_definition_modules) =
-            self.records.finish_stream(self.network.as_ref())?;
+            self.records.finish_stream(self.netplay.manager.as_ref())?;
         let (description_name, description) = self.classic_save_description(
             &description_title,
             &description_definition_modules,
@@ -1412,7 +1417,7 @@ impl GameApp {
         self.records.finish_session(
             frame,
             self.process_group_maker.as_bytes(),
-            self.network_is_league,
+            self.netplay.is_league,
             &description_name,
             &description,
             &final_player_info_snapshot,

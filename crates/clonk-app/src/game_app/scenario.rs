@@ -676,7 +676,7 @@ impl GameApp {
         // QuitGame snapshots the raw NetworkActive flag before Game.Clear and
         // restores it for any scheduled NextMission. Even a Film2 client
         // therefore re-enters the network-host/lobby path on Restart.
-        if self.network.is_some() {
+        if self.netplay.manager.is_some() {
             return self.restart_current_network_scenario();
         }
         let Some(scenario) = self.scenario_lifecycle.active.clone() else {
@@ -841,18 +841,19 @@ impl GameApp {
             };
             return self.finish_startup_network_failure(purpose, message);
         }
-        if prepared_go && self.network.is_some() {
+        if prepared_go && self.netplay.manager.is_some() {
             // Explicit/direct command-line starts have no startup generation,
             // but QuitGame still tears down the failed network before the
             // process exits.
             let local_client_id = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .and_then(|network| i32::try_from(network.local_client_id()).ok())
                 .unwrap_or_else(|| self.offline_local_client_id());
             self.change_network_control_to_local(local_client_id);
         }
-        if !prepared_go && self.network.is_none() && returns_to_startup {
+        if !prepared_go && self.netplay.manager.is_none() && returns_to_startup {
             // C4Application::OpenGame marks a failed ordinary fullscreen
             // local start, clears the partial game, enters PreInit, restores
             // the remembered startup dialog and only then presents its log.
@@ -1187,7 +1188,7 @@ impl GameApp {
         // scenario/Parameters capacity before landscape creation (pristine
         // 9ffa0a5d src/C4Game.cpp:361-364,231-248,2394-2431;
         // src/C4PlayerInfo.cpp:357-395,1273-1290).
-        let replay_startup = if self.network.is_none() {
+        let replay_startup = if self.netplay.manager.is_none() {
             open_group_path_for_folder_map(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|group| {
@@ -1197,7 +1198,7 @@ impl GameApp {
         } else {
             Ok(None)
         };
-        let offline_startup = if self.network.is_none() {
+        let offline_startup = if self.netplay.manager.is_none() {
             self.app_paths.as_ref().map_or(Ok(None), |paths| {
                 let selection =
                     snapshot_effective_client_player_selection(paths, &self.classic_command_line)
@@ -1261,7 +1262,7 @@ impl GameApp {
         // C4GameParameters::Load freezes this before InitGameSecondPart calls
         // FixRandom and Landscape.Init. Parameters.txt wins when present;
         // only a fresh missing-Parameters round consults time/LC_PIN_SEED.
-        let offline_random_seed = (self.network.is_none()
+        let offline_random_seed = (self.netplay.manager.is_none()
             && replay_startup_error.is_none()
             && offline_startup_error.is_none()
             && replay_startup.is_none())
@@ -1478,7 +1479,7 @@ impl GameApp {
             .and_then(|loading| loading.prepared_go.as_ref())
             .and_then(|prepared| prepared.definition_modules.clone());
         let retained_definition_save_paths =
-            self.network_mode.as_ref().and_then(|mode| match mode {
+            self.netplay.mode.as_ref().and_then(|mode| match mode {
                 NetworkMode::Host(HostSettings {
                     prepared: Some(prepared),
                     ..
@@ -1614,7 +1615,7 @@ impl GameApp {
                 tracing::warn!(%error, "failed to present the savegame takeover warning");
             }
         }
-        let network_game = self.network.is_some();
+        let network_game = self.netplay.manager.is_some();
         let replay = scenario_data
             .lobby_metadata()
             .is_some_and(|metadata| metadata.head().is_replay());
@@ -1826,7 +1827,7 @@ impl GameApp {
             }
         };
         if !network_game {
-            self.network_league_name = scenario_data
+            self.netplay.league_name = scenario_data
                 .lobby_metadata()
                 .map(|metadata| {
                     metadata.embedded_game_parameter_values().map_or_else(
@@ -1846,18 +1847,19 @@ impl GameApp {
                     || metadata.game_parameter_defaults().max_players(),
                     |parameters| parameters.max_players(),
                 );
-                self.network_max_players = usize::try_from(max_players).unwrap_or(0);
+                self.netplay.max_players = usize::try_from(max_players).unwrap_or(0);
             }
             if let Some(startup) = offline_startup_players.as_ref() {
-                self.network_max_players = self
-                    .network_max_players
+                self.netplay.max_players = self
+                    .netplay
+                    .max_players
                     .max(usize::try_from(startup.max_players()).unwrap_or(0));
             }
             if replay_save_game {
                 // Savegame parameter loading raises MaxPlayers to the full
                 // restore-list row count before InitPlayers starts joining
                 // (C4Game.cpp:242-250).
-                self.network_max_players = self.network_max_players.max(
+                self.netplay.max_players = self.netplay.max_players.max(
                     replay_player_startup
                         .as_ref()
                         .map_or(0, |startup| startup.restore_player_count),
@@ -1878,6 +1880,7 @@ impl GameApp {
             replay_startup_player_count
         } else {
             let serialized = self
+                .netplay
                 .host_join_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.parameters.startup_player_count)
@@ -1905,7 +1908,7 @@ impl GameApp {
         }
         let (use_fair_crew, fair_crew_strength, fair_crew_forced, allow_debug) = prepared_fair_crew
             .unwrap_or_else(|| {
-                if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                if matches!(self.netplay.mode, Some(NetworkMode::Client(_))) {
                     // A client reaches activation only after JoinData installed
                     // prepared_go above. Keep standalone defaults for malformed
                     // transitional state rather than consulting local options.
@@ -1948,9 +1951,10 @@ impl GameApp {
         } else {
             engine.set_local_players([self.players.local_owner]);
         }
-        engine.set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+        engine.set_max_players(i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX));
         if let Some(timing) = self
-            .network_control_clock
+            .netplay
+            .control_clock
             .filter(|_| network_game)
             .map(NetworkControlClock::engine_timing)
             .transpose()
@@ -1970,13 +1974,13 @@ impl GameApp {
         // StartRecord precedes InitPlayers and InitGameFinal, so profile-load
         // failure callbacks and Script.Initialize already execute in control
         // sync mode (C4Game.cpp:2467-2474,478-484,2901-2948).
-        let initial_recording_active = !replay && (self.records.enabled || self.network_is_league);
+        let initial_recording_active = !replay && (self.records.enabled || self.netplay.is_league);
         engine.set_recording_active(initial_recording_active);
         engine.set_replay_control(replay);
-        engine.set_league_game(self.network_is_league);
+        engine.set_league_game(self.netplay.is_league);
         seed_engine_player_info_parameters(
             &mut engine,
-            &self.network_league_name,
+            &self.netplay.league_name,
             replay_player_startup
                 .as_ref()
                 .map(|startup| &startup.restart_player_infos)
@@ -2129,7 +2133,7 @@ impl GameApp {
             if startup.restore_savegame_infos_ran {
                 seed_engine_player_info_parameters(
                     &mut engine,
-                    &self.network_league_name,
+                    &self.netplay.league_name,
                     &startup.player_infos,
                 );
                 remove_unassociated_savegame_player_objects_with_logs(
@@ -2258,7 +2262,7 @@ impl GameApp {
             };
             let mut fatal_recording_error = None;
             if let Err(error) = prepare_result {
-                let league_host = self.network_is_league
+                let league_host = self.netplay.is_league
                     && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
                 if league_host {
                     fatal_recording_error = Some(ScenarioActivationError::Recoverable(format!(
@@ -2268,8 +2272,8 @@ impl GameApp {
                     tracing::warn!(%error, "failed to prepare C++-compatible recording");
                 }
             }
-            if let Err(error) = self.start_recording(self.network_is_league) {
-                let league_host = self.network_is_league
+            if let Err(error) = self.start_recording(self.netplay.is_league) {
+                let league_host = self.netplay.is_league
                     && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
                 if league_host {
                     fatal_recording_error = Some(ScenarioActivationError::Recoverable(format!(
@@ -2576,7 +2580,7 @@ impl GameApp {
             // Both paths retain C++'s independent material/texture overloads.
             let (authoritative_external_groups, reuse_preloaded_materials) =
                 network_material_load_plan(
-                    self.network_mode.as_ref(),
+                    self.netplay.mode.as_ref(),
                     self.scenario_lifecycle
                         .network_material_resource_groups
                         .as_deref(),
@@ -2623,14 +2627,15 @@ impl GameApp {
         // restored or callback-enabled true value.
         self.sound.runtime_music_enabled |= restored_music_enabled.unwrap_or(false);
         if replay {
-            self.control_clients
+            self.netplay
+                .control_clients
                 .replace_snapshot(replay_parameter_clients);
         }
         if let Some(startup) = replay_player_startup {
             self.players.infos = startup.player_infos;
             seed_engine_player_info_parameters(
                 &mut self.engine,
-                &self.network_league_name,
+                &self.netplay.league_name,
                 &self.players.infos,
             );
         }
@@ -2747,16 +2752,17 @@ impl GameApp {
         self.engine
             .set_fire_particles(self.rendering.display_flags.fire_particles);
         self.engine.set_local_players([self.players.local_owner]);
-        self.engine.set_network_game(self.network.is_some());
-        self.engine.set_network_control_mode(self.network.is_some());
-        self.engine.set_league_game(self.network_is_league);
+        self.engine.set_network_game(self.netplay.manager.is_some());
+        self.engine
+            .set_network_control_mode(self.netplay.manager.is_some());
+        self.engine.set_league_game(self.netplay.is_league);
         seed_engine_player_info_parameters(
             &mut self.engine,
-            &self.network_league_name,
+            &self.netplay.league_name,
             &self.players.infos,
         );
         self.engine
-            .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+            .set_max_players(i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX));
         self.apply_material_library();
         self.input_routing.dispatcher = InputDispatcher::new();
         self.install_local_controls(LocalControlRegistry::default());

@@ -100,8 +100,8 @@ fn n1_joined_client_app() -> GameApp {
     app.startup.view = StartupView::NetworkLobby;
     app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     let (network, _events) = NetworkManager::test_stub_for_client_id(7);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
     app.sync_network_lobby_game_option_state();
     app
 }
@@ -111,8 +111,8 @@ fn n1_joined_client_app_with_commands() -> (GameApp, network::TestNetworkCommand
     app.startup.view = StartupView::NetworkLobby;
     app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     let (network, _events, commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
     (app, commands)
 }
 
@@ -560,14 +560,14 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
             password_needed: true,
         }))
         .test_value();
-    app.classic_direct_reference_query = Some(ClassicDirectReferenceQuery { receiver });
+    app.netplay.classic_direct_reference_query = Some(ClassicDirectReferenceQuery { receiver });
     app.mode = AppMode::Loading;
     let (boot_sender, boot_receiver) = mpsc::channel();
     app.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(boot_receiver));
 
     app.poll_classic_direct_reference_query().test_value();
-    main_assert!(app.classic_direct_reference_query.is_some());
-    main_assert!(app.pending_network_join.is_none());
+    main_assert!(app.netplay.classic_direct_reference_query.is_some());
+    main_assert!(app.netplay.pending_join.is_none());
     main_assert!(app.dialogs.game_option_input.is_none());
 
     boot_sender
@@ -576,18 +576,18 @@ fn classic_command_line_passworded_reference_prompts_before_connecting() {
     app.poll_boot_loading();
     main_assert!(app.scenario_lifecycle.boot_loading.is_none());
     main_assert_eq!(app.mode => AppMode::Loading);
-    main_assert!(app.classic_direct_reference_query.is_some());
+    main_assert!(app.netplay.classic_direct_reference_query.is_some());
 
     app.poll_classic_direct_reference_query().test_value();
 
-    main_assert!(app.classic_direct_reference_query.is_none());
+    main_assert!(app.netplay.classic_direct_reference_query.is_none());
     main_assert!(app.startup_network.connection.is_none());
-    main_assert_eq!(app.pending_network_join.as_ref().expect("resolved join remains pending").server_addresses => attempts);
+    main_assert_eq!(app.netplay.pending_join.as_ref().expect("resolved join remains pending").server_addresses => attempts);
     main_assert_eq!(app.dialogs.game_option_input.as_ref().expect("password prompt").purpose => PendingInputDialogPurpose::NetworkJoinPassword);
 
     app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
         .test_value();
-    main_assert!(app.pending_network_join.is_none());
+    main_assert!(app.netplay.pending_join.is_none());
 }
 
 #[cfg(unix)]
@@ -742,7 +742,7 @@ fn control_buffered_inside_the_presend_horizon_is_not_a_catch_up_backlog() {
     // (src/C4GameControlNetwork.cpp:147-155); `CtrlOverflow` measures against
     // the executing tick (src/C4GameControlNetwork.h:124), including that horizon.
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(7, 2);
-    let clock = app.network_control_clock.test_mut();
+    let clock = app.netplay.control_clock.test_mut();
     clock.observe_control_send_time_ms(300);
     main_assert_eq!(clock.calculate_performance().map(|change| change.control_presend) => Some(12), "a 300 ms link sizes the horizon at twelve frames");
 
@@ -757,7 +757,7 @@ fn a_shallow_presend_horizon_keeps_the_cpp_overflow_limit() {
     // A 110 ms link sizes PreSend at 5: two future ticks remain inside C++'s
     // `C4ControlOverflowLimit` of 3.
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(4, 2);
-    let clock = app.network_control_clock.test_mut();
+    let clock = app.netplay.control_clock.test_mut();
     clock.observe_control_send_time_ms(110);
     main_assert_eq!(clock.calculate_performance().map(|change| change.control_presend) => Some(5));
 
@@ -770,7 +770,7 @@ fn a_shallow_presend_horizon_keeps_the_cpp_overflow_limit() {
 fn a_backlog_beyond_the_presend_horizon_still_catches_up() {
     // Async packing can leave ready control beyond the client's own horizon.
     let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(12, 2);
-    let clock = app.network_control_clock.test_mut();
+    let clock = app.netplay.control_clock.test_mut();
     clock.observe_control_send_time_ms(300);
     clock.calculate_performance();
 
@@ -785,8 +785,8 @@ fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
     let mut app = new_running_sandbox_app();
     let (manager, events) = NetworkManager::test_stub();
     let start_tick = 41_u32;
-    app.network = Some(manager);
-    app.network_control_clock = Some(NetworkControlClock::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.control_clock = Some(NetworkControlClock::new(
         i32::try_from(start_tick).test_value(),
         1,
     ));
@@ -809,7 +809,7 @@ fn completed_control_wakes_and_retries_only_the_blocked_boundary() {
     let blocked = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator).test_value();
     main_assert_eq!(blocked.executed_frames => 0);
     main_assert_eq!(accumulator => Duration::ZERO);
-    main_assert_eq!(app.waiting_network_control => Some(NetworkControlWait::ReadyTick(start_tick)));
+    main_assert_eq!(app.netplay.waiting_control => Some(NetworkControlWait::ReadyTick(start_tick)));
 
     events
         .send(NetworkEvent::ReadyTick {
@@ -1128,15 +1128,15 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
     let mut app = new_menu_app(320, 200);
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Client);
     main_assert!(
-        app.host_join_snapshot.is_none(),
+        app.netplay.host_join_snapshot.is_none(),
         "a real client does not pretend to own the host's mutable snapshot"
     );
-    app.pending_network_join_data = Some(join_data.clone());
-    app.pending_client_start_status = Some(status);
-    app.client_combined_scenario_path = Some(scenario_dir.clone());
+    app.netplay.pending_join_data = Some(join_data.clone());
+    app.netplay.pending_client_start_status = Some(status);
+    app.netplay.client_combined_scenario_path = Some(scenario_dir.clone());
     app.try_prepare_client_network_scenario().test_value();
     main_assert!(
-        app.pending_network_join_data.is_none(),
+        app.netplay.pending_join_data.is_none(),
         "the full pending JoinData packet is consumed after installation"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1152,7 +1152,7 @@ fn client_network_scenario_install_retains_authoritative_join_data_rules_and_goa
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    main_assert!(app.host_join_snapshot.is_none());
+    main_assert!(app.netplay.host_join_snapshot.is_none());
 
     let count = |id: &str| {
         app.snapshot
@@ -1953,9 +1953,9 @@ fn network_replay_start_shows_cpp_error_and_never_opens_a_child() {
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert!(app.definition_selection.dialog.is_none());
-    main_assert!(app.staged_network_host_scenario.is_none());
+    main_assert!(app.netplay.staged_host_scenario.is_none());
     main_assert!(app.startup_network.connection.is_none());
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
     let dialog = &app.dialogs.messages[0].state;
     main_assert_eq!(dialog.caption() => "Cannot start scenario.");
     main_assert_eq!(dialog.message() => "Cannot play back records while in network mode.");
@@ -2485,8 +2485,8 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.scenario_game_options.context() => GameOptionContext::NetworkHostSelector);
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(app.lobby.session.is_none());
     main_assert!(app.startup_network.connection.is_none());
 
@@ -2545,7 +2545,7 @@ fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding()
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert!(app.startup_network.connection.is_none());
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
     main_assert!(app.lobby.session.is_none());
 }
 
@@ -2676,7 +2676,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
         .test_value();
     main_assert_eq!(staged.options => accepted_options);
     main_assert_eq!(staged.options.password => "round secret");
-    app.staged_network_host_scenario = Some(staged);
+    app.netplay.staged_host_scenario = Some(staged);
 
     let (sender, receiver) = mpsc::channel();
     app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost, None, None)
@@ -2713,18 +2713,18 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
         &app,
         &format!("Unable to start network session: {reported_host_error}"),
     );
-    main_assert!(app.staged_network_host_scenario.is_none());
+    main_assert!(app.netplay.staged_host_scenario.is_none());
     // PreInit rebuilds the loader screen (src/C4Application.cpp:242-247,373-389).
     main_assert!(app.loader.screen.is_some());
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     let mut frame = vec![0x4c; 800 * 600 * 4];
     app.test_render(&mut frame);
     main_assert!(frame.iter().any(|byte| *byte != 0x4c));
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
     let stale = prepare_tutorial_host_lobby(&app, repository);
-    app.staged_network_host_scenario = Some(stale);
+    app.netplay.staged_host_scenario = Some(stale);
     app.stage_network_host_scenario(
         FrontendScenario::fallback(),
         ScenarioDefinitionLoad::Seed {
@@ -2733,7 +2733,7 @@ fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteracti
         },
     )
     .test_value();
-    main_assert!(app.staged_network_host_scenario.is_none());
+    main_assert!(app.netplay.staged_host_scenario.is_none());
     main_assert!(app.startup_network.connection.is_none());
 }
 
@@ -2763,8 +2763,8 @@ fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_ne!(app.startup.view => StartupView::NetworkLobby);
     main_assert!(app.lobby.session.is_none());
-    main_assert!(app.network.is_none(), "headless listener must be dropped");
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none(), "headless listener must be dropped");
+    main_assert!(app.netplay.mode.is_none());
     assert_startup_error_log(
                 &app,
                 "Network lobby unavailable: classic game-lobby model is unavailable: host connection completed without a staged scenario; refusing guessed lobby state",
@@ -2805,10 +2805,10 @@ fn failed_host_staging_returns_to_host_selector_with_error_log() {
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::NetworkHost);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost));
-    main_assert!(app.staged_network_host_scenario.is_none());
+    main_assert!(app.netplay.staged_host_scenario.is_none());
     main_assert!(app.startup_network.connection.is_none());
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     assert_startup_error_log(&app, &format!("Cannot host {title}: {staging_error}"));
     // A retained fatal status would terminate rendering (clonk-org/clonk-rs#196).
     app.preflight_startup_presentation().test_value();
@@ -2828,7 +2828,7 @@ fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
     staged
         .pending_global_gui_failures
         .insert("GUISpinBoxArrow", source.clone());
-    app.staged_network_host_scenario = Some(staged);
+    app.netplay.staged_host_scenario = Some(staged);
     install_test_classic_host_lobby(&mut app);
 
     let mut visible = vec![0_u8; 640 * 480 * 4];
@@ -2907,7 +2907,7 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
         .test_value();
     main_assert_eq!(staged.lobby.local_name => "<i<i>>");
     main_assert_eq!(staged.lobby.nick => "Unknown");
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
     main_assert!(app.startup_network.connection.is_none());
 
     persist_config_value(&paths, "Network", "LocalName", "Changed Host").test_value();
@@ -2942,7 +2942,7 @@ fn staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
     app.loader.render_config = Some(LoaderRenderConfig::new(2.0, false).test_value());
     app.prepare_network_host_scenario(make_frontend(), definition_load())
         .test_value();
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
     main_assert!(app.startup_network.connection.is_none());
 }
 
@@ -2953,19 +2953,19 @@ fn control_rate_submits_relative_set_and_waits_for_echo() {
     app.app_paths = Some(paths.clone());
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     app.engine.set_control_rate(4);
-    app.network_control_clock = Some(NetworkControlClock::new(0, 4));
+    app.netplay.control_clock = Some(NetworkControlClock::new(0, 4));
     main_assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
 
     app.submit_classic_lobby_control_rate(7);
     let sets = commands.take_submitted_control_sets();
     main_assert_eq!(sets => [n1_fixture!(control_set: 0, 3, 0)]);
     main_assert_eq!(app.engine.control_rate() => 4);
-    main_assert_eq!(app.network_control_clock.unwrap().control_rate() => 4, "the menu selection is not an optimistic clock mutation");
+    main_assert_eq!(app.netplay.control_clock.unwrap().control_rate() => 4, "the menu selection is not an optimistic clock mutation");
     main_assert_eq!(n1_lobby_option(&app, LobbyOptionKind::ControlRate).map(|row| row.value.as_str()) => Some("4"));
 
     app.execute_control_set(sets[0]);
     main_assert_eq!(app.engine.control_rate() => 7);
-    main_assert_eq!(app.network_control_clock.unwrap().control_rate() => 7);
+    main_assert_eq!(app.netplay.control_clock.unwrap().control_rate() => 7);
     main_assert_eq!(app.config.deferred.get("Network", "ControlRate") => Some("7"), "only the authoritative host echo records the next-session setting");
     // C4ControlSet updates memory; shutdown saves it (C4Control.cpp:141).
     app.flush_deferred_config();
@@ -3028,7 +3028,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
         .initial_join_snapshot
         .test_value();
     snapshot.parameters.teams = clonk_network::join_team_list_snapshot(metadata.clone());
-    app.host_join_snapshot = Some(snapshot);
+    app.netplay.host_join_snapshot = Some(snapshot);
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.players.infos.replace_snapshot(
         3,
@@ -3060,7 +3060,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     let teams = app.players.team_assignment.as_ref().test_value().teams();
     main_assert_eq!(teams.random_team_count => 2);
     main_assert_eq!(teams.teams.len() => 2);
-    main_assert_eq!(app.host_join_snapshot.as_ref().unwrap().parameters.teams.random_team_count => 2);
+    main_assert_eq!(app.netplay.host_join_snapshot.as_ref().unwrap().parameters.teams.random_team_count => 2);
     main_assert_eq!(n1_lobby_option(&app, LobbyOptionKind::RandomTeamCount).map(|row| row.value.as_str()) => Some("2"));
 
     app.execute_control_set(n1_fixture!(control_set: 3, 0, 0));
@@ -3145,7 +3145,7 @@ fn classic_host_savegame_warning_ignores_an_assigned_restore_player() {
         .initial_join_snapshot
         .test_value();
     snapshot.parameters.restore_player_infos = n1_restore_player_infos(50);
-    app.host_join_snapshot = Some(snapshot);
+    app.netplay.host_join_snapshot = Some(snapshot);
 
     main_assert!(app
         .lobby.classic_host
@@ -3168,13 +3168,13 @@ fn classic_host_regular_scenario_never_warns_about_restore_rows() {
     let (_user_data, _guard, paths) = n1_test_paths(Some(content.path()));
     let scenario = install_minimal_prepared_host_fixture(content.path());
     let mut app = new_menu_app_with_paths(640, 480, &paths);
-    app.staged_network_host_scenario = Some(prepare_minimal_host_lobby(&app, scenario));
+    app.netplay.staged_host_scenario = Some(prepare_minimal_host_lobby(&app, scenario));
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let mut snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
         .test_value();
     snapshot.parameters.restore_player_infos = n1_restore_player_infos(50);
-    app.host_join_snapshot = Some(snapshot);
+    app.netplay.host_join_snapshot = Some(snapshot);
 
     app.process_classic_lobby_actions(n1_lobby_start_request(true))
         .test_value();
@@ -3244,31 +3244,31 @@ fn client_start_and_abort_report_the_cpp_host_only_error() {
 #[test]
 fn a_running_host_advertises_only_the_profile_it_can_claim() {
     let mut app = new_menu_app(640, 480);
-    app.network_mode = Some(NetworkMode::Host(HostSettings {
+    app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11113)),
         player_name: "Profile Host".to_string(),
         prepared: None,
     }));
     let (manager, _events, _commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let (snapshot, reference) = default_exact_host_reference();
     main_assert_eq!(
         reference.summary().compat_profile.clone() => None,
         "the template names no profile, so a published one came from the host"
     );
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients
         .replace_snapshot(snapshot.parameters.clients.clients.clone());
-    app.host_join_snapshot = Some(snapshot);
-    app.advertised_game_reference = Some(reference);
+    app.netplay.host_join_snapshot = Some(snapshot);
+    app.netplay.advertised_game_reference = Some(reference);
 
     // An ordinary session advertises nothing, so its reference stays exactly
     // what a host that never heard of the profile publishes.
     app.config.compat_profile = crate::settings::CompatProfile::Normal;
     app.publish_running_host_reference();
     main_assert_eq!(
-        app.advertised_game_reference
+        app.netplay.advertised_game_reference
             .test_ref()
             .summary()
             .compat_profile
@@ -3281,7 +3281,7 @@ fn a_running_host_advertises_only_the_profile_it_can_claim() {
     app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     app.publish_running_host_reference();
     let advertised = app
-        .advertised_game_reference
+        .netplay.advertised_game_reference
         .test_ref()
         .summary()
         .compat_profile
@@ -3394,32 +3394,32 @@ fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
 #[test]
 fn a_running_host_advertises_its_live_runtime_join_admission() {
     let mut app = new_menu_app(640, 480);
-    app.network_mode = Some(NetworkMode::Host(HostSettings {
+    app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
         player_name: "Exact Host".to_string(),
         prepared: None,
     }));
     let (manager, _events, _commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let (snapshot, reference) = default_exact_host_reference();
     main_assert!(
         reference.summary().join_allowed,
         "the template starts join-allowed, so a stale read is visible"
     );
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients
         .replace_snapshot(snapshot.parameters.clients.clients.clone());
-    app.host_join_snapshot = Some(snapshot);
-    app.advertised_game_reference = Some(reference);
+    app.netplay.host_join_snapshot = Some(snapshot);
+    app.netplay.advertised_game_reference = Some(reference);
 
     // The host barred runtime joins at runtime; nothing about that reaches
     // `prepared`, because there is no prepared host here.
-    app.runtime_network_join_allowed = Some(false);
+    app.netplay.runtime_join_allowed = Some(false);
     app.publish_running_host_reference();
 
     main_assert!(
-        !app.advertised_game_reference
+        !app.netplay.advertised_game_reference
             .as_ref()
             .expect("the running host republishes its reference")
             .summary()
@@ -3429,11 +3429,11 @@ fn a_running_host_advertises_its_live_runtime_join_admission() {
 
     // And back again, so this pins "follows the live value" rather than
     // "always false".
-    app.runtime_network_join_allowed = Some(true);
+    app.netplay.runtime_join_allowed = Some(true);
     app.publish_running_host_reference();
 
     main_assert!(
-        app.advertised_game_reference
+        app.netplay.advertised_game_reference
             .as_ref()
             .expect("the running host republishes its reference")
             .summary()
@@ -3445,16 +3445,16 @@ fn a_running_host_advertises_its_live_runtime_join_admission() {
 fn set_comment_updates_state_reference_and_invalidation() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
-    app.network_mode = Some(NetworkMode::Host(HostSettings {
+    app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
         player_name: "Exact Host".to_string(),
         prepared: None,
     }));
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let (_snapshot, reference) = default_exact_host_reference();
-    app.advertised_game_reference = Some(reference);
+    app.netplay.advertised_game_reference = Some(reference);
 
     let oversized = "x".repeat(clonk_frontend::game_option_buttons::COMMENT_MAX_TEXT + 1);
     app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(format!(
@@ -3464,7 +3464,7 @@ fn set_comment_updates_state_reference_and_invalidation() {
 
     let expected = "x".repeat(clonk_frontend::game_option_buttons::COMMENT_MAX_TEXT);
     main_assert_eq!(app.scenario_game_options.values().comment => expected);
-    main_assert_eq!(app.advertised_game_reference.as_ref().expect("updated advertised reference").metadata().comment.as_bytes() => expected.as_bytes());
+    main_assert_eq!(app.netplay.advertised_game_reference.as_ref().expect("updated advertised reference").metadata().comment.as_bytes() => expected.as_bytes());
     main_assert_eq!(commands.take_league_update_effects().1 => 1);
     main_assert_eq!(
         n1_expect(&app.lobby.classic_host, "classic lobby")
@@ -3481,7 +3481,7 @@ fn set_password_sets_and_bare_command_clears_live_password() {
     let mut app = new_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
     let (_snapshot, reference) = default_exact_host_reference();
-    app.advertised_game_reference = Some(reference);
+    app.netplay.advertised_game_reference = Some(reference);
     let observer = thread::spawn(move || {
         let mut passwords = Vec::new();
         for _ in 0..2 {
@@ -3498,7 +3498,7 @@ fn set_password_sets_and_bare_command_clears_live_password() {
     .test_value();
     main_assert_eq!(app.scenario_game_options.values().password => "secret");
     main_assert!(
-        app.advertised_game_reference
+        app.netplay.advertised_game_reference
             .as_ref()
             .expect("password-protected reference")
             .summary()
@@ -3509,7 +3509,7 @@ fn set_password_sets_and_bare_command_clears_live_password() {
         .test_value();
     main_assert!(app.scenario_game_options.values().password.is_empty());
     main_assert!(
-        !app.advertised_game_reference
+        !app.netplay.advertised_game_reference
             .as_ref()
             .expect("unprotected reference")
             .summary()
@@ -3525,8 +3525,8 @@ fn client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
     for result in [MessageDialogResult::Dismissed, MessageDialogResult::Cancel] {
         let mut app = new_menu_app(640, 480);
         let (network, _events) = NetworkManager::test_stub_for_client_id(7);
-        app.network = Some(network);
-        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        app.netplay.manager = Some(network);
+        app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
         app.startup.view = StartupView::NetworkLobby;
         app.last_startup_dialog = StartupDialog::NetworkGame;
         app.mode = AppMode::Loading;
@@ -3540,8 +3540,8 @@ fn client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
 
         main_assert!(matches!(app.mode, AppMode::Menu));
         main_assert_eq!(app.startup.view => StartupView::NetworkGame);
-        main_assert!(app.network.is_none());
-        main_assert!(app.network_mode.is_none());
+        main_assert!(app.netplay.manager.is_none());
+        main_assert!(app.netplay.mode.is_none());
         main_assert!(app.lobby.start_wait.is_none());
         main_assert!(app.dialogs.messages.is_empty());
     }
@@ -3553,9 +3553,9 @@ fn client_host_timeout_during_final_init_aborts_startup() {
     // (src/C4Network2.cpp:558-616,1809-1817; src/C4Game.cpp:459-466).
     let mut app = new_real_classic_menu_app(640, 480);
     let (network, events) = NetworkManager::test_stub_for_client_id(7);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Client(client_network_settings()));
-    app.control_clients.replace_snapshot([
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
+    app.netplay.control_clients.replace_snapshot([
         message_client(0, b"Oracle Host"),
         message_client(7, b"Client"),
     ]);
@@ -3594,8 +3594,8 @@ fn client_host_timeout_during_final_init_aborts_startup() {
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.startup_network.dialog.is_some());
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(app.lobby.start_wait.is_none());
     let engine_results = app.engine.snapshot().round_results;
     main_assert_eq!(engine_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::NetworkError));
@@ -3607,8 +3607,8 @@ fn client_host_timeout_during_final_init_aborts_startup() {
 #[test]
 fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
     let mut app = new_menu_app(640, 480);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.control_clients.replace_snapshot([
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.control_clients.replace_snapshot([
         message_client(0, b"Exact Host"),
         message_client(7, b"Remote"),
         message_client(8, b"Other"),
@@ -3670,7 +3670,7 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     let mut app = new_menu_app(640, 480);
     app.startup.view = StartupView::NetworkLobby;
     app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
@@ -3685,16 +3685,16 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
     });
     snapshot.parameters.scenario = scenario_core.clone();
     snapshot.parameters.title = LegacyCString::from_bytes(b"Remote title".to_vec()).test_value();
-    app.pending_network_join_data = Some(clonk_network::JoinDataEnvelope {
+    app.netplay.pending_join_data = Some(clonk_network::JoinDataEnvelope {
         client_id: 7,
         start_control_tick: 0,
         status: host_config.initial_status,
         dynamic: snapshot.dynamic,
         parameters: snapshot.parameters,
     });
-    app.admission_resources
+    app.netplay.admission_resources
         .register_lobby_resource(&scenario_core);
-    app.admission_resources.mark_progress(9, 42);
+    app.netplay.admission_resources.mark_progress(9, 42);
 
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
         .test_value();
@@ -3706,14 +3706,14 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
 
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
         .test_value();
-    app.admission_resources.mark_progress(9, 73);
+    app.netplay.admission_resources.mark_progress(9, 73);
     app.sec1_timer().test_value();
     main_assert_eq!(scenario_state(&app).text => LobbyScenarioText::Message("Loading... (42%)".to_string()), "inactive ScenDesc retains its last presentation");
 
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
         .test_value();
     main_assert_eq!(scenario_state(&app).text => LobbyScenarioText::Message("Loading... (73%)".to_string()));
-    app.admission_resources.mark_progress(9, 100);
+    app.netplay.admission_resources.mark_progress(9, 100);
     app.sec1_timer().test_value();
     main_assert_eq!(scenario_state(&app).text => LobbyScenarioText::Message("Loading... (100%)".to_string()));
     main_assert!(
@@ -3729,15 +3729,15 @@ fn client_scenario_description_refreshes_only_while_active_until_terminal() {
         br"{\rtf1 Gold Mine\par Mine some gold.\par}",
     )
     .test_value();
-    app.admission_resources.mark_complete(9, scenario);
+    app.netplay.admission_resources.mark_complete(9, scenario);
     app.sec1_timer().test_value();
     main_assert_eq!(scenario_state(&app).text => LobbyScenarioText::Description("Gold Mine\nMine some gold.\n".to_string()));
     main_assert!(scenario_state(&app).finished);
 
-    app.admission_resources
+    app.netplay.admission_resources
         .resources
         .insert(9, AdmissionResourceState::Loading { removed: false });
-    app.admission_resources.present_percent.insert(9, 7);
+    app.netplay.admission_resources.present_percent.insert(9, 7);
     app.sec1_timer().test_value();
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
         .test_value();
@@ -3786,8 +3786,8 @@ fn joined_chrome_focused_button_activates_on_confirm_keys() {
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(app.lobby.session.is_none());
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
 
     // Dialog::KeyEscape aborts silently from any focus
     // (src/C4GuiDialogs.cpp:371-378).
@@ -3903,13 +3903,13 @@ fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(HostSettings {
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         player_name: "Host".to_string(),
         prepared: None,
     }));
-    app.control_clients
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     app.sync_classic_lobby_roster();
 
@@ -3949,11 +3949,11 @@ fn host_client_context_mutes_locally_and_submits_activation_without_optimism() {
         clonk_engine::ClientUpdateControlData::new(clonk_engine::CLIENT_UPDATE_ACTIVATE, 7, 0, 0);
     main_assert_eq!(commands.take_submitted_client_updates() => vec![update.clone()]);
     main_assert!(
-        app.control_clients.is_activated(7),
+        app.netplay.control_clients.is_activated(7),
         "the lobby waits for the synchronized client update"
     );
 
-    app.control_clients.apply_update(&update);
+    app.netplay.control_clients.apply_update(&update);
     let entries = app.classic_lobby_client_context_entries(7).test_value();
     let mut activation_label = entries[2].text.clone();
     Markup::strip_markup(&mut activation_label);
@@ -5009,22 +5009,22 @@ fn network_join_applies_active_scenario_gui_overrides() {
     };
     let artifact = preload_job(&app, join_data.clone(), game_resources.clone());
 
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.pending_network_join_data = Some(join_data.clone());
-    app.pending_client_start_status = Some(n1_fixture!(status:
+    app.netplay.pending_join_data = Some(join_data.clone());
+    app.netplay.pending_client_start_status = Some(n1_fixture!(status:
         clonk_network::NETWORK_STATE_GO,
         host.initial_status.control_mode,
         0,
     ));
     for resource in &host_files {
-        app.admission_resources.ensure_by_core(&resource.core);
-        app.admission_resources
+        app.netplay.admission_resources.ensure_by_core(&resource.core);
+        app.netplay.admission_resources
             .mark_complete(resource.core.id, resource.path.clone());
     }
-    app.client_combined_scenario_path = Some(combined_path.clone());
+    app.netplay.client_combined_scenario_path = Some(combined_path.clone());
     app.lobby.preload_artifact = Some(artifact);
     app.try_prepare_client_network_scenario().test_value();
 
@@ -5096,11 +5096,11 @@ fn network_join_applies_active_scenario_gui_overrides() {
         path: corrupt_pack.clone(),
     });
     let corrupt_artifact = preload_job(&app, corrupt_join_data.clone(), corrupt_game_resources);
-    app.admission_resources.ensure_by_core(&corrupt_core);
-    app.admission_resources
+    app.netplay.admission_resources.ensure_by_core(&corrupt_core);
+    app.netplay.admission_resources
         .mark_complete(corrupt_core.id, corrupt_pack.clone());
     app.scenario_lifecycle.loading = None;
-    app.pending_network_join_data = Some(corrupt_join_data);
+    app.netplay.pending_join_data = Some(corrupt_join_data);
     app.lobby.preload_artifact = Some(corrupt_artifact);
     app.try_prepare_client_network_scenario().test_value();
     let failures = app
@@ -5276,7 +5276,7 @@ fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
     teams.allow_team_switch = true;
     app.engine.set_team_configuration(teams);
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
         .test_value();
@@ -5379,7 +5379,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     }));
     app.snapshot = app.engine.snapshot();
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(3);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     app.apply_ingame_menu_action(MenuAction::ActivateHostility)
         .test_value();
@@ -5452,7 +5452,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
 
     teams.allow_hostility_change = true;
     app.engine.set_team_configuration(teams);
-    app.network = None;
+    app.netplay.manager = None;
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(ada))
         .test_value();
     main_assert!(!app
@@ -5603,7 +5603,7 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
             .update(LoaderUpdate::SetProcess(Some(50)));
         n1_install_loading_state(&mut app);
         if client {
-            app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+            app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
             app.show_reached_network_start_wait().test_value();
             app.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -5615,7 +5615,7 @@ fn scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
             )
             .test_value();
         } else {
-            app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+            app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
             app.begin_network_start_wait(n1_fixture!(status:
                 clonk_network::NETWORK_STATE_GO,
                 1,
@@ -5654,7 +5654,7 @@ fn scale_three_host_start_wait_renders_after_native_loader_text() {
         .test_mut()
         .update(LoaderUpdate::SetProcess(Some(73)));
     n1_install_loading_state(&mut app);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
     let status = n1_fixture!(status: clonk_network::NETWORK_STATE_GO, 1, 4);
     app.begin_network_start_wait(status);
     app.show_reached_network_start_wait().test_value();
@@ -5678,7 +5678,7 @@ fn fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
         .test_mut()
         .update(LoaderUpdate::SetTitle("client loader".into()));
     n1_install_loading_state(&mut app);
-    app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+    app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
     app.show_reached_network_start_wait().test_value();
     app.push_message_dialog(
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -5863,22 +5863,22 @@ fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
 #[test]
 fn a_client_learns_when_the_async_deadline_dropped_its_control() {
     let mut app = new_state_only_menu_app(320, 200);
-    main_assert_eq!(app.discarded_control_ticks => 0);
-    main_assert_eq!(app.last_reported_discarded_control_tick => None);
+    main_assert_eq!(app.netplay.discarded_control_ticks => 0);
+    main_assert_eq!(app.netplay.last_reported_discarded_control_tick => None);
 
     app.note_discarded_control_tick(41);
-    main_assert_eq!(app.discarded_control_ticks => 1);
-    main_assert_eq!(app.last_reported_discarded_control_tick => Some(41));
+    main_assert_eq!(app.netplay.discarded_control_ticks => 1);
+    main_assert_eq!(app.netplay.last_reported_discarded_control_tick => Some(41));
 
     // A repeated tick is reported once but counted on every observation.
     app.note_discarded_control_tick(41);
-    main_assert_eq!(app.discarded_control_ticks => 2);
-    main_assert_eq!(app.last_reported_discarded_control_tick => Some(41));
+    main_assert_eq!(app.netplay.discarded_control_ticks => 2);
+    main_assert_eq!(app.netplay.last_reported_discarded_control_tick => Some(41));
 
     app.note_discarded_control_tick(42);
-    main_assert_eq!(app.discarded_control_ticks => 3);
-    main_assert_eq!(app.last_reported_discarded_control_tick => Some(42));
+    main_assert_eq!(app.netplay.discarded_control_ticks => 3);
+    main_assert_eq!(app.netplay.last_reported_discarded_control_tick => Some(42));
 
     // The diagnostic queues no synchronized control.
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
 }

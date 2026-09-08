@@ -2253,6 +2253,157 @@ pub(crate) struct LobbyState {
     pub(crate) white_chat: bool,
 }
 
+/// The app-side network session: the manager and mode, the host's
+/// advertisement and references, the joins, admissions and resource waits,
+/// the control clock, ticks, barriers and sync gates, the league session,
+/// the client registries and statistics, and the runtime-dynamic and
+/// restart latches. Fields keep the declaration order they had on `GameApp`
+/// because they drop in that order: the masterserver signup is cancelled
+/// before the manager joins its worker. `GameApp` composes it as `netplay`.
+pub(crate) struct NetplayState {
+    pub(crate) game_advertiser: Option<clonk_network::NetworkGameAdvertiser>,
+    /// Last validated exact host reference. This state advances independently
+    /// of optional listener I/O and is retained as the next InitLocal rebuild
+    /// template when advertising could not bind.
+    pub(crate) advertised_game_reference: Option<clonk_network::HostGameReference>,
+    #[cfg(test)]
+    pub(crate) league_surrender_pre_abort_results: Option<(
+        clonk_engine::RoundResultsState,
+        clonk_engine::RoundResultsState,
+        bool,
+    )>,
+    /// Control ticks this client sent that the host's async deadline gave up
+    /// on, so the input never executed anywhere
+    /// (`force_expired_async_control`, mirroring `PackCompleteCtrl`,
+    /// C4GameControlNetwork.cpp:741-784). A diagnostic count only — it is read
+    /// back by the network diagnostics and never by simulation, because the
+    /// host alone decides the timeout and every client executes the one
+    /// aggregate it broadcasts.
+    pub(crate) discarded_control_ticks: u32,
+    /// The last discarded tick already reported to the player, so a peer that
+    /// loses several ticks in a burst is described once per tick rather than
+    /// once per redelivery.
+    pub(crate) last_reported_discarded_control_tick: Option<i32>,
+    // Fields drop in declaration order. Cancel an in-flight league request
+    // before NetworkManager joins its worker so shutdown cannot wait for the
+    // HTTP timeout.
+    pub(crate) pending_masterserver_signup: Option<network::PendingMasterserverSignup>,
+    pub(crate) pending_league_player_auth: Option<PendingLeaguePlayerAuth>,
+    pub(crate) event_waker: Option<NetworkEventWakeCallback>,
+    pub(crate) manager: Option<NetworkManager>,
+    pub(crate) mode: Option<NetworkMode>,
+    /// Process-session credentials mutated by C4LeagueSignupDialog. Native
+    /// persists LeagueAccount but deliberately keeps LeaguePassword only in
+    /// memory, so never write this override through the INI helper.
+    pub(crate) league_auth_session: Option<clonk_network::LeagueAuthRequestHead>,
+    /// Exact resource publication which continues after a host has entered its
+    /// closed-admission lobby. Once complete, the ordinary final host startup
+    /// path replaces the discoverable, closed-admission preliminary transport.
+    pub(crate) pending_host_preparation: Option<Receiver<PendingNetworkHostPreparationResult>>,
+    pub(crate) classic_direct_reference_query: Option<ClassicDirectReferenceQuery>,
+    /// Frozen C++-ordered address attempts retained across password prompts.
+    pub(crate) pending_join: Option<ClientSettings>,
+    pub(crate) staged_host_scenario: Option<StagedNetworkHostScenario>,
+    pub(crate) sync_checks: SyncCheckState,
+    pub(crate) ticks: NetworkTickGate,
+    pub(crate) waiting_control: Option<NetworkControlWait>,
+    /// When the current lockstep stall began, and whether it has been announced.
+    ///
+    /// A control stall is completely silent in C++: `DrawHoldMessages` prints
+    /// only "Pause", and only for `HaltCount`, which a stall never sets. The
+    /// world therefore freezes while rendering carries on at full frame rate,
+    /// which is indistinguishable from a hang — the symptom behind
+    /// legacyclonk/LegacyClonk#28, "network games stop randomly". There is no
+    /// C++ behaviour to preserve here, so the port says something.
+    pub(crate) stall_since: Option<(Instant, bool)>,
+    /// Lockstep pacing figures since the last `netplay pacing` log line; see
+    /// `log_netplay_pacing_summary`.
+    pub(crate) pacing: NetplayPacingWindow,
+    pub(crate) control_retry_pending: bool,
+    pub(crate) sync: NetworkSyncGate,
+    /// `C4GameControl::Input` packets produced outside the simulation in a
+    /// local game. They execute together at the next control-rate frame.
+    pub(crate) offline_control_input: Vec<NetworkControl>,
+    /// Offline counterpart of C4Game::HaltCount. Pause/Unpause assign 1/0,
+    /// while native modal owners increment/decrement the same counted stack.
+    /// Any nonzero value stops simulation but leaves event/render loops alive.
+    pub(crate) offline_halt_count: i32,
+    pub(crate) control_running: bool,
+    /// App-owned counterpart of C4Network2's runtime fStatusReached state.
+    /// The session owns acknowledgement consensus; the app owns driving
+    /// simulation to this target and stopping exactly at the control boundary.
+    pub(crate) runtime_status_barrier: Option<RuntimeNetworkStatusBarrier>,
+    /// Live host `Game.Network.Status` projection for periodic references.
+    /// This is distinct from the control barrier, which may still be waiting
+    /// after ChangeGameStatus has already switched Paused/Running.
+    pub(crate) host_reference_paused: bool,
+    /// Last authoritative C4Network2Status control mode. Runtime chat can
+    /// replace it through the same status barrier as C4Network2::SetCtrlMode.
+    pub(crate) runtime_control_mode: Option<i32>,
+    /// Control mode applied after the status acknowledgement. The F4 option
+    /// keeps displaying this while a newer status is still pending.
+    pub(crate) runtime_committed_control_mode: Option<i32>,
+    /// Last acknowledged C4Network2Status. Native retains both status flags
+    /// until the next status request resets them.
+    pub(crate) runtime_committed_status: Option<clonk_network::NetworkStatus>,
+    pub(crate) runtime_join_allowed: Option<bool>,
+    /// Host-owned override of `Config.Network.NoRejoinAfterElimination`
+    /// (clonk-org/clonk-rs#240). `None` reads the key, which the oracle has no
+    /// counterpart for and which therefore defaults to readmitting.
+    pub(crate) rejoin_after_elimination_allowed: Option<bool>,
+    pub(crate) control_clock: Option<NetworkControlClock>,
+    pub(crate) max_players: usize,
+    pub(crate) is_league: bool,
+    /// Exact synchronized `Game.Parameters.League` bytes. This is distinct
+    /// from `network_is_league`, which models `isLeague()`'s LeagueAddress
+    /// test; GetLeagueProgressData gates on this name instead.
+    pub(crate) league_name: Vec<u8>,
+    /// Process-local `Game.Parameters.StreamAddress`; this value is assigned
+    /// by league Start but is intentionally absent from JoinData.
+    pub(crate) stream_address: LegacyCString,
+    /// C4Game::pNetworkStatistics exists for every running game. Only the
+    /// Pings presentation tab is conditional on an enabled network session.
+    pub(crate) stats: Option<NetworkStats>,
+    pub(crate) stats_clients: HashSet<ClientId>,
+    pub(crate) stats_players: HashSet<i32>,
+    pub(crate) control_clients: ControlClientRegistry,
+    /// `C4GameControlClient::iNextControl` for the activated-client copy.
+    /// Native resets every entry to the current ControlTick whenever
+    /// `CopyClientList` runs and never advances it afterwards.
+    pub(crate) client_next_control_ticks: HashMap<i32, i32>,
+    pub(crate) client_activity: NetworkClientActivity,
+    /// Armed on this client by the host's restart notice
+    /// (`clonk_network::host_restart`). While it is armed, losing the host is a
+    /// restart to follow rather than the dead host native assumes
+    /// (src/C4Network2.cpp:1826-1832), so the round is torn down and the same
+    /// address re-joined instead of dropping to local control.
+    pub(crate) pending_host_rejoin: Option<PendingHostRejoin>,
+    pub(crate) admission_resources: AdmissionResourceStore,
+    pub(crate) blocking_resource_wait: Option<BlockingResourceWait>,
+    pub(crate) aborted_player_resource_joins: HashSet<(i32, i32)>,
+    /// Mutable host-owned JoinData used for lobby Set changes, GO
+    /// activation, and later client admission. PreparedHostBootstrap remains
+    /// the immutable resource proof from before the socket opened.
+    pub(crate) host_join_snapshot: Option<clonk_network::HostJoinSnapshot>,
+    /// C4Network2::fDynamicNeeded plus the clients waiting for the next
+    /// synchronized runtime dynamic. One queued CID_Synchronize serves every
+    /// request observed before that boundary.
+    pub(crate) pending_runtime_dynamic_request: Option<PendingRuntimeDynamicRequest>,
+    pub(crate) next_runtime_dynamic_save_generation: u64,
+    pub(crate) pending_join_data: Option<clonk_network::JoinDataEnvelope>,
+    /// Armed after a retained-session restart marker and consumed by the next
+    /// JoinData. Initial admission also emits JoinData, so the marker must be
+    /// tracked explicitly before acknowledging the lower restart fence.
+    pub(crate) pending_round_restart_join_data: bool,
+    pub(crate) initial_lobby_status_ack_pending: bool,
+    pub(crate) client_start_barrier: ClientStartBarrier,
+    pub(crate) pending_client_start_status: Option<clonk_network::NetworkStatus>,
+    pub(crate) client_combined_scenario_path: Option<PathBuf>,
+    pub(crate) client_combined_preload_file: ClientCombinedPreloadFile,
+    pub(crate) executing_ready_tick: Option<Tick>,
+    pub(crate) pending_league_end: Option<PendingLeagueEnd>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -2376,11 +2527,6 @@ pub(crate) struct GameApp {
     /// `Application.launchEditor`: set by `SwitchToEditor`, consumed by
     /// `~C4Application` after subsystem cleanup (C4Application.cpp:58-74).
     pub(crate) pending_editor_launch: Option<PathBuf>,
-    pub(crate) network_game_advertiser: Option<clonk_network::NetworkGameAdvertiser>,
-    /// Last validated exact host reference. This state advances independently
-    /// of optional listener I/O and is retained as the next InitLocal rebuild
-    /// template when advertising could not bind.
-    pub(crate) advertised_game_reference: Option<clonk_network::HostGameReference>,
     /// Process-local `C4Startup::eLastDlgID`. The network lobby and staged
     /// loader are game states rather than startup dialogs, so they must not
     /// displace the dialog reopened after the round ends.
@@ -2398,12 +2544,6 @@ pub(crate) struct GameApp {
     /// Presentation-only proximity voice state; never serialized or passed to
     /// the deterministic engine.
     pub(crate) voice_chat: crate::voice_chat::VoiceChatState,
-    #[cfg(test)]
-    pub(crate) league_surrender_pre_abort_results: Option<(
-        clonk_engine::RoundResultsState,
-        clonk_engine::RoundResultsState,
-        bool,
-    )>,
     pub(crate) assets: Arc<FrontendAssets>,
     /// Per-resource failures from resolving the active scenario's C4GUI
     /// sheet/font set. Empty means the active (or startup) bundle resolved
@@ -2439,18 +2579,6 @@ pub(crate) struct GameApp {
     /// inherit. C++ reads the two separately too, and either alone makes the
     /// lobby a console lobby (C4Network2.cpp:463).
     pub(crate) headless: bool,
-    /// Control ticks this client sent that the host's async deadline gave up
-    /// on, so the input never executed anywhere
-    /// (`force_expired_async_control`, mirroring `PackCompleteCtrl`,
-    /// C4GameControlNetwork.cpp:741-784). A diagnostic count only — it is read
-    /// back by the network diagnostics and never by simulation, because the
-    /// host alone decides the timeout and every client executes the one
-    /// aggregate it broadcasts.
-    pub(crate) discarded_control_ticks: u32,
-    /// The last discarded tick already reported to the player, so a peer that
-    /// loses several ticks in a burst is described once per tick rather than
-    /// once per redelivery.
-    pub(crate) last_reported_discarded_control_tick: Option<i32>,
     /// `C4Game::FileMonitor`. Armed once per game when
     /// `Developer.AutoFileReload` is set and the app is windowed
     /// (`C4Game.cpp:2413-2424`), started after definitions have loaded.
@@ -2463,18 +2591,8 @@ pub(crate) struct GameApp {
     /// changed the live object count and cleared after the scenario-save
     /// double-object warning.
     pub(crate) script_created_objects: bool,
-    // Fields drop in declaration order. Cancel an in-flight league request
-    // before NetworkManager joins its worker so shutdown cannot wait for the
-    // HTTP timeout.
-    pub(crate) pending_lobby_internet_signup: Option<network::PendingMasterserverSignup>,
-    pub(crate) pending_league_player_auth: Option<PendingLeaguePlayerAuth>,
-    pub(crate) network_event_waker: Option<NetworkEventWakeCallback>,
-    pub(crate) network: Option<NetworkManager>,
-    pub(crate) network_mode: Option<NetworkMode>,
-    /// Process-session credentials mutated by C4LeagueSignupDialog. Native
-    /// persists LeagueAccount but deliberately keeps LeaguePassword only in
-    /// memory, so never write this override through the INI helper.
-    pub(crate) league_auth_session: Option<clonk_network::LeagueAuthRequestHead>,
+    /// The app-side network session (clonk-org/clonk-rs#1248).
+    pub(crate) netplay: NetplayState,
     /// The lobby (clonk-org/clonk-rs#1247).
     pub(crate) lobby: LobbyState,
     /// A pending "bring this window forward", drained by the runner.
@@ -2494,72 +2612,6 @@ pub(crate) struct GameApp {
     /// notification its check queued and never a later one.
     pub(crate) next_desktop_notification_id: u64,
     pub(crate) control_messages: ControlMessageState,
-    /// Exact resource publication which continues after a host has entered its
-    /// closed-admission lobby. Once complete, the ordinary final host startup
-    /// path replaces the discoverable, closed-admission preliminary transport.
-    pub(crate) pending_network_host_preparation:
-        Option<Receiver<PendingNetworkHostPreparationResult>>,
-    pub(crate) classic_direct_reference_query: Option<ClassicDirectReferenceQuery>,
-    /// Frozen C++-ordered address attempts retained across password prompts.
-    pub(crate) pending_network_join: Option<ClientSettings>,
-    pub(crate) staged_network_host_scenario: Option<StagedNetworkHostScenario>,
-    pub(crate) sync_checks: SyncCheckState,
-    pub(crate) network_ticks: NetworkTickGate,
-    pub(crate) waiting_network_control: Option<NetworkControlWait>,
-    /// When the current lockstep stall began, and whether it has been announced.
-    ///
-    /// A control stall is completely silent in C++: `DrawHoldMessages` prints
-    /// only "Pause", and only for `HaltCount`, which a stall never sets. The
-    /// world therefore freezes while rendering carries on at full frame rate,
-    /// which is indistinguishable from a hang — the symptom behind
-    /// legacyclonk/LegacyClonk#28, "network games stop randomly". There is no
-    /// C++ behaviour to preserve here, so the port says something.
-    pub(crate) network_stall_since: Option<(Instant, bool)>,
-    /// Lockstep pacing figures since the last `netplay pacing` log line; see
-    /// `log_netplay_pacing_summary`.
-    pub(crate) netplay_pacing: NetplayPacingWindow,
-    pub(crate) network_control_retry_pending: bool,
-    pub(crate) network_sync: NetworkSyncGate,
-    /// `C4GameControl::Input` packets produced outside the simulation in a
-    /// local game. They execute together at the next control-rate frame.
-    pub(crate) offline_control_input: Vec<NetworkControl>,
-    /// Offline counterpart of C4Game::HaltCount. Pause/Unpause assign 1/0,
-    /// while native modal owners increment/decrement the same counted stack.
-    /// Any nonzero value stops simulation but leaves event/render loops alive.
-    pub(crate) offline_halt_count: i32,
-    pub(crate) network_control_running: bool,
-    /// App-owned counterpart of C4Network2's runtime fStatusReached state.
-    /// The session owns acknowledgement consensus; the app owns driving
-    /// simulation to this target and stopping exactly at the control boundary.
-    pub(crate) runtime_network_status_barrier: Option<RuntimeNetworkStatusBarrier>,
-    /// Live host `Game.Network.Status` projection for periodic references.
-    /// This is distinct from the control barrier, which may still be waiting
-    /// after ChangeGameStatus has already switched Paused/Running.
-    pub(crate) host_reference_paused: bool,
-    /// Last authoritative C4Network2Status control mode. Runtime chat can
-    /// replace it through the same status barrier as C4Network2::SetCtrlMode.
-    pub(crate) runtime_network_control_mode: Option<i32>,
-    /// Control mode applied after the status acknowledgement. The F4 option
-    /// keeps displaying this while a newer status is still pending.
-    pub(crate) runtime_network_committed_control_mode: Option<i32>,
-    /// Last acknowledged C4Network2Status. Native retains both status flags
-    /// until the next status request resets them.
-    pub(crate) runtime_network_committed_status: Option<clonk_network::NetworkStatus>,
-    pub(crate) runtime_network_join_allowed: Option<bool>,
-    /// Host-owned override of `Config.Network.NoRejoinAfterElimination`
-    /// (clonk-org/clonk-rs#240). `None` reads the key, which the oracle has no
-    /// counterpart for and which therefore defaults to readmitting.
-    pub(crate) network_rejoin_after_elimination_allowed: Option<bool>,
-    pub(crate) network_control_clock: Option<NetworkControlClock>,
-    pub(crate) network_max_players: usize,
-    pub(crate) network_is_league: bool,
-    /// Exact synchronized `Game.Parameters.League` bytes. This is distinct
-    /// from `network_is_league`, which models `isLeague()`'s LeagueAddress
-    /// test; GetLeagueProgressData gates on this name instead.
-    pub(crate) network_league_name: Vec<u8>,
-    /// Process-local `Game.Parameters.StreamAddress`; this value is assigned
-    /// by league Start but is intentionally absent from JoinData.
-    pub(crate) network_stream_address: LegacyCString,
     pub(crate) input_latency_benchmark: Option<InputLatencyBenchmark>,
     /// C4Game::FullSpeed and FrameSkip are transient per-game scheduler
     /// controls. They are deliberately excluded from save capture/restore.
@@ -2568,48 +2620,8 @@ pub(crate) struct GameApp {
     /// Frozen `C4GameParameters::AutoFrameSkip` for the active round. Unlike
     /// the startup option, this must not change while a game is running.
     pub(crate) auto_frame_skip: bool,
-    /// C4Game::pNetworkStatistics exists for every running game. Only the
-    /// Pings presentation tab is conditional on an enabled network session.
-    pub(crate) network_stats: Option<NetworkStats>,
-    pub(crate) network_stats_clients: HashSet<ClientId>,
-    pub(crate) network_stats_players: HashSet<i32>,
-    pub(crate) control_clients: ControlClientRegistry,
-    /// `C4GameControlClient::iNextControl` for the activated-client copy.
-    /// Native resets every entry to the current ControlTick whenever
-    /// `CopyClientList` runs and never advances it afterwards.
-    pub(crate) network_client_next_control_ticks: HashMap<i32, i32>,
-    pub(crate) network_client_activity: NetworkClientActivity,
     /// The local profile and the rosters assembled around it.
     pub(crate) players: PlayerState,
-    /// Armed on this client by the host's restart notice
-    /// (`clonk_network::host_restart`). While it is armed, losing the host is a
-    /// restart to follow rather than the dead host native assumes
-    /// (src/C4Network2.cpp:1826-1832), so the round is torn down and the same
-    /// address re-joined instead of dropping to local control.
-    pub(crate) pending_host_rejoin: Option<PendingHostRejoin>,
-    pub(crate) admission_resources: AdmissionResourceStore,
-    pub(crate) blocking_resource_wait: Option<BlockingResourceWait>,
-    pub(crate) aborted_player_resource_joins: HashSet<(i32, i32)>,
-    /// Mutable host-owned JoinData used for lobby Set changes, GO
-    /// activation, and later client admission. PreparedHostBootstrap remains
-    /// the immutable resource proof from before the socket opened.
-    pub(crate) host_join_snapshot: Option<clonk_network::HostJoinSnapshot>,
-    /// C4Network2::fDynamicNeeded plus the clients waiting for the next
-    /// synchronized runtime dynamic. One queued CID_Synchronize serves every
-    /// request observed before that boundary.
-    pub(crate) pending_runtime_dynamic_request: Option<PendingRuntimeDynamicRequest>,
-    pub(crate) next_runtime_dynamic_save_generation: u64,
-    pub(crate) pending_network_join_data: Option<clonk_network::JoinDataEnvelope>,
-    /// Armed after a retained-session restart marker and consumed by the next
-    /// JoinData. Initial admission also emits JoinData, so the marker must be
-    /// tracked explicitly before acknowledging the lower restart fence.
-    pub(crate) pending_round_restart_join_data: bool,
-    pub(crate) initial_lobby_status_ack_pending: bool,
-    pub(crate) client_start_barrier: ClientStartBarrier,
-    pub(crate) pending_client_start_status: Option<clonk_network::NetworkStatus>,
-    pub(crate) client_combined_scenario_path: Option<PathBuf>,
-    pub(crate) client_combined_preload_file: ClientCombinedPreloadFile,
-    pub(crate) executing_ready_tick: Option<Tick>,
     /// Control recording and playback.
     pub(crate) records: RecordingState,
     pub(crate) object_sprites: HashMap<String, DefinitionSprite>,
@@ -2659,7 +2671,6 @@ pub(crate) struct GameApp {
     /// (clonk-org/clonk-rs#40).
     pub(crate) exit_reason: Option<&'static str>,
     pub(crate) game_over_handled: bool,
-    pub(crate) pending_league_end: Option<PendingLeagueEnd>,
     /// Process-start localization/encoding metadata needed by live flash
     /// producers. The active message itself is runtime-only, survives a
     /// GraphicsSystem resize, and is reset by Game::Default/new-game.
@@ -5888,8 +5899,8 @@ pub(crate) fn summarize_presentation_benchmark_network(
 pub(crate) fn inspect_presentation_benchmark_network(
     app: &GameApp,
 ) -> Option<std::result::Result<PresentationBenchmarkNetworkEvidence, String>> {
-    let network = app.network.as_ref()?;
-    let Some(control_clock) = app.network_control_clock else {
+    let network = app.netplay.manager.as_ref()?;
+    let Some(control_clock) = app.netplay.control_clock else {
         return Some(Err("network_control_clock_unavailable".to_string()));
     };
     Some(
@@ -6072,7 +6083,8 @@ pub(crate) fn finish_app_presentation_benchmark(
         assert_native_tick,
         app.engine.players().count(),
         app.players.infos.nonremoved_player_count(),
-        app.control_clients
+        app.netplay
+            .control_clients
             .activated_client_ids()
             .into_iter()
             .filter(|client_id| *client_id != 0)

@@ -451,7 +451,7 @@ fn classic_command_line_maps_process_local_overrides_in_argument_order() {
     assert_eq!(app.scenario_game_options.values().password, "secret");
     assert_eq!(app.scenario_game_options.values().comment, "launch comment");
     assert!(!app.scenario_game_options.values().fair_crew);
-    assert_eq!(app.runtime_network_join_allowed, Some(false));
+    assert_eq!(app.netplay.runtime_join_allowed, Some(false));
 }
 
 #[test]
@@ -1778,7 +1778,7 @@ fn input_latency_benchmark_submits_two_unmatched_releases_for_each_local_player(
     app.local_controls
         .initialize(test_local_control_init(second_owner, 1, false, false));
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(network);
+    app.netplay.manager = Some(network);
     app.input_latency_benchmark = Some(InputLatencyBenchmark::new(Duration::from_millis(500)));
     let started = Instant::now();
     let tick = app.local_control_submission_tick();
@@ -1814,7 +1814,7 @@ fn input_latency_benchmark_requires_a_live_local_crew() {
         .crew
         .clear();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(network);
+    app.netplay.manager = Some(network);
     app.input_latency_benchmark = Some(InputLatencyBenchmark::new(Duration::from_millis(500)));
     let started = Instant::now();
 
@@ -4431,8 +4431,8 @@ fn runtime_status_report_failure_remains_stopped_and_unreached() {
 
     app.test_network_events();
 
-    assert!(!app.network_control_running);
-    runtime_assert_eq!(app.runtime_network_status_barrier => Some(RuntimeNetworkStatusBarrier { status: pause, local_reached: false, actual_control_tick: None, }));
+    assert!(!app.netplay.control_running);
+    runtime_assert_eq!(app.netplay.runtime_status_barrier => Some(RuntimeNetworkStatusBarrier { status: pause, local_reached: false, actual_control_tick: None, }));
 }
 
 #[test]
@@ -4512,9 +4512,9 @@ fn running_script_uses_symbolic_console_strictness_and_frozen_sync() {
     app.app_paths = Some(paths);
     app.engine.set_debug_mode(true);
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
-    app.control_clients
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
-    app.host_reference_paused = true;
+    app.netplay.host_reference_paused = true;
 
     app.process_running_chat_text("/script return 1");
 
@@ -4709,7 +4709,7 @@ fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_playe
     // Game.Parameters cap in force when the deferred PlayerInfo arrives
     // (src/C4Script.cpp:3693-3705; src/C4PlayerInfo.cpp:781-807).
     let mut app = new_state_only_running_sandbox_app();
-    app.network_max_players = 1;
+    app.netplay.max_players = 1;
     app.engine.set_max_players(1);
     app.players.infos.replace_snapshot(
         1,
@@ -4749,7 +4749,7 @@ fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_playe
 
     app.handle_script_player_info_updates().test_value();
 
-    assert_eq!(app.network_max_players, 1);
+    assert_eq!(app.netplay.max_players, 1);
     runtime_assert!(
         app.players.infos
             .client_info_ids(0)
@@ -5722,7 +5722,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     // Closing the round drops both the open editor and every committed
     // host: they belong to the scenario that was open, and carrying them
     // over would write one scenario's edit into the *next* one's save.
-    app.network = None;
+    app.netplay.manager = None;
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditInfo])
         .test_value();
     assert!(app.developer.component_editor.is_some());
@@ -7525,7 +7525,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
 
     // Halted: the click is refused with IDS_CNS_FILLNOHALT and Hold is
     // never armed, so the frame repeat cannot start either (`:227-231`).
-    app.network_control_running = false;
+    app.netplay.control_running = false;
     app.console_viewport_press(identity, (40, 10), 1.0, false, false);
     assert!(!app.developer.tools.holding(), "a halted fill never holds");
     runtime_assert!(app
@@ -7537,7 +7537,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     assert!(commands.take_submitted_decided_controls().is_empty());
 
     // Running: the click still emits nothing, but arms the repeat.
-    app.network_control_running = true;
+    app.netplay.control_running = true;
     let pressed = (40, 10);
     app.console_viewport_press(identity, pressed, 1.0, false, false);
     assert!(app.developer.tools.holding());
@@ -7746,7 +7746,7 @@ fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
     // (src/C4Player.cpp:452-461; src/C4Network2Res.cpp:718-823).
     let mut app = new_state_only_running_sandbox_app();
     let (manager, event_tx) = NetworkManager::test_stub();
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let mutable_path = PathBuf::from("Network/Bob.c4p");
     let serving_path = PathBuf::from("Network/Bob_2.c4p");
     let core = clonk_engine::NetworkResourceCore {
@@ -7756,7 +7756,7 @@ fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
         loadable: true,
         ..Default::default()
     };
-    app.admission_resources.register_finished_derivation(
+    app.netplay.admission_resources.register_finished_derivation(
         &core,
         mutable_path.clone(),
         clonk_network::ResourceFileOwnership::Temporary,
@@ -7772,7 +7772,7 @@ fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
 
     app.test_network_events();
 
-    runtime_assert_eq!(app.admission_resources.status(core.id) => Some(&AdmissionResourceState::Complete { path: mutable_path, removed: false, local: false, }));
+    runtime_assert_eq!(app.netplay.admission_resources.status(core.id) => Some(&AdmissionResourceState::Complete { path: mutable_path, removed: false, local: false, }));
 }
 
 #[test]
@@ -7780,7 +7780,7 @@ fn player_command_submission_queues_the_open_tick_without_local_execution() {
     let mut app = new_state_only_running_sandbox_app();
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     let crew = app.engine.test_crew_cursor(app.players.local_owner);
     let before = app
@@ -7822,7 +7822,7 @@ fn player_select_submission_queues_the_open_tick_without_local_execution() {
     let before = app.engine.selected_crew(owner);
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     let selection = PlayerSelectControlData {
         player: owner,
@@ -8309,7 +8309,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
         app.new_startup_player_properties_controller(0, 0).comment() => "Loaded new player";
     );
 
-    app.control_clients
+    app.netplay.control_clients
         .replace_snapshot([message_client(7, b"Remote")]);
     app.append_remote_lobby_ready_log(clonk_network::ReadyCheckPacket::new(
         7,
@@ -8342,7 +8342,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
     );
     app.close_context_menu_silently();
 
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
         countdown_seconds: 5,
         check_league_rules: true,
@@ -8355,7 +8355,7 @@ fn process_language_table_survives_disk_edits_until_an_explicit_options_reload()
         league.state.caption() => "Loaded league error";
     );
     app.dialogs.messages.clear();
-    app.network_is_league = false;
+    app.netplay.is_league = false;
 
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
         countdown_seconds: 5,
@@ -8403,7 +8403,7 @@ fn runtime_join_flash_keeps_the_process_language_charset_until_reload() {
         app.runtime_network_role(),
         RuntimeNetworkRole::Host
     ));
-    app.control_clients
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     let acknowledgement = thread::spawn(move || {
@@ -9132,7 +9132,7 @@ fn modified_f1_retains_downstream_priority_without_toggling_help() {
 fn f4_player_tooltip_names_follow_retained_visibility_and_effective_name() {
     let mut app = new_classic_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    app.control_clients
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     app.players.infos.replace_snapshot(
         3,
@@ -9171,9 +9171,9 @@ fn f4_player_tooltip_names_follow_retained_visibility_and_effective_name() {
 fn f4_control_mode_waits_for_status_commit() {
     let mut app = new_classic_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    app.runtime_network_control_mode = Some(0);
-    app.runtime_network_committed_control_mode = Some(0);
-    app.control_clients
+    app.netplay.runtime_control_mode = Some(0);
+    app.netplay.runtime_committed_control_mode = Some(0);
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
     let labels = app.classic_lobby_option_labels();
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
@@ -9181,8 +9181,8 @@ fn f4_control_mode_waits_for_status_commit() {
     app.apply_runtime_client_list_option(LobbyOptionKind::ControlMode, 1)
         .test_value();
     runtime_assert_eq!(
-        app.runtime_network_control_mode => Some(1);
-        app.runtime_network_committed_control_mode => Some(0);
+        app.netplay.runtime_control_mode => Some(1);
+        app.netplay.runtime_committed_control_mode => Some(0);
         app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_decentral.as_str());
     );
@@ -9195,12 +9195,12 @@ fn f4_control_mode_waits_for_status_commit() {
     app.handle_status_committed(expected).test_value();
     app.refresh_runtime_client_list();
     runtime_assert_eq!(
-        app.runtime_network_committed_control_mode => Some(1);
+        app.netplay.runtime_committed_control_mode => Some(1);
         app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_central.as_str());
     );
 
-    app.host_reference_paused = true;
+    app.netplay.host_reference_paused = true;
     app.apply_runtime_client_list_option(LobbyOptionKind::ControlMode, 0)
         .test_value();
     let paused = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_PAUSE, 0, 40);
@@ -9211,7 +9211,7 @@ fn f4_control_mode_waits_for_status_commit() {
     app.handle_status_committed(paused).test_value();
     app.refresh_runtime_client_list();
     runtime_assert_eq!(
-        app.runtime_network_committed_control_mode => Some(1);
+        app.netplay.runtime_committed_control_mode => Some(1);
         app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_central.as_str());
     );
@@ -9223,7 +9223,7 @@ fn f4_control_mode_waits_for_status_commit() {
     app.handle_status_committed(resumed).test_value();
     app.refresh_runtime_client_list();
     runtime_assert_eq!(
-        app.runtime_network_committed_control_mode => Some(0);
+        app.netplay.runtime_committed_control_mode => Some(0);
         app.dialogs.client_list .as_ref() .expect("F4 dialog remains open") .option_rows() .iter() .find(|row| row.kind == LobbyOptionKind::ControlMode) .map(|row| row.value.as_str()) =>
             Some(labels.control_mode_decentral.as_str());
     );
@@ -9247,21 +9247,21 @@ fn runtime_pause_applies_direct_script_halt_and_toggle_requests() {
         .test_value();
     app.test_update();
     assert_eq!(app.engine.frame(), initial_frame);
-    assert_ne!(app.offline_halt_count, 0);
+    assert_ne!(app.netplay.offline_halt_count, 0);
 
     app.engine
         .call_scenario_script_function("Toggle", Vec::new())
         .test_value();
     app.test_update();
     assert_eq!(app.engine.frame(), initial_frame + 1);
-    assert_eq!(app.offline_halt_count, 0);
+    assert_eq!(app.netplay.offline_halt_count, 0);
 
     app.engine
         .call_scenario_script_function("Toggle", Vec::new())
         .test_value();
     app.test_update();
     assert_eq!(app.engine.frame(), initial_frame + 1);
-    assert_ne!(app.offline_halt_count, 0);
+    assert_ne!(app.netplay.offline_halt_count, 0);
 
     let mut game_over = new_game_over_keyboard_app();
     game_over.engine.clear_scenario_script();
@@ -9282,12 +9282,12 @@ fn runtime_pause_applies_direct_script_halt_and_toggle_requests() {
         .call_scenario_script_function("Toggle", Vec::new())
         .test_value();
     game_over.test_update();
-    runtime_assert_eq!(game_over.offline_halt_count => 1, "evaluation keeps the halt acquired by C4GameOverDlg::OnShown");
+    runtime_assert_eq!(game_over.netplay.offline_halt_count => 1, "evaluation keeps the halt acquired by C4GameOverDlg::OnShown");
     game_over.test_modifiers(ModifiersState::ALT);
     game_over.test_key(VirtualKeyCode::KeyC, ElementState::Pressed);
     assert!(game_over.dialogs.game_over.is_none());
     game_over.test_update();
-    assert_eq!(game_over.offline_halt_count, 0);
+    assert_eq!(game_over.netplay.offline_halt_count, 0);
 }
 
 #[test]
@@ -9300,15 +9300,15 @@ fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
     ] {
         let mut app = new_running_sandbox_app();
         let (_events, mut commands) = install_running_network_stub(&mut app, local_client_id, 0, 1);
-        app.network_is_league = true;
-        app.network_control_running = false;
+        app.netplay.is_league = true;
+        app.netplay.control_running = false;
         let go = clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 1, 0);
-        app.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+        app.netplay.runtime_status_barrier = Some(RuntimeNetworkStatusBarrier {
             status: go,
             local_reached: true,
             actual_control_tick: Some(0),
         });
-        app.network_sync.queue(
+        app.netplay.sync.queue(
             0,
             0,
             vec![NetworkControl::Script(clonk_engine::ScriptControlData {
@@ -9321,14 +9321,14 @@ fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
         app.handle_status_committed(go).test_value();
 
         if local_client_id == 0 {
-            let pause = app.runtime_network_status_barrier.test_value().status;
+            let pause = app.netplay.runtime_status_barrier.test_value().status;
             assert_eq!(pause.state, clonk_network::NETWORK_STATE_PAUSE);
             assert!(app.lobby.league_votes.paused_for_vote);
         } else {
             runtime_assert!(
-                app.runtime_network_status_barrier.is_none(),
+                app.netplay.runtime_status_barrier.is_none(),
                 "client {local_client_id} left an unexpected barrier for {script:?}: {:?}",
-                app.runtime_network_status_barrier
+                app.netplay.runtime_status_barrier
             );
             assert!(!app.lobby.league_votes.paused_for_vote);
         }
@@ -10173,7 +10173,7 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
     let mut clients = bound("NetClientListDlgToggle");
     let (_events, _commands) = install_running_network_stub(&mut clients, 0, 40, 4);
     clients
-        .control_clients
+        .netplay.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
     runtime_assert!(clients.dialogs.client_list.is_none());
     press(&mut clients);
@@ -10224,10 +10224,10 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
     // process is the host, and changes nothing when it is not
     // (src/C4Network2.cpp:799-804).
     let mut guest = bound("NetAllowJoinToggle");
-    let before = guest.runtime_network_join_allowed;
+    let before = guest.netplay.runtime_join_allowed;
     press(&mut guest);
     runtime_assert_eq!(
-        guest.runtime_network_join_allowed => before,
+        guest.netplay.runtime_join_allowed => before,
         "a non-host toggles no admission gate",
     );
 }

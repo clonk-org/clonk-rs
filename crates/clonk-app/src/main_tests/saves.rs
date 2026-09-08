@@ -501,8 +501,8 @@ fn classic_record_stream_is_converted_and_activated() {
     main_assert_eq!(app.classic_command_line.scenario.as_deref() => Some(output_path.as_path()));
     main_assert_eq!(app.scenario_lifecycle.active.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(output_path.as_path()));
     main_assert!(app.records.playback.is_some());
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(!app.records.classic_stream_activation_pending);
     main_assert!(output_path.is_dir());
     for child in ["OriginChild.c4g", "InitialChild.c4g", "LaterChild.c4g"] {
@@ -718,7 +718,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
 
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
     let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
-    app.admission_resources
+    app.netplay.admission_resources
         .mark_complete(stale_resource.id, stale_resource_path);
     app.start_scenario(FrontendScenario::from_command_line(&packed_replay_path))
         .test_value();
@@ -799,7 +799,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     // not append team 5 (C4PlayerInfo.cpp:819-831; C4Teams.cpp:409-420).
     main_assert!(!teams.iter().any(|team| team.id == 5));
     main_assert_eq!(teams.iter().find(|team| team.id == 3).map(|team| team.player_ids.as_slice()) => Some(&[7][..]));
-    main_assert!(app.control_clients.snapshot().is_empty(), "replay PlayerInfos packets do not synthesize Parameters.Clients");
+    main_assert!(app.netplay.control_clients.snapshot().is_empty(), "replay PlayerInfos packets do not synthesize Parameters.Clients");
     main_assert_eq!(app.engine.game_time() => 17);
     main_assert_eq!(app.players.infos.retained_rows_snapshot().0 => 7, "SavePlayerInfos overwrites the replay PlayerInfos ID counter");
     // InitGame snapshots the raw PlayerInfos before InitPlayers merges the
@@ -1405,13 +1405,13 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
     )
     .test_value());
     main_assert!(staged.scenario.as_ref().expect("reloaded staged scenario").lobby_metadata().expect("reloaded lobby metadata").head().is_replay());
-    app.staged_network_host_scenario = Some(staged);
-    app.network_mode = Some(NetworkMode::Host(HostSettings {
+    app.netplay.staged_host_scenario = Some(staged);
+    app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
         player_name: "Exact Host".to_string(),
         prepared: None,
     }));
-    app.control_clients.replace_snapshot([
+    app.netplay.control_clients.replace_snapshot([
         clonk_engine::ClientCoreControlData {
             client_id: 0,
             activated: true,
@@ -4904,7 +4904,7 @@ fn savegame_slot_probe_uses_c4group_validity() {
     scenario.identifier = "Probe.c4s".to_string();
     scenario.path = Some(fixture.path().join("Probe.c4s"));
     app.scenario_lifecycle.active = Some(scenario);
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     main_assert!(app.can_quick_save(), "offline saves ignore retained league state");
 
     let slot_root = save_root.join("Probe.c4f");

@@ -163,7 +163,7 @@ impl GameApp {
     pub(crate) fn startup_network_transition_active(&self) -> bool {
         self.mode != AppMode::Running
             && (self.startup_network.connection.is_some()
-                || self.pending_network_host_preparation.is_some())
+                || self.netplay.pending_host_preparation.is_some())
     }
 
     fn startup_network_join_progress_active(&self) -> bool {
@@ -814,11 +814,11 @@ impl GameApp {
         MainMenuConditions {
             has_player: players.iter().any(|state| state.id == player),
             player_count: players.len(),
-            max_players: self.network_max_players,
-            is_league: self.network_is_league,
-            network_enabled: self.network.is_some(),
-            network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
-            network_has_clients: self.network.is_some(),
+            max_players: self.netplay.max_players,
+            is_league: self.netplay.is_league,
+            network_enabled: self.netplay.manager.is_some(),
+            network_host: matches!(self.netplay.mode, Some(NetworkMode::Host(_))),
+            network_has_clients: self.netplay.manager.is_some(),
             is_fullscreen: self.rendering.display_flags.is_fullscreen,
             team_switch_allowed: self.engine.team_configuration().allow_team_switch,
         }
@@ -2288,16 +2288,19 @@ impl GameApp {
         self.startup_network.connection = Some(connection);
         if purpose == StartupNetworkPurpose::StagedHost {
             let initial_fonts = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .and_then(|staged| staged.loader_screen.as_ref())
                 .map(|loader| loader.resources().fonts().clone());
             let initial_tooltip = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .map(|staged| staged.loader_initial_tooltip_font.clone());
             let initial_native_source = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .and_then(|staged| staged.loader_initial_native_font_source.clone());
             if let (Some(fonts), Some(tooltip)) = (initial_fonts, initial_tooltip) {
@@ -2309,7 +2312,8 @@ impl GameApp {
             self.cancel_underlying_interaction();
             self.replace_startup_view(StartupView::NetworkGame);
             if let Some(mut loader) = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_mut()
                 .and_then(|staged| staged.loader_screen.take())
             {
@@ -2420,55 +2424,55 @@ impl GameApp {
         self.lobby.classic_host = None;
         self.lobby.session = None;
         self.lobby.start_wait = None;
-        self.pending_network_host_preparation = None;
-        self.staged_network_host_scenario = None;
+        self.netplay.pending_host_preparation = None;
+        self.netplay.staged_host_scenario = None;
         self.lobby.min_players = None;
         self.reinitialize_startup_loader_screen();
         self.abandon_live_masterserver_signup();
         self.clear_pending_league_player_auth();
-        self.network_game_advertiser = None;
-        self.advertised_game_reference = None;
-        self.host_reference_paused = false;
-        self.runtime_network_control_mode = None;
-        self.runtime_network_committed_control_mode = None;
-        self.runtime_network_committed_status = None;
-        self.runtime_network_join_allowed = None;
-        self.network = None;
-        self.network_mode = None;
-        self.host_join_snapshot = None;
-        self.pending_runtime_dynamic_request = None;
+        self.netplay.game_advertiser = None;
+        self.netplay.advertised_game_reference = None;
+        self.netplay.host_reference_paused = false;
+        self.netplay.runtime_control_mode = None;
+        self.netplay.runtime_committed_control_mode = None;
+        self.netplay.runtime_committed_status = None;
+        self.netplay.runtime_join_allowed = None;
+        self.netplay.manager = None;
+        self.netplay.mode = None;
+        self.netplay.host_join_snapshot = None;
+        self.netplay.pending_runtime_dynamic_request = None;
         self.lobby.host_countdown = None;
         self.lobby.pending_local_countdown_echoes.clear();
-        self.network_ticks.clear();
-        self.network_sync.clear();
-        self.offline_control_input.clear();
-        self.sync_checks.clear();
-        self.network_control_clock = None;
+        self.netplay.ticks.clear();
+        self.netplay.sync.clear();
+        self.netplay.offline_control_input.clear();
+        self.netplay.sync_checks.clear();
+        self.netplay.control_clock = None;
         self.players.host_local_alternate_colors.clear();
         self.players.host_local_info_ids.clear();
-        self.network_is_league = false;
-        self.network_league_name.clear();
-        self.network_stream_address = LegacyCString::default();
+        self.netplay.is_league = false;
+        self.netplay.league_name.clear();
+        self.netplay.stream_address = LegacyCString::default();
         self.players.infos = ControlPlayerInfoRegistry::default();
         self.clear_blocking_resource_wait();
-        self.admission_resources.clear();
+        self.netplay.admission_resources.clear();
         seed_engine_player_info_parameters(
             &mut self.engine,
-            &self.network_league_name,
+            &self.netplay.league_name,
             &self.players.infos,
         );
-        self.network_control_running = true;
-        self.runtime_network_status_barrier = None;
-        self.control_clients = initial_control_clients(None, None);
-        self.network_client_activity.clear();
-        self.pending_network_join = None;
-        self.pending_network_join_data = None;
-        self.pending_round_restart_join_data = false;
-        self.initial_lobby_status_ack_pending = false;
-        self.client_start_barrier = ClientStartBarrier::default();
-        self.pending_client_start_status = None;
-        self.client_combined_scenario_path = None;
-        self.client_combined_preload_file.clear();
+        self.netplay.control_running = true;
+        self.netplay.runtime_status_barrier = None;
+        self.netplay.control_clients = initial_control_clients(None, None);
+        self.netplay.client_activity.clear();
+        self.netplay.pending_join = None;
+        self.netplay.pending_join_data = None;
+        self.netplay.pending_round_restart_join_data = false;
+        self.netplay.initial_lobby_status_ack_pending = false;
+        self.netplay.client_start_barrier = ClientStartBarrier::default();
+        self.netplay.pending_client_start_status = None;
+        self.netplay.client_combined_scenario_path = None;
+        self.netplay.client_combined_preload_file.clear();
         self.scenario_lifecycle.network_material_resource_groups = None;
         self.scenario_lifecycle.loading = None;
         self.scenario_lifecycle.active = None;
@@ -2511,16 +2515,16 @@ impl GameApp {
         // The notice is armed while the host is still connected, and a host
         // that announces a restart it then abandons must cost this client
         // nothing. Only the session actually going away starts the clock.
-        if self.network.is_some() {
+        if self.netplay.manager.is_some() {
             return Ok(());
         }
         let now = Instant::now();
-        let Some(rejoin) = self.pending_host_rejoin.as_ref() else {
+        let Some(rejoin) = self.netplay.pending_host_rejoin.as_ref() else {
             return Ok(());
         };
         if now >= rejoin.deadline {
             let targets = startup_network_connect_targets(&rejoin.settings);
-            self.pending_host_rejoin = None;
+            self.netplay.pending_host_rejoin = None;
             return self.finish_startup_network_failure(
                 StartupNetworkPurpose::Join,
                 format!("The restarting host at {targets} did not come back in time"),
@@ -2530,10 +2534,10 @@ impl GameApp {
             return Ok(());
         }
         let settings = rejoin.settings.clone();
-        if let Some(rejoin) = self.pending_host_rejoin.as_mut() {
+        if let Some(rejoin) = self.netplay.pending_host_rejoin.as_mut() {
             rejoin.next_attempt_at = Some(now + HOST_REJOIN_RETRY_INTERVAL);
         }
-        self.pending_network_join = Some(settings);
+        self.netplay.pending_join = Some(settings);
         self.launch_pending_network_join()
     }
 
@@ -2545,11 +2549,11 @@ impl GameApp {
     /// being followed next frame by a second teardown from the expiry branch.
     fn defer_pending_host_rejoin(&mut self) -> bool {
         let now = Instant::now();
-        let Some(rejoin) = self.pending_host_rejoin.as_mut() else {
+        let Some(rejoin) = self.netplay.pending_host_rejoin.as_mut() else {
             return false;
         };
         if now >= rejoin.deadline {
-            self.pending_host_rejoin = None;
+            self.netplay.pending_host_rejoin = None;
             return false;
         }
         rejoin.next_attempt_at = Some(now + HOST_REJOIN_RETRY_INTERVAL);
@@ -2603,7 +2607,7 @@ impl GameApp {
                 // Whatever this session turns out to be, the reconnect that a
                 // restart notice asked for is over. An armed window left
                 // running would later expire under a live lobby.
-                self.pending_host_rejoin = None;
+                self.netplay.pending_host_rejoin = None;
                 if let Some(response) = manager.take_league_start_response() {
                     if let NetworkMode::Host(HostSettings {
                         prepared: Some(prepared),
@@ -2618,7 +2622,7 @@ impl GameApp {
                         }
                     }
                     if response.max_players != 0 {
-                        if let Some(staged) = self.staged_network_host_scenario.as_mut() {
+                        if let Some(staged) = self.netplay.staged_host_scenario.as_mut() {
                             staged.lobby.max_players = response.max_players;
                         }
                     }
@@ -2670,7 +2674,7 @@ impl GameApp {
                         ..
                     }) = &mut mode
                     {
-                        if let Some(staged) = self.staged_network_host_scenario.as_mut() {
+                        if let Some(staged) = self.netplay.staged_host_scenario.as_mut() {
                             if let Some(parameters) = prepared
                                 .host_config()
                                 .initial_join_snapshot
@@ -2718,13 +2722,13 @@ impl GameApp {
                     }
                 }
                 if purpose == StartupNetworkPurpose::Join {
-                    self.pending_network_join = None;
+                    self.netplay.pending_join = None;
                     self.players.host_local_alternate_colors.clear();
                     self.players.host_local_info_ids.clear();
                 }
                 // InitNetwork constructs a fresh C4Network2Client list; no
                 // activity timestamp survives into the new socket session.
-                self.network_client_activity.clear();
+                self.netplay.client_activity.clear();
                 if purpose == StartupNetworkPurpose::StagedHost {
                     let control_clients = initial_control_clients(Some(&manager), Some(&mode));
                     let network_control_clock = initial_network_control_clock(Some(&mode));
@@ -2740,9 +2744,9 @@ impl GameApp {
                                 previous_player_infos =
                                     Some(std::mem::take(&mut self.players.infos));
                                 previous_admission_resources =
-                                    Some(std::mem::take(&mut self.admission_resources));
+                                    Some(std::mem::take(&mut self.netplay.admission_resources));
                                 let player_infos = &mut self.players.infos;
-                                let resources = &mut self.admission_resources;
+                                let resources = &mut self.netplay.admission_resources;
                                 match prepared.install_initial_host_player_state(
                                     player_infos,
                                     |core, path| {
@@ -2755,7 +2759,7 @@ impl GameApp {
                                         self.players.infos = previous_player_infos
                                             .take()
                                             .expect("prepared install saved the previous registry");
-                                        self.admission_resources =
+                                        self.netplay.admission_resources =
                                             previous_admission_resources.take().expect(
                                                 "prepared install saved the previous resources",
                                             );
@@ -2782,7 +2786,7 @@ impl GameApp {
                             if let Some(previous_admission_resources) =
                                 previous_admission_resources.take()
                             {
-                                self.admission_resources = previous_admission_resources;
+                                self.netplay.admission_resources = previous_admission_resources;
                             }
                             return self.finish_startup_network_failure(
                                 purpose,
@@ -2795,7 +2799,7 @@ impl GameApp {
                     self.players.host_local_info_ids =
                         initial_host_local_player_info_ids(Some(&mode));
                     self.prune_host_local_alternate_colors();
-                    if self.staged_network_host_scenario.is_none()
+                    if self.netplay.staged_host_scenario.is_none()
                         && matches!(
                             &mode,
                             NetworkMode::Host(HostSettings {
@@ -2831,29 +2835,30 @@ impl GameApp {
                             {
                                 self.start_prepared_network_game_advertiser(prepared, &manager);
                             }
-                            self.network_max_players = initial_network_max_players(Some(&mode));
+                            self.netplay.max_players = initial_network_max_players(Some(&mode));
                             self.engine.set_max_players(
-                                i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+                                i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX),
                             );
-                            self.control_clients = control_clients;
-                            self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
-                            self.network_is_league = initial_network_is_league(Some(&mode));
-                            self.network_league_name = initial_network_league_name(Some(&mode));
-                            self.network_stream_address =
+                            self.netplay.control_clients = control_clients;
+                            self.netplay.host_join_snapshot =
+                                initial_host_join_snapshot(Some(&mode));
+                            self.netplay.is_league = initial_network_is_league(Some(&mode));
+                            self.netplay.league_name = initial_network_league_name(Some(&mode));
+                            self.netplay.stream_address =
                                 initial_network_stream_address(Some(&mode));
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
-                                &self.network_league_name,
+                                &self.netplay.league_name,
                                 &self.players.infos,
                             );
                             self.players.team_assignment = initial_network_team_assignment(
                                 Some(&mode),
                                 &self.players.generated_team_name_template,
                             );
-                            self.network_mode = Some(mode);
-                            self.network = Some(manager);
-                            self.network_control_running = false;
-                            self.network_control_clock = network_control_clock;
+                            self.netplay.mode = Some(mode);
+                            self.netplay.manager = Some(manager);
+                            self.netplay.control_running = false;
+                            self.netplay.control_clock = network_control_clock;
                             self.lobby.session = Some(lobby);
                             self.lobby.classic_host = None;
                             self.mode = AppMode::Menu;
@@ -2897,39 +2902,40 @@ impl GameApp {
                                     self.start_prepared_network_game_advertiser(prepared, &manager)
                                 }
                                 NetworkMode::Host(_)
-                                    if self.pending_network_host_preparation.is_some() =>
+                                    if self.netplay.pending_host_preparation.is_some() =>
                                 {
                                     self.start_preparing_network_game_advertiser(&manager)
                                 }
                                 NetworkMode::Host(_) | NetworkMode::Client(_) => {
-                                    self.network_game_advertiser = None;
-                                    self.advertised_game_reference = None;
-                                    self.host_reference_paused = false;
+                                    self.netplay.game_advertiser = None;
+                                    self.netplay.advertised_game_reference = None;
+                                    self.netplay.host_reference_paused = false;
                                 }
                             }
-                            self.network_max_players = initial_network_max_players(Some(&mode));
+                            self.netplay.max_players = initial_network_max_players(Some(&mode));
                             self.engine.set_max_players(
-                                i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+                                i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX),
                             );
-                            self.control_clients = control_clients;
-                            self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
-                            self.network_is_league = initial_network_is_league(Some(&mode));
-                            self.network_league_name = initial_network_league_name(Some(&mode));
-                            self.network_stream_address =
+                            self.netplay.control_clients = control_clients;
+                            self.netplay.host_join_snapshot =
+                                initial_host_join_snapshot(Some(&mode));
+                            self.netplay.is_league = initial_network_is_league(Some(&mode));
+                            self.netplay.league_name = initial_network_league_name(Some(&mode));
+                            self.netplay.stream_address =
                                 initial_network_stream_address(Some(&mode));
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
-                                &self.network_league_name,
+                                &self.netplay.league_name,
                                 &self.players.infos,
                             );
                             self.players.team_assignment = initial_network_team_assignment(
                                 Some(&mode),
                                 &self.players.generated_team_name_template,
                             );
-                            self.network_mode = Some(mode);
-                            self.network = Some(manager);
-                            self.network_control_running = false;
-                            self.network_control_clock = network_control_clock;
+                            self.netplay.mode = Some(mode);
+                            self.netplay.manager = Some(manager);
+                            self.netplay.control_running = false;
+                            self.netplay.control_clock = network_control_clock;
                             self.lobby.session = None;
                             self.lobby.classic_host = Some(lobby);
                             self.sync_classic_lobby_roster();
@@ -2951,7 +2957,7 @@ impl GameApp {
                             if let Some(previous_admission_resources) =
                                 previous_admission_resources.take()
                             {
-                                self.admission_resources = previous_admission_resources;
+                                self.netplay.admission_resources = previous_admission_resources;
                             }
                             tracing::error!(%error, "cannot enter exact classic host lobby");
                             return self.finish_startup_network_failure(
@@ -2979,27 +2985,27 @@ impl GameApp {
                                 .preloading,
                                 self.classic_lobby_labels(),
                             );
-                    self.network_game_advertiser = None;
-                    self.advertised_game_reference = None;
-                    self.host_reference_paused = false;
-                    self.network_max_players = initial_network_max_players(Some(&mode));
+                    self.netplay.game_advertiser = None;
+                    self.netplay.advertised_game_reference = None;
+                    self.netplay.host_reference_paused = false;
+                    self.netplay.max_players = initial_network_max_players(Some(&mode));
                     self.engine.set_max_players(
-                        i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+                        i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX),
                     );
-                    self.network_is_league = initial_network_is_league(Some(&mode));
-                    self.network_league_name = initial_network_league_name(Some(&mode));
-                    self.network_stream_address = initial_network_stream_address(Some(&mode));
+                    self.netplay.is_league = initial_network_is_league(Some(&mode));
+                    self.netplay.league_name = initial_network_league_name(Some(&mode));
+                    self.netplay.stream_address = initial_network_stream_address(Some(&mode));
                     seed_engine_player_info_parameters(
                         &mut self.engine,
-                        &self.network_league_name,
+                        &self.netplay.league_name,
                         &self.players.infos,
                     );
-                    self.network_control_clock = initial_network_control_clock(Some(&mode));
-                    self.control_clients = control_clients;
-                    self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
-                    self.network_mode = Some(mode);
-                    self.network = Some(manager);
-                    self.network_control_running = false;
+                    self.netplay.control_clock = initial_network_control_clock(Some(&mode));
+                    self.netplay.control_clients = control_clients;
+                    self.netplay.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
+                    self.netplay.mode = Some(mode);
+                    self.netplay.manager = Some(manager);
+                    self.netplay.control_running = false;
                     self.players.team_assignment = None;
                     self.lobby.session = Some(lobby);
                     self.lobby.classic_host = None;
@@ -3012,7 +3018,7 @@ impl GameApp {
             }
             Err(NetworkStartError::WrongPassword { .. })
                 if purpose == StartupNetworkPurpose::Join
-                    && self.pending_network_join.is_some() =>
+                    && self.netplay.pending_join.is_some() =>
             {
                 self.mode = AppMode::Menu;
                 if let Err(error) = self.open_network_join_password_dialog() {
@@ -4892,7 +4898,7 @@ impl GameApp {
                 self.open_scenario_browser();
             }
             MainMenuItem::NetworkGame => {
-                if self.network_mode.is_some() && self.lobby.session.is_some() {
+                if self.netplay.mode.is_some() && self.lobby.session.is_some() {
                     self.open_network_lobby();
                 } else {
                     self.begin_startup_dialog_fade(StartupDialog::NetworkGame);
@@ -5206,7 +5212,7 @@ impl GameApp {
         self.definition_selection.pointer_capture = false;
         self.clear_pending_league_player_auth();
         self.startup_network.connection = None;
-        self.pending_network_host_preparation = None;
+        self.netplay.pending_host_preparation = None;
         self.startup_network.game_search = None;
         self.startup_network.last_refresh = None;
         self.startup_network.masterserver_next_query_at = None;
@@ -5218,52 +5224,52 @@ impl GameApp {
         self.startup_network.last_click = None;
         self.startup_network.join_edit_last_click = None;
         self.startup_network.edit_consumed_keys.clear();
-        self.pending_network_join = None;
-        self.network_game_advertiser = None;
-        self.advertised_game_reference = None;
-        self.host_reference_paused = false;
-        self.runtime_network_control_mode = None;
-        self.runtime_network_committed_control_mode = None;
-        self.runtime_network_committed_status = None;
-        self.runtime_network_join_allowed = None;
+        self.netplay.pending_join = None;
+        self.netplay.game_advertiser = None;
+        self.netplay.advertised_game_reference = None;
+        self.netplay.host_reference_paused = false;
+        self.netplay.runtime_control_mode = None;
+        self.netplay.runtime_committed_control_mode = None;
+        self.netplay.runtime_committed_status = None;
+        self.netplay.runtime_join_allowed = None;
         if self.startup.view == StartupView::NetworkLobby {
             self.control_messages.clear_clients();
             self.lobby.session = None;
             self.lobby.classic_host = None;
             self.lobby.start_wait = None;
-            self.staged_network_host_scenario = None;
+            self.netplay.staged_host_scenario = None;
             self.lobby.min_players = None;
             self.clear_lobby_preload();
             self.lobby.host_countdown = None;
             self.lobby.pending_local_countdown_echoes.clear();
             self.reinitialize_startup_loader_screen();
             self.abandon_live_masterserver_signup();
-            self.network = None;
-            self.network_mode = None;
-            self.host_join_snapshot = None;
-            self.pending_runtime_dynamic_request = None;
-            self.network_ticks.clear();
-            self.network_sync.clear();
-            self.offline_control_input.clear();
-            self.sync_checks.clear();
+            self.netplay.manager = None;
+            self.netplay.mode = None;
+            self.netplay.host_join_snapshot = None;
+            self.netplay.pending_runtime_dynamic_request = None;
+            self.netplay.ticks.clear();
+            self.netplay.sync.clear();
+            self.netplay.offline_control_input.clear();
+            self.netplay.sync_checks.clear();
             self.clear_blocking_resource_wait();
-            self.admission_resources.clear();
+            self.netplay.admission_resources.clear();
             self.players.host_local_alternate_colors.clear();
             self.players.host_local_info_ids.clear();
-            self.executing_ready_tick = None;
+            self.netplay.executing_ready_tick = None;
             self.players.infos = ControlPlayerInfoRegistry::default();
-            self.network_is_league = false;
-            self.network_league_name.clear();
-            self.network_stream_address = LegacyCString::default();
+            self.netplay.is_league = false;
+            self.netplay.league_name.clear();
+            self.netplay.stream_address = LegacyCString::default();
             seed_engine_player_info_parameters(
                 &mut self.engine,
-                &self.network_league_name,
+                &self.netplay.league_name,
                 &self.players.infos,
             );
-            self.network_control_running = true;
-            self.runtime_network_status_barrier = None;
-            self.control_clients = initial_control_clients(None, None);
-            self.network_client_activity.clear();
+            self.netplay.control_running = true;
+            self.netplay.runtime_status_barrier = None;
+            self.netplay.control_clients = initial_control_clients(None, None);
+            self.netplay.client_activity.clear();
             let values = self.scenario_game_option_values();
             self.scenario_game_options =
                 GameOptionButtons::new(GameOptionContext::LocalSelector, values);
@@ -5434,10 +5440,10 @@ impl GameApp {
             // in `Loading` and let `poll_loading` carry the scenario to `Running`.
             if self.scenario_lifecycle.loading.is_none()
                 && self.startup_network.connection.is_none()
-                && self.classic_direct_reference_query.is_none()
+                && self.netplay.classic_direct_reference_query.is_none()
             {
                 self.mode = AppMode::Menu;
-                if self.network_mode.is_some() && self.lobby.session.is_some() {
+                if self.netplay.mode.is_some() && self.lobby.session.is_some() {
                     // A command-line host/client has already completed network
                     // initialization. C++ proceeds directly into DoLobby here;
                     // returning to the main menu would leave GS_Lobby unacked

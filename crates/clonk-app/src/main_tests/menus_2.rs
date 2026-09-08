@@ -1174,7 +1174,7 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     // (C4GuiDialogs.cpp:386-425; C4MainMenu.cpp:313-329).
     let mut app = new_classic_running_sandbox_app();
     let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     app.open_ingame_menu().test_value();
     app.apply_ingame_menu_action(MenuAction::ActivateOptions)
@@ -1329,7 +1329,7 @@ fn subthreshold_constructable_menu_click_still_enters_item() {
     let (mut app, owner, menu_point, _valid, _invalid, _world, _c4id) = construction_drag_fixture();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
 
     app.test_cursor(PhysicalPosition::new(
@@ -1352,7 +1352,7 @@ fn invalid_construction_menu_drop_sends_nothing_and_clears_drag() {
         construction_drag_fixture();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     begin_construction_drag(&mut app, menu_point, valid_point);
     main_assert!(matches!(app.ingame_menus.construction_drag.as_ref(), Some(ConstructionMenuDrag::Active {site_valid: true,..})));
@@ -1445,7 +1445,7 @@ fn construction_menu_drag_reprojects_stationary_pointer_after_camera_motion() {
 
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     app.test_left_button(ElementState::Released);
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
@@ -1505,7 +1505,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        app.network = Some(manager);
+        app.netplay.manager = Some(manager);
         app.dispatch_control_event_for_local_player(
             owner,
             ControlEvent::Command {
@@ -3304,20 +3304,20 @@ fn bare_escape_opens_abort_confirmation_without_exiting() {
 #[test]
 fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
     let mut unpaused = new_running_sandbox_app();
-    main_assert_eq!(unpaused.offline_halt_count => 0);
+    main_assert_eq!(unpaused.netplay.offline_halt_count => 0);
     main_assert!(unpaused.show_abort_dialog(unpaused.players.local_owner));
-    main_assert_eq!(unpaused.offline_halt_count => 1);
+    main_assert_eq!(unpaused.netplay.offline_halt_count => 1);
     main_assert!(!unpaused.show_abort_dialog(unpaused.players.local_owner), "the singleton abort dialog cannot acquire a second halt lease");
-    main_assert_eq!(unpaused.offline_halt_count => 1);
+    main_assert_eq!(unpaused.netplay.offline_halt_count => 1);
     finish_abort_dialog(
         &mut unpaused,
         clonk_frontend::message_dialog::MessageDialogResult::No,
     );
-    main_assert_eq!(unpaused.offline_halt_count => 0);
+    main_assert_eq!(unpaused.netplay.offline_halt_count => 0);
 
     let mut app = new_running_sandbox_app();
     app.set_runtime_pause(true);
-    main_assert_eq!(app.offline_halt_count => 1);
+    main_assert_eq!(app.netplay.offline_halt_count => 1);
     app.engine
         .test_player_mut(app.players.local_owner)
         .control
@@ -3325,7 +3325,7 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
     let frozen_frame = app.engine.frame();
 
     main_assert!(app.show_abort_dialog(app.players.local_owner));
-    main_assert_eq!(app.offline_halt_count => 2);
+    main_assert_eq!(app.netplay.offline_halt_count => 2);
     main_assert!(app.runtime_halt_active());
     app.test_update();
     main_assert_eq!(app.engine.frame() => frozen_frame);
@@ -3334,25 +3334,25 @@ fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
         &mut app,
         clonk_frontend::message_dialog::MessageDialogResult::No,
     );
-    main_assert_eq!(app.offline_halt_count => 1);
+    main_assert_eq!(app.netplay.offline_halt_count => 1);
     main_assert!(app.runtime_halt_active(), "the prior pause remains owned");
     main_assert_eq!(app.engine.player(app.players.local_owner).expect("local player").control.pressed_coms => 0, "decline clears every local player's pressed commands");
 
     main_assert!(app.show_abort_dialog(app.players.local_owner));
-    main_assert_eq!(app.offline_halt_count => 2);
+    main_assert_eq!(app.netplay.offline_halt_count => 2);
     let index = app.dialogs.messages.len() - 1;
     app.remove_message_dialog_at(index).test_value();
-    main_assert_eq!(app.offline_halt_count => 1);
+    main_assert_eq!(app.netplay.offline_halt_count => 1);
     app.set_runtime_pause(false);
-    main_assert_eq!(app.offline_halt_count => 0);
+    main_assert_eq!(app.netplay.offline_halt_count => 0);
 
     let mut network = new_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut network, 0, 0, 1);
     main_assert!(network.show_abort_dialog(network.players.local_owner));
-    main_assert_eq!(network.offline_halt_count => 0);
+    main_assert_eq!(network.netplay.offline_halt_count => 0);
     finish_abort_dialog(
         &mut network,
         clonk_frontend::message_dialog::MessageDialogResult::No,
     );
-    main_assert_eq!(network.offline_halt_count => 0);
+    main_assert_eq!(network.netplay.offline_halt_count => 0);
 }

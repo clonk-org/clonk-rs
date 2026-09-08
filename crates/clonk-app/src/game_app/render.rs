@@ -58,9 +58,10 @@ impl GameApp {
                 stats.automatic_graphics_skips_per_second(),
             ),
         ];
-        if let Some(clock) = self.network_control_clock {
+        if let Some(clock) = self.netplay.control_clock {
             let route_snapshot = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .map(NetworkManager::runtime_connections_snapshot)
                 .unwrap_or_default();
@@ -3470,7 +3471,7 @@ impl GameApp {
         if self.developer.component_editor.is_some() {
             return;
         }
-        if !component_editor_available(self.network.is_some()) {
+        if !component_editor_available(self.netplay.manager.is_some()) {
             let message = self.runtime_resource_text(
                 "IDS_CNS_NONETEDIT",
                 "No editing while a network game is running.",
@@ -4538,7 +4539,7 @@ impl GameApp {
         // caller, so the live flag is what is passed.
         let reloaded = self
             .engine
-            .reload_definition(&definition, self.network.is_some());
+            .reload_definition(&definition, self.netplay.manager.is_some());
         tracing::debug!(%definition, reloaded, "property page reload dispatched");
         // `ReloadDef` updates every affected object's face on success and
         // removes every object of the definition on failure, so the page's
@@ -5416,7 +5417,7 @@ impl GameApp {
         if changed.is_empty() {
             return;
         }
-        let network_game = self.network.is_some();
+        let network_game = self.netplay.manager.is_some();
         for path in changed {
             let path = path.to_string_lossy().into_owned();
             let route = changed_file_route(network_game, &path, |candidate| {
@@ -7347,7 +7348,7 @@ impl GameApp {
             .context("application paths are unavailable for the network GUI overloading")?;
         let definition_load = self.scenario_lifecycle.definition_load.as_ref();
         let (head, catalog, mut graphics_registrations) =
-            if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+            if matches!(self.netplay.mode, Some(NetworkMode::Client(_))) {
                 // A client's Extra.Init ran before the join with the pre-join
                 // DefinitionFilenames (C4Game.cpp:368-381), so its set keeps
                 // no per-definition Extra children; the synchronized
@@ -7399,11 +7400,12 @@ impl GameApp {
             .unwrap_or(0)
             .saturating_add(1);
         let mut appended = false;
-        for (resource_id, state) in &self.admission_resources.resources {
+        for (resource_id, state) in &self.netplay.admission_resources.resources {
             let AdmissionResourceState::Complete { path, .. } = state else {
                 continue;
             };
             let arrived_definitions = self
+                .netplay
                 .admission_resources
                 .resource_cores
                 .get(resource_id)

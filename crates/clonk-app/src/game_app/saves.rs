@@ -57,12 +57,12 @@ impl GameApp {
         parameters.fair_crew_forced = self.engine.fair_crew_forced();
         parameters.fair_crew_strength = self.engine.fair_crew_strength();
         parameters.allow_debug = self.engine.allow_debug();
-        parameters.is_network_game = self.network.is_some();
+        parameters.is_network_game = self.netplay.manager.is_some();
         parameters.control_rate = self.engine.control_rate();
         parameters.auto_frame_skip = self.auto_frame_skip;
         parameters.player_infos = self.recording_player_info_snapshot();
         parameters.clients =
-            clonk_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+            clonk_network::JoinClientRegistrySnapshot::new(self.netplay.control_clients.snapshot());
         clonk_network::serialize_initial_network_parameters(&parameters, &seed.scenario_defaults)
             .context("serialize live save Parameters.txt")
     }
@@ -101,7 +101,7 @@ impl GameApp {
             ClassicSaveDescriptionKind::Record => {
                 ("IDS_DESC_DATEREC", "Recording from %i.%i.%i %02d:%02d.")
             }
-            ClassicSaveDescriptionKind::Savegame if self.network.is_some() => {
+            ClassicSaveDescriptionKind::Savegame if self.netplay.manager.is_some() => {
                 ("IDS_DESC_DATENET", "Network game from %i.%i.%i %02d:%02d.")
             }
             ClassicSaveDescriptionKind::Savegame => {
@@ -156,20 +156,20 @@ impl GameApp {
             lines.push((definitions, true));
         }
 
-        if matches!(kind, ClassicSaveDescriptionKind::Record) && self.network_is_league {
+        if matches!(kind, ClassicSaveDescriptionKind::Record) && self.netplay.is_league {
             let league = resource_bytes("IDS_PRC_LEAGUE", "Using league '%s'");
             lines.push((
                 developer_console_save::format_resource_strings(
                     &league,
-                    &[self.network_league_name.as_slice()],
+                    &[self.netplay.league_name.as_slice()],
                 ),
                 true,
             ));
         }
 
-        if self.network.is_some() {
+        if self.netplay.manager.is_some() {
             let mut clients = resource_bytes("IDS_DESC_CLIENTS", "Clients: ");
-            for (index, client) in self.control_clients.snapshot().iter().enumerate() {
+            for (index, client) in self.netplay.control_clients.snapshot().iter().enumerate() {
                 if index != 0 {
                     clients.extend_from_slice(b", ");
                 }
@@ -328,9 +328,9 @@ impl GameApp {
             },
         };
         let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
-            &self.control_clients.snapshot(),
+            &self.netplay.control_clients.snapshot(),
             &self.recording_player_info_snapshot(),
-            self.network.is_some(),
+            self.netplay.manager.is_some(),
             validation_policy.player_policy(),
         );
         restore_plan.validate_for_live_save(
@@ -475,7 +475,9 @@ impl GameApp {
             }
         }
 
-        if self.network.is_some() && !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if self.netplay.manager.is_some()
+            && !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
+        {
             self.show_developer_console_message(
                 self.runtime_resource_text(
                     "IDS_GAME_NOCLIENTSAVE",
@@ -530,7 +532,7 @@ impl GameApp {
         });
 
         if kind == ConsoleSaveKind::Savegame {
-            if let Some(network) = self.network.as_ref() {
+            if let Some(network) = self.netplay.manager.as_ref() {
                 if let Err(error) = network.submit_queued_synchronize(
                     self.local_control_submission_tick(),
                     true,
@@ -577,6 +579,7 @@ impl GameApp {
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(self.app_paths.as_ref(), &native_config);
         let title = self
+            .netplay
             .host_join_snapshot
             .as_ref()
             .map(|snapshot| native_bytes_as_legacy_text(snapshot.parameters.title.as_bytes()))
@@ -1020,9 +1023,9 @@ impl GameApp {
     /// `C4Game::CanQuickSave` (C4Game.cpp:2205-2223): network hosts only, and
     /// running league rounds only when they are replays.
     pub(crate) fn can_quick_save(&self) -> bool {
-        self.network.is_none()
-            || (matches!(self.network_mode, Some(NetworkMode::Host(_)))
-                && (!self.network_is_league || self.engine.replay()))
+        self.netplay.manager.is_none()
+            || (matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
+                && (!self.netplay.is_league || self.engine.replay()))
     }
 
     /// The ten savegame slots (C4MainMenu.cpp:474-494).
@@ -1174,6 +1177,7 @@ impl GameApp {
             // QuickSave receives Game.Parameters.ScenarioTitle, which remains
             // stable even if later UI metadata changes.
             let label = self
+                .netplay
                 .host_join_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.parameters.title.as_bytes().to_vec())
@@ -1362,16 +1366,17 @@ impl GameApp {
                     Ok(()) => {
                         if completion.official_derivation {
                             if let (Some(network), Some((derivation, ownership))) =
-                                (self.network.as_ref(), completion.derivation)
+                                (self.netplay.manager.as_ref(), completion.derivation)
                             {
                                 match network.finish_resource_derive(derivation) {
-                                    Ok(core) => {
-                                        self.admission_resources.register_finished_derivation(
+                                    Ok(core) => self
+                                        .netplay
+                                        .admission_resources
+                                        .register_finished_derivation(
                                             &core,
                                             completion.path.clone(),
                                             ownership,
-                                        )
-                                    }
+                                        ),
                                     Err(error) => {
                                         tracing::warn!(
                                             player_number = completion.player_number,
@@ -1425,9 +1430,9 @@ impl GameApp {
             target_group_name: "",
         };
         let source_restore_plan = runtime_join_save::set_as_live_save_restore_infos(
-            &self.control_clients.snapshot(),
+            &self.netplay.control_clients.snapshot(),
             &self.recording_player_info_snapshot(),
-            self.network.is_some(),
+            self.netplay.manager.is_some(),
             savegame_policy.player_policy(),
         );
         source_restore_plan.validate_for_live_save(
@@ -1592,7 +1597,7 @@ impl GameApp {
             route_network_savegame_recreation(&mut self.players.infos, &restore_player_infos);
         seed_engine_player_info_parameters(
             &mut self.engine,
-            &self.network_league_name,
+            &self.netplay.league_name,
             &self.players.infos,
         );
         remove_unassociated_savegame_player_objects_with_logs(
@@ -1615,14 +1620,14 @@ impl GameApp {
             )
         });
         let runtime_teams = if let Some((runtime_teams, snapshot)) = exact_teams {
-            if let Some(host_snapshot) = self.host_join_snapshot.as_mut() {
+            if let Some(host_snapshot) = self.netplay.host_join_snapshot.as_mut() {
                 host_snapshot.parameters.teams = snapshot;
             }
             runtime_teams
         } else {
             let mut runtime_teams = self.engine.teams().to_vec();
             recheck_runtime_team_memberships_from_infos(&mut runtime_teams, &memberships);
-            if let Some(host_snapshot) = self.host_join_snapshot.as_mut() {
+            if let Some(host_snapshot) = self.netplay.host_join_snapshot.as_mut() {
                 recheck_join_team_memberships_from_infos(
                     &mut host_snapshot.parameters.teams.teams,
                     &memberships,
@@ -1735,7 +1740,7 @@ impl GameApp {
         let mut prejoin_recorded_player_files = Vec::new();
         let mut filename_ledger = clonk_engine::RuntimeJoinPlayerFilenameLedger::default();
         for source in &savegame.runtime_players {
-            if self.records.enabled || self.network_is_league {
+            if self.records.enabled || self.netplay.is_league {
                 if let Some(path) = savegame.recreation_record_paths.get(&source.info.id) {
                     match packed_group_bytes(path, self.process_group_maker.as_bytes()) {
                         Ok(bytes) => prejoin_recorded_player_files.push((source.info.id, bytes)),
