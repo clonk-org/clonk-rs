@@ -7385,7 +7385,10 @@ impl GameApp {
             // CMouse invokes DoDragging before top-down dialog routing, even
             // when another shared dialog now owns the pointer location.
             self.update_scoreboard_title_drag(point);
-            if self.update_menu_title_drag(point) {
+            if self
+                .ingame_menus
+                .update_title_drag(point, &mut self.dialogs, &self.engine)
+            {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
             }
@@ -11463,7 +11466,9 @@ impl GameApp {
                                         .map(|dialog| dialog.focused_control());
                                 }
                                 (ElementState::Released, Some(point))
-                                    if self.handle_startup_crew_rename_pointer_up(point) =>
+                                    if self.startup.handle_crew_rename_pointer_up(
+                                        self.startup_crew_rename_char_pos(point, false),
+                                    ) =>
                                 {
                                     return Ok(());
                                 }
@@ -12507,7 +12512,9 @@ impl GameApp {
                             return Ok(());
                         }
                         TouchPhase::Ended
-                            if self.handle_startup_crew_rename_pointer_up(position) =>
+                            if self.startup.handle_crew_rename_pointer_up(
+                                self.startup_crew_rename_char_pos(position, false),
+                            ) =>
                         {
                             self.pointer_left_unchecked();
                             return Ok(());
