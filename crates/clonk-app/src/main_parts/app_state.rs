@@ -742,6 +742,29 @@ pub(crate) struct IngameMenus {
     pub(crate) construction_drag: Option<ConstructionMenuDrag>,
 }
 
+/// The in-game mouse half of the app, the `C4MouseControl` analogue: the
+/// gameplay gate and the scenario permission behind it, the left and right
+/// button states, the object selection retained after button-up, and the
+/// Help-mode caption. `GameApp` composes it as `ingame_mouse`.
+pub(crate) struct IngameMouse {
+    /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
+    /// input (C4MainMenu.cpp:847-849).
+    pub(crate) control: bool,
+    /// False when `[Head] DisableMouse=1`; C++ then neither assigns mouse
+    /// control nor offers its Options entry (C4Player.cpp:1907-1912;
+    /// C4MainMenu.cpp:563-571).
+    pub(crate) control_allowed: bool,
+    pub(crate) left: Option<IngameButtonMouseState>,
+    pub(crate) right: Option<IngameButtonMouseState>,
+    /// C4MouseControl::Selection for object-only landscape frames. Unlike a
+    /// crew frame, C++ retains this local list after button-up so a later
+    /// object drag can issue Set + Append commands for the whole group.
+    pub(crate) dragged_objects: Vec<ObjectId>,
+    /// Tooltip-style caption installed by a Help-mode object click or region
+    /// hover, including C4MouseControl's move-count lifetime.
+    pub(crate) help_caption: Option<IngameMouseHelpCaption>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -829,6 +852,10 @@ pub(crate) struct GameApp {
     /// the close-button pointer latches and the construction drag
     /// (clonk-org/clonk-rs#1236).
     pub(crate) ingame_menus: IngameMenus,
+    /// The in-game mouse (`C4MouseControl`): whether gameplay mouse input
+    /// is on and allowed, both button states, the retained object
+    /// selection and the Help-mode caption (clonk-org/clonk-rs#1237).
+    pub(crate) ingame_mouse: IngameMouse,
     #[cfg(test)]
     pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
@@ -905,13 +932,6 @@ pub(crate) struct GameApp {
     pub(crate) white_lobby_chat: bool,
     /// Prefix GUI log lines with C++'s markup-colored wall-clock timestamp.
     pub(crate) show_log_timestamps: bool,
-    /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
-    /// input (C4MainMenu.cpp:847-849).
-    pub(crate) mouse_control: bool,
-    /// False when `[Head] DisableMouse=1`; C++ then neither assigns mouse
-    /// control nor offers its Options entry (C4Player.cpp:1907-1912;
-    /// C4MainMenu.cpp:563-571).
-    pub(crate) mouse_control_allowed: bool,
     pub(crate) mode: AppMode,
     /// The scenario selector's own state.
     pub(crate) scensel: ScenarioSelectorState,
@@ -1417,15 +1437,6 @@ pub(crate) struct GameApp {
     /// MostRecentScrolling clock. Repeated bare arrows carry the complete
     /// prior vector for 100ms without mutating deterministic player state.
     pub(crate) free_view_scroll_momentum: FreeViewScrollMomentum,
-    /// Tooltip-style caption installed by a Help-mode object click or region
-    /// hover, including C4MouseControl's move-count lifetime.
-    pub(crate) ingame_mouse_help_caption: Option<IngameMouseHelpCaption>,
-    pub(crate) mouse_state: Option<IngameButtonMouseState>,
-    pub(crate) ingame_right_mouse_state: Option<IngameButtonMouseState>,
-    /// C4MouseControl::Selection for object-only landscape frames. Unlike a
-    /// crew frame, C++ retains this local list after button-up so a later
-    /// object drag can issue Set + Append commands for the whole group.
-    pub(crate) ingame_dragged_objects: Vec<ObjectId>,
     /// Platform-side C4MC_Button_LeftDouble synthesis for winit, whose
     /// MouseInput event does not expose an OS click count.
     pub(crate) ingame_last_left_down: Option<Instant>,

@@ -462,7 +462,7 @@ fn mouse_target_acquire(
     app.live_input.ingame_mouse_target = acquired;
     app.live_input.ingame_mouse_caption.cursor = mouse_target_cursor_kind(row.cursor_mode);
     app.live_input.ingame_pointer = Some(pointer);
-    app.ingame_dragged_objects = row
+    app.ingame_mouse.dragged_objects = row
         .selection_before
         .iter()
         .map(|id| *ids.get(id).test_value())
@@ -471,14 +471,14 @@ fn mouse_target_acquire(
     if row.acquire_mode == 1 {
         return None;
     }
-    let first = *app.ingame_dragged_objects.first().test_value();
+    let first = *app.ingame_mouse.dragged_objects.first().test_value();
     let source_position = app.engine.test_object_snapshot(first).position;
     let drag = mouse_target_drag(
         pointer,
         mouse_target_position_pointer(owner, source_position),
         first,
     );
-    app.mouse_state = Some(drag);
+    app.ingame_mouse.left = Some(drag);
     Some(drag)
 }
 
@@ -621,7 +621,7 @@ fn mouse_target_run_event(row: &MouseTargetEventGolden) {
     };
     main_assert_eq!(actual_refill_ocf => row.refill_ocf_out, "{} refill_ocf_out", row.case);
     main_assert_eq!(mouse_target_packets(&mut commands, &ids) => row.packets, "{} packets", row.case);
-    main_assert_eq!(mouse_target_oracle_ids(&ids, &app.ingame_dragged_objects) => row.selection_after, "{} selection_after", row.case);
+    main_assert_eq!(mouse_target_oracle_ids(&ids, &app.ingame_mouse.dragged_objects) => row.selection_after, "{} selection_after", row.case);
 }
 
 #[test]

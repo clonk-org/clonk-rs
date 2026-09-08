@@ -1268,8 +1268,8 @@ fn player_menu_title_close_survives_disable_mouse_player_assignment() {
         .local_controls
         .initialize(test_local_control_init(owner, 0, true, true));
     main_assert!(!assignment.mouse);
-    app.mouse_control_allowed = false;
-    app.mouse_control = false;
+    app.ingame_mouse.control_allowed = false;
+    app.ingame_mouse.control = false;
     app.open_ingame_menu().test_value();
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -1315,8 +1315,8 @@ fn construction_menu_drag_uses_five_pixel_gate_and_focus_loss_clears_capture() {
         f64::from(menu_point.y),
     ));
     main_assert!(app.ingame_construction_drag_active());
-    main_assert!(app.mouse_state.is_none());
-    main_assert!(app.ingame_right_mouse_state.is_none());
+    main_assert!(app.ingame_mouse.left.is_none());
+    main_assert!(app.ingame_mouse.right.is_none());
     main_assert!(app.ingame_custom_cursor_active());
 
     app.handle_focus_lost().test_value();
@@ -1893,8 +1893,8 @@ fn script_menu_close_survives_disable_mouse_object_assignment() {
         .local_controls
         .initialize(test_local_control_init(owner, 0, true, true));
     main_assert!(!assignment.mouse);
-    app.mouse_control_allowed = false;
-    app.mouse_control = false;
+    app.ingame_mouse.control_allowed = false;
+    app.ingame_mouse.control = false;
 
     let cursor = app.engine.test_crew_cursor(owner);
     let menu = two_item_script_menu(cursor);
@@ -2470,7 +2470,7 @@ fn script_menu_scroll_and_drag_state_is_per_viewport_owner() {
             false,
         ));
     }
-    app.mouse_control = true;
+    app.ingame_mouse.control = true;
     install_test_cursor_menu(
         &mut app,
         primary_cursor,

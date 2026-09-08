@@ -1106,9 +1106,11 @@ impl GameApp {
             .network_chart_resources()
             .expect("network chart resources were preflighted before rendering");
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         dialog.render(
             self.rendering.graphics.surface_mut(),
@@ -1132,9 +1134,11 @@ impl GameApp {
         };
         let assets = Arc::clone(&self.assets);
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         let keyboard_active = self.runtime_client_list_draw_active();
         let mouse_active = self.runtime_client_list_mouse_active();
@@ -1184,9 +1188,11 @@ impl GameApp {
             .runtime_client_list_resources()
             .expect("runtime client-list resources were preflighted before rendering");
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         dialog.render_tooltip(
             self.rendering.graphics.surface_mut(),
@@ -2006,7 +2012,7 @@ impl GameApp {
     }
 
     pub(crate) fn ingame_selection_frame(&self) -> Option<(Vec<ObjectId>, Vector2, GuiPoint)> {
-        if !self.mouse_control
+        if !self.ingame_mouse.control
             || !matches!(self.mode, AppMode::Running)
             || self.dialogs.game_over.is_some()
             || self.dialogs.game_option_input.is_some()
@@ -2015,12 +2021,14 @@ impl GameApp {
             return None;
         }
         let motion = self
-            .ingame_right_mouse_state
+            .ingame_mouse
+            .right
             .as_ref()
             .map(|state| &state.motion)
             .filter(|motion| motion.moved && motion.selection_frame)
             .or_else(|| {
-                self.mouse_state
+                self.ingame_mouse
+                    .left
                     .as_ref()
                     .map(|state| &state.motion)
                     .filter(|motion| motion.moved && motion.selection_frame)
@@ -6609,7 +6617,9 @@ impl GameApp {
                 }
                 _ => false,
             };
-        if construction_cursor_drawn && self.mouse_control && self.live_input.modifiers.shift_key()
+        if construction_cursor_drawn
+            && self.ingame_mouse.control
+            && self.live_input.modifiers.shift_key()
         {
             if let (Some((_, _, pointer, _)), Some(primary_offset), Some(viewport_clip)) = (
                 construction_cursor,
@@ -6693,7 +6703,7 @@ impl GameApp {
                                 Some(&frame_gamma),
                             );
                         }
-                        if self.mouse_control
+                        if self.ingame_mouse.control
                             && self.live_input.modifiers.shift_key()
                             && cursor_kind.allows_add_marker()
                         {
@@ -6714,7 +6724,8 @@ impl GameApp {
         }
         let help_caption = running_world_cursor_drawable
             .then(|| {
-                self.ingame_mouse_help_caption
+                self.ingame_mouse
+                    .help_caption
                     .as_ref()
                     .zip(self.live_input.ingame_pointer)
                     .and_then(|(caption, pointer)| {

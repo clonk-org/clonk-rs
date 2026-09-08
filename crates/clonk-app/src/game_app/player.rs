@@ -331,7 +331,7 @@ impl GameApp {
             prefers_mouse: true,
             gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
-            disable_mouse: !self.mouse_control_allowed,
+            disable_mouse: !self.ingame_mouse.control_allowed,
         });
         let config = PlayerConfig::new(self.players.local_owner, self.players.local_name.clone());
         if let Err(error) = self
@@ -341,7 +341,7 @@ impl GameApp {
             self.remove_local_control_assignment(self.players.local_owner);
             return Err(error);
         }
-        self.mouse_control = self.local_controls.mouse_owner().is_some();
+        self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
         Ok(())
     }
 

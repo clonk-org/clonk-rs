@@ -498,9 +498,11 @@ impl GameApp {
 
     pub(crate) fn open_scoreboard_dialog(&mut self, request: ScoreboardPresentationRequest) {
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         let layout_revision = request.layout_revision;
         self.dialogs.scoreboard = Some(request);
@@ -1614,11 +1616,11 @@ impl GameApp {
             }
             MenuAction::ToggleMouseControl => {
                 let selection = self.ingame_menu_selection(player);
-                if self.mouse_control_allowed {
+                if self.ingame_mouse.control_allowed {
                     if let Some(control) = self.local_controls.toggle_mouse(player) {
                         self.engine
                             .set_player_mouse_control(player, control.mouse)?;
-                        self.mouse_control = self.local_controls.mouse_owner().is_some();
+                        self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
                         // C4Player::ToggleMouseControl clears and defaults
                         // C4MouseControl whenever ownership is reinitialized.
                         self.reset_ingame_mouse_control();
@@ -2125,7 +2127,7 @@ impl GameApp {
         else {
             return Ok(false);
         };
-        if self.mouse_control
+        if self.ingame_mouse.control
             && self.local_controls.mouse_owner() == Some(owner)
             && site_valid
             && self.engine.player(owner).is_some()
@@ -2352,7 +2354,7 @@ impl GameApp {
         owner: i32,
         adjust_selection: bool,
     ) -> Result<Option<(ObjectId, EngineScriptMenuLayout)>, EngineError> {
-        if !self.mouse_control {
+        if !self.ingame_mouse.control {
             return Ok(None);
         }
         let Some((target, menu)) = self.engine.cursor_object_menu(owner) else {
@@ -2427,7 +2429,7 @@ impl GameApp {
         &self,
         owner: i32,
     ) -> Result<Option<(ObjectId, EngineScriptMenuPresentationGeometry)>, EngineError> {
-        if !self.mouse_control {
+        if !self.ingame_mouse.control {
             return Ok(None);
         }
         let Some((target, menu)) = self.engine.cursor_object_menu(owner) else {
@@ -4776,10 +4778,13 @@ impl GameApp {
                 Some(RunningDialogStackEntry::RuntimeClientList) => {
                     let dialog = self.dialogs.client_list.as_ref()?;
                     let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
-                    let preferred =
-                        scoreboard_preferred_rect(self.rendering.graphics.preferred_dialog_rect(
-                            self.mouse_control.then_some(self.players.local_owner),
-                        ));
+                    let preferred = scoreboard_preferred_rect(
+                        self.rendering.graphics.preferred_dialog_rect(
+                            self.ingame_mouse
+                                .control
+                                .then_some(self.players.local_owner),
+                        ),
+                    );
                     dialog.tooltip_at(point, preferred, line_height)
                 }
                 Some(RunningDialogStackEntry::Message(_))
@@ -4798,10 +4803,13 @@ impl GameApp {
                 .filter(|dialog| dialog.is_info_only())
             {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
-                let preferred =
-                    scoreboard_preferred_rect(self.rendering.graphics.preferred_dialog_rect(
-                        self.mouse_control.then_some(self.players.local_owner),
-                    ));
+                let preferred = scoreboard_preferred_rect(
+                    self.rendering.graphics.preferred_dialog_rect(
+                        self.ingame_mouse
+                            .control
+                            .then_some(self.players.local_owner),
+                    ),
+                );
                 return dialog.tooltip_at(point, preferred, line_height);
             }
         }
@@ -4837,10 +4845,13 @@ impl GameApp {
             }
             if let Some(dialog) = self.dialogs.client_list.as_ref() {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
-                let preferred =
-                    scoreboard_preferred_rect(self.rendering.graphics.preferred_dialog_rect(
-                        self.mouse_control.then_some(self.players.local_owner),
-                    ));
+                let preferred = scoreboard_preferred_rect(
+                    self.rendering.graphics.preferred_dialog_rect(
+                        self.ingame_mouse
+                            .control
+                            .then_some(self.players.local_owner),
+                    ),
+                );
                 if let Some(target) = dialog.tooltip_at(point, preferred, line_height) {
                     return Some(target);
                 }
@@ -5026,7 +5037,7 @@ impl GameApp {
         self.pending_league_player_auth = None;
         self.dialogs.help_visible = false;
         self.live_input.ingame_mouse_help = false;
-        self.ingame_mouse_help_caption = None;
+        self.ingame_mouse.help_caption = None;
         self.runtime_flash_message = None;
         self.film_view_player = None;
         self.clear_physical_viewport_states();
@@ -5073,10 +5084,10 @@ impl GameApp {
         self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.live_input.ingame_mouse_target = None;
         self.live_input.running_pointer = None;
-        self.mouse_state = None;
-        self.ingame_right_mouse_state = None;
+        self.ingame_mouse.left = None;
+        self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         self.rendering.sky = None;

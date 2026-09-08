@@ -427,14 +427,14 @@ fn mouse_clicks_retain_selection_across_same_frame_ocf_mutation() {
     move_cursor(&mut app, point, "acquire selectable crew target");
     main_assert_eq!(app.live_input.ingame_mouse_target => Some(target));
     main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Select);
-    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+    main_assert_eq!(app.ingame_mouse.dragged_objects => vec![target]);
 
     let mut update = ObjectUpdate::new();
     update.ocf_override = Some(clonk_engine::ocf::NORMAL);
     app.engine.apply_object_update(target, update).test_value();
     app.snapshot = app.engine.snapshot();
     main_assert_eq!(app.ingame_primary_mouse_target(owner, point) => None);
-    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+    main_assert_eq!(app.ingame_mouse.dragged_objects => vec![target]);
     let mut commands = install_mouse_network_capture(&mut app);
 
     app.test_right_button(ElementState::Pressed);
@@ -496,7 +496,7 @@ fn ordinary_moves_clear_single_mouse_selection_over_region_help_and_scroll() {
     let target_point = mouse_test_object_point(&app, owner, target);
     let acquire = |app: &mut GameApp| {
         move_cursor(app, target_point, "acquire single crew mouse selection");
-        main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+        main_assert_eq!(app.ingame_mouse.dragged_objects => vec![target]);
     };
 
     acquire(&mut app);
@@ -506,12 +506,12 @@ fn ordinary_moves_clear_single_mouse_selection_over_region_help_and_scroll() {
         clonk_frontend::hud::ViewportButton::Help,
     );
     move_cursor(&mut app, region, "move selected cursor onto viewport region");
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
 
     acquire(&mut app);
     app.live_input.ingame_mouse_help = true;
     move_cursor(&mut app, target_point, "move selected cursor while Help is active");
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
     app.live_input.ingame_mouse_help = false;
 
     acquire(&mut app);
@@ -523,7 +523,7 @@ fn ordinary_moves_clear_single_mouse_selection_over_region_help_and_scroll() {
     main_assert!(app.ingame_viewport_region(owner, edge).is_none());
     move_cursor(&mut app, edge, "move selected cursor onto scrolling edge");
     main_assert!(app.live_input.ingame_edge_scroll.is_some());
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
 }
 
 #[test]
@@ -638,7 +638,7 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
     );
     main_assert!(app.live_input.ingame_mouse_help, "left-up keeps Help active");
     let expected = "Named target: Helpful details.";
-    main_assert_eq!(app.ingame_mouse_help_caption => Some(input_fixture!(mouse_help: expected.to_string(), clonk_script::c4_string_bytes(expected).len() / 2,)));
+    main_assert_eq!(app.ingame_mouse.help_caption => Some(input_fixture!(mouse_help: expected.to_string(), clonk_script::c4_string_bytes(expected).len() / 2,)));
     main_assert!(app.ingame_help_cursor_active());
     main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "a Help click never enters any synchronized mouse queue");
 
@@ -656,7 +656,7 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
     move_cursor(&mut app, point, "move back onto help target");
     app.test_left_button(ElementState::Pressed);
     move_cursor(&mut app, empty, "move beyond drag sensitivity in Help");
-    let state = app.mouse_state.test_value();
+    let state = app.ingame_mouse.left.test_value();
     main_assert!(state.down_cursor_help);
     main_assert!(state.motion.moved);
     main_assert!(!state.motion.world_drag_started);
@@ -664,7 +664,7 @@ fn help_click_describes_ocf_all_target_without_commands_or_drag() {
     main_assert!(!state.motion.selection_frame);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "crossing the drag threshold in Help still emits nothing");
-    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.text.as_str()) => Some(expected), "Help reports the object captured on left-down");
+    main_assert_eq!(app.ingame_mouse.help_caption.as_ref().map(|caption| caption.text.as_str()) => Some(expected), "Help reports the object captured on left-down");
     main_assert_eq!(app.engine.object_help_caption(target).as_deref() => Some(expected));
 }
 
@@ -683,11 +683,11 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
 
     let keep = clonk_script::c4_string_bytes(&raw_name).len() / 2;
     main_assert_ne!(keep => raw_name.len() / 2, "KeepCaption counts C4 bytes");
-    main_assert_eq!(app.ingame_mouse_help_caption => Some(input_fixture!(mouse_help: raw_name, keep)));
+    main_assert_eq!(app.ingame_mouse.help_caption => Some(input_fixture!(mouse_help: raw_name, keep)));
     for remaining in (0..keep).rev() {
         app.update_ingame_pointer(point).test_value();
         main_assert_eq!(
-            app.ingame_mouse_help_caption
+            app.ingame_mouse.help_caption
                 .as_ref()
                 .map(|caption| caption.keep_moves) =>
             Some(remaining),
@@ -695,23 +695,23 @@ fn help_caption_uses_name_only_and_cpp_move_lifetime() {
         );
     }
     app.update_ingame_pointer(point).test_value();
-    main_assert!(app.ingame_mouse_help_caption.is_none());
+    main_assert!(app.ingame_mouse.help_caption.is_none());
 
-    app.ingame_mouse_help_caption = Some(input_fixture!(mouse_help: "wheel".to_string(), 2));
+    app.ingame_mouse.help_caption = Some(input_fixture!(mouse_help: "wheel".to_string(), 2));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
-    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
+    main_assert_eq!(app.ingame_mouse.help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
 
-    app.ingame_mouse_help_caption = Some(input_fixture!(mouse_help: "ignored up".to_string(), 2));
+    app.ingame_mouse.help_caption = Some(input_fixture!(mouse_help: "ignored up".to_string(), 2));
     app.ingame_ignore_left_up = true;
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     main_assert!(!app.ingame_ignore_left_up);
-    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
+    main_assert_eq!(app.ingame_mouse.help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
 
-    app.ingame_mouse_help_caption = Some(input_fixture!(mouse_help: "middle".to_string(), 2));
+    app.ingame_mouse.help_caption = Some(input_fixture!(mouse_help: "middle".to_string(), 2));
     app.handle_other_mouse_button(ElementState::Pressed)
         .test_value();
-    main_assert_eq!(app.ingame_mouse_help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
+    main_assert_eq!(app.ingame_mouse.help_caption.as_ref().map(|caption| caption.keep_moves) => Some(1));
 }
 
 #[test]
@@ -1177,7 +1177,7 @@ fn mouse_fog_ignore_fow_right_click_clears_cached_selection_after_cycling() {
 
     move_cursor(&mut app, target_point, "move onto fog-covered IgnoreFoW target");
     main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Select);
-    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+    main_assert_eq!(app.ingame_mouse.dragged_objects => vec![target]);
     app.test_right_button(ElementState::Pressed);
     app.test_right_button(ElementState::Released);
 
@@ -1342,7 +1342,7 @@ fn mouse_fog_turns_moving_object_release_into_noop_command() {
         visible_drag_point,
         "begin DragMoving in visible terrain",
     );
-    main_assert!(app.mouse_state.is_some_and(|state| state.motion.moved));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| state.motion.moved));
     move_cursor(&mut app, hidden_point, "continue DragMoving into fog");
     app.test_left_button(ElementState::Released);
 
@@ -1404,12 +1404,12 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
     move_cursor(&mut app, start, "move to selection start");
     app.test_right_button(ElementState::Pressed);
     move_cursor(&mut app, visible_end, "move to visible selection endpoint");
-    let visible_motion = app.ingame_right_mouse_state.test_value().motion;
+    let visible_motion = app.ingame_mouse.right.test_value().motion;
     main_assert_eq!(visible_motion.selection_kind => IngameDragSelectionKind::Objects);
     main_assert_eq!(app.ingame_selection_candidates(visible_motion) => vec![first]);
 
     move_cursor(&mut app, hidden_end, "move selection endpoint into fog");
-    let hidden_motion = app.ingame_right_mouse_state.test_value().motion;
+    let hidden_motion = app.ingame_mouse.right.test_value().motion;
     main_assert_eq!(hidden_motion.last.screen => hidden_end);
     main_assert_eq!(app.ingame_selection_candidates(hidden_motion) => vec![first]);
     main_assert_ne!(app.ingame_selection_candidates(hidden_motion) => vec![first, second], "fogged endpoint must not add the hidden member");
@@ -1440,7 +1440,7 @@ fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
     main_assert_eq!(app.ingame_selection_candidates(hidden_motion) => vec![first], "fog must freeze object identity, not only rectangle coordinates");
 
     app.test_right_button(ElementState::Released);
-    main_assert_eq!(app.ingame_dragged_objects => vec![first]);
+    main_assert_eq!(app.ingame_mouse.dragged_objects => vec![first]);
 }
 
 #[test]
@@ -1492,10 +1492,10 @@ fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
     app.ingame_last_left_down = None;
     move_cursor(&mut app, hidden, "move to fog-covered press point");
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.mouse_state.is_some_and(|state| state.down_cursor_nothing));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| state.down_cursor_nothing));
     move_cursor(&mut app, visible, "move held pointer into visible terrain");
     let release = app.live_input.ingame_pointer.test_value();
-    main_assert!(app.mouse_state.is_some_and(|state| {!state.motion.moved && state.motion.last.screen == release.screen}));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| {!state.motion.moved && state.motion.last.screen == release.screen}));
     app.test_left_button(ElementState::Released);
 
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
@@ -1606,7 +1606,7 @@ fn physical_left_drag_carryable_queues_object_drop_without_direct_controls() {
     main_assert_eq!(command.data => 0);
     main_assert_eq!(command.add_mode => 1);
     main_assert_eq!(command.by_client => 0);
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
 }
 
 #[test]
@@ -1780,9 +1780,9 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     move_cursor(&mut app, frame_start, "move to object-frame start");
     app.test_left_button(ElementState::Pressed);
     move_cursor(&mut app, frame_end, "drag frame over both carryables");
-    main_assert_eq!(app.mouse_state.expect("left object frame remains live").motion.selection_kind => IngameDragSelectionKind::Objects);
+    main_assert_eq!(app.ingame_mouse.left.expect("left object frame remains live").motion.selection_kind => IngameDragSelectionKind::Objects);
     app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.ingame_dragged_objects => expected_selection);
+    main_assert_eq!(app.ingame_mouse.dragged_objects => expected_selection);
     main_assert!(app.ingame_last_left_down.is_none(), "a moved gesture cannot arm an immediate false LeftDouble");
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     main_assert!(direct.is_empty());
@@ -1813,7 +1813,7 @@ fn physical_left_object_frame_retains_group_for_set_then_append_drag() {
     );
     main_assert_eq!(player_commands.iter().map(|(_, command)| command.add_mode).collect::<Vec<_>>() => vec![1, 4]);
     main_assert!(player_commands.iter().all(|(_, command)| {command.command == CommandId::Drop as i32 && command.x == drop_world.x && command.y == drop_world.y}));
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
 }
 
 #[test]
@@ -1901,13 +1901,13 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
     move_cursor(&mut app, empty_start, "move to empty frame start");
     app.test_left_button(ElementState::Pressed);
     move_cursor(&mut app, empty_end, "move empty frame");
-    main_assert_eq!(app.mouse_state.expect("empty frame remains live").motion.selection_kind => IngameDragSelectionKind::Unknown);
+    main_assert_eq!(app.ingame_mouse.left.expect("empty frame remains live").motion.selection_kind => IngameDragSelectionKind::Unknown);
     app.test_left_button(ElementState::Released);
     let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
     main_assert!(direct.is_empty());
     main_assert!(player_commands.is_empty());
     main_assert!(selections.is_empty());
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
 
     let entrance_point = mouse_test_object_point(&app, owner, entrance);
     let entrance_world = app
@@ -1923,7 +1923,7 @@ fn physical_left_empty_and_entrance_drags_emit_no_commands() {
     main_assert!(direct.is_empty());
     main_assert!(player_commands.is_empty());
     main_assert!(selections.is_empty());
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
 }
 
 #[test]
@@ -2169,7 +2169,7 @@ fn ctrl_region_drags_show_put_and_vehicle_put_captions() {
         app.test_update();
 
         main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => expected_kind);
-        main_assert_eq!(app.mouse_state.and_then(|state| state.motion.region_drag_cursor) => Some(expected_cursor));
+        main_assert_eq!(app.ingame_mouse.left.and_then(|state| state.motion.region_drag_cursor) => Some(expected_cursor));
         let caption = app.live_input.ingame_mouse_caption.caption.test_ref();
         let expected_subject = if vehicle_drag {
             "Caption wagon"
@@ -2217,7 +2217,7 @@ fn group_put_caption_uses_remaining_live_selection() {
         target_point,
         "cross grouped moving-drag threshold",
     );
-    main_assert_eq!(app.ingame_dragged_objects.len() => 3);
+    main_assert_eq!(app.ingame_mouse.dragged_objects.len() => 3);
 
     app.engine
         .apply_object_update(
@@ -2305,7 +2305,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
     move_cursor(&mut app, drop_point, "cross drag threshold");
-    main_assert!(app.mouse_state.is_some_and(|state| {state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()}));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| {state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()}));
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
@@ -2326,13 +2326,13 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
     move_cursor(&mut app, drop_point, "cross drag threshold");
-    main_assert!(app.mouse_state.is_some_and(|state| state.motion.region_drag_started));
-    main_assert_eq!(app.ingame_dragged_objects => vec![target]);
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| state.motion.region_drag_started));
+    main_assert_eq!(app.ingame_mouse.dragged_objects => vec![target]);
     for _ in 0..5 {
         app.test_update();
     }
     main_assert_eq!(
-        app.mouse_state
+        app.ingame_mouse.left
             .and_then(|state| state.motion.region_drag_cursor) =>
         Some(IngameRegionDragCursor::Drop),
         "the Tick5 C4MouseControl::Execute equivalent refreshes a stationary drag"
@@ -2433,12 +2433,12 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
     app.handle_ingame_mouse_button(ElementState::Pressed)
         .test_value();
     move_cursor(&mut app, destination_point, "cross vehicle drag threshold");
-    main_assert_eq!(app.ingame_dragged_objects => vec![vehicle]);
+    main_assert_eq!(app.ingame_mouse.dragged_objects => vec![vehicle]);
     move_cursor(&mut app, destination_point, "resolve vehicle moving cursor");
-    main_assert_eq!(app.mouse_state.and_then(|state| state.motion.region_drag_cursor) => Some(IngameRegionDragCursor::Vehicle));
+    main_assert_eq!(app.ingame_mouse.left.and_then(|state| state.motion.region_drag_cursor) => Some(IngameRegionDragCursor::Vehicle));
     // Model the last DragMoving update having resolved Ctrl+container;
     // ClearPointers may delete that stored target before button-up.
-    app.mouse_state.test_mut().motion.region_drag_cursor =
+    app.ingame_mouse.left.test_mut().motion.region_drag_cursor =
         Some(IngameRegionDragCursor::VehiclePut(put_target));
     app.engine
         .apply_object_update(
@@ -2507,7 +2507,7 @@ fn help_cursor_gets_the_delayed_red_help_caption() {
     main_assert!(app.live_input.ingame_mouse_caption.caption.is_none());
 
     move_to_target(&mut app);
-    main_assert!(app.ingame_mouse_help_caption.is_none());
+    main_assert!(app.ingame_mouse.help_caption.is_none());
     let expected = app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
     main_assert_eq!(app.live_input.ingame_mouse_caption.caption.as_ref().map(|caption| caption.text.as_str()) => Some(expected.as_str()));
 }
@@ -2545,14 +2545,14 @@ fn threshold_region_entry_waits_to_cancel_and_focus_loss_clears_drag() {
         region_point,
         "cross threshold directly into region",
     );
-    main_assert!(app.mouse_state.is_some_and(|state| {state.motion.moved && state.motion.selection_frame && !state.motion.selection_cancelled_by_region}));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| {state.motion.moved && state.motion.selection_frame && !state.motion.selection_cancelled_by_region}));
     move_cursor(&mut app, start, "leave region before a second region event");
-    main_assert!(app.mouse_state.is_some_and(|state| {state.motion.selection_frame && !state.motion.selection_cancelled_by_region}));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| {state.motion.selection_frame && !state.motion.selection_cancelled_by_region}));
 
     app.handle_focus_lost().test_value();
-    main_assert!(app.mouse_state.is_none());
-    main_assert!(app.ingame_right_mouse_state.is_none());
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.left.is_none());
+    main_assert!(app.ingame_mouse.right.is_none());
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
     main_assert!(!app.ingame_moving_drag_active());
 }
 
@@ -5578,14 +5578,14 @@ fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
     main_assert!(app.live_input.ingame_pointer.is_none());
     main_assert!(app.live_input.ingame_edge_scroll.is_none());
     main_assert_eq!(app.local_controls.mouse_owner() => None);
-    main_assert!(!app.mouse_control);
+    main_assert!(!app.ingame_mouse.control);
 
     app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
         .test_value();
     let player = app.engine.test_player(owner);
     main_assert_eq!((player.control_set(), player.mouse_control()) => (0, 1));
     main_assert_eq!(app.local_controls.mouse_owner() => Some(owner));
-    main_assert!(app.mouse_control);
+    main_assert!(app.ingame_mouse.control);
 }
 
 fn mouse_option_phase(app: &GameApp, player: i32) -> Option<u8> {
@@ -5689,7 +5689,7 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
         (primary, PlayerStatus::Active),
         (secondary, PlayerStatus::Active),
     ]);
-    app.mouse_control = app.local_controls.mouse_owner().is_some();
+    app.ingame_mouse.control = app.local_controls.mouse_owner().is_some();
     main_assert_eq!(app.local_controls.mouse_owner() => Some(secondary));
 
     app.apply_ingame_menu_action_for_player(secondary, MenuAction::ToggleMouseControl)
@@ -5698,7 +5698,7 @@ fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
     main_assert_eq!(app.engine.player(primary).expect("primary player").mouse_control() => 1, "the other raw per-player flag survives");
     main_assert_eq!(app.engine.player(secondary).expect("secondary player").mouse_control() => 0);
     main_assert_eq!(app.local_controls.mouse_owner() => None);
-    main_assert!(!app.mouse_control);
+    main_assert!(!app.ingame_mouse.control);
     let primary_flags = app.option_flags(primary);
     main_assert_eq!((primary_flags.mouse_shown, primary_flags.mouse) => (true, true));
     let secondary_flags = app.option_flags(secondary);
@@ -5881,7 +5881,7 @@ fn button_and_wheel_moves_consume_mouse_init_centering() {
 
     main_assert!(app.live_input.ingame_mouse_init_centered);
     main_assert_eq!(app.live_input.ingame_viewport_mouse.expect("button Move retains the centered coordinate").position => retained_center);
-    main_assert!(app.mouse_state.is_some());
+    main_assert!(app.ingame_mouse.left.is_some());
 
     app.reset_ingame_mouse_control();
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0);
@@ -6358,7 +6358,7 @@ fn construction_drop_requires_the_original_live_mouse_assignment() {
             app.local_controls.remove(owner);
             main_assert_eq!(app.local_controls.mouse_owner() => None);
         } else {
-            app.mouse_control = false;
+            app.ingame_mouse.control = false;
         }
         app.test_left_button(ElementState::Released);
 

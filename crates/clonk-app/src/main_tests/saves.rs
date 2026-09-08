@@ -3576,7 +3576,7 @@ fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
         .test_value();
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
-    app.mouse_control = false;
+    app.ingame_mouse.control = false;
     app.snapshot = app.engine.snapshot();
     app.rendering.display_flags.show_commands = false;
     app.film_view_player = Some(owner);
@@ -3887,7 +3887,7 @@ fn film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
         viewport.y as f32 + viewport.height as f32 / 2.0,
     );
     app.live_input.ingame_pointer = app.rendering.graphics.viewport_point_at(pointer);
-    app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
+    app.ingame_mouse.help_caption = Some(IngameMouseHelpCaption {
         text: "Hidden mouse caption".to_string(),
         keep_moves: 1,
     });
@@ -4545,7 +4545,7 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
     main_assert_eq!(player.view_wealth() => 4);
     main_assert!(player.no_elimination_check());
     main_assert_eq!(app.local_controls.mouse_owner() => Some(owner));
-    main_assert!(app.mouse_control);
+    main_assert!(app.ingame_mouse.control);
 }
 
 #[test]

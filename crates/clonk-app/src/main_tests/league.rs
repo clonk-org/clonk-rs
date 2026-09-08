@@ -1827,7 +1827,7 @@ fn exclusive_vote_outside_hit_still_reaches_exposed_chart() {
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.rendering.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
+            .preferred_dialog_rect(app.ingame_mouse.control.then_some(app.players.local_owner)),
     );
     let chart_layout = app
         .dialogs.chart
@@ -1985,7 +1985,7 @@ fn eliminated_and_surrendered_viewports_keep_notices_while_suppressing_non_playe
     );
     main_assert_eq!(app.script_menu_pointer_target_for_owner(owner, menu_point).expect("hidden script menu pointer routing is inert") => None);
     app.local_controls = LocalControlRegistry::default();
-    app.mouse_control = true;
+    app.ingame_mouse.control = true;
     main_assert_eq!(app.ingame_menu_pointer_target(menu_point) => None);
 
     app.startup_tooltip_resources.insert(

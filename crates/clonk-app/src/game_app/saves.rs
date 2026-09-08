@@ -1793,7 +1793,7 @@ impl GameApp {
                             prefers_mouse,
                             gamepads_enabled: self.config.gamepads_enabled,
                             replay: false,
-                            disable_mouse: !self.mouse_control_allowed,
+                            disable_mouse: !self.ingame_mouse.control_allowed,
                         };
                         let control = if script_player {
                             self.local_controls.resolve(control_init)
@@ -1859,7 +1859,7 @@ impl GameApp {
                 .map(|player| (player.id(), player.status())),
         );
         engine.set_local_players(local_players.iter().copied());
-        self.mouse_control = self.local_controls.mouse_owner().is_some();
+        self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
         Ok((
             local_players,
             joined_player_files,

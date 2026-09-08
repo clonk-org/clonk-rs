@@ -195,7 +195,7 @@ fn hud_inventory_autostop_queues_stored_press_and_release() {
         f64::from(outside.x),
         f64::from(outside.y),
     ));
-    main_assert!(app.mouse_state.is_some_and(|state| !state.motion.moved), "three pixels must remain Drag_None");
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| !state.motion.moved), "three pixels must remain Drag_None");
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
@@ -483,14 +483,14 @@ fn selection_drag_entering_hud_region_is_cancelled() {
         f64::from(crossed.x),
         f64::from(crossed.y),
     ));
-    main_assert!(app.mouse_state.is_some_and(|state| state.motion.moved && state.motion.selection_frame));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| state.motion.moved && state.motion.selection_frame));
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(region_point.x),
         f64::from(region_point.y),
     ));
     main_assert!(app.ingame_selection_frame().is_none());
-    main_assert!(app.mouse_state.is_some_and(|state| {!state.motion.selection_frame && state.motion.selection_cancelled_by_region}));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| {!state.motion.selection_frame && state.motion.selection_cancelled_by_region}));
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
     let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
@@ -2111,7 +2111,7 @@ fn passive_observer_renders_region_cursor() {
     install_l018_cursor_atlas(&mut app);
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
-    app.mouse_control = false;
+    app.ingame_mouse.control = false;
     app.snapshot = app.engine.snapshot();
     let (width, height) = {
         let surface = app.rendering.graphics.surface();
