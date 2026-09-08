@@ -10238,7 +10238,7 @@ fn simultaneous_local_team_selection_menus_route_independently() {
     main_assert!(
         [first, second]
             .into_iter()
-            .all(|owner| app.ingame_menu_belongs_to(owner)),
+            .all(|owner| app.ingame_menus.ingame_menu_belongs_to(owner)),
         "both local players retain their own initial team menu"
     );
     // The team page is a five-column C4MN_Style_Normal grid, so COM_MenuDown
@@ -10267,7 +10267,7 @@ fn simultaneous_local_team_selection_menus_route_independently() {
         "first player's selection must not mutate the second player"
     );
     main_assert!(
-        app.ingame_menu_belongs_to(second),
+        app.ingame_menus.ingame_menu_belongs_to(second),
         "second player's menu survives the first player's selection"
     );
 
@@ -10279,8 +10279,8 @@ fn simultaneous_local_team_selection_menus_route_independently() {
         app.engine.crew_cursor(second).is_some(),
         "second team activation spawns its native crew"
     );
-    main_assert!(!app.ingame_menu_belongs_to(first));
-    main_assert!(!app.ingame_menu_belongs_to(second));
+    main_assert!(!app.ingame_menus.ingame_menu_belongs_to(first));
+    main_assert!(!app.ingame_menus.ingame_menu_belongs_to(second));
 }
 
 #[test]

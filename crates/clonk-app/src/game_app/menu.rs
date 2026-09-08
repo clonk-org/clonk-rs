@@ -597,13 +597,9 @@ impl GameApp {
             })
     }
 
-    pub(crate) fn ingame_menu_belongs_to(&self, owner: i32) -> bool {
-        self.ingame_menus.players.contains(owner)
-    }
-
     pub(crate) fn menu_controls_active_for(&self, owner: i32) -> bool {
         matches!(self.mode, AppMode::Running)
-            && (self.ingame_menu_belongs_to(owner)
+            && (self.ingame_menus.ingame_menu_belongs_to(owner)
                 || (owner == self.players.local_owner && self.ingame_menus.object.is_some()))
     }
 
@@ -977,7 +973,7 @@ impl GameApp {
 
         let owns_object_menu =
             owner == self.players.local_owner && self.ingame_menus.object.is_some();
-        if menu_command && !owns_object_menu && !self.ingame_menu_belongs_to(owner) {
+        if menu_command && !owns_object_menu && !self.ingame_menus.ingame_menu_belongs_to(owner) {
             return Ok(false);
         }
 
@@ -986,7 +982,7 @@ impl GameApp {
                 kind,
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
-                if self.ingame_menu_belongs_to(owner) {
+                if self.ingame_menus.ingame_menu_belongs_to(owner) {
                     self.close_ingame_menu_by_user_for_player(owner)?;
                 } else {
                     self.open_ingame_menu_for_player(owner)?;
@@ -1005,7 +1001,7 @@ impl GameApp {
             return Ok(true);
         }
 
-        if !self.ingame_menu_belongs_to(owner) {
+        if !self.ingame_menus.ingame_menu_belongs_to(owner) {
             return Ok(false);
         }
         let (outcome, preview_target) = {
@@ -1600,7 +1596,7 @@ impl GameApp {
             MenuAction::ToggleSound => {
                 // Application.SoundSystem->ToggleOnOff() + reopen with the
                 // previous selection (C4MainMenu.cpp:842-852).
-                let selection = self.ingame_menu_selection(player);
+                let selection = self.ingame_menus.ingame_menu_selection(player);
                 self.toggle_sound_option()?;
                 self.ingame_menus.players.replace(
                     player,
@@ -1612,7 +1608,7 @@ impl GameApp {
                 );
             }
             MenuAction::ToggleMusic => {
-                let selection = self.ingame_menu_selection(player);
+                let selection = self.ingame_menus.ingame_menu_selection(player);
                 self.toggle_music_option()?;
                 self.ingame_menus.players.replace(
                     player,
@@ -1624,7 +1620,7 @@ impl GameApp {
                 );
             }
             MenuAction::ToggleMouseControl => {
-                let selection = self.ingame_menu_selection(player);
+                let selection = self.ingame_menus.ingame_menu_selection(player);
                 if self.ingame_mouse.control_allowed {
                     if let Some(control) = self.local_controls.toggle_mouse(player) {
                         self.engine
@@ -1647,7 +1643,7 @@ impl GameApp {
             MenuAction::Display(toggle) => {
                 // Toggle + reopen with the previous selection
                 // (C4MainMenu.cpp:855-884).
-                let selection = self.ingame_menu_selection(player);
+                let selection = self.ingame_menus.ingame_menu_selection(player);
                 self.rendering.display_flags.toggle(toggle);
                 self.defer_display_toggle(toggle);
                 if toggle == DisplayToggle::UpperBoard {
@@ -1769,14 +1765,6 @@ impl GameApp {
             MenuAction::NoOp => {}
         }
         Ok(())
-    }
-
-    fn ingame_menu_selection(&self, player: i32) -> usize {
-        self.ingame_menus
-            .players
-            .get(player)
-            .map(IngameMenuState::selection)
-            .unwrap_or(0)
     }
 
     pub(crate) fn apply_game_goal_menu_requests(&mut self) -> Result<(), EngineError> {
@@ -1977,10 +1965,6 @@ impl GameApp {
         self.dialogs.menu_title_drag = None;
         self.cancel_ingame_mouse_gestures();
         true
-    }
-
-    pub(crate) fn construction_menu_drag_captured(&self) -> bool {
-        self.ingame_menus.construction_drag.is_some()
     }
 
     pub(crate) fn arm_construction_menu_drag(
@@ -4709,17 +4693,6 @@ impl GameApp {
         })
     }
 
-    pub(crate) fn top_message_dialog_is_exclusive(&self) -> bool {
-        self.dialogs.messages.last().is_some_and(|dialog| {
-            matches!(
-                dialog.continuation,
-                MessageDialogContinuation::AbortGame { .. }
-                    | MessageDialogContinuation::LeagueVote { .. }
-                    | MessageDialogContinuation::LeagueSurrender
-            )
-        })
-    }
-
     pub(crate) fn active_message_dialog_index(&self) -> Option<usize> {
         if self.mode == AppMode::Running {
             if self.network_chart_elevated_owns_input() {
@@ -4733,15 +4706,6 @@ impl GameApp {
         self.dialogs
             .message_active_index
             .filter(|index| *index < self.dialogs.messages.len())
-    }
-
-    pub(crate) fn captured_message_dialog_index(&self) -> Option<usize> {
-        self.dialogs.message_pointer_capture_index.filter(|index| {
-            self.dialogs
-                .messages
-                .get(*index)
-                .is_some_and(|dialog| dialog.state.has_pointer_capture())
-        })
     }
 
     pub(crate) fn point_in_message_dialog_bounds(

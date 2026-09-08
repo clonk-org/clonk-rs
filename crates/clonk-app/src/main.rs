@@ -4801,13 +4801,13 @@ impl GameApp {
         owner: i32,
         event: ControlEvent,
     ) -> Result<(), EngineError> {
-        if self.ingame_menu_belongs_to(owner) || owner == self.players.local_owner {
+        if self.ingame_menus.ingame_menu_belongs_to(owner) || owner == self.players.local_owner {
             if let ControlEvent::Command { command, kind } = event {
                 if self.handle_menu_command_failsafe(owner, command, kind)? {
                     return Ok(());
                 }
             }
-            if self.ingame_menu_belongs_to(owner)
+            if self.ingame_menus.ingame_menu_belongs_to(owner)
                 || (owner == self.players.local_owner && self.ingame_menus.object.is_some())
             {
                 return Ok(());
