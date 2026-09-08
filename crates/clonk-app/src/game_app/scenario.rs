@@ -721,9 +721,9 @@ impl GameApp {
                 self.begin_startup_dialog_fade(StartupDialog::NetworkGame);
                 self.close_context_menu_silently();
                 self.dialogs.game_option_input = None;
-                self.game_option_input_consumed_keys.clear();
-                self.game_option_input_pointer_capture = None;
-                self.game_option_consumed_keys.clear();
+                self.dialogs.game_option_input_consumed_keys.clear();
+                self.dialogs.game_option_input_pointer_capture = None;
+                self.dialogs.game_option_consumed_keys.clear();
                 self.scenario_game_options.cancel_interaction();
                 self.refresh_retained_network_dialog_internet();
                 self.replace_startup_view(StartupView::NetworkGame);
@@ -758,14 +758,14 @@ impl GameApp {
         self.startup.player_properties_dialog = None;
         self.dialogs.game_option_input = None;
         self.dialogs.league_signup = None;
-        self.cancelled_league_signup_continuation = None;
-        self.league_signup_consumed_keys.clear();
-        self.league_signup_pointer_capture = false;
-        self.league_signup_pointer_position = None;
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_pointer_capture = false;
-        self.game_option_consumed_keys.clear();
+        self.dialogs.cancelled_league_signup_continuation = None;
+        self.dialogs.league_signup_consumed_keys.clear();
+        self.dialogs.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_pointer_position = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_pointer_capture = false;
+        self.dialogs.game_option_consumed_keys.clear();
         self.scensel.mode = selector_mode;
         self.startup.scenario_back_dialog = Some(match selector_mode {
             ScenarioSelectorMode::Local => StartupDialog::MainMenu,
@@ -1082,10 +1082,10 @@ impl GameApp {
         self.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
         self.close_context_menu_silently();
-        self.definition_selector = None;
+        self.definition_selection.dialog = None;
         self.pending_definition_selection = None;
         self.pending_lobby_player_selection = None;
-        self.definition_selector_last_click = None;
+        self.definition_selection.last_click = None;
         self.dialogs.game_over = None;
         self.hide_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
         if scenario.path.is_none() {

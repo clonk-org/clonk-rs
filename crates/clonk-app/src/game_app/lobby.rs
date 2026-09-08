@@ -7408,21 +7408,21 @@ impl GameApp {
         self.dialogs.message_pointer_capture_index = None;
         self.dialogs.message_consumed_keys.clear();
         self.dialogs.game_option_input = None;
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
         self.dialogs.league_signup = None;
-        self.cancelled_league_signup_continuation = None;
-        self.league_signup_consumed_keys.clear();
-        self.league_signup_pointer_capture = false;
-        self.league_signup_pointer_position = None;
-        self.definition_selector = None;
+        self.dialogs.cancelled_league_signup_continuation = None;
+        self.dialogs.league_signup_consumed_keys.clear();
+        self.dialogs.league_signup_pointer_capture = false;
+        self.dialogs.league_signup_pointer_position = None;
+        self.definition_selection.dialog = None;
         self.pending_definition_selection = None;
         self.pending_lobby_player_selection = None;
-        self.definition_selector_last_click = None;
-        self.definition_selector_consumed_keys.clear();
-        self.definition_selector_pointer_capture = false;
+        self.definition_selection.last_click = None;
+        self.definition_selection.consumed_keys.clear();
+        self.definition_selection.pointer_capture = false;
         self.startup.player_properties_dialog = None;
     }
 
@@ -7797,7 +7797,7 @@ impl GameApp {
             })
         })?;
         let active = self.context_menus.open.is_none()
-            && self.definition_selector.is_none()
+            && self.definition_selection.dialog.is_none()
             && self.dialogs.game_option_input.is_none()
             && self.dialogs.league_signup.is_none()
             && self.dialogs.messages.is_empty()
@@ -7834,7 +7834,7 @@ impl GameApp {
             })
         })?;
         let active = self.context_menus.open.is_none()
-            && self.definition_selector.is_none()
+            && self.definition_selection.dialog.is_none()
             && self.dialogs.game_option_input.is_none()
             && self.dialogs.league_signup.is_none()
             && self.dialogs.messages.is_empty()

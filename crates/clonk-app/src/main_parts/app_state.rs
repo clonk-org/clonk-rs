@@ -247,6 +247,9 @@ pub(crate) struct StartupDialogState {
     /// that fresh selector goes to Main instead of inventing a NetDlg.
     pub(crate) scenario_back_dialog: Option<StartupDialog>,
     pub(crate) view_flags: StartupViewFlags,
+    /// Last player-list row click (index, time) for forwarding the list box's
+    /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
+    pub(crate) player_last_click: Option<(usize, Instant)>,
 }
 
 /// The dialogs a running game can put on screen, and the stack that orders
@@ -330,6 +333,23 @@ pub(crate) struct RuntimeDialogState {
     /// A modal may close on key-down. Retain consumed physical keys until
     /// their matching key-up so the underlying screen cannot activate.
     pub(crate) message_consumed_keys: HashSet<VirtualKeyCode>,
+    /// The latches the league-signup and game-option dialogs keep
+    /// (clonk-org/clonk-rs#1238).
+    pub(crate) league_signup_consumed_keys: HashSet<VirtualKeyCode>,
+    pub(crate) league_signup_pointer_capture: bool,
+    pub(crate) league_signup_pointer_position: Option<GuiPoint>,
+    /// UserClose(false) blocks inside its cancellation notification before
+    /// returning failure to LeaguePlrAuth. Reject the current player and
+    /// resume the remaining players only after that notification closes.
+    pub(crate) cancelled_league_signup_continuation: Option<LeaguePlayerAuthContinuation>,
+    pub(crate) game_option_input_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Physical pointer/gesture whose release belongs to the modal input
+    /// dialog even if the dialog closes before that release arrives.
+    pub(crate) game_option_input_pointer_capture: Option<ContextMenuPointerButton>,
+    pub(crate) game_option_input_pointer_position: Option<GuiPoint>,
+    pub(crate) game_option_input_last_click: Option<Instant>,
+    pub(crate) game_option_consumed_keys: HashSet<VirtualKeyCode>,
+    pub(crate) game_option_pointer_capture: bool,
 }
 
 /// Live keyboard and pointer state: what the platform last told us, and
@@ -833,6 +853,17 @@ pub(crate) struct StartupNetworkState {
     pub(crate) direct_reference_queries: Vec<StartupDirectReferenceQuery>,
     pub(crate) next_direct_reference_query_id: u64,
     pub(crate) connection: Option<StartupNetworkConnection>,
+    /// The latches the network dialog keeps for its own list and edits
+    /// (clonk-org/clonk-rs#1238).
+    /// Physical keys consumed by the join-address Edit until their matching
+    /// release, even if a multiline paste moves focus back to the game list.
+    pub(crate) edit_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Last network-game row click for C4StartupNetDlg's list-box
+    /// `OnSelDblClick -> DoOK` callback.
+    pub(crate) last_click: Option<(usize, Instant)>,
+    /// Last join-address edit click for C4GUI::Edit's double-click word
+    /// selection. This is independent from the game-list row gesture.
+    pub(crate) join_edit_last_click: Option<Instant>,
 }
 
 /// The loader-screen half of the app: which `C4LoaderScreen` is active for
@@ -855,6 +886,24 @@ pub(crate) struct LoaderScreenState {
     /// latch affects presentation only and never delays simulation or network
     /// readiness.
     pub(crate) terminal_frame_pending: bool,
+}
+
+/// The definition selector: the modal C4DefinitionSelDlg opened from the
+/// scenario book, the keys it consumed, the gesture it retains past its
+/// close, and its last label click. `GameApp` composes it as
+/// `definition_selection`.
+pub(crate) struct DefinitionSelectionState {
+    /// The modal C4DefinitionSelDlg opened from the scenario book's
+    /// "Choose definitions" checkbox. Its nested error message is kept in
+    /// `message_dialogs`, so this controller remains alive underneath it.
+    pub(crate) dialog: Option<clonk_frontend::definition_sel::DefinitionSelController>,
+    pub(crate) consumed_keys: HashSet<VirtualKeyCode>,
+    /// Retain a left/touch gesture if the selector closes before its matching
+    /// release so the underlying scenario book cannot receive that release.
+    pub(crate) pointer_capture: bool,
+    /// Last definition-list label click for multi-selection double-click
+    /// toggling (C4FileSelDlg::OnSelDblClick).
+    pub(crate) last_click: Option<(usize, Instant)>,
 }
 
 pub(crate) struct GameApp {
@@ -945,6 +994,9 @@ pub(crate) struct GameApp {
     /// is installed, its render configuration and error, its gamma ramp, and
     /// the terminal 100% frame latch (clonk-org/clonk-rs#1238).
     pub(crate) loader: LoaderScreenState,
+    /// The modal C4DefinitionSelDlg and the latches it keeps while open
+    /// (clonk-org/clonk-rs#1238).
+    pub(crate) definition_selection: DefinitionSelectionState,
     #[cfg(test)]
     #[cfg(test)]
     pub(crate) sec1_timer_call_count: usize,
@@ -1513,49 +1565,11 @@ pub(crate) struct GameApp {
     /// The runtime dialogs and the stack that orders them.
     pub(crate) dialogs: RuntimeDialogState,
     pub(crate) next_running_message_stack_id: u64,
-    /// UserClose(false) blocks inside its cancellation notification before
-    /// returning failure to LeaguePlrAuth. Reject the current player and
-    /// resume the remaining players only after that notification closes.
-    pub(crate) cancelled_league_signup_continuation: Option<LeaguePlayerAuthContinuation>,
-    /// The modal C4DefinitionSelDlg opened from the scenario book's
-    /// "Choose definitions" checkbox. Its nested error message is kept in
-    /// `message_dialogs`, so this controller remains alive underneath it.
-    pub(crate) definition_selector: Option<clonk_frontend::definition_sel::DefinitionSelController>,
     /// Scenario/root retained until the selector accepts or cancels.
     pub(crate) pending_definition_selection: Option<PendingDefinitionSelection>,
     /// Local-client target and path/wire-name map for C4PlayerSelDlg.
     pub(crate) pending_lobby_player_selection: Option<PendingLobbyPlayerSelection>,
-    pub(crate) league_signup_consumed_keys: HashSet<VirtualKeyCode>,
-    pub(crate) league_signup_pointer_capture: bool,
-    pub(crate) league_signup_pointer_position: Option<GuiPoint>,
-    pub(crate) definition_selector_consumed_keys: HashSet<VirtualKeyCode>,
-    /// Physical keys consumed by the join-address Edit until their matching
-    /// release, even if a multiline paste moves focus back to the game list.
-    pub(crate) netdlg_edit_consumed_keys: HashSet<VirtualKeyCode>,
-    /// Retain a left/touch gesture if the selector closes before its matching
-    /// release so the underlying scenario book cannot receive that release.
-    pub(crate) definition_selector_pointer_capture: bool,
-    pub(crate) game_option_input_consumed_keys: HashSet<VirtualKeyCode>,
-    /// Physical pointer/gesture whose release belongs to the modal input
-    /// dialog even if the dialog closes before that release arrives.
-    pub(crate) game_option_input_pointer_capture: Option<ContextMenuPointerButton>,
-    pub(crate) game_option_input_pointer_position: Option<GuiPoint>,
-    pub(crate) game_option_input_last_click: Option<Instant>,
-    pub(crate) game_option_consumed_keys: HashSet<VirtualKeyCode>,
-    pub(crate) game_option_pointer_capture: bool,
     pub(crate) menu_backdrop_cache: StartupBackdropCache,
-    /// Last definition-list label click for multi-selection double-click
-    /// toggling (C4FileSelDlg::OnSelDblClick).
-    pub(crate) definition_selector_last_click: Option<(usize, Instant)>,
-    /// Last player-list row click (index, time) for forwarding the list box's
-    /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
-    pub(crate) plrsel_last_click: Option<(usize, Instant)>,
-    /// Last network-game row click for C4StartupNetDlg's list-box
-    /// `OnSelDblClick -> DoOK` callback.
-    pub(crate) netdlg_last_click: Option<(usize, Instant)>,
-    /// Last join-address edit click for C4GUI::Edit's double-click word
-    /// selection. This is independent from the game-list row gesture.
-    pub(crate) netdlg_join_edit_last_click: Option<Instant>,
     /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
     /// Fader/ScreenFader state.
     pub(crate) message_board: ClassicMessageBoardState,

@@ -769,7 +769,7 @@ impl GameApp {
             && self.startup.options_advanced_dialog.is_none()
             && self.dialogs.messages.is_empty()
             && self.context_menus.open.is_none()
-            && self.definition_selector.is_none()
+            && self.definition_selection.dialog.is_none()
             && self.dialogs.game_option_input.is_none()
             && self.dialogs.league_signup.is_none()
     }
@@ -1917,9 +1917,9 @@ impl GameApp {
         self.startup_network.game_references.clear();
         self.startup_network.discovery_reference_queries.clear();
         self.startup_network.direct_reference_queries.clear();
-        self.netdlg_last_click = None;
-        self.netdlg_join_edit_last_click = None;
-        self.netdlg_edit_consumed_keys.clear();
+        self.startup_network.last_click = None;
+        self.startup_network.join_edit_last_click = None;
+        self.startup_network.edit_consumed_keys.clear();
         self.sync_startup_network_game_rows();
         self.reset_startup_masterserver_entry();
         self.status_text.clear();
@@ -3044,7 +3044,7 @@ impl GameApp {
             || self.dialogs.game_over.is_some()
             || self.startup.player_properties_dialog.is_some()
             || self.dialogs.game_option_input.is_some()
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.context_menus.open.is_some()
         {
             return Ok(false);
@@ -3995,7 +3995,7 @@ impl GameApp {
             );
             dialog.set_selected_index(selected_index);
         }
-        self.plrsel_last_click = None;
+        self.startup.player_last_click = None;
         self.refresh_participants_label();
         if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
             tracing::error!(%error, "failed to show participant overflow after properties save failure");
@@ -4228,7 +4228,7 @@ impl GameApp {
             .collect();
         self.startup.crew_files = crew;
         self.startup.crew_player_index = Some(player_index);
-        self.plrsel_last_click = None;
+        self.startup.player_last_click = None;
         self.status_text.clear();
         self.play_ui_sound("DoorOpen");
         Ok(())
@@ -4250,7 +4250,7 @@ impl GameApp {
         self.startup.crew_files.clear();
         self.startup.crew_models.clear();
         self.startup.crew_player_index = None;
-        self.plrsel_last_click = None;
+        self.startup.player_last_click = None;
         self.play_ui_sound("DoorClose");
     }
 
@@ -4288,7 +4288,7 @@ impl GameApp {
                 selected.or_else(|| (!self.startup.crew_models.is_empty()).then_some(0)),
             );
         }
-        self.plrsel_last_click = None;
+        self.startup.player_last_click = None;
         Ok(())
     }
 
@@ -4801,10 +4801,10 @@ impl GameApp {
             ),
             controller,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
         Ok(())
     }
 
@@ -5186,19 +5186,19 @@ impl GameApp {
         self.abort_startup_crew_rename();
         self.startup.player_properties_dialog = None;
         self.dialogs.game_option_input = None;
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
-        self.game_option_pointer_capture = false;
-        self.game_option_consumed_keys.clear();
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = None;
+        self.dialogs.game_option_input_last_click = None;
+        self.dialogs.game_option_pointer_capture = false;
+        self.dialogs.game_option_consumed_keys.clear();
         self.scenario_game_options.cancel_interaction();
-        self.definition_selector = None;
+        self.definition_selection.dialog = None;
         self.pending_definition_selection = None;
         self.pending_lobby_player_selection = None;
-        self.definition_selector_last_click = None;
-        self.definition_selector_consumed_keys.clear();
-        self.definition_selector_pointer_capture = false;
+        self.definition_selection.last_click = None;
+        self.definition_selection.consumed_keys.clear();
+        self.definition_selection.pointer_capture = false;
         self.clear_pending_league_player_auth();
         self.startup_network.connection = None;
         self.pending_network_host_preparation = None;
@@ -5210,9 +5210,9 @@ impl GameApp {
         self.startup_network.game_references.clear();
         self.startup_network.discovery_reference_queries.clear();
         self.startup_network.direct_reference_queries.clear();
-        self.netdlg_last_click = None;
-        self.netdlg_join_edit_last_click = None;
-        self.netdlg_edit_consumed_keys.clear();
+        self.startup_network.last_click = None;
+        self.startup_network.join_edit_last_click = None;
+        self.startup_network.edit_consumed_keys.clear();
         self.pending_network_join = None;
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
@@ -5550,7 +5550,7 @@ impl GameApp {
                     .collect(),
             );
         }
-        self.plrsel_last_click = None;
+        self.startup.player_last_click = None;
         self.refresh_participants_label();
         self.status_text.clear();
         if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
@@ -5577,7 +5577,7 @@ impl GameApp {
                 .network_start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
-            || self.definition_selector.is_some()
+            || self.definition_selection.dialog.is_some()
             || self.dialogs.game_option_input.is_some()
             || self.dialogs.league_signup.is_some()
             || self.startup.options_advanced_dialog.is_some()
@@ -5647,7 +5647,7 @@ impl GameApp {
                 if self.classic_host_lobby.is_none()
                     && self.dialogs.client_list.is_none()
                     && self.context_menus.open.is_none()
-                    && self.definition_selector.is_none()
+                    && self.definition_selection.dialog.is_none()
                     && self.dialogs.game_option_input.is_none()
                     && self.dialogs.league_signup.is_none()
                     && self.dialogs.messages.is_empty()

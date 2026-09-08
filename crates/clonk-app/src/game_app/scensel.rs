@@ -1085,7 +1085,8 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let layout = self.definition_selector_layout();
         let actions = self
-            .definition_selector
+            .definition_selection
+            .dialog
             .as_mut()
             .map(|controller| match event {
                 GamepadEvent::Direction {
@@ -1187,7 +1188,7 @@ impl GameApp {
         };
         let fixed_selection = scenario_fixed_definition_modules(&scenario);
         self.startup_tooltip.pointer_left();
-        self.definition_selector = Some(
+        self.definition_selection.dialog = Some(
             clonk_frontend::definition_sel::DefinitionSelController::new(
                 root.to_string_lossy().into_owned(),
                 fixed_selection,
@@ -1201,9 +1202,9 @@ impl GameApp {
             custom_definition_root,
         });
         self.pending_lobby_player_selection = None;
-        self.definition_selector_last_click = None;
-        self.definition_selector_consumed_keys.clear();
-        self.definition_selector_pointer_capture = false;
+        self.definition_selection.last_click = None;
+        self.definition_selection.consumed_keys.clear();
+        self.definition_selection.pointer_capture = false;
         Ok(())
     }
 
@@ -1270,7 +1271,7 @@ impl GameApp {
             controller.cancel_interaction();
         }
         self.startup_tooltip.pointer_left();
-        self.definition_selector = Some(
+        self.definition_selection.dialog = Some(
             clonk_frontend::definition_sel::DefinitionSelController::new_player(root, entries),
         );
         self.pending_definition_selection = None;
@@ -1279,9 +1280,9 @@ impl GameApp {
             config,
             candidates,
         });
-        self.definition_selector_last_click = None;
-        self.definition_selector_consumed_keys.clear();
-        self.definition_selector_pointer_capture = false;
+        self.definition_selection.last_click = None;
+        self.definition_selection.consumed_keys.clear();
+        self.definition_selection.pointer_capture = false;
         Ok(true)
     }
 
@@ -1543,7 +1544,7 @@ impl GameApp {
     pub(crate) fn definition_selector_layout(
         &self,
     ) -> Option<clonk_frontend::definition_sel::DefinitionSelLayout> {
-        let controller = self.definition_selector.as_ref()?;
+        let controller = self.definition_selection.dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.rendering.graphics.surface();
         Some(controller.layout(surface.width() as i32, surface.height() as i32, &fonts.text))
@@ -1567,7 +1568,8 @@ impl GameApp {
         actions: Vec<clonk_frontend::definition_sel::DefinitionSelAction>,
     ) -> Result<(), EngineError> {
         let sounds = self
-            .definition_selector
+            .definition_selection
+            .dialog
             .as_mut()
             .map(|controller| controller.take_sound_events())
             .unwrap_or_default();
@@ -1602,7 +1604,8 @@ impl GameApp {
                                 {
                                     pending.candidates = candidates;
                                 }
-                                if let Some(controller) = self.definition_selector.as_mut() {
+                                if let Some(controller) = self.definition_selection.dialog.as_mut()
+                                {
                                     controller.rebuild_rows_after_refresh(entries);
                                 }
                             }
@@ -1620,7 +1623,8 @@ impl GameApp {
                                 {
                                     pending.candidates.clear();
                                 }
-                                if let Some(controller) = self.definition_selector.as_mut() {
+                                if let Some(controller) = self.definition_selection.dialog.as_mut()
+                                {
                                     controller.rebuild_rows_after_refresh(Vec::new());
                                 }
                                 self.report_classic_lobby_error(format!(
@@ -1628,7 +1632,7 @@ impl GameApp {
                                 ));
                             }
                         }
-                        self.definition_selector_last_click = None;
+                        self.definition_selection.last_click = None;
                         continue;
                     }
                     let Some(root) = self
@@ -1652,12 +1656,12 @@ impl GameApp {
                             Vec::new()
                         }
                     };
-                    if let Some(controller) = self.definition_selector.as_mut() {
+                    if let Some(controller) = self.definition_selection.dialog.as_mut() {
                         // C4FileSelDlg::UpdateFileList rebuilds every row and
                         // C4DefinitionSelDlg does not reapply fixed checks on F5.
                         controller.rebuild_rows_after_refresh(entries);
                     }
-                    self.definition_selector_last_click = None;
+                    self.definition_selection.last_click = None;
                 }
                 DefinitionSelAction::PleaseSelectFile => {
                     self.push_message_dialog(
@@ -1672,8 +1676,8 @@ impl GameApp {
                 DefinitionSelAction::Accepted(modules) => {
                     if let Some(pending) = self.pending_lobby_player_selection.take() {
                         self.startup_tooltip.pointer_left();
-                        self.definition_selector = None;
-                        self.definition_selector_last_click = None;
+                        self.definition_selection.dialog = None;
+                        self.definition_selection.last_click = None;
                         if let [selected] = modules.as_slice() {
                             if let Some(candidate) = pending.candidates.get(selected).cloned() {
                                 self.submit_selected_classic_lobby_player(
@@ -1696,12 +1700,12 @@ impl GameApp {
                     let Some(pending) = self.pending_definition_selection.take() else {
                         tracing::error!("definition selector accepted without pending scenario");
                         self.startup_tooltip.pointer_left();
-                        self.definition_selector = None;
+                        self.definition_selection.dialog = None;
                         break;
                     };
                     self.startup_tooltip.pointer_left();
-                    self.definition_selector = None;
-                    self.definition_selector_last_click = None;
+                    self.definition_selection.dialog = None;
+                    self.definition_selection.last_click = None;
                     self.accept_scenario_from_selector(
                         pending.scenario,
                         pending.selector_mode,
@@ -1714,10 +1718,10 @@ impl GameApp {
                 }
                 DefinitionSelAction::Cancelled => {
                     self.startup_tooltip.pointer_left();
-                    self.definition_selector = None;
+                    self.definition_selection.dialog = None;
                     self.pending_definition_selection = None;
                     self.pending_lobby_player_selection = None;
-                    self.definition_selector_last_click = None;
+                    self.definition_selection.last_click = None;
                     break;
                 }
             }
@@ -1730,22 +1734,23 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.definition_selector.is_none() {
+        if self.definition_selection.dialog.is_none() {
             return Ok(false);
         }
         match state {
             ElementState::Pressed => {
-                self.definition_selector_consumed_keys.insert(key);
+                self.definition_selection.consumed_keys.insert(key);
             }
             ElementState::Released => {
-                self.definition_selector_consumed_keys.remove(&key);
+                self.definition_selection.consumed_keys.remove(&key);
             }
         }
         let backwards = self.input_routing.live.modifiers.shift_key();
         let alt = self.input_routing.live.modifiers.alt_key();
         let layout = self.definition_selector_layout();
         let actions = self
-            .definition_selector
+            .definition_selection
+            .dialog
             .as_mut()
             .map(|controller| {
                 if alt && state == ElementState::Pressed {
@@ -1773,7 +1778,7 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<()> {
-        let Some(controller) = self.definition_selector.as_ref() else {
+        let Some(controller) = self.definition_selection.dialog.as_ref() else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);

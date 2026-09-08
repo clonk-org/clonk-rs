@@ -484,7 +484,7 @@ impl GameApp {
             }
             AppMode::Menu => {
                 if let Some(layout) = self.definition_selector_layout() {
-                    if let Some(controller) = self.definition_selector.as_mut() {
+                    if let Some(controller) = self.definition_selection.dialog.as_mut() {
                         controller.tick_scrollbar(&layout);
                     }
                 }

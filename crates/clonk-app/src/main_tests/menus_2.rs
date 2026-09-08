@@ -302,7 +302,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     );
     label_drag.test_cursor(label_point);
     label_drag.test_left_button(ElementState::Pressed);
-    main_assert_eq!(label_drag.game_option_input_pointer_capture => None);
+    main_assert_eq!(label_drag.dialogs.game_option_input_pointer_capture => None);
     main_assert!(label_drag.input_routing.live.primary_left_down);
     label_drag.test_cursor(lower_point);
     main_assert!(!label_drag.running_chat_active());
@@ -346,10 +346,10 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     );
     release_hit.test_cursor(edit_point);
     release_hit.test_left_button(ElementState::Pressed);
-    main_assert_eq!(release_hit.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Left),);
+    main_assert_eq!(release_hit.dialogs.game_option_input_pointer_capture => Some(ContextMenuPointerButton::Left),);
     release_hit.test_cursor(checkbox_point);
     release_hit.test_left_button(ElementState::Released);
-    main_assert_eq!(release_hit.game_option_input_pointer_capture => None);
+    main_assert_eq!(release_hit.dialogs.game_option_input_pointer_capture => None);
     main_assert_eq!(release_hit.dialogs.messages[0].state.checkbox_checked() => Some(true),);
 
     let mut close_active_chat = boxed_running_sandbox_app();
@@ -900,7 +900,7 @@ fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs()
     let text_before_context_key = app.running_chat_text().map(str::to_string);
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ArrowUp, ElementState::Released);
-    main_assert!(app.game_option_input_consumed_keys.is_empty());
+    main_assert!(app.dialogs.game_option_input_consumed_keys.is_empty());
     main_assert_eq!(app.running_chat_text() => text_before_context_key.as_deref());
     main_assert_eq!(app.chat.running.as_ref().map(|chat| chat.history_index) => Some(-1));
 

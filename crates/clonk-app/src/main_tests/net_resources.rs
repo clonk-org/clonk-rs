@@ -1577,7 +1577,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     );
     let _ = definition.handle_pointer_move(definition_title, &definition_layout);
     let definition_caption = definition.caption();
-    app.definition_selector = Some(definition);
+    app.definition_selection.dialog = Some(definition);
     assert_delayed_target(
         &mut app,
         definition_title,
@@ -1588,7 +1588,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         (definition_layout.close_button.y + 1) as f32,
     );
     let _ = app
-        .definition_selector
+        .definition_selection.dialog
         .test_mut()
         .handle_pointer_move(definition_close, &definition_layout);
     assert_delayed_target(

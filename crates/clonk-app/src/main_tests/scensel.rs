@@ -159,7 +159,7 @@ fn checked_definition_checkbox_intercepts_start_even_when_local_only_disables_it
     })
     .test_value();
 
-    let selector = app.definition_selector.test_ref();
+    let selector = app.definition_selection.dialog.test_ref();
     main_assert_eq!(selector.accepted_selection() => ["Objects.c4d"]);
     main_assert!(app.loading_state.is_none());
     app.process_definition_selector_actions(vec![
@@ -299,7 +299,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     })
     .test_value();
     main_assert!(app.loading_state.is_none());
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.dialogs.messages[0].state.caption() => "Start nicht möglich.");
     main_assert_eq!(app.dialogs.messages[0].state.message() => "Noch kein Zugang zu dieser Mission.");
@@ -366,7 +366,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
     })
     .test_value();
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.definition_selector.is_some(), "the same catalog entry proceeds to the start flow after grant");
+    main_assert!(app.definition_selection.dialog.is_some(), "the same catalog entry proceeds to the start flow after grant");
     reset_cached_app_paths();
 }
 
@@ -1670,8 +1670,8 @@ fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
         PendingInputDialogPurpose::GameOption(GameOptionInputKind::Comment)
     );
     app.dialogs.game_option_input = None;
-    app.game_option_input_consumed_keys.clear();
-    app.game_option_consumed_keys.clear();
+    app.dialogs.game_option_input_consumed_keys.clear();
+    app.dialogs.game_option_consumed_keys.clear();
 
     app.test_modifiers(ModifiersState::ALT | ModifiersState::SUPER);
     app.test_key(VirtualKeyCode::KeyM, ElementState::Pressed);

@@ -445,10 +445,10 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::RunningChat,
             controller: InputDialogController::new_chat(label, &text).with_chat_tooltip(tooltip),
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = self.input_routing.live.running_pointer;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = self.input_routing.live.running_pointer;
+        self.dialogs.game_option_input_last_click = None;
     }
 
     fn start_message_board_input(&mut self, input: clonk_engine::ActiveMessageBoardInput) {
@@ -481,10 +481,10 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::RunningChat,
             controller,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = self.input_routing.live.running_pointer;
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_consumed_keys.clear();
+        self.dialogs.game_option_input_pointer_capture = None;
+        self.dialogs.game_option_input_pointer_position = self.input_routing.live.running_pointer;
+        self.dialogs.game_option_input_last_click = None;
     }
 
     pub(crate) fn reconcile_message_board_input_dialog(&mut self) -> Result<(), EngineError> {
@@ -649,7 +649,7 @@ impl GameApp {
             self.dialogs.chart_elevated = false;
         }
         self.close_context_menu_silently();
-        self.game_option_input_last_click = None;
+        self.dialogs.game_option_input_last_click = None;
         if was_active {
             self.dialogs.message_active_index = if self.dialogs.chart_elevated {
                 None

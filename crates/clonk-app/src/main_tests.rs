@@ -4663,7 +4663,7 @@ fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
             .cursor_object_menu(app.players.local_owner)
             .map(|(_, menu)| menu.style),
         context_menu_open: app.context_menus.open.is_some(),
-        definition_selector_open: app.definition_selector.is_some(),
+        definition_selector_open: app.definition_selection.dialog.is_some(),
         game_option_input_open: app.dialogs.game_option_input.is_some(),
         game_over_handled: app.game_over_handled,
         runtime_help_visible: app.dialogs.help_visible,

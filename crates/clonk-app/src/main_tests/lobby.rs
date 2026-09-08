@@ -790,7 +790,7 @@ fn network_too_few_warning_then_profile_ack_stages_and_enters_exact_lobby() {
         .test_value();
 
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     let staged = some(&app.staged_network_host_scenario);
     main_assert_eq!(staged.frontend.identifier => scenario.identifier);
     main_assert_eq!(staged.frontend.title => scenario.title);
@@ -4020,12 +4020,12 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert!(app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Pressed)
         .expect("latch joined Add Player key"));
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     app.handle_focus_lost().test_value();
     main_assert!(app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Released)
         .expect("release canceled joined Add Player key"));
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Pressed)
         .expect("relatch joined Add Player key"));
@@ -4036,7 +4036,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert!(app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Released)
         .expect("release controller-canceled joined Add Player key"));
-    main_assert!(app.definition_selector.is_none());
+    main_assert!(app.definition_selection.dialog.is_none());
 
     let chooser_point = joined_lobby_row_point(&mut app, LobbyRosterId::Player(31));
     click_network_lobby(&mut app, chooser_point);
@@ -4262,7 +4262,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         (add_player.y + add_player.h / 2) as f32,
     );
     click_network_lobby(&mut app, add_point);
-    main_assert!(app.definition_selector.is_some());
+    main_assert!(app.definition_selection.dialog.is_some());
     main_assert_eq!(some(&app.pending_lobby_player_selection).client_id => 7);
 }
 
@@ -4901,10 +4901,10 @@ fn classic_lobby_add_player_picker_publishes_relative_file_and_projects_echo() {
         &mut app,
         ClassicLobbyAction::AddPlayerRequested { client_id: 0 },
     );
-    let selected = some(&app.definition_selector).rows()[0]
+    let selected = some(&app.definition_selection.dialog).rows()[0]
         .full_path()
         .to_string();
-    main_assert_eq!(some(&app.definition_selector).root_path() => player_dir.to_string_lossy(), "C4PlayerSelDlg snapshots the configured PlayerPath root");
+    main_assert_eq!(some(&app.definition_selection.dialog).root_path() => player_dir.to_string_lossy(), "C4PlayerSelDlg snapshots the configured PlayerPath root");
     main_assert_eq!(
         some(&app.pending_lobby_player_selection).candidates[&selected].wire_filename =>
         "Players/Alice.c4p",
@@ -4925,7 +4925,7 @@ fn classic_lobby_add_player_picker_publishes_relative_file_and_projects_echo() {
         clonk_frontend::definition_sel::DefinitionSelAction::RefreshRequested,
     ])
     .test_value();
-    main_assert_eq!(some(&app.definition_selector).rows()[0].full_path() => selected, "F5 must not re-read PlayerPath");
+    main_assert_eq!(some(&app.definition_selection.dialog).rows()[0].full_path() => selected, "F5 must not re-read PlayerPath");
 
     let resource = lobby_fixture!(player_resource:
         17,
