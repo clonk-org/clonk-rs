@@ -3016,7 +3016,6 @@ impl GameApp {
             },
             last_startup_dialog: StartupDialog::MainMenu,
             scenario_game_options,
-            white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
             mode: AppMode::Loading,
             scensel: ScenarioSelectorState {
@@ -3067,33 +3066,37 @@ impl GameApp {
             file_monitor: None,
             game_log_capture: None,
             script_created_objects: false,
-            configured_client_player_selection: None,
             pending_lobby_internet_signup: None,
             pending_league_player_auth: None,
             network_event_waker: None,
             network,
             network_mode,
             league_auth_session: None,
-            network_lobby,
-            classic_host_lobby: None,
-            lobby_preload_task: None,
-            lobby_preload_artifact: None,
-            network_start_wait: None,
-            host_lobby_countdown: None,
-            network_lobby_min_players: None,
-            pending_local_lobby_countdown_echoes: VecDeque::new(),
-            lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
-            ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
+            lobby: LobbyState {
+                session: network_lobby,
+                classic_host: None,
+                preload_task: None,
+                preload_artifact: None,
+                start_wait: None,
+                host_countdown: None,
+                min_players: None,
+                pending_local_countdown_echoes: VecDeque::new(),
+                ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
+                ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
+                live_ready_check_notification: None,
+                ready_check_continuation: None,
+                ready_check_sink: std::sync::Arc::new(ready_check_notification::SilentSink),
+                ready_check_toast_backend: ready_check_backend::ReadyCheckToastBackend::default(),
+                league_votes: LeagueVoteState::default(),
+                configured_client_player_selection: None,
+                pending_player_selection: None,
+                white_chat: load_white_lobby_chat(paths),
+            },
             pending_window_attention: false,
             pending_desktop_notifications: VecDeque::new(),
             pending_desktop_notification_dismissals: VecDeque::new(),
-            live_ready_check_notification: None,
             next_desktop_notification_id: 0,
-            lobby_ready_check_continuation: None,
-            lobby_ready_check_sink: std::sync::Arc::new(ready_check_notification::SilentSink),
-            ready_check_toast_backend: ready_check_backend::ReadyCheckToastBackend::default(),
             control_messages,
-            league_votes: LeagueVoteState::default(),
             pending_network_host_preparation: None,
             classic_direct_reference_query: None,
             pending_network_join: None,
@@ -3230,7 +3233,6 @@ impl GameApp {
             runtime_flash_message: None,
             film_view_player: None,
             next_running_message_stack_id: 1,
-            pending_lobby_player_selection: None,
             context_menus: ContextMenuState {
                 open: None,
                 lobby_team_player: None,
@@ -3399,7 +3401,7 @@ impl GameApp {
                 &classic.definition_files,
             ));
         if !classic.player_files.is_empty() {
-            self.configured_client_player_selection = self
+            self.lobby.configured_client_player_selection = self
                 .app_paths
                 .as_ref()
                 .map(|paths| snapshot_effective_client_player_selection(paths, classic))
@@ -3500,7 +3502,8 @@ impl GameApp {
         let ordered_loading_overlay = self.loader_presentation_active()
             && (!self.dialogs.messages.is_empty()
                 || self
-                    .network_start_wait
+                    .lobby
+                    .start_wait
                     .as_ref()
                     .is_some_and(|wait| wait.visible))
             && self
@@ -3869,7 +3872,7 @@ impl GameApp {
                 dialog.resize(width as i32, height as i32, fonts);
                 dialog.pointer_left();
             }
-            if let Some(lobby) = self.network_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.session.as_mut() {
                 lobby.update_layout(width_f, height_f);
                 lobby.pointer_left();
             }
@@ -5387,7 +5390,7 @@ impl GameApp {
             // initialization. Clear a joined-client adapter at the same
             // boundary so no hidden lobby state can consume synchronized
             // runtime traffic (src/C4Network2.cpp:493-515).
-            let closed_joined_lobby = self.network_lobby.take().is_some();
+            let closed_joined_lobby = self.lobby.session.take().is_some();
             if closed_joined_lobby && self.mode != AppMode::Running {
                 self.close_context_menu_silently();
             }
@@ -5508,7 +5511,7 @@ impl GameApp {
             .map(|client_id| self.control_message_lobby_chat_color(client_id))
             .unwrap_or(color);
         let rgba = clonk_frontend::game_lobby::make_color_readable_on_black(color);
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.push_log(LobbyLogLine {
                 text: line,
                 color: rgba,
@@ -5516,7 +5519,7 @@ impl GameApp {
             return;
         }
         if self.startup.view == StartupView::NetworkLobby {
-            if let Some(lobby) = self.network_lobby.as_mut() {
+            if let Some(lobby) = self.lobby.session.as_mut() {
                 lobby.push_log(LobbyLogLine {
                     text: line,
                     color: rgba,
@@ -5947,7 +5950,8 @@ impl GameApp {
             || self.startup.options_advanced_dialog.is_some()
             || self.startup.player_properties_dialog.is_some()
             || self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             || self.ingame_menus.object.is_some()
@@ -7849,7 +7853,7 @@ impl GameApp {
                             self.remove_runtime_players_at_client(remove.client_id, true);
                         }
                         if self.control_clients.apply_remove(&remove) {
-                            if let Some(wait) = self.network_start_wait.as_mut() {
+                            if let Some(wait) = self.lobby.start_wait.as_mut() {
                                 wait.controller.remove_client(remove.client_id);
                             }
                             self.remove_classic_lobby_resources_at_client(remove.client_id);
@@ -8628,7 +8632,7 @@ impl GameApp {
                 StartupView::ScenarioBrowser | StartupView::NetworkLobby
             )
         {
-            if self.startup.view == StartupView::NetworkLobby && self.classic_host_lobby.is_some() {
+            if self.startup.view == StartupView::NetworkLobby && self.lobby.classic_host.is_some() {
                 check(
                     self.assets.game_lobby_resources().map(|_| ()),
                     "C4GameLobby",

@@ -529,7 +529,7 @@ fn push_to_talk_key_falls_through_in_an_offline_menu() {
 fn push_to_talk_opens_capture_in_a_network_lobby() {
     let mut app = new_menu_app(320, 200);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
     app.control_clients.register(7, false, true);
     let (manager, _events, mut voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
     app.network = Some(manager);
@@ -2371,7 +2371,7 @@ fn recoverable_route_diagnostic_keeps_the_classic_host_lobby_open() {
 
     main_assert!(app.classic_host_lobby_active());
     main_assert!(app.network.is_some());
-    main_assert_eq!(app.classic_host_lobby.as_ref().expect("classic lobby remains").controller.logs().last().map(|line| line.text.as_str()) => Some(warning));
+    main_assert_eq!(app.lobby.classic_host.as_ref().expect("classic lobby remains").controller.logs().last().map(|line| line.text.as_str()) => Some(warning));
 }
 
 #[test]
@@ -2390,7 +2390,7 @@ fn an_unassociated_connection_failure_stays_out_of_the_classic_host_lobby() {
     let (manager, events) = NetworkManager::test_stub();
     app.network = Some(manager);
     let before = app
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .expect("classic lobby is installed")
         .controller
@@ -2408,7 +2408,7 @@ fn an_unassociated_connection_failure_stays_out_of_the_classic_host_lobby() {
     main_assert!(app.classic_host_lobby_active());
     main_assert!(app.network.is_some());
     main_assert_eq!(
-        app.classic_host_lobby
+        app.lobby.classic_host
             .as_ref()
             .expect("classic lobby remains")
             .controller
@@ -2439,7 +2439,7 @@ fn peer_protocol_error_logs_and_keeps_the_classic_lobby_open() {
     main_assert!(app.classic_host_lobby_active());
     main_assert!(app.network.is_some());
     main_assert_eq!(
-        app.classic_host_lobby
+        app.lobby.classic_host
             .as_ref()
             .expect("classic lobby remains")
             .controller
@@ -2474,7 +2474,7 @@ fn typed_peer_transport_diagnostic_keeps_the_classic_lobby_open() {
     main_assert!(app.classic_host_lobby_active());
     main_assert!(app.network.is_some());
     main_assert_eq!(
-        app.classic_host_lobby
+        app.lobby.classic_host
             .as_ref()
             .expect("classic lobby remains")
             .controller
@@ -2493,7 +2493,7 @@ fn network_diagnostics_are_visible_in_a_joined_client_lobby() {
     // src/C4Log.cpp:227-239; src/C4GameLobby.cpp:738-753).
     let mut app = new_menu_app(320, 200);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     let (manager, events) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(manager);
@@ -2520,7 +2520,7 @@ fn network_diagnostics_are_visible_in_a_joined_client_lobby() {
 
     main_assert!(app.joined_network_lobby_active());
     main_assert!(app.network.is_some());
-    let logs = &app.network_lobby.test_ref().logs;
+    let logs = &app.lobby.session.test_ref().logs;
     main_assert_eq!(
         logs.iter()
             .rev()
@@ -2576,7 +2576,7 @@ fn failed_client_connection_reaches_cleanup_and_keeps_classic_lobby_open() {
     main_assert!(app.pending_runtime_dynamic_request.is_none(), "the ordinary PeerConnectionFailed cleanup handler must run");
     let expected_diagnostic = format!("client {failed_client_id}: {diagnostic}");
     main_assert_eq!(
-        app.classic_host_lobby
+        app.lobby.classic_host
             .as_ref()
             .expect("classic lobby remains")
             .controller
@@ -2623,7 +2623,7 @@ fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     // src/C4Game.cpp:408-411; src/C4Application.cpp:373-400,438-449).
     let mut app = new_real_classic_menu_app(320, 200);
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     let (manager, events) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(manager);
@@ -2639,7 +2639,7 @@ fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     main_assert!(app.startup_network.dialog.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     assert_startup_error_log(
         &app,
         "Unable to start network session: network worker stopped unexpectedly",
@@ -2663,7 +2663,7 @@ fn fatal_worker_failure_after_lobby_while_loading_changes_to_local_control() {
     app.mode = AppMode::Loading;
     let (events, _commands) = install_running_network_stub(&mut app, 7, 31, 4);
     app.engine.set_network_control_mode(true);
-    app.network_lobby = None;
+    app.lobby.session = None;
     let control_tick_before = app.engine.sync_check(7).control_tick;
     n2_send_event(
         &events,
@@ -2675,7 +2675,7 @@ fn fatal_worker_failure_after_lobby_while_loading_changes_to_local_control() {
     main_assert_eq!(app.mode => AppMode::Loading);
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert_eq!(app.engine.control_rate => 1);
     main_assert_eq!(app.engine.sync_check(7).control_tick => control_tick_before, "ChangeToLocal preserves the current control tick");
     let engine_results = app.engine.snapshot().round_results;
@@ -2694,7 +2694,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
     let mut app = new_real_classic_menu_app(320, 200);
     app.startup.view = StartupView::NetworkLobby;
     app.mode = AppMode::Loading;
-    app.network_lobby = None;
+    app.lobby.session = None;
     app.network_mode = Some(NetworkMode::Client(n2_client_settings()));
     let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(manager);
@@ -2717,7 +2717,7 @@ fn prepared_network_loading_failure_clears_session_before_restoring_startup() {
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert!(app.scenario_lifecycle.loading.is_none(), "the failed load ticket must not suppress a later client start");
     assert_startup_error_log(&app, "Unable to activate synchronized scenario");
 }
@@ -2756,7 +2756,7 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     configure_runtime_network_role(&mut app, RuntimeNetworkRole::Client);
     app.startup.view = StartupView::NetworkLobby;
     app.mode = AppMode::Loading;
-    app.network_lobby = None;
+    app.lobby.session = None;
     let snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
         .test_value();
@@ -2773,7 +2773,7 @@ fn post_go_client_preparation_failure_clears_session_and_presents_startup_error(
     main_assert_eq!(app.startup.view => StartupView::NetworkGame);
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.dialogs.messages[0].state.caption() => "Error Log");
     main_assert!(
@@ -7583,7 +7583,7 @@ fn client_join_data_submits_an_empty_initial_player_info_for_an_observer() {
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Observer",
     )));
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
     app.players.selected_file = None;
 
     let host_config = clonk_network::HostConfig::default();
@@ -9721,7 +9721,7 @@ fn classic_host_lobby_activation_request_has_no_presentation_child() {
     app.test_network_events();
 
     main_assert_eq!(commands.take_submitted_client_updates() => vec![n2_fixture!(client_update: clonk_engine::CLIENT_UPDATE_ACTIVATE, 3, 1, 0)]);
-    main_assert!(app.classic_host_lobby.is_some());
+    main_assert!(app.lobby.classic_host.is_some());
 }
 
 #[test]
@@ -9746,7 +9746,7 @@ fn classic_host_lobby_status_commit_has_no_presentation_child() {
 
     main_assert_eq!(app.runtime_network_committed_status => Some(lobby));
     main_assert!(!app.network_control_running);
-    main_assert!(app.classic_host_lobby.is_some());
+    main_assert!(app.lobby.classic_host.is_some());
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.status_text => "lobby presentation sentinel");
 }
@@ -10219,16 +10219,16 @@ fn client_follows_a_session_preserving_restart_into_the_lobby() {
     main_assert!(app.network.is_some(), "the session the host kept up is the one this client keeps");
     main_assert!(app.startup_network.connection.is_none(), "the restart must not launch a new client admission");
     main_assert!(app.pending_host_rejoin.is_none(), "a preserved session has no reconnect to arm");
-    main_assert!(app.network_lobby.is_some(), "the client lands in the lobby rather than the game list");
-    main_assert_eq!(app.network_lobby.test_ref().selected_identifier() => Some(restarted_scenario.identifier.as_str()), "the retained lobby must still identify the round's scenario");
-    main_assert_eq!(app.network_lobby.test_ref().scenario_label() => restarted_scenario.title, "the client must not see the scenario-selection placeholder after restart");
-    let participants = &app.network_lobby.test_ref().participants;
+    main_assert!(app.lobby.session.is_some(), "the client lands in the lobby rather than the game list");
+    main_assert_eq!(app.lobby.session.test_ref().selected_identifier() => Some(restarted_scenario.identifier.as_str()), "the retained lobby must still identify the round's scenario");
+    main_assert_eq!(app.lobby.session.test_ref().scenario_label() => restarted_scenario.title, "the client must not see the scenario-selection placeholder after restart");
+    let participants = &app.lobby.session.test_ref().participants;
     main_assert_eq!(participants.keys().copied().collect::<Vec<_>>() => [0, 7, 9]);
     main_assert_eq!(participants[&0].name => "Exact host");
     main_assert_eq!(participants[&7].name => "Assigned local");
     main_assert_eq!(participants[&9].name => "Retained peer");
     main_assert!(
-        app.network_lobby
+        app.lobby.session
             .test_ref()
             .controller
             .rows()
@@ -10663,7 +10663,7 @@ fn removing_local_network_client_changes_to_local_control() {
 
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.session.is_none());
     main_assert!(app.control_clients.contains(3));
     main_assert!(app.control_clients.is_activated(3));
     main_assert!(!app.control_clients.contains(0));
@@ -10677,7 +10677,7 @@ fn running_stale_lobby_state_cannot_execute_scheduled_sync_immediately() {
     // src/C4GameControlNetwork.cpp:558-588).
     let mut app = new_state_only_running_sandbox_app();
     let (events, _commands) = install_running_network_stub(&mut app, 7, 0, 1);
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     n2_send_event(
         &events,
         n2_fixture!(scheduled_sync:
@@ -10915,7 +10915,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     lobby.roster_rows.clone_from(&cached_rows);
     lobby.roster_rows_authoritative = true;
     lobby.controller.set_rows(cached_rows.clone());
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
     n2_send_event(&event_tx, n2_fixture!(ready_tick: 77, Vec::new()));
     n2_send_event(
         &event_tx,
@@ -10927,7 +10927,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     main_assert_eq!(clock.calculate_performance() => None);
     main_assert_eq!(clock.avg_control_send_time() => 0, "host-only ping telemetry must not replace the consumed topology sample");
 
-    let lobby = app.network_lobby.test_ref();
+    let lobby = app.lobby.session.test_ref();
     let host = lobby
         .roster_rows
         .iter()
@@ -10959,7 +10959,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     // C4PlayerInfoListBox (src/C4Network2.cpp:674-677;
     // src/C4Network2Dialogs.cpp:343-370).
     app.refresh_classic_lobby_client_telemetry();
-    let lobby = app.network_lobby.test_mut();
+    let lobby = app.lobby.session.test_mut();
     let host = lobby
         .roster_rows
         .iter()
@@ -11004,7 +11004,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
     app.test_network_events();
 
-    let lobby = app.network_lobby.test_ref();
+    let lobby = app.lobby.session.test_ref();
     main_assert_eq!(lobby.roster_rows => telemetry_rows);
     main_assert_eq!(lobby.controller.rows() => telemetry_rows.as_slice());
 
@@ -11023,7 +11023,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
     app.test_network_events();
     main_assert_ne!(
-        app.network_lobby
+        app.lobby.session
             .as_ref()
             .expect("cached lobby fixture")
             .controller
@@ -11033,7 +11033,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
 
     {
-        let lobby = app.network_lobby.test_mut();
+        let lobby = app.lobby.session.test_mut();
         lobby.roster_rows.clone_from(&cached_rows);
         lobby.controller.set_rows(cached_rows.clone());
     }
@@ -11043,7 +11043,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
     app.test_network_events();
     main_assert_ne!(
-        app.network_lobby
+        app.lobby.session
             .as_ref()
             .expect("cached lobby fixture")
             .controller
@@ -11053,7 +11053,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
 
     {
-        let lobby = app.network_lobby.test_mut();
+        let lobby = app.lobby.session.test_mut();
         lobby.roster_rows.clone_from(&cached_rows);
         lobby.controller.set_rows(cached_rows.clone());
     }
@@ -11071,7 +11071,7 @@ fn joined_lobby_non_roster_network_batch_keeps_cached_player_raster() {
     );
     app.test_network_events();
 
-    let lobby = app.network_lobby.test_mut();
+    let lobby = app.lobby.session.test_mut();
     lobby.sync_classic_controller();
     main_assert!(
         lobby
@@ -11091,8 +11091,8 @@ fn classic_roster_sync_without_a_lobby_is_cpp_guarded_noop() {
     // there is no PlayerInfo-list projection or related UI mutation.
     let mut app = new_state_only_running_sandbox_app();
     app.set_context_menu_lobby_team_player(Some(41));
-    main_assert!(app.classic_host_lobby.is_none());
-    main_assert!(app.network_lobby.is_none());
+    main_assert!(app.lobby.classic_host.is_none());
+    main_assert!(app.lobby.session.is_none());
 
     app.sync_classic_lobby_roster();
 
@@ -12810,7 +12810,7 @@ fn runtime_network_client_join_loading_reaches_running_render() {
     app.process_network_events().test_value();
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert!(app.network_control_running);
-    main_assert!(app.network_start_wait.is_none());
+    main_assert!(app.lobby.start_wait.is_none());
     main_assert!(!app.control_clients.is_activated(7));
     main_assert!(app.engine.players().any(|player| player.player_info_id() == 1));
     main_assert!(app.engine.players().all(|player| player.player_info_id() != 2));

@@ -171,10 +171,10 @@ impl GameApp {
     }
 
     fn note_control_message_sound(&mut self, client_id: i32, muted: bool) {
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.note_client_sound(client_id, muted);
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.note_client_sound(client_id, muted);
         }
     }
@@ -273,7 +273,7 @@ impl GameApp {
                             .state(control.by_client)
                             .map(|client| legacy_presentation_text(client.nick.as_bytes()))
                             .unwrap_or_else(|| "???".to_string());
-                        let white = self.control_message_has_lobby() && self.white_lobby_chat;
+                        let white = self.control_message_has_lobby() && self.lobby.white_chat;
                         let line = match (control.message_type, white) {
                             (MESSAGE_TYPE_NORMAL, true) => {
                                 format!("<{nick}> <c ffffff>{message}")
@@ -335,7 +335,7 @@ impl GameApp {
                         .state(control.by_client)
                         .map(|client| legacy_presentation_text(client.nick.as_bytes()))
                         .unwrap_or_else(|| "???".to_string());
-                    let line = if self.white_lobby_chat {
+                    let line = if self.lobby.white_chat {
                         format!("{{{nick}}} <c ffffff>{message}")
                     } else {
                         format!("{{{nick}}} {message}")

@@ -117,7 +117,8 @@ impl GameApp {
         self.loader_presentation_active()
             && self.dialogs.messages.is_empty()
             && !self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             && scale > 0.0
@@ -2416,12 +2417,12 @@ impl GameApp {
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.clear_lobby_preload();
-        self.classic_host_lobby = None;
-        self.network_lobby = None;
-        self.network_start_wait = None;
+        self.lobby.classic_host = None;
+        self.lobby.session = None;
+        self.lobby.start_wait = None;
         self.pending_network_host_preparation = None;
         self.staged_network_host_scenario = None;
-        self.network_lobby_min_players = None;
+        self.lobby.min_players = None;
         self.reinitialize_startup_loader_screen();
         self.abandon_live_masterserver_signup();
         self.clear_pending_league_player_auth();
@@ -2436,8 +2437,8 @@ impl GameApp {
         self.network_mode = None;
         self.host_join_snapshot = None;
         self.pending_runtime_dynamic_request = None;
-        self.host_lobby_countdown = None;
-        self.pending_local_lobby_countdown_echoes.clear();
+        self.lobby.host_countdown = None;
+        self.lobby.pending_local_countdown_echoes.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
         self.offline_control_input.clear();
@@ -2853,8 +2854,8 @@ impl GameApp {
                             self.network = Some(manager);
                             self.network_control_running = false;
                             self.network_control_clock = network_control_clock;
-                            self.network_lobby = Some(lobby);
-                            self.classic_host_lobby = None;
+                            self.lobby.session = Some(lobby);
+                            self.lobby.classic_host = None;
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
                             self.restore_startup_fonts();
@@ -2863,7 +2864,8 @@ impl GameApp {
                         }
                     }
                     let retained_preload = self
-                        .classic_host_lobby
+                        .lobby
+                        .classic_host
                         .as_ref()
                         .filter(|_| {
                             matches!(
@@ -2928,8 +2930,8 @@ impl GameApp {
                             self.network = Some(manager);
                             self.network_control_running = false;
                             self.network_control_clock = network_control_clock;
-                            self.network_lobby = None;
-                            self.classic_host_lobby = Some(lobby);
+                            self.lobby.session = None;
+                            self.lobby.classic_host = Some(lobby);
                             self.sync_classic_lobby_roster();
                             self.sync_classic_lobby_resource_ready();
                             self.scenario_game_options = options;
@@ -2999,10 +3001,10 @@ impl GameApp {
                     self.network = Some(manager);
                     self.network_control_running = false;
                     self.players.team_assignment = None;
-                    self.network_lobby = Some(lobby);
-                    self.classic_host_lobby = None;
-                    self.host_lobby_countdown = None;
-                    self.pending_local_lobby_countdown_echoes.clear();
+                    self.lobby.session = Some(lobby);
+                    self.lobby.classic_host = None;
+                    self.lobby.host_countdown = None;
+                    self.lobby.pending_local_countdown_echoes.clear();
                     self.mode = AppMode::Menu;
                     self.open_network_lobby();
                     return Ok(());
@@ -4890,7 +4892,7 @@ impl GameApp {
                 self.open_scenario_browser();
             }
             MainMenuItem::NetworkGame => {
-                if self.network_mode.is_some() && self.network_lobby.is_some() {
+                if self.network_mode.is_some() && self.lobby.session.is_some() {
                     self.open_network_lobby();
                 } else {
                     self.begin_startup_dialog_fade(StartupDialog::NetworkGame);
@@ -5198,7 +5200,7 @@ impl GameApp {
         self.scenario_game_options.cancel_interaction();
         self.definition_selection.dialog = None;
         self.definition_selection.pending = None;
-        self.pending_lobby_player_selection = None;
+        self.lobby.pending_player_selection = None;
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();
         self.definition_selection.pointer_capture = false;
@@ -5226,14 +5228,14 @@ impl GameApp {
         self.runtime_network_join_allowed = None;
         if self.startup.view == StartupView::NetworkLobby {
             self.control_messages.clear_clients();
-            self.network_lobby = None;
-            self.classic_host_lobby = None;
-            self.network_start_wait = None;
+            self.lobby.session = None;
+            self.lobby.classic_host = None;
+            self.lobby.start_wait = None;
             self.staged_network_host_scenario = None;
-            self.network_lobby_min_players = None;
+            self.lobby.min_players = None;
             self.clear_lobby_preload();
-            self.host_lobby_countdown = None;
-            self.pending_local_lobby_countdown_echoes.clear();
+            self.lobby.host_countdown = None;
+            self.lobby.pending_local_countdown_echoes.clear();
             self.reinitialize_startup_loader_screen();
             self.abandon_live_masterserver_signup();
             self.network = None;
@@ -5271,7 +5273,7 @@ impl GameApp {
         self.replace_startup_dialog(StartupView::MainMenu, StartupDialog::MainMenu);
         self.scensel.mode = ScenarioSelectorMode::Local;
         self.main_menu_state.pointer_left();
-        if let Some(lobby) = self.network_lobby.as_mut() {
+        if let Some(lobby) = self.lobby.session.as_mut() {
             lobby.pointer_left();
         }
         let participants_validation = (!crate::presentation_capture_or_discovery_requested())
@@ -5435,7 +5437,7 @@ impl GameApp {
                 && self.classic_direct_reference_query.is_none()
             {
                 self.mode = AppMode::Menu;
-                if self.network_mode.is_some() && self.network_lobby.is_some() {
+                if self.network_mode.is_some() && self.lobby.session.is_some() {
                     // A command-line host/client has already completed network
                     // initialization. C++ proceeds directly into DoLobby here;
                     // returning to the main menu would leave GS_Lobby unacked
@@ -5587,7 +5589,8 @@ impl GameApp {
             || self.context_menus.open.is_some()
             || !self.dialogs.messages.is_empty()
             || self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             || self.definition_selection.dialog.is_some()
@@ -5657,7 +5660,7 @@ impl GameApp {
         let mut rendered = self.render_startup_element_tooltip()?;
         match self.startup.view {
             StartupView::NetworkLobby
-                if self.classic_host_lobby.is_none()
+                if self.lobby.classic_host.is_none()
                     && self.dialogs.client_list.is_none()
                     && self.context_menus.open.is_none()
                     && self.definition_selection.dialog.is_none()
@@ -5667,13 +5670,14 @@ impl GameApp {
                     && self.startup.player_properties_dialog.is_none()
                     && !self.chat.external_dialog_visible
                     && self
-                        .network_start_wait
+                        .lobby
+                        .start_wait
                         .as_ref()
                         .is_none_or(|wait| !wait.visible) =>
             {
                 let assets = Arc::clone(&self.assets);
                 let gamma = self.startup_fragment_gamma();
-                if let Some(lobby) = self.network_lobby.as_mut() {
+                if let Some(lobby) = self.lobby.session.as_mut() {
                     lobby.render_classic_tooltips(
                         self.rendering.graphics.surface_mut(),
                         assets.as_ref(),
@@ -5917,8 +5921,8 @@ impl GameApp {
 
     fn reject_generic_startup_view(&self) -> Result<()> {
         if self.startup.view != StartupView::NetworkLobby
-            || self.classic_host_lobby.is_some()
-            || self.network_lobby.is_some()
+            || self.lobby.classic_host.is_some()
+            || self.lobby.session.is_some()
         {
             return Ok(());
         }

@@ -201,7 +201,8 @@ impl GameApp {
             let mut encoded = [0_u8; 4];
             let text = character.encode_utf8(&mut encoded).to_string();
             let actions = self
-                .classic_host_lobby
+                .lobby
+                .classic_host
                 .as_mut()
                 .map(|lobby| lobby.controller.text_input(text))
                 .unwrap_or_default();
@@ -211,7 +212,8 @@ impl GameApp {
             let mut encoded = [0_u8; 4];
             let text = character.encode_utf8(&mut encoded).to_string();
             let actions = self
-                .network_lobby
+                .lobby
+                .session
                 .as_mut()
                 .map(|lobby| {
                     lobby.sync_classic_controller();
@@ -488,7 +490,7 @@ impl GameApp {
                     (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
                 }
             };
-            let _ = self.network_start_wait.as_mut().is_some_and(|wait| {
+            let _ = self.lobby.start_wait.as_mut().is_some_and(|wait| {
                 wait.pointer
                     .is_some_and(|point| wait.controller.handle_wheel(point, native_delta, &layout))
             });
@@ -639,7 +641,7 @@ impl GameApp {
         }
         if self.mode == AppMode::Menu
             && self.startup.view == StartupView::NetworkLobby
-            && self.network_lobby.is_some()
+            && self.lobby.session.is_some()
         {
             let amount = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
@@ -651,7 +653,7 @@ impl GameApp {
                 return Ok(());
             }
             self.scenario_game_options.note_pointer_wheel();
-            let (_, scroll_window_captured) = match self.network_lobby.as_mut() {
+            let (_, scroll_window_captured) = match self.lobby.session.as_mut() {
                 Some(lobby) => lobby
                     .wheel_right_sheet(
                         amount,
@@ -2353,7 +2355,8 @@ impl GameApp {
             && self.dialogs.game_option_input.is_none()
             && self.definition_selection.dialog.is_none()
             && self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_none_or(|wait| !wait.visible)
     }
@@ -4547,7 +4550,7 @@ impl GameApp {
         }
         if self.mode == AppMode::Menu
             && self.startup.view == StartupView::NetworkLobby
-            && self.network_lobby.is_some()
+            && self.lobby.session.is_some()
             && key == VirtualKeyCode::ContextMenu
             && self.input_routing.live.modifiers.is_empty()
         {
@@ -4558,7 +4561,7 @@ impl GameApp {
         }
         if self.mode == AppMode::Menu
             && self.startup.view == StartupView::NetworkLobby
-            && self.network_lobby.is_some()
+            && self.lobby.session.is_some()
             && self.handle_joined_lobby_roster_key(key, state)?
         {
             return Ok(());
@@ -4964,7 +4967,8 @@ impl GameApp {
                         }
                         StartupView::NetworkLobby => {
                             if let Some(action) = self
-                                .network_lobby
+                                .lobby
+                                .session
                                 .as_mut()
                                 .and_then(|lobby| lobby.handle_key(gui_key, state))
                             {
@@ -6343,11 +6347,12 @@ impl GameApp {
             }
             GamepadEvent::Clear { .. } => {
                 if self
-                    .network_start_wait
+                    .lobby
+                    .start_wait
                     .as_ref()
                     .is_some_and(|wait| wait.visible)
                 {
-                    if let Some(wait) = self.network_start_wait.as_mut() {
+                    if let Some(wait) = self.lobby.start_wait.as_mut() {
                         wait.controller.cancel_interaction();
                     }
                 } else if let Some(pending) = self.startup.options_advanced_dialog.as_mut() {
@@ -6357,7 +6362,7 @@ impl GameApp {
                     self.process_startup_player_properties_actions(actions);
                 } else if self.mode == AppMode::Menu
                     && self.startup.view == StartupView::NetworkLobby
-                    && (self.classic_host_lobby.is_some() || self.network_lobby.is_some())
+                    && (self.lobby.classic_host.is_some() || self.lobby.session.is_some())
                 {
                     self.cancel_classic_lobby_interaction();
                 } else if self.mode == AppMode::Menu
@@ -6381,12 +6386,14 @@ impl GameApp {
             }
             GamepadEvent::GuiButton { class, state, .. } => {
                 if self
-                    .network_start_wait
+                    .lobby
+                    .start_wait
                     .as_ref()
                     .is_some_and(|wait| wait.visible)
                 {
                     let actions = self
-                        .network_start_wait
+                        .lobby
+                        .start_wait
                         .as_mut()
                         .map(|wait| match (class, state) {
                             (GuiButtonClass::Low, ElementState::Pressed) => {
@@ -6497,7 +6504,8 @@ impl GameApp {
         }
         if self.message_dialog_owns_gamepad_input()
             || self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             || self.startup.options_advanced_dialog.is_some()
@@ -6605,7 +6613,8 @@ impl GameApp {
             return Ok(());
         }
         if self
-            .network_start_wait
+            .lobby
+            .start_wait
             .as_ref()
             .is_some_and(|wait| wait.visible)
         {
@@ -6682,13 +6691,14 @@ impl GameApp {
             });
         }
         if self
-            .network_start_wait
+            .lobby
+            .start_wait
             .as_ref()
             .is_some_and(|wait| wait.visible)
         {
             if state == ElementState::Pressed {
                 let backwards = matches!(button, ControlButton::Left | ControlButton::Up);
-                if let Some(wait) = self.network_start_wait.as_mut() {
+                if let Some(wait) = self.lobby.start_wait.as_mut() {
                     wait.controller.handle_gamepad_horizontal(backwards);
                 }
             }
@@ -6752,7 +6762,7 @@ impl GameApp {
             return self.handle_classic_lobby_gamepad_direction(button, state);
         }
         if self.joined_network_lobby_active() {
-            let option_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
+            let option_focused = self.lobby.session.as_mut().is_some_and(|lobby| {
                 lobby.sync_classic_controller();
                 matches!(lobby.controller.focus(), LobbyControl::GameOption(_))
             });
@@ -6766,7 +6776,8 @@ impl GameApp {
                     };
                     let assets = Arc::clone(&self.assets);
                     let actions = self
-                        .network_lobby
+                        .lobby
+                        .session
                         .as_mut()
                         .expect("joined lobby was checked above")
                         .with_classic_controller_input(
@@ -7155,7 +7166,7 @@ impl GameApp {
                         }
                         StartupView::NetworkLobby => {
                             let option_focused = self.joined_network_lobby_active()
-                                && self.network_lobby.as_mut().is_some_and(|lobby| {
+                                && self.lobby.session.as_mut().is_some_and(|lobby| {
                                     lobby.sync_classic_controller();
                                     matches!(lobby.controller.focus(), LobbyControl::GameOption(_))
                                 });
@@ -7163,7 +7174,8 @@ impl GameApp {
                                 let assets = Arc::clone(&self.assets);
                                 let actions = {
                                     let lobby = self
-                                        .network_lobby
+                                        .lobby
+                                        .session
                                         .as_mut()
                                         .expect("joined lobby was checked above");
                                     match state {
@@ -7603,7 +7615,7 @@ impl GameApp {
             return Ok(());
         }
         if let Some(layout) = self.network_start_wait_layout() {
-            if let Some(wait) = self.network_start_wait.as_mut() {
+            if let Some(wait) = self.lobby.start_wait.as_mut() {
                 wait.pointer = Some(point);
                 wait.controller.handle_pointer_move(point, &layout);
             }
@@ -7778,13 +7790,14 @@ impl GameApp {
                         self.process_main_menu_actions(actions)
                     }
                     StartupView::NetworkLobby => {
-                        if self.network_lobby.is_some() {
+                        if self.lobby.session.is_some() {
                             let (width, height) = {
                                 let surface = self.rendering.graphics.surface();
                                 (surface.width() as f32, surface.height() as f32)
                             };
                             let region = self
-                                .network_lobby
+                                .lobby
+                                .session
                                 .as_mut()
                                 .map(|lobby| {
                                     lobby.update_layout(width, height);
@@ -7980,7 +7993,8 @@ impl GameApp {
         let gui_owned = match self.mode {
             AppMode::Menu => true,
             AppMode::Loading => {
-                self.network_start_wait
+                self.lobby
+                    .start_wait
                     .as_ref()
                     .is_some_and(|wait| wait.visible)
                     || self.dialogs.league_signup.is_some()
@@ -9666,7 +9680,7 @@ impl GameApp {
         }
         if self.mode == AppMode::Menu
             && self.startup.view == StartupView::NetworkLobby
-            && self.network_lobby.is_some()
+            && self.lobby.session.is_some()
         {
             return self.handle_network_lobby_secondary_button(button_state);
         }
@@ -10038,7 +10052,7 @@ impl GameApp {
         }
         if self.mode == AppMode::Menu
             && self.startup.view == StartupView::NetworkLobby
-            && self.network_lobby.is_some()
+            && self.lobby.session.is_some()
         {
             return self.handle_network_lobby_middle_button(button_state);
         }
@@ -11126,7 +11140,8 @@ impl GameApp {
         }
         if let Some(layout) = self.network_start_wait_layout() {
             let actions = self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_mut()
                 .and_then(|wait| {
                     wait.pointer.map(|point| match button_state {
@@ -11642,12 +11657,12 @@ impl GameApp {
                         Ok(())
                     }
                     StartupView::NetworkLobby => {
-                        if self.network_lobby.is_some() {
+                        if self.lobby.session.is_some() {
                             let (width, height) = {
                                 let surface = self.rendering.graphics.surface();
                                 (surface.width() as f32, surface.height() as f32)
                             };
-                            let panel_pointer = self.network_lobby.as_mut().and_then(|lobby| {
+                            let panel_pointer = self.lobby.session.as_mut().and_then(|lobby| {
                                 lobby.update_layout(width, height);
                                 lobby.pointer_position().filter(|point| {
                                     matches!(
@@ -12083,7 +12098,8 @@ impl GameApp {
         }
         if let Some(layout) = self.network_start_wait_layout() {
             let actions = self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_mut()
                 .map(|wait| {
                     wait.pointer = (!matches!(phase, TouchPhase::Cancelled)).then_some(position);
@@ -12661,13 +12677,14 @@ impl GameApp {
                 self.process_main_menu_actions(actions)
             }
             StartupView::NetworkLobby => {
-                if self.network_lobby.is_some() {
+                if self.lobby.session.is_some() {
                     let (width, height) = {
                         let surface = self.rendering.graphics.surface();
                         (surface.width() as f32, surface.height() as f32)
                     };
                     let region = self
-                        .network_lobby
+                        .lobby
+                        .session
                         .as_mut()
                         .map(|lobby| {
                             lobby.update_layout(width, height);
@@ -12806,11 +12823,12 @@ impl GameApp {
             return;
         }
         if self
-            .network_start_wait
+            .lobby
+            .start_wait
             .as_ref()
             .is_some_and(|wait| wait.visible)
         {
-            if let Some(wait) = self.network_start_wait.as_mut() {
+            if let Some(wait) = self.lobby.start_wait.as_mut() {
                 wait.pointer = None;
                 wait.controller.pointer_left();
             }
@@ -13130,7 +13148,8 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self
-            .network_start_wait
+            .lobby
+            .start_wait
             .as_ref()
             .is_none_or(|wait| !wait.visible)
         {
@@ -13143,12 +13162,14 @@ impl GameApp {
             && !modifiers.control_key()
             && key == VirtualKeyCode::KeyR
         {
-            self.network_start_wait
+            self.lobby
+                .start_wait
                 .as_mut()
                 .map(|wait| wait.controller.handle_hotkey('R'))
                 .unwrap_or_default()
         } else if let Some(gui_key) = map_key_code(key) {
-            self.network_start_wait
+            self.lobby
+                .start_wait
                 .as_mut()
                 .map(|wait| match state {
                     ElementState::Pressed => wait.controller.handle_key_down_with_tab_direction(

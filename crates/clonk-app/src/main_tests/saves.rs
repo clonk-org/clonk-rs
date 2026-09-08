@@ -1468,7 +1468,7 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
 
     app.sync_classic_lobby_roster();
 
-    let rows = app.classic_host_lobby.test_ref().controller.rows();
+    let rows = app.lobby.classic_host.test_ref().controller.rows();
     main_assert_eq!(
         rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>() =>
         vec![

@@ -1462,7 +1462,7 @@ impl GameApp {
         if self.players.restart_restore_infos.what & RESTART_RESTORE_PLAYER_TEAMS == 0
             || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
             || self.network.is_none()
-            || (self.classic_host_lobby.is_none() && self.network_lobby.is_none())
+            || (self.lobby.classic_host.is_none() && self.lobby.session.is_none())
         {
             return;
         }
@@ -1566,7 +1566,7 @@ impl GameApp {
             || self.players.restart_restore_infos.what & RESTART_RESTORE_SCRIPT_PLAYERS == 0
             || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
             || self.network.is_none()
-            || (self.classic_host_lobby.is_none() && self.network_lobby.is_none())
+            || (self.lobby.classic_host.is_none() && self.lobby.session.is_none())
         {
             return;
         }

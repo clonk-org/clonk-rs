@@ -16,9 +16,9 @@ impl GameApp {
             || self.startup_network.connection.is_some()
             || self.pending_network_join.is_some()
             || self.staged_network_host_scenario.is_some()
-            || self.lobby_preload_task.is_some()
-            || self.lobby_preload_artifact.is_some()
-            || self.network_start_wait.is_some()
+            || self.lobby.preload_task.is_some()
+            || self.lobby.preload_artifact.is_some()
+            || self.lobby.start_wait.is_some()
             || self.pending_network_join_data.is_some()
             || self.pending_client_start_status.is_some()
     }
@@ -30,8 +30,8 @@ impl GameApp {
             || (self.scenario_lifecycle.boot_loading.is_none()
                 && (self.network.is_some()
                     || self.network_mode.is_some()
-                    || self.network_lobby.is_some()
-                    || self.classic_host_lobby.is_some()))
+                    || self.lobby.session.is_some()
+                    || self.lobby.classic_host.is_some()))
     }
 
     /// Return a finished console round to the state its next command is
@@ -52,15 +52,15 @@ impl GameApp {
         let boot_still_loading = self.scenario_lifecycle.boot_loading.is_some();
         let network_game_active = self.network.is_some()
             || self.network_mode.is_some()
-            || self.network_lobby.is_some()
-            || self.classic_host_lobby.is_some()
+            || self.lobby.session.is_some()
+            || self.lobby.classic_host.is_some()
             || self.startup_network.connection.is_some()
             || self.classic_direct_reference_query.is_some()
             || self.pending_network_join.is_some()
             || self.staged_network_host_scenario.is_some()
-            || self.lobby_preload_task.is_some()
-            || self.lobby_preload_artifact.is_some()
-            || self.network_start_wait.is_some()
+            || self.lobby.preload_task.is_some()
+            || self.lobby.preload_artifact.is_some()
+            || self.lobby.start_wait.is_some()
             || self.pending_network_join_data.is_some()
             || self.pending_client_start_status.is_some();
         self.scenario_lifecycle.auto_start_sandbox = false;

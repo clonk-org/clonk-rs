@@ -1436,7 +1436,7 @@ impl GameApp {
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
                 if self.startup.view == StartupView::NetworkLobby
-                    && self.classic_host_lobby.is_none()
+                    && self.lobby.classic_host.is_none()
                 {
                     self.close_stale_classic_lobby_team_combo();
                 }
@@ -1481,7 +1481,7 @@ impl GameApp {
                     }
                 }
                 if self.startup.view == StartupView::NetworkLobby
-                    && self.classic_host_lobby.is_some()
+                    && self.lobby.classic_host.is_some()
                 {
                     self.render_classic_host_lobby()?;
                     if ordered_native {
@@ -1660,7 +1660,7 @@ impl GameApp {
                     )
                 };
                 let scenario_loading_label = self.scenario_selector_loading_label();
-                let network_lobby = self.network_lobby.as_mut();
+                let network_lobby = self.lobby.session.as_mut();
                 render_startup_frame(
                     &mut self.rendering.graphics,
                     self.assets.as_ref(),
@@ -2108,7 +2108,8 @@ impl GameApp {
             && self.dialogs.messages.is_empty()
             && self.dialogs.league_signup.is_none()
             && !self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
         {
@@ -2144,7 +2145,8 @@ impl GameApp {
             self.commit_pending_native_loader_base(frame);
             self.begin_native_text_capture(true);
             if self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             {
@@ -2153,7 +2155,8 @@ impl GameApp {
                         .assets
                         .network_start_wait_resources()
                         .map_err(|error| self.loader_boundary(error.to_string()))?;
-                    self.network_start_wait
+                    self.lobby
+                        .start_wait
                         .as_ref()
                         .expect("visibility was checked above")
                         .controller
@@ -2200,7 +2203,8 @@ impl GameApp {
                 .render_with_config(self.rendering.graphics.surface_mut(), config, Some(gamma));
             render.map_err(|error| self.loader_boundary(error.to_string()))?;
             if self
-                .network_start_wait
+                .lobby
+                .start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             {
@@ -2208,7 +2212,8 @@ impl GameApp {
                     .assets
                     .network_start_wait_resources()
                     .map_err(|error| self.loader_boundary(error.to_string()))?;
-                self.network_start_wait
+                self.lobby
+                    .start_wait
                     .as_ref()
                     .expect("visibility was checked above")
                     .controller
@@ -2247,7 +2252,8 @@ impl GameApp {
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
         }
         if self
-            .network_start_wait
+            .lobby
+            .start_wait
             .as_ref()
             .is_some_and(|wait| wait.visible)
         {
@@ -2255,7 +2261,8 @@ impl GameApp {
                 .assets
                 .network_start_wait_resources()
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
-            self.network_start_wait
+            self.lobby
+                .start_wait
                 .as_ref()
                 .expect("visibility was checked above")
                 .controller

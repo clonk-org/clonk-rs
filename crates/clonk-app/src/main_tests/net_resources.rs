@@ -217,7 +217,7 @@ fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_pack
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Client(client_network_settings()));
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
 
     let resource = |resource_type: clonk_network::HostResourceType, id, name: &[u8]| {
         netresources_fixture!(
@@ -249,7 +249,7 @@ fn runtime_join_data_tracks_slow_resource_then_cancel_aborts_without_status_pack
     app.test_network_events();
 
     main_assert_eq!(app.mode => AppMode::Loading);
-    main_assert!(app.network_lobby.is_none(), "a running host never enters DoLobby");
+    main_assert!(app.lobby.session.is_none(), "a running host never enters DoLobby");
     main_assert_eq!(app.pending_client_start_status => Some(reference_status));
 
     let progress = app
@@ -486,7 +486,7 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
         clonk_engine::LegacyCString::from_bytes(b"M\x81ker".to_vec()).test_value();
     app.network_mode = Some(NetworkMode::Client(settings));
     app.startup.view = StartupView::NetworkLobby;
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
         .test_value();
@@ -860,7 +860,7 @@ fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
     app.sync_classic_lobby_roster();
     let expected_color = [0xff, 0x17, 0x17, 0xff];
     main_assert!(app
-                .classic_host_lobby
+                .lobby.classic_host
                 .as_ref()
                 .unwrap()
                 .controller
@@ -870,7 +870,7 @@ fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
 
     let mut client = new_menu_app(640, 480);
     client.startup.view = StartupView::NetworkLobby;
-    client.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    client.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     client.control_clients.replace_snapshot([
         message_client(0, b"Exact Host"),
         message_client(7, b"Client"),
@@ -880,7 +880,7 @@ fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
         .replace_snapshot(4, [authoritative]);
     client.sync_classic_lobby_roster();
     main_assert!(client
-                .network_lobby
+                .lobby.session
                 .as_ref()
                 .unwrap()
                 .roster_rows
@@ -903,7 +903,7 @@ fn generic_client_resource_save_hit_target_emits_the_resource_id() {
     app.network_mode = Some(NetworkMode::Client(settings));
     let (network, _events) = NetworkManager::test_stub_for_client_id(7);
     app.network = Some(network);
-    app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
     let core = netresources_fixture!(
         resource_resource_type_id_loadable_filename:
             clonk_network::HostResourceType::Scenario as u8,
@@ -918,10 +918,10 @@ fn generic_client_resource_save_hit_target_emits_the_resource_id() {
     app.register_classic_lobby_resource(&core, 100);
     app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Resources))
         .test_value();
-    main_assert!(app.network_lobby.as_ref().unwrap().resource_rows[&core.id].save_possible);
+    main_assert!(app.lobby.session.as_ref().unwrap().resource_rows[&core.id].save_possible);
 
     {
-        let lobby = app.network_lobby.as_mut().test_value();
+        let lobby = app.lobby.session.as_mut().test_value();
         let rect = lobby
             .update_layout(640.0, 480.0)
             .resource_save_buttons
@@ -2660,15 +2660,15 @@ fn catalog_host_selection_change_discards_and_rearms_preload_state() {
     let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
     lobby.select_scenario("Old.c4s", "Old");
     lobby.preload.record_result(true);
-    app.network_lobby = Some(lobby);
+    app.lobby.session = Some(lobby);
 
     main_assert!(app.select_network_lobby_scenario("New.c4s", "New"));
 
-    let preload = app.network_lobby.as_ref().test_value().preload;
+    let preload = app.lobby.session.as_ref().test_value().preload;
     main_assert!(!preload.spent);
     main_assert!(preload.manual_button_present);
     main_assert!(preload.eligible);
-    main_assert_eq!(app.network_lobby.as_ref().and_then(NetworkLobbyState::selected_identifier) => Some("New.c4s"));
+    main_assert_eq!(app.lobby.session.as_ref().and_then(NetworkLobbyState::selected_identifier) => Some("New.c4s"));
 }
 
 #[test]

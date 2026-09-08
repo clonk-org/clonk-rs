@@ -1591,7 +1591,7 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
     main_assert_eq!(layout.panels[1].rows.len() => 2);
 
     let mut rows = app
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .test_value()
         .controller
@@ -1601,7 +1601,7 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
         panic!("free savegame group header");
     };
     header.kind = LobbyRosterHeader::ReplayPlayers;
-    app.classic_host_lobby
+    app.lobby.classic_host
         .as_mut()
         .test_value()
         .controller
@@ -2049,13 +2049,13 @@ fn player_context_root_matches_cpp_entry_gates() {
         })
     };
     let client_row = app
-        .classic_host_lobby
+        .lobby.classic_host
         .as_ref()
         .test_value()
         .controller
         .rows()[0]
         .clone();
-    app.classic_host_lobby
+    app.lobby.classic_host
         .as_mut()
         .test_value()
         .controller
@@ -2221,7 +2221,7 @@ fn context_menu_matches_edit_predicates_and_order() {
 fn classic_context_menu_dispatches_to_the_live_edit() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
-    app.classic_host_lobby
+    app.lobby.classic_host
         .test_mut()
         .controller
         .set_chat_edit_view(LobbyChatEditView {
@@ -2248,7 +2248,7 @@ fn classic_context_menu_dispatches_to_the_live_edit() {
     })
     .test_value();
     let view = app
-        .classic_host_lobby
+        .lobby.classic_host
         .test_ref()
         .controller
         .chat_edit_view();
@@ -2499,7 +2499,7 @@ fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it()
             LobbyChatRequest::OpenExternalDialog,
         )])
         .test_value();
-    main_assert!(lobby_app.classic_host_lobby.is_some());
+    main_assert!(lobby_app.lobby.classic_host.is_some());
     main_assert!(lobby_app.chat.external_dialog_visible);
     let dialog = lobby_app.chat.external_dialog.test_ref();
     main_assert_eq!(dialog.mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);

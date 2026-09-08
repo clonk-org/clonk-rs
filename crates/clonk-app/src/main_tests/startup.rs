@@ -4800,7 +4800,7 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
             StartupView::ScenarioBrowser => app.open_scenario_browser(),
             StartupView::NetworkLobby => {
                 app.startup.view = StartupView::NetworkLobby;
-                app.classic_host_lobby = None;
+                app.lobby.classic_host = None;
             }
             StartupView::NetworkGame => app.open_network_game_dialog(),
             StartupView::Options => app.open_options_menu(),

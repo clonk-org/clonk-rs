@@ -2191,6 +2191,68 @@ pub(crate) struct ScenarioLifecycleState {
     pub(crate) initial_definition_seed: Option<Vec<String>>,
 }
 
+/// The lobby: the network and classic-host lobby sessions, the preload and
+/// start-wait state around them, the host's countdown with the minimum
+/// player count and the echoes it suppresses, the ready check with its
+/// cooldown, toast, continuation and sink, the league votes, the player
+/// selections a lobby stages, and the white-chat presentation flag. `GameApp`
+/// composes it as `lobby`.
+pub(crate) struct LobbyState {
+    pub(crate) session: Option<NetworkLobbyState>,
+    pub(crate) classic_host: Option<ClassicHostLobbyState>,
+    pub(crate) preload_task: Option<LobbyPreloadTask>,
+    pub(crate) preload_artifact: Option<LobbyPreloadArtifact>,
+    pub(crate) start_wait: Option<NetworkStartWaitDialogState>,
+    /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
+    /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
+    pub(crate) host_countdown: Option<HostLobbyCountdown>,
+    /// `Game.C4S.GetMinPlayer()` for the round this lobby is staging.
+    ///
+    /// C++ reads it off the loaded `C4Scenario` when the countdown expires
+    /// (C4GameLobby.cpp:1163). The port has not applied a scenario while the
+    /// lobby runs, so the host retains the staged head value here. `None` is
+    /// "not known", and never aborts a round — an undetermined minimum must
+    /// not be able to quit a server.
+    pub(crate) min_players: Option<i32>,
+    /// The live host session surfaces its locally submitted countdown once
+    /// after broadcasting it. C++ instead applies that packet directly and
+    /// excludes the host from the broadcast, so suppress exactly those echoes.
+    pub(crate) pending_local_countdown_echoes: VecDeque<clonk_network::LobbyCountdownPacket>,
+    pub(crate) ready_check_cooldown: LobbyReadyCheckCooldown,
+    pub(crate) ready_check_toasts_enabled: bool,
+    /// The live ready check's toast, while it has one.
+    pub(crate) live_ready_check_notification: Option<DesktopNotificationId>,
+    /// The live ready check's single-claim continuation.
+    ///
+    /// `C4Network2::ReadyCheckDialog` is one modal whose `ShowModalDlg` return
+    /// value *is* the answer, so a toast button and the dialog can never both
+    /// answer (`src/C4Network2.cpp:1672-1688`). The port's toast resolves on
+    /// another thread, so that single return value becomes an atomic claim
+    /// held here: whoever wins it owns the answer, and every other path —
+    /// second button press, countdown expiry, teardown — becomes inert.
+    /// `None` when no check is outstanding.
+    pub(crate) ready_check_continuation:
+        Option<crate::ready_check_notification::ReadyCheckContinuation>,
+    /// Where a resolved continuation hides its toast.
+    ///
+    /// Held by the app rather than by the backend thread because
+    /// `ReadyCheckDialog::OnClosed` hides the toast from whichever side
+    /// resolved the prompt (`src/C4Network2.cpp:176-178`), including the
+    /// in-window dialog. Defaults to a sink that shows nothing, which is also
+    /// what a platform without a toast service leaves in place.
+    pub(crate) ready_check_sink:
+        std::sync::Arc<dyn crate::ready_check_notification::NotificationSink + Send + Sync>,
+    /// Where a ready-check toast with answer buttons comes from.
+    pub(crate) ready_check_toast_backend: crate::ready_check_backend::ReadyCheckToastBackend,
+    pub(crate) league_votes: LeagueVoteState,
+    pub(crate) configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
+    /// Local-client target and path/wire-name map for C4PlayerSelDlg.
+    pub(crate) pending_player_selection: Option<PendingLobbyPlayerSelection>,
+    /// `Config.General.UseWhiteLobbyChat`, which is intentionally distinct
+    /// from the in-game white-chat display toggle.
+    pub(crate) white_chat: bool,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -2324,9 +2386,6 @@ pub(crate) struct GameApp {
     /// displace the dialog reopened after the round ends.
     pub(crate) last_startup_dialog: StartupDialog,
     pub(crate) scenario_game_options: GameOptionButtons,
-    /// `Config.General.UseWhiteLobbyChat`, which is intentionally distinct
-    /// from the in-game white-chat display toggle.
-    pub(crate) white_lobby_chat: bool,
     /// Prefix GUI log lines with C++'s markup-colored wall-clock timestamp.
     pub(crate) show_log_timestamps: bool,
     pub(crate) mode: AppMode,
@@ -2404,7 +2463,6 @@ pub(crate) struct GameApp {
     /// changed the live object count and cleared after the scenario-save
     /// double-object warning.
     pub(crate) script_created_objects: bool,
-    pub(crate) configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
     // Fields drop in declaration order. Cancel an in-flight league request
     // before NetworkManager joins its worker so shutdown cannot wait for the
     // HTTP timeout.
@@ -2417,28 +2475,8 @@ pub(crate) struct GameApp {
     /// persists LeagueAccount but deliberately keeps LeaguePassword only in
     /// memory, so never write this override through the INI helper.
     pub(crate) league_auth_session: Option<clonk_network::LeagueAuthRequestHead>,
-    pub(crate) network_lobby: Option<NetworkLobbyState>,
-    pub(crate) classic_host_lobby: Option<ClassicHostLobbyState>,
-    pub(crate) lobby_preload_task: Option<LobbyPreloadTask>,
-    pub(crate) lobby_preload_artifact: Option<LobbyPreloadArtifact>,
-    pub(crate) network_start_wait: Option<NetworkStartWaitDialogState>,
-    /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
-    /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
-    pub(crate) host_lobby_countdown: Option<HostLobbyCountdown>,
-    /// `Game.C4S.GetMinPlayer()` for the round this lobby is staging.
-    ///
-    /// C++ reads it off the loaded `C4Scenario` when the countdown expires
-    /// (C4GameLobby.cpp:1163). The port has not applied a scenario while the
-    /// lobby runs, so the host retains the staged head value here. `None` is
-    /// "not known", and never aborts a round — an undetermined minimum must
-    /// not be able to quit a server.
-    pub(crate) network_lobby_min_players: Option<i32>,
-    /// The live host session surfaces its locally submitted countdown once
-    /// after broadcasting it. C++ instead applies that packet directly and
-    /// excludes the host from the broadcast, so suppress exactly those echoes.
-    pub(crate) pending_local_lobby_countdown_echoes: VecDeque<clonk_network::LobbyCountdownPacket>,
-    pub(crate) lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
-    pub(crate) ready_check_toasts_enabled: bool,
+    /// The lobby (clonk-org/clonk-rs#1247).
+    pub(crate) lobby: LobbyState,
     /// A pending "bring this window forward", drained by the runner.
     ///
     /// Distinct from the control channel's attention request, which is C++'s
@@ -2452,35 +2490,10 @@ pub(crate) struct GameApp {
     /// shows. `ReadyCheckDialog::OnClosed` hides the dialog's toast from
     /// whichever side closed the prompt (`src/C4Network2.cpp:176-183`).
     pub(crate) pending_desktop_notification_dismissals: VecDeque<DesktopNotificationId>,
-    /// The live ready check's toast, while it has one.
-    pub(crate) live_ready_check_notification: Option<DesktopNotificationId>,
     /// Source of [`DesktopNotificationId`]s, so a dismissal names exactly the
     /// notification its check queued and never a later one.
     pub(crate) next_desktop_notification_id: u64,
-    /// The live ready check's single-claim continuation.
-    ///
-    /// `C4Network2::ReadyCheckDialog` is one modal whose `ShowModalDlg` return
-    /// value *is* the answer, so a toast button and the dialog can never both
-    /// answer (`src/C4Network2.cpp:1672-1688`). The port's toast resolves on
-    /// another thread, so that single return value becomes an atomic claim
-    /// held here: whoever wins it owns the answer, and every other path —
-    /// second button press, countdown expiry, teardown — becomes inert.
-    /// `None` when no check is outstanding.
-    pub(crate) lobby_ready_check_continuation:
-        Option<crate::ready_check_notification::ReadyCheckContinuation>,
-    /// Where a resolved continuation hides its toast.
-    ///
-    /// Held by the app rather than by the backend thread because
-    /// `ReadyCheckDialog::OnClosed` hides the toast from whichever side
-    /// resolved the prompt (`src/C4Network2.cpp:176-178`), including the
-    /// in-window dialog. Defaults to a sink that shows nothing, which is also
-    /// what a platform without a toast service leaves in place.
-    pub(crate) lobby_ready_check_sink:
-        std::sync::Arc<dyn crate::ready_check_notification::NotificationSink + Send + Sync>,
-    /// Where a ready-check toast with answer buttons comes from.
-    pub(crate) ready_check_toast_backend: crate::ready_check_backend::ReadyCheckToastBackend,
     pub(crate) control_messages: ControlMessageState,
-    pub(crate) league_votes: LeagueVoteState,
     /// Exact resource publication which continues after a host has entered its
     /// closed-admission lobby. Once complete, the ordinary final host startup
     /// path replaces the discoverable, closed-admission preliminary transport.
@@ -2659,8 +2672,6 @@ pub(crate) struct GameApp {
     /// The runtime dialogs and the stack that orders them.
     pub(crate) dialogs: RuntimeDialogState,
     pub(crate) next_running_message_stack_id: u64,
-    /// Local-client target and path/wire-name map for C4PlayerSelDlg.
-    pub(crate) pending_lobby_player_selection: Option<PendingLobbyPlayerSelection>,
     pub(crate) menu_backdrop_cache: StartupBackdropCache,
     /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
     /// Fader/ScreenFader state.

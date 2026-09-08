@@ -3192,7 +3192,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
             .iter()
             .find(|layout_row| {
                 matches!(
-                    app.classic_host_lobby
+                    app.lobby.classic_host
                         .as_ref()
                         .expect("test lobby")
                         .controller
@@ -3253,7 +3253,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         "the roster waits for the authoritative player-info echo"
     );
 
-    app.classic_host_lobby
+    app.lobby.classic_host
         .test_mut()
         .controller
         .apply_countdown_packet(clonk_frontend::game_lobby::LobbyCountdownPacket::Seconds(
@@ -3265,7 +3265,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     .test_value();
     main_assert_eq!(commands.take_player_info_updates().len() => 1, "only the final countdown phase locks team selection");
 
-    app.classic_host_lobby
+    app.lobby.classic_host
         .test_mut()
         .controller
         .apply_countdown_packet(clonk_frontend::game_lobby::LobbyCountdownPacket::Abort);
