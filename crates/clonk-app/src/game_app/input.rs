@@ -5272,19 +5272,16 @@ impl GameApp {
             return;
         }
         if let Some(position) = self
-            .message_input_history
+            .chat
+            .input_history
             .iter()
             .position(|previous| previous == text)
         {
-            self.message_input_history.remove(position);
+            self.chat.input_history.remove(position);
         }
-        self.message_input_history.push_front(text.to_string());
-        self.message_input_history.truncate(20);
-        let history = self
-            .message_input_history
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        self.chat.input_history.push_front(text.to_string());
+        self.chat.input_history.truncate(20);
+        let history = self.chat.input_history.iter().cloned().collect::<Vec<_>>();
         if let Some(dialog) = self.startup_network.dialog.as_mut() {
             dialog.set_chat_history(history.clone());
         }
@@ -13221,7 +13218,7 @@ impl GameApp {
         );
         dialog.set_chat_strings(self.localized_irc_chat_strings());
         dialog.set_chat_login(load_irc_settings(self.app_paths.as_ref()).login());
-        dialog.set_chat_history(self.message_input_history.iter().cloned().collect());
+        dialog.set_chat_history(self.chat.input_history.iter().cloned().collect());
         if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
             dialog.set_text_font(&fonts.text);
         }

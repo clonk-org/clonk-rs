@@ -2268,7 +2268,7 @@ fn classic_ready_packets_update_roster_and_start_when_relevant_clients_are_ready
 #[test]
 fn classic_lobby_system_logs_honor_timestamps() {
     let mut app = new_menu_app(640, 480);
-    app.show_log_timestamps = true;
+    app.chat.show_log_timestamps = true;
     let (events, _commands) = install_classic_host_network_stub(&mut app);
     app.netplay.control_clients.replace_snapshot([
         message_client(0, b"Exact Host"),
@@ -2331,7 +2331,7 @@ fn classic_host_chat_start_abort_and_readycheck_use_live_lobby_actions() {
 fn unknown_lobby_command_is_a_local_nonfatal_cpp_error() {
     let mut app = new_menu_app(640, 480);
     install_classic_host_network_stub(&mut app);
-    app.show_log_timestamps = true;
+    app.chat.show_log_timestamps = true;
 
     process_lobby_chat_request(&mut app, LobbyChatRequest::Submit("/xyz".to_string()));
 
@@ -2838,7 +2838,7 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     process_lobby_chat_request(&mut app, LobbyChatRequest::InsertText("X".to_string()));
     main_assert_eq!(app_lobby(&app).chat_edit.horizontal_scroll => 123, "a zero-byte C++ insertion preserves retained horizontal scroll",);
 
-    app.message_input_history.clear();
+    app.chat.input_history.clear();
     app.install_active_lobby_chat_view(LobbyChatEditView {
         text: "seed".to_string(),
         caret: 4,
@@ -7831,7 +7831,7 @@ fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_lobby(&mut app);
     app.lobby.white_chat = false;
-    app.show_log_timestamps = false;
+    app.chat.show_log_timestamps = false;
     app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Local"), message_client(7, b"Remote")]);
     app.players.infos.apply(lobby_fixture!(player_data:
@@ -7879,14 +7879,14 @@ fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
     let line = &app_classic_lobby(&app).controller.logs()[2];
     main_assert_eq!(line.color => [0x82, 0x60, 0x3e, 0xff]);
 
-    app.show_log_timestamps = true;
+    app.chat.show_log_timestamps = true;
     app.execute_message_control(message_control(MESSAGE_TYPE_SYSTEM, -1, -1, b"notice", 0));
     let line = &app_classic_lobby(&app).controller.logs()[3];
     main_assert!(line.text.starts_with("<c 909090>["));
     main_assert!(line.text.ends_with("</c> Network: notice"));
     main_assert_eq!(line.color => [0xaf, 0xaf, 0xaf, 0xff]);
 
-    app.show_log_timestamps = false;
+    app.chat.show_log_timestamps = false;
     app.lobby.white_chat = true;
     app.execute_message_control(message_control(
         MESSAGE_TYPE_NORMAL,
@@ -9308,7 +9308,7 @@ fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
     let event_tx = install_client_network_stub(&mut app, 7);
     app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
     app.startup.view = StartupView::NetworkLobby;
-    app.show_log_timestamps = false;
+    app.chat.show_log_timestamps = false;
     app.lobby.session = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
 
     for (countdown, expected, expected_controller, expected_logs) in [

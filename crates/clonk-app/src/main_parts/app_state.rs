@@ -71,6 +71,12 @@ pub(crate) struct ChatState {
     /// C4GUI::Edit retains an equal start/end selection as its hidden drag
     /// anchor even though the painted selection is empty.
     pub(crate) lobby_drag_anchor: Option<usize>,
+    /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
+    /// Fader/ScreenFader state.
+    pub(crate) message_board: ClassicMessageBoardState,
+    pub(crate) input_history: VecDeque<String>,
+    /// Prefix GUI log lines with C++'s markup-colored wall-clock timestamp.
+    pub(crate) show_log_timestamps: bool,
 }
 
 /// The app's side of saving a game: where it writes, what it still owes,
@@ -2532,8 +2538,6 @@ pub(crate) struct GameApp {
     /// displace the dialog reopened after the round ends.
     pub(crate) last_startup_dialog: StartupDialog,
     pub(crate) scenario_game_options: GameOptionButtons,
-    /// Prefix GUI log lines with C++'s markup-colored wall-clock timestamp.
-    pub(crate) show_log_timestamps: bool,
     pub(crate) mode: AppMode,
     /// The scenario selector's own state.
     pub(crate) scensel: ScenarioSelectorState,
@@ -2684,10 +2688,6 @@ pub(crate) struct GameApp {
     pub(crate) dialogs: RuntimeDialogState,
     pub(crate) next_running_message_stack_id: u64,
     pub(crate) menu_backdrop_cache: StartupBackdropCache,
-    /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
-    /// Fader/ScreenFader state.
-    pub(crate) message_board: ClassicMessageBoardState,
-    pub(crate) message_input_history: VecDeque<String>,
     /// `C4Player::ShowStartup` for the local player: device hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).
     pub(crate) show_startup_hint: bool,

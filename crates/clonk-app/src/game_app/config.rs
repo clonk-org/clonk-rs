@@ -968,7 +968,7 @@ impl GameApp {
                     self.play_ui_sound("Command");
                 }
                 OptionsDlgAction::ShowLogTimestampsChanged(enabled) => {
-                    self.show_log_timestamps = enabled;
+                    self.chat.show_log_timestamps = enabled;
                     self.play_ui_sound("ArrowHit");
                 }
                 OptionsDlgAction::OpenLanguageCombo => {
@@ -1417,7 +1417,7 @@ impl GameApp {
         self.rendering.display_flags = load_display_flags(paths);
         self.rendering.display_flags.is_fullscreen = is_fullscreen;
         self.lobby.white_chat = load_white_lobby_chat(paths);
-        self.show_log_timestamps = load_show_log_timestamps(paths);
+        self.chat.show_log_timestamps = load_show_log_timestamps(paths);
         self.config.show_folder_maps = load_show_folder_maps(paths);
         self.lobby.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
         let native_config = load_native_config_bytes(paths);

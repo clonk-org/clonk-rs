@@ -6310,7 +6310,7 @@ impl GameApp {
                     self.chat.lobby_drag_anchor = Some(0);
                 }
                 if !self.classic_host_lobby_active() {
-                    let history = self.message_input_history.clone();
+                    let history = self.chat.input_history.clone();
                     let view = self.lobby.session.as_mut().map(|lobby| {
                         let inserted = lobby.browse_chat_history(older, &history);
                         (lobby.chat_edit.clone(), inserted)
@@ -6331,7 +6331,7 @@ impl GameApp {
                     let horizontal_scroll = lobby.controller.chat_edit_view().horizontal_scroll;
                     let text = usize::try_from(lobby.chat_history_index)
                         .ok()
-                        .and_then(|index| self.message_input_history.get(index))
+                        .and_then(|index| self.chat.input_history.get(index))
                         .filter(|text| !text.is_empty())
                         .cloned();
                     let (view, inserted) = match text {
