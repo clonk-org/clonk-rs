@@ -177,7 +177,13 @@ impl Engine {
         timings.objects = section.elapsed();
 
         let section = std::time::Instant::now();
-        objects.sort_by_key(|object| object.id);
+        // Ordinary worlds have unique IDs and need no stable-sort scratch
+        // buffer. Restored duplicate IDs must retain their physical tie order.
+        if self.object_ids_are_unique() {
+            objects.sort_unstable_by_key(|object| object.id);
+        } else {
+            objects.sort_by_key(|object| object.id);
+        }
         timings.object_sort = section.elapsed();
 
         let section = std::time::Instant::now();
