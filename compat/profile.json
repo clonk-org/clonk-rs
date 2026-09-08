@@ -179,7 +179,7 @@
           "kind": "issue",
           "value": "clonk-org/clonk-rs#1241",
           "status": "pending",
-          "note": "The device-loss probe (clonk-app --device-loss-probe, docs/RENDERING_PARITY.md) injects a backend-authoritative loss inside the shipped event loop; a report from a visible window per injectable backend is the evidence still pending."
+          "note": "The shipped event loop lacks live platform evidence for complete retained-GPU device-loss recovery and the first correct post-rebuild presentation."
         }
       ]
     },
