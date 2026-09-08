@@ -577,6 +577,159 @@ pub fn format_game_time(seconds: u64) -> String {
     )
 }
 
+/// The geometry a band is composed for. Two bands with the same shape
+/// compose the same alpha, whatever ramp their colors went through.
+#[derive(Clone, PartialEq)]
+struct HudBoardShape {
+    image: clonk_graphics::GpuTextureId,
+    width: i32,
+    height: i32,
+    format: clonk_graphics::PixelFormat,
+    scale: u32,
+    offset_x: i32,
+    offset_y: i32,
+}
+
+/// What a composed band's bytes depend on.
+#[derive(Clone, PartialEq)]
+struct HudBoardKey {
+    shape: HudBoardShape,
+    gamma: Option<GammaRamp>,
+    renderer_config: Option<crate::render_config::AdvancedRendererConfig>,
+}
+
+struct HudBoardEntry {
+    key: HudBoardKey,
+    band: Surface,
+}
+
+/// Retained upper/message board bands.
+///
+/// Both boards tile a static texture across the whole window width on every
+/// frame through the generic per-pixel blit, which costs 3.6 ms a frame at
+/// 1280x720 no matter what the scenario is doing. A band depends only on its
+/// texture, geometry, gamma ramp and renderer configuration, so it is composed
+/// once and copied afterwards.
+///
+/// The copy is only equivalent when every composed pixel came out opaque: a
+/// source-over blit of an opaque band writes its own bytes whatever lies
+/// beneath it, while a translucent one reads the destination and has to be
+/// recomposed. That is decided from the composed band rather than assumed of
+/// the artwork, so a tile whose seams interpolate to partial alpha keeps the
+/// uncached path — and the decision is remembered per shape rather than per
+/// ramp, so a gamma fade does not pay for the same rejected trial every frame.
+#[derive(Default)]
+pub(crate) struct HudBoardCache {
+    entries: Vec<HudBoardEntry>,
+    translucent: Vec<HudBoardShape>,
+    #[cfg(test)]
+    pub(crate) compositions: usize,
+}
+
+impl HudBoardCache {
+    /// Upper board and message board, at one geometry each.
+    const MAX_ENTRIES: usize = 2;
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_band(
+        &mut self,
+        surface: &mut Surface,
+        image: &ImageData,
+        y: i32,
+        width: i32,
+        height: i32,
+        scale: f32,
+        offset_x: i32,
+        offset_y: i32,
+        gamma: Option<&GammaRamp>,
+        compose: impl Fn(&mut Surface, i32, i32, i32, i32),
+    ) {
+        // A recording surface is presented by flattening its command stream;
+        // retained CPU bytes are not part of that stream.
+        if width <= 0
+            || height <= 0
+            || surface.is_gpu_scene_capture_active()
+            || surface.is_clonk_text_capture_active()
+            || surface.clip().is_some()
+            || y < 0
+            || y.saturating_add(height) > surface.height() as i32
+            || width != surface.width() as i32
+        {
+            compose(surface, 0, y, width, height);
+            return;
+        }
+        let shape = HudBoardShape {
+            image: image.gpu_texture_id(),
+            width,
+            height,
+            format: surface.format(),
+            scale: scale.to_bits(),
+            offset_x,
+            offset_y,
+        };
+        if self.translucent.contains(&shape) {
+            compose(surface, 0, y, width, height);
+            return;
+        }
+        let key = HudBoardKey {
+            shape,
+            gamma: gamma.cloned(),
+            renderer_config: crate::render_config::active_advanced_renderer_config(),
+        };
+        if let Some(entry) = self.entries.iter().find(|entry| entry.key == key) {
+            copy_band_rows(surface, &entry.band, y);
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.compositions += 1;
+        }
+        let mut band = Surface::new(width as u32, height as u32, key.shape.format);
+        band.fill(Color::transparent());
+        compose(&mut band, 0, 0, width, height);
+        if !band
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel[3] == u8::MAX)
+        {
+            compose(surface, 0, y, width, height);
+            Self::retain(&mut self.translucent, key.shape);
+            return;
+        }
+        copy_band_rows(surface, &band, y);
+        Self::retain(&mut self.entries, HudBoardEntry { key, band });
+    }
+
+    /// Keep the most recent [`Self::MAX_ENTRIES`] of one retained set.
+    fn retain<T>(set: &mut Vec<T>, entry: T) {
+        if set.len() >= Self::MAX_ENTRIES {
+            set.remove(0);
+        }
+        set.push(entry);
+    }
+}
+
+/// Replace `surface`'s rows from `y` with an opaque band of the same width.
+fn copy_band_rows(surface: &mut Surface, band: &Surface, y: i32) {
+    let row_bytes = band.width() as usize * 4;
+    let destination_row_bytes = surface.width() as usize * 4;
+    if row_bytes != destination_row_bytes {
+        return;
+    }
+    let offset = y as usize * destination_row_bytes;
+    let length = band.height() as usize * row_bytes;
+    let Some(destination) = surface
+        .pixels_mut()
+        .get_mut(offset..offset.saturating_add(length))
+    else {
+        return;
+    };
+    let Some(source) = band.pixels().get(..length) else {
+        return;
+    };
+    destination.copy_from_slice(source);
+}
+
 /// `CStdDDraw::BlitSurfaceTile`: unscaled tiling of `image` across the
 /// target rect (upper board / message board backgrounds).
 fn blit_tile(
@@ -924,6 +1077,7 @@ pub(crate) fn draw_upper_board_with_gamma(
     let text_width = font.text_width(&format_game_time(game_time_seconds));
     draw_upper_board_with_initialized_text_width(
         surface,
+        &mut HudBoardCache::default(),
         font,
         hud,
         mode,
@@ -939,6 +1093,7 @@ pub(crate) fn draw_upper_board_with_gamma(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_upper_board_with_initialized_text_width(
     surface: &mut Surface,
+    boards: &mut HudBoardCache,
     font: &HudFont<'_>,
     hud: &HudGraphics,
     mode: UpperBoardMode,
@@ -959,20 +1114,27 @@ pub(crate) fn draw_upper_board_with_initialized_text_width(
         let Some(board) = hud.upper_board.as_ref() else {
             return;
         };
-        blit_tile_scaled(
-            surface,
-            board,
-            0,
-            0,
-            width,
-            board_height,
-            if mode == UpperBoardMode::Small {
+        {
+            let scale = if mode == UpperBoardMode::Small {
                 0.5
             } else {
                 1.0
-            },
-            gamma,
-        );
+            };
+            boards.draw_band(
+                surface,
+                board,
+                0,
+                width,
+                board_height,
+                scale,
+                0,
+                0,
+                gamma,
+                |target, x, y, width, height| {
+                    blit_tile_scaled(target, board, x, y, width, height, scale, gamma);
+                },
+            );
+        }
 
         // Logo (src/C4UpperBoard.cpp:54-71).
         if let Some((logo, layout)) = hud.logo.as_ref().and_then(|logo| {
@@ -2935,12 +3097,20 @@ pub fn draw_message_board(
     hud: &HudGraphics,
     board: &MessageBoardOverlay,
 ) {
-    draw_message_board_with_gamma(surface, font, hud, board, None);
+    draw_message_board_with_gamma(
+        surface,
+        &mut HudBoardCache::default(),
+        font,
+        hud,
+        board,
+        None,
+    );
 }
 
 /// Draws one physical line already admitted to `C4LogBuffer`.
 pub(crate) fn draw_message_board_with_gamma(
     surface: &mut Surface,
+    boards: &mut HudBoardCache,
     font: &HudFont<'_>,
     hud: &HudGraphics,
     board: &MessageBoardOverlay,
@@ -2953,7 +3123,22 @@ pub(crate) fn draw_message_board_with_gamma(
     let Some(background) = hud.background.as_ref() else {
         return;
     };
-    blit_tile(surface, background, 0, y, width, height, 0, -y, gamma);
+    {
+        boards.draw_band(
+            surface,
+            background,
+            y,
+            width,
+            height,
+            1.0,
+            0,
+            -y,
+            gamma,
+            |target, x, band_y, width, height| {
+                blit_tile(target, background, x, band_y, width, height, 0, -y, gamma);
+            },
+        );
+    }
 
     if board.mode == MessageBoardMode::Hidden && !board.type_in {
         return;
@@ -3990,7 +4175,14 @@ mod tests {
             back_scroll: 0,
             ..MessageBoardOverlay::default()
         };
-        draw_message_board_with_gamma(&mut target, &font, &hud, &board, None);
+        draw_message_board_with_gamma(
+            &mut target,
+            &mut HudBoardCache::default(),
+            &font,
+            &hud,
+            &board,
+            None,
+        );
         check_eq! { target.get_pixel(0, 54) => Some(MESSAGE_COLOR) }
         check_eq! { target.get_pixel(273, 54) => Some(Color::opaque(30, 50, 70)) }
         check_eq! { target.get_pixel(274, 54) => Some(Color::opaque(30, 50, 70)) }
@@ -4001,7 +4193,14 @@ mod tests {
             back_scroll: 0,
             ..MessageBoardOverlay::default()
         };
-        draw_message_board_with_gamma(&mut unclipped, &font, &hud, &unclipped_board, None);
+        draw_message_board_with_gamma(
+            &mut unclipped,
+            &mut HudBoardCache::default(),
+            &font,
+            &hud,
+            &unclipped_board,
+            None,
+        );
         check_eq! { unclipped.get_pixel(275, 54) => Some(MESSAGE_COLOR), "the shortened facet wraps at append time but does not clip StringOut" }
         draw_upper_board_fixture! { &mut target, &font, &hud; mode => UpperBoardMode::Mini, title => "Must not draw", seconds => 0, clock => Some("[12:34:56]"), fps => Some(42) };
 
@@ -5045,5 +5244,151 @@ mod tests {
             target
         };
         check_eq! { render(upscaled_sheet(&control, 2)).snapshot().checksum() => render(control).snapshot().checksum() }
+    }
+}
+
+#[cfg(test)]
+mod hud_board_cache_tests {
+    use super::*;
+    use clonk_graphics::PixelFormat;
+
+    fn target(width: u32, height: u32) -> Surface {
+        let mut surface = Surface::new(width, height, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(0, 0, 0));
+        surface
+    }
+
+    fn image(width: u32, height: u32, color: [u8; 4]) -> ImageData {
+        ImageData::new(
+            width,
+            height,
+            color
+                .iter()
+                .copied()
+                .cycle()
+                .take((width * height * 4) as usize)
+                .collect::<Vec<u8>>(),
+        )
+    }
+
+    fn draw_band(cache: &mut HudBoardCache, surface: &mut Surface, tile: &ImageData) {
+        draw_band_with_gamma(cache, surface, tile, None);
+    }
+
+    fn draw_band_with_gamma(
+        cache: &mut HudBoardCache,
+        surface: &mut Surface,
+        tile: &ImageData,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let width = surface.width() as i32;
+        let height = 8;
+        cache.draw_band(
+            surface,
+            tile,
+            0,
+            width,
+            height,
+            1.0,
+            0,
+            0,
+            gamma,
+            |band, x, y, width, height| {
+                blit_tile(band, tile, x, y, width, height, 0, 0, gamma);
+            },
+        );
+    }
+
+    #[test]
+    fn an_opaque_band_is_composed_once_and_copied_afterwards() {
+        // Both HUD boards tile a static texture across the whole window every
+        // frame; at 1280x720 that is 3.6 ms a frame of identical work.
+        let tile = image(4, 4, [120, 80, 40, 255]);
+        let mut cache = HudBoardCache::default();
+        let mut surface = target(32, 16);
+
+        draw_band(&mut cache, &mut surface, &tile);
+        draw_band(&mut cache, &mut surface, &tile);
+        draw_band(&mut cache, &mut surface, &tile);
+
+        assert_eq!(cache.compositions, 1);
+    }
+
+    #[test]
+    fn a_cached_band_writes_the_pixels_the_uncached_blit_writes() {
+        let tile = image(4, 4, [120, 80, 40, 255]);
+        let mut expected = target(32, 16);
+        blit_tile(&mut expected, &tile, 0, 0, 32, 8, 0, 0, None);
+
+        let mut cache = HudBoardCache::default();
+        let mut cached = target(32, 16);
+        draw_band(&mut cache, &mut cached, &tile);
+        let first = cached.pixels().to_vec();
+        draw_band(&mut cache, &mut cached, &tile);
+
+        assert_eq!(first, expected.pixels());
+        assert_eq!(cached.pixels(), expected.pixels());
+    }
+
+    #[test]
+    fn a_translucent_band_keeps_reading_its_destination() {
+        // A band that does not come out opaque composes against whatever is
+        // beneath it, so retaining its bytes would freeze one frame's world.
+        let tile = image(4, 4, [120, 80, 40, 128]);
+        let mut cache = HudBoardCache::default();
+        let mut surface = target(32, 16);
+        let mut expected = target(32, 16);
+        blit_tile(&mut expected, &tile, 0, 0, 32, 8, 0, 0, None);
+        blit_tile(&mut expected, &tile, 0, 0, 32, 8, 0, 0, None);
+
+        draw_band(&mut cache, &mut surface, &tile);
+        draw_band(&mut cache, &mut surface, &tile);
+
+        assert_eq!(cache.compositions, 1);
+        assert_eq!(surface.pixels(), expected.pixels());
+    }
+
+    #[test]
+    fn a_translucent_band_is_trialled_once_across_gamma_changes() {
+        // A gamma fade moves the ramp every frame. Re-running the rejected
+        // trial composition each time would make a fade cost more than the
+        // uncached path it falls back to.
+        let tile = image(4, 4, [120, 80, 40, 128]);
+        let mut cache = HudBoardCache::default();
+        let mut surface = target(32, 16);
+
+        draw_band_with_gamma(&mut cache, &mut surface, &tile, None);
+        draw_band_with_gamma(
+            &mut cache,
+            &mut surface,
+            &tile,
+            Some(&GammaRamp::standard()),
+        );
+
+        assert_eq!(cache.compositions, 1);
+    }
+
+    #[test]
+    fn a_changed_tile_recomposes_the_band() {
+        let mut cache = HudBoardCache::default();
+        let mut surface = target(32, 16);
+
+        draw_band(&mut cache, &mut surface, &image(4, 4, [120, 80, 40, 255]));
+        draw_band(&mut cache, &mut surface, &image(4, 4, [10, 20, 30, 255]));
+
+        assert_eq!(cache.compositions, 2);
+    }
+
+    #[test]
+    fn a_recording_surface_is_never_served_from_retained_bytes() {
+        let tile = image(4, 4, [120, 80, 40, 255]);
+        let mut cache = HudBoardCache::default();
+        let mut surface = target(32, 16);
+        surface.begin_gpu_scene_capture();
+
+        draw_band(&mut cache, &mut surface, &tile);
+        draw_band(&mut cache, &mut surface, &tile);
+
+        assert_eq!(cache.compositions, 0);
     }
 }

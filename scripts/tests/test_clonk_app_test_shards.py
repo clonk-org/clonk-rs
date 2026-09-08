@@ -48,7 +48,10 @@ EXPECTED_SHARED = [
 ]
 # Opt-in probes are included directly by the test harness and intentionally
 # stay out of the default compile-time shard union.
-OPT_IN_FRAGMENTS = {"presentation_profile.rs": "presentation-profile"}
+OPT_IN_FRAGMENTS = {
+    "presentation_profile.rs": "presentation-profile",
+    "scenario_frame_profile.rs": "presentation-profile",
+}
 
 
 def feature_closure(features, roots):

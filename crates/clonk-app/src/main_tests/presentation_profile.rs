@@ -109,7 +109,7 @@ fn profile_fixture(busy_objects: usize) -> ProfileFixture {
 
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
-    let rect = app.graphics.viewport_rect(owner).test_value();
+    let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let center_y = (rect.y + rect.height as i32 / 2) as f32;
     let interior = GuiPoint::new((rect.x + rect.width as i32 / 2) as f32, center_y);
     let left = GuiPoint::new(rect.x as f32, center_y);

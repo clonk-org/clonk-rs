@@ -1084,6 +1084,19 @@ pub(crate) fn lit_sky_texels(image: &ImageData, lighting: f32) -> Vec<Color> {
         .collect()
 }
 
+/// Sky texels already multiplied by the frame's daylight factor.
+///
+/// [`lit_sky_texels`] walks the whole source image, so a large sky costs 20 ms
+/// a frame on `Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s`. The result
+/// depends only on the interned source image and that factor, exactly like the
+/// retained GPU texture below, so the software tile pass memoizes it on the
+/// same key instead of relighting a static sky every frame.
+pub(crate) struct LitSkyTexels {
+    pub(crate) source: GpuTextureId,
+    pub(crate) lighting: u32,
+    pub(crate) texels: Arc<[Color]>,
+}
+
 pub(crate) struct RetainedLitSkyTexture {
     pub(crate) source: GpuTextureId,
     pub(crate) lighting: u32,

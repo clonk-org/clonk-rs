@@ -826,6 +826,19 @@ std::thread_local! {
     static OBJECT_OVERLAY_ANCESTRY_SETUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Exact sprite/shape output-reach evaluations in the base object walk.
     static OBJECT_OUTPUT_REACH_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Sky texels relit for the software tile pass, whether or not the
+    /// lighting factor and source image changed.
+    static LIT_SKY_TEXEL_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_lit_sky_texel_builds() {
+    LIT_SKY_TEXEL_BUILDS.with(|builds| builds.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn lit_sky_texel_builds() -> usize {
+    LIT_SKY_TEXEL_BUILDS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -1311,6 +1324,11 @@ pub struct GraphicsSystem {
     /// mutable retained texture and advance its revision when those bytes
     /// change instead of allocating a new GPU identity every frame.
     retained_lit_sky: Option<RetainedLitSkyTexture>,
+    /// The software tile pass reads the same relit texels every frame; a
+    /// large sky costs 20 ms a frame to relight from scratch.
+    lit_sky_texels: Option<LitSkyTexels>,
+    /// Composed upper/message board bands, retained across frames.
+    hud_boards: hud::HudBoardCache,
     /// Native material texture surfaces by byte-folded texture name. Both
     /// Surface32 PNGs and indexed Surface8 BMPs participate in landscape
     /// patterns; only Surface32 is eligible for graphical PXS.
@@ -1446,6 +1464,8 @@ impl GraphicsSystem {
             scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             retained_lit_sky: None,
+            lit_sky_texels: None,
+            hud_boards: hud::HudBoardCache::default(),
             material_textures: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
             material_catalogue_revision: 0,
@@ -5454,6 +5474,29 @@ impl GraphicsSystem {
         );
     }
 
+    /// The frame's sky texels, relit only when the source image or the
+    /// daylight factor changed.
+    fn lit_sky_texels_for(&mut self, image: &ImageData, lighting: f32) -> Arc<[Color]> {
+        let source = image.gpu_texture_id();
+        let lighting_bits = lighting.to_bits();
+        if let Some(cached) = self
+            .lit_sky_texels
+            .as_ref()
+            .filter(|cached| cached.source == source && cached.lighting == lighting_bits)
+        {
+            return Arc::clone(&cached.texels);
+        }
+        #[cfg(test)]
+        LIT_SKY_TEXEL_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let texels: Arc<[Color]> = Arc::from(lit_sky_texels(image, lighting));
+        self.lit_sky_texels = Some(LitSkyTexels {
+            source,
+            lighting: lighting_bits,
+            texels: Arc::clone(&texels),
+        });
+        texels
+    }
+
     pub(crate) fn retained_lit_sky_texture(
         &mut self,
         source: &ImageData,
@@ -5705,13 +5748,13 @@ impl GraphicsSystem {
         // Lighting is constant for the complete tiled draw. C++ applies it
         // before per-tile modulation/fog, so caching these exact u8 texels
         // removes repeated work without changing shader ordering.
-        let lit_texels = lit_sky_texels(image, lighting);
+        let lit_texels = self.lit_sky_texels_for(image, lighting);
         // C4Sky leaves this packed modulation active while PerformBlt folds
         // the ClrModMap into every vertex. Keeping the two values in the blit
         // state preserves native `ModulateClr` ordering and transparency.
         let uses_blit_modulation = fog.is_some() || modulation.is_some();
         let row_context = SkyTileRowRenderContext {
-            lit_texels: &lit_texels,
+            lit_texels: lit_texels.as_ref(),
             image_width: width as usize,
             surface_width,
             regions: &regions,
@@ -11263,6 +11306,7 @@ impl GraphicsSystem {
             let text_width = self.initialized_upper_board_text_width();
             hud::draw_message_board_with_gamma(
                 &mut self.surface,
+                &mut self.hud_boards,
                 &font,
                 &self.hud_graphics,
                 &self.message_board,
@@ -11270,6 +11314,7 @@ impl GraphicsSystem {
             );
             hud::draw_upper_board_with_initialized_text_width(
                 &mut self.surface,
+                &mut self.hud_boards,
                 &font,
                 &self.hud_graphics,
                 self.upper_board_mode,
@@ -11952,5 +11997,76 @@ mod landscape_benchmark_capture_tests {
 
         assert!(Arc::ptr_eq(&first_map, second_map));
         assert_eq!(first_scene.commands, second_scene.commands);
+    }
+}
+
+#[cfg(test)]
+mod lit_sky_texel_cache_tests {
+    use super::*;
+
+    fn sky_graphics() -> GraphicsSystem {
+        GraphicsSystem::new(
+            64,
+            64,
+            48,
+            "lit sky texel cache test",
+            Arc::new(clonk_graphics::BitmapFont::new()),
+            Arc::new(HashMap::new()),
+            Arc::new(CursorAtlas::empty()),
+            Arc::new(HudGraphics::default()),
+        )
+    }
+
+    fn sky_image() -> ImageData {
+        ImageData::new(8, 8, vec![200_u8; 8 * 8 * 4])
+    }
+
+    fn tile_once(graphics: &mut GraphicsSystem, image: &ImageData, lighting: f32) {
+        let settings = SkySettings {
+            has_surface: true,
+            ..SkySettings::default()
+        };
+        graphics.tile_sky_image_with_parallel_rows(image, &settings, None, lighting, None, false);
+    }
+
+    #[test]
+    fn repeated_sky_tiling_relights_the_source_image_once() {
+        // `lit_sky_texels` walks the whole sky image, which is 20 ms a frame
+        // on `Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s`. Its result
+        // depends only on the source image and the daylight factor, both of
+        // which are constant across the frames of a static sky.
+        let mut graphics = sky_graphics();
+        let image = sky_image();
+        reset_lit_sky_texel_builds();
+
+        tile_once(&mut graphics, &image, 0.75);
+        tile_once(&mut graphics, &image, 0.75);
+
+        assert_eq!(lit_sky_texel_builds(), 1);
+    }
+
+    #[test]
+    fn a_changed_lighting_factor_relights_the_sky_again() {
+        let mut graphics = sky_graphics();
+        let image = sky_image();
+        reset_lit_sky_texel_builds();
+
+        tile_once(&mut graphics, &image, 1.0);
+        tile_once(&mut graphics, &image, 0.5);
+
+        assert_eq!(lit_sky_texel_builds(), 2);
+    }
+
+    #[test]
+    fn a_changed_sky_image_relights_the_sky_again() {
+        let mut graphics = sky_graphics();
+        let first = sky_image();
+        let second = ImageData::new(8, 8, vec![10_u8; 8 * 8 * 4]);
+        reset_lit_sky_texel_builds();
+
+        tile_once(&mut graphics, &first, 1.0);
+        tile_once(&mut graphics, &second, 1.0);
+
+        assert_eq!(lit_sky_texel_builds(), 2);
     }
 }
