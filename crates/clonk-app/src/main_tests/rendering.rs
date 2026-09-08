@@ -147,7 +147,7 @@ fn hud_inventory_left_click_queues_exact_contents_only() {
             );
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
 
     app.test_cursor(PhysicalPosition::new(
@@ -180,7 +180,7 @@ fn hud_inventory_autostop_queues_stored_press_and_release() {
     main_assert_eq!(app.ingame_viewport_region(owner, outside) => None);
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
 
     app.test_cursor(PhysicalPosition::new(f64::from(down.x), f64::from(down.y)));
@@ -419,7 +419,7 @@ fn hud_command_bar_left_click_queues_exact_drawn_coms_only() {
     let (mut app, owner, points) = command_bar_fixture(false);
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     for (command, point) in points {
         app.ingame_last_left_down = None;
@@ -471,7 +471,7 @@ fn selection_drag_entering_hud_region_is_cancelled() {
         .test_value();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(start.x),
@@ -969,7 +969,7 @@ fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from()
     let mut app = new_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 1, 40, 4);
     app.rendering.display_flags.show_stats = true;
-    let clock = app.network_control_clock.test_mut();
+    let clock = app.netplay.control_clock.test_mut();
     clock.observe_control_send_time_ms(40);
     clock.observe_control_lateness_ms(300);
     clock.calculate_performance();
@@ -980,7 +980,7 @@ fn the_diagnostics_overlay_reports_the_horizon_a_stalling_client_is_sized_from()
         .diagnostics_overlay_text()
         .test_value()
         .to_string();
-    let presend = app.network_control_clock.test_value().control_presend();
+    let presend = app.netplay.control_clock.test_value().control_presend();
     main_assert!(text.contains(&format!("PreSend {presend}")), "{text}");
     main_assert!(text.contains("late 300 ms"), "{text}");
     main_assert!(text.contains("budget 300.0 ms"), "the tail-aware envelope, not the ping-derived ACT: {text}");
@@ -996,8 +996,8 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
     // after it is released.
     let mut app = new_running_sandbox_app();
     let (_events, commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    app.network_stats = Some(clonk_network::NetworkStats::new());
-    app.network_stats
+    app.netplay.stats = Some(clonk_network::NetworkStats::new());
+    app.netplay.stats
         .as_mut()
         .test_value()
         .register_client(7, "Client");
@@ -1060,7 +1060,7 @@ fn diagnostics_and_second_stats_read_delayed_route_telemetry_without_waiting() {
         .to_string();
     main_assert!(fresh.contains("Ping 21 ms, loss 0"), "{fresh}");
     let ping_graph = app
-        .network_stats
+        .netplay.stats
         .as_ref()
         .test_value()
         .client_ping_graph(7)
@@ -2340,12 +2340,12 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
         modules: Vec::new(),
         definition_root: None,
     });
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
     let (manager, events) = NetworkManager::test_stub();
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     events.send(arrival(31, &pack_a)).test_value();
     app.test_network_events();
@@ -2403,13 +2403,13 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
         modules: Vec::new(),
         definition_root: None,
     });
-    host_app.network_mode = Some(NetworkMode::Host(HostSettings {
+    host_app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_113)),
         player_name: "Host".to_string(),
         prepared: None,
     }));
     let (host_manager, host_events) = NetworkManager::test_stub();
-    host_app.network = Some(host_manager);
+    host_app.netplay.manager = Some(host_manager);
     host_events.send(arrival(41, &pack_a)).test_value();
     host_app.test_network_events();
     main_assert_eq!(host_app.assets.startup_dialog_images.get("GUICaption.png").expect("host overloaded caption").pixels()[..4] => [0x31, 0x11, 0x11, 0xff]);
@@ -4471,7 +4471,7 @@ fn construction_drop_uses_cached_last_phase_without_release_recheck() {
         construction_drag_fixture();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     begin_construction_drag(&mut app, menu_point, valid_point);
 

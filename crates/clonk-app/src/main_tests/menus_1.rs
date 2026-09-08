@@ -369,7 +369,7 @@ fn hud_command_autostop_release_survives_menu_opened_by_press() {
         .test_value();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(point.x),
@@ -1484,8 +1484,8 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
     let mut app = new_menu_app(640, 480);
     install_test_free_savegame_player_row(&mut app, 50);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
@@ -1892,8 +1892,8 @@ fn takeover_submenu_fills_live_at_open() {
     let mut app = new_menu_app(640, 480);
     install_test_free_savegame_player_row(&mut app, 50);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
@@ -2030,7 +2030,7 @@ fn player_context_root_matches_cpp_entry_gates() {
             players: vec![free_script],
         }],
     };
-    app.host_join_snapshot = Some(host_snapshot);
+    app.netplay.host_join_snapshot = Some(host_snapshot);
     let player_row = |id, client_id, name: &str, team| {
         LobbyRosterRow::Player(LobbyPlayerRow {
             id,
@@ -2079,7 +2079,7 @@ fn player_context_root_matches_cpp_entry_gates() {
             player_row(7, 0, "Chooser", 1),
             player_row(9, 7, "Script", 0),
         ]);
-    app.network_mode = Some(NetworkMode::Host(HostSettings {
+    app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         player_name: "Host".to_string(),
         prepared: None,
@@ -2158,8 +2158,8 @@ fn player_context_root_matches_cpp_entry_gates() {
         "team zero retains New Color even with team colors enabled"
     );
 
-    app.network_mode = None;
-    app.control_clients
+    app.netplay.mode = None;
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Remote owner")]);
     let (_, foreign) = app.classic_lobby_player_context_entries(7).test_value();
     main_assert!(foreign.is_empty());

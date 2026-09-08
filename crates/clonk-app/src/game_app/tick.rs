@@ -32,10 +32,10 @@ impl GameApp {
         }
         // Each C4Game::Execute attempt recomputes whether Control.Prepare is
         // blocked. The scheduler reads the reason after this method returns.
-        self.waiting_network_control = None;
+        self.netplay.waiting_control = None;
         self.guard_classic_global_gui_bootstrap()?;
         self.poll_lobby_preload()?;
-        if let Some(network) = self.network.as_ref() {
+        if let Some(network) = self.netplay.manager.as_ref() {
             network.refresh_current_frame(self.current_network_input_frame());
         }
         if self.mode == AppMode::Loading && self.scenario_lifecycle.loading.is_some() {
@@ -91,7 +91,7 @@ impl GameApp {
                 if self.dialogs.game_over.is_some() {
                     return Ok(());
                 }
-                if self.pending_league_end.is_some() {
+                if self.netplay.pending_league_end.is_some() {
                     return Ok(());
                 }
                 self.reconcile_message_board_input_dialog()?;
@@ -106,26 +106,29 @@ impl GameApp {
                 // PreSend frames before its cadence gate, so the aggregate is
                 // normally complete by the frame that wants to execute it.
                 self.flush_pending_remove_player_controls(true)?;
-                if self.network.is_none() {
+                if self.netplay.manager.is_none() {
                     let control_rate = u64::try_from(self.engine.control_rate())
                         .unwrap_or(1)
                         .max(1);
                     if self.engine.frame().is_multiple_of(control_rate)
-                        && !self.offline_control_input.is_empty()
+                        && !self.netplay.offline_control_input.is_empty()
                     {
                         let tick = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-                        let controls = std::mem::take(&mut self.offline_control_input);
+                        let controls = std::mem::take(&mut self.netplay.offline_control_input);
                         self.apply_ready_controls(tick, controls)?;
                     }
                 }
-                if self.network.is_some() {
+                if self.netplay.manager.is_some() {
                     let frame = self.engine.frame();
                     let local_activated = self
-                        .network
+                        .netplay
+                        .manager
                         .as_ref()
                         .and_then(|network| i32::try_from(network.local_client_id()).ok())
-                        .is_some_and(|client_id| self.control_clients.is_activated(client_id));
-                    let due_ticks = match self.network_control_clock.as_mut() {
+                        .is_some_and(|client_id| {
+                            self.netplay.control_clients.is_activated(client_id)
+                        });
+                    let due_ticks = match self.netplay.control_clock.as_mut() {
                         Some(clock) => clock
                             .take_due_ticks(frame, local_activated)
                             .into_iter()
@@ -139,10 +142,10 @@ impl GameApp {
                             .collect::<Vec<_>>(),
                         None => vec![u32::try_from(frame).unwrap_or(u32::MAX)],
                     };
-                    let Some(network) = self.network.as_ref() else {
+                    let Some(network) = self.netplay.manager.as_ref() else {
                         return Ok(());
                     };
-                    let control_tick = match self.network_control_clock {
+                    let control_tick = match self.netplay.control_clock {
                         None => Some(u32::try_from(frame).unwrap_or(u32::MAX)),
                         Some(clock) => match clock.tick_for_frame(frame) {
                             None => None,
@@ -166,7 +169,7 @@ impl GameApp {
                     }
 
                     if let Some(tick) = control_tick {
-                        let sync_controls = self.network_sync.take_exact(tick);
+                        let sync_controls = self.netplay.sync.take_exact(tick);
                         if !sync_controls.is_empty() {
                             let control_result =
                                 self.apply_synchronized_controls(tick, sync_controls);
@@ -176,7 +179,7 @@ impl GameApp {
                             let pacing_result = self.apply_engine_network_target_fps_requests();
                             control_result?;
                             pacing_result?;
-                            if let Some(network) = self.network.as_ref() {
+                            if let Some(network) = self.netplay.manager.as_ref() {
                                 network.reset_client_performance();
                             }
                         }
@@ -185,7 +188,7 @@ impl GameApp {
                         // start so an old TargetFPS cannot expire concurrently
                         // before this update reaches the worker.
                         if let (Some(network), Some(clock)) =
-                            (self.network.as_ref(), self.network_control_clock)
+                            (self.netplay.manager.as_ref(), self.netplay.control_clock)
                         {
                             network.control_tick_reached(
                                 tick,
@@ -202,16 +205,16 @@ impl GameApp {
                         // src/C4Game.cpp:786-797). The decoded packet order is
                         // authoritative, including interleaved SyncCheck packets.
                         let pending_player_resource =
-                            self.network_ticks.ready.get(&tick).and_then(|controls| {
+                            self.netplay.ticks.ready.get(&tick).and_then(|controls| {
                                 pending_admission_resource(
-                                    &mut self.admission_resources,
-                                    &self.control_clients,
+                                    &mut self.netplay.admission_resources,
+                                    &self.netplay.control_clients,
                                     controls,
-                                    &self.aborted_player_resource_joins,
+                                    &self.netplay.aborted_player_resource_joins,
                                 )
                             });
                         if let Some(pending) = pending_player_resource {
-                            self.waiting_network_control =
+                            self.netplay.waiting_control =
                                 Some(NetworkControlWait::PlayerResource {
                                     resource_id: pending.core.id,
                                 });
@@ -242,47 +245,50 @@ impl GameApp {
                             return Ok(());
                         }
                         let Some(controls) =
-                            self.network_ticks.take_exact_if_ready(tick, |controls| {
+                            self.netplay.ticks.take_exact_if_ready(tick, |controls| {
                                 preflight_admission_resources(
-                                    &mut self.admission_resources,
-                                    &self.control_clients,
+                                    &mut self.netplay.admission_resources,
+                                    &self.netplay.control_clients,
                                     controls,
-                                    &self.aborted_player_resource_joins,
+                                    &self.netplay.aborted_player_resource_joins,
                                 )
                             })
                         else {
-                            self.waiting_network_control =
+                            self.netplay.waiting_control =
                                 Some(NetworkControlWait::ReadyTick(tick));
                             self.announce_network_stall(Instant::now())?;
                             return Ok(());
                         };
-                        if let Some((stalled_since, _)) = self.network_stall_since.take() {
-                            self.netplay_pacing.record_stall(stalled_since.elapsed());
+                        if let Some((stalled_since, _)) = self.netplay.stall_since.take() {
+                            self.netplay.pacing.record_stall(stalled_since.elapsed());
                         }
                         // C++ CalcPerformance runs in GetControl, before the
                         // decoded controls execute. Freeze the receiver-local
                         // wait sample at the same consumption boundary.
                         let active_client_ids = self
+                            .netplay
                             .control_clients
                             .activated_client_ids()
                             .into_iter()
                             .filter_map(|client_id| ClientId::try_from(client_id).ok())
                             .collect();
-                        let Some(network) = self.network.as_ref() else {
+                        let Some(network) = self.netplay.manager.as_ref() else {
                             return Ok(());
                         };
                         let control_tick_cost =
                             network.control_tick_consumed(tick, active_client_ids);
                         if let Some(cost) = control_tick_cost {
-                            self.netplay_pacing
+                            self.netplay
+                                .pacing
                                 .record_control_tick(cost.lateness_ms, cost.wait_attribution);
                         }
                         // C++ GetControl::CalcPerformance precedes decoded
                         // Control.Execute. Its flash therefore precedes (and
                         // may be replaced by) a SetPreSend flash in this batch.
                         let control_mode = self
-                            .runtime_network_committed_control_mode
-                            .or(self.runtime_network_control_mode)
+                            .netplay
+                            .runtime_committed_control_mode
+                            .or(self.netplay.runtime_control_mode)
                             .unwrap_or(0);
                         // Independent of the lateness branch below: the host can
                         // give up on this client's control without this tick
@@ -294,7 +300,7 @@ impl GameApp {
                         if let Some(discarded_tick) = discarded_tick {
                             self.note_discarded_control_tick(discarded_tick);
                         }
-                        if let Some(clock) = self.network_control_clock.as_mut() {
+                        if let Some(clock) = self.netplay.control_clock.as_mut() {
                             if let Some(cost) = control_tick_cost {
                                 clock.observe_control_send_time_ms(cost.send_time_ms);
                                 if let Some(lateness_ms) = cost.lateness_ms {
@@ -315,7 +321,7 @@ impl GameApp {
                         }
                         let control_result = self.apply_ready_controls(tick, controls);
                         if control_result.is_ok() {
-                            if let Some(clock) = self.network_control_clock.as_mut() {
+                            if let Some(clock) = self.netplay.control_clock.as_mut() {
                                 clock.complete_control_frame_at(frame);
                             }
                         }
@@ -327,7 +333,8 @@ impl GameApp {
                         // A client mismatch disconnects and returns to the menu.
                         // Do not execute one extra simulation frame after the
                         // ordered SyncCheck has changed session state.
-                        if !matches!(self.mode, AppMode::Running) || self.network.is_none() {
+                        if !matches!(self.mode, AppMode::Running) || self.netplay.manager.is_none()
+                        {
                             return Ok(());
                         }
                     }
@@ -445,7 +452,7 @@ impl GameApp {
                 // DragConstruct refreshes its ConstructionCheck phase during
                 // MouseControl::Execute even without a new platform motion.
                 self.refresh_construction_menu_drag();
-                if let Some(network) = self.network.as_ref() {
+                if let Some(network) = self.netplay.manager.as_ref() {
                     network.refresh_current_frame(self.current_network_input_frame());
                 }
                 self.apply_game_goal_menu_requests()?;

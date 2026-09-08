@@ -3182,18 +3182,18 @@ impl GameApp {
         }
         let currently_allowed = self.runtime_join_admission_allowed();
         let allowed = !currently_allowed;
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return;
         };
         if let Err(error) = network.set_join_allowed(allowed) {
             tracing::error!(%error, allowed, "failed to change runtime join admission");
             return;
         }
-        self.runtime_network_join_allowed = Some(allowed);
+        self.netplay.runtime_join_allowed = Some(allowed);
         if let Some(NetworkMode::Host(HostSettings {
             prepared: Some(prepared),
             ..
-        })) = self.network_mode.as_mut()
+        })) = self.netplay.mode.as_mut()
         {
             prepared.set_runtime_join_allowed(allowed);
         }
@@ -5346,7 +5346,7 @@ impl GameApp {
         let Some(mut control) = control else {
             return;
         };
-        if let Some(network) = self.network.as_ref() {
+        if let Some(network) = self.netplay.manager.as_ref() {
             if let Err(error) = network.submit_message(control) {
                 tracing::error!(%error, "failed to submit classic game message");
             }

@@ -2298,7 +2298,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     main_assert_eq!(app.engine.mouse_drag_carryable_command(owner, drop_world) => Some(CommandId::Drop));
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
 
     move_cursor(&mut app, region_point, "move onto inventory region");
@@ -2319,7 +2319,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
         "the threshold event itself still runs DragNone, not DragMoving"
     );
     main_assert!(selections.is_empty());
-    app.network = None;
+    app.netplay.manager = None;
     app.ingame_last_left_down = None;
 
     move_cursor(&mut app, region_point, "move onto inventory region");
@@ -2353,7 +2353,7 @@ fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
     main_assert_eq!(app.engine.mouse_region_drag_source(target) => None);
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
@@ -2426,7 +2426,7 @@ fn inventory_region_left_drag_vehicle_queues_single_push_to() {
         .test_value();
     let (manager, _events, mut network_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
 
     move_cursor(&mut app, region_point, "move onto vehicle region");
@@ -3161,8 +3161,8 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         )],
     );
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(HostSettings {
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(HostSettings {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         player_name: "Host".to_string(),
         prepared: None,
@@ -6161,7 +6161,7 @@ fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
 
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     app.on_ingame_mouse_double().test_value();
     main_assert_eq!(
@@ -6206,7 +6206,7 @@ fn mouse_jump_zone_click_queues_exact_jump_control() {
 
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
     app.handle_ingame_mouse_click(pointer).test_value();
 
@@ -6257,7 +6257,7 @@ fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
 
         let (manager, _event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        app.network = Some(manager);
+        app.netplay.manager = Some(manager);
         let tick = app.local_control_submission_tick();
         app.handle_ingame_mouse_click(pointer).test_value();
         main_assert_eq!(
@@ -6351,7 +6351,7 @@ fn construction_drop_requires_the_original_live_mouse_assignment() {
             construction_drag_fixture();
         let (manager, _events, mut network_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
-        app.network = Some(manager);
+        app.netplay.manager = Some(manager);
         begin_construction_drag(&mut app, menu_point, valid_point);
 
         if remove_assignment {
@@ -6414,7 +6414,7 @@ fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
 fn running_f4_only_stronger_escape_owns_keyboard_input() {
     let mut app = new_classic_running_sandbox_app();
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    app.control_clients
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
 

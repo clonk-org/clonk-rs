@@ -33,7 +33,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     let (_query_sender, query_receiver) = mpsc::channel::<
         std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>,
     >();
-    startup.classic_direct_reference_query = Some(ClassicDirectReferenceQuery {
+    startup.netplay.classic_direct_reference_query = Some(ClassicDirectReferenceQuery {
         receiver: query_receiver,
     });
     let pending_join_arguments = startup.classic_command_line.clone();
@@ -43,7 +43,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     main_assert_eq!(startup.classic_command_line => pending_join_arguments);
     startup.process_console_command("/close").test_value();
     main_assert_eq!(startup.mode => AppMode::Menu);
-    main_assert!(startup.classic_direct_reference_query.is_none());
+    main_assert!(startup.netplay.classic_direct_reference_query.is_none());
     main_assert!(startup.console_startup_active());
     startup
         .process_console_command("/open /comment:replacement")
@@ -52,7 +52,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
 
     let mut running = new_state_only_lightweight_running_sandbox_app();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
-    running.network = Some(network);
+    running.netplay.manager = Some(network);
     running
         .process_console_command("administrator message")
         .test_value();
@@ -1427,7 +1427,7 @@ fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
     main_assert_eq!(say.message.as_bytes() => b"\"hello\"");
 
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
-    app.network = Some(network);
+    app.netplay.manager = Some(network);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     for character in "hello".chars() {
         app.test_text_input(character);
@@ -1600,7 +1600,7 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
     install_message_fixture(&mut app);
     app.snapshot = app.engine.snapshot();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
-    app.network = Some(network);
+    app.netplay.manager = Some(network);
     app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
 
     let layout = app.game_option_input_layout().test_value();
@@ -1943,7 +1943,7 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     app.test_modifiers(ModifiersState::SUPER);
     let frame_before_pause = app.engine.frame();
     app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
-    main_assert_ne!(app.offline_halt_count => 0);
+    main_assert_ne!(app.netplay.offline_halt_count => 0);
     for _ in 0..3 {
         app.test_update();
     }
@@ -1982,16 +1982,16 @@ fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
     main_assert_eq!(hold.align => clonk_graphics::clonk_font::TextAlign::Center);
 
     app.test_key(VirtualKeyCode::Pause, ElementState::Released);
-    main_assert_ne!(app.offline_halt_count => 0, "release does not toggle");
+    main_assert_ne!(app.netplay.offline_halt_count => 0, "release does not toggle");
     app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
-    main_assert_eq!(app.offline_halt_count => 0);
+    main_assert_eq!(app.netplay.offline_halt_count => 0);
     app.test_update();
     main_assert_eq!(app.engine.frame() => frame_before_pause + 1);
 
     app.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     main_assert!(!app.take_exit_request());
     app.return_to_menu();
-    main_assert_eq!(app.offline_halt_count => 0, "Game::Default clears the halt");
+    main_assert_eq!(app.netplay.offline_halt_count => 0, "Game::Default clears the halt");
 }
 
 #[test]

@@ -24,7 +24,7 @@ impl GameApp {
             self.scenario_game_options.set_comment(comment.clone());
         }
         if let Some(runtime_join) = self.classic_command_line.runtime_join {
-            self.runtime_network_join_allowed = Some(runtime_join);
+            self.netplay.runtime_join_allowed = Some(runtime_join);
         }
     }
 
@@ -61,10 +61,10 @@ impl GameApp {
     }
 
     pub(crate) fn league_player_auth_settings(&self) -> clonk_network::LeagueAuthRequestHead {
-        if let Some(auth) = self.league_auth_session.as_ref() {
+        if let Some(auth) = self.netplay.league_auth_session.as_ref() {
             return auth.clone();
         }
-        match self.network_mode.as_ref() {
+        match self.netplay.mode.as_ref() {
             Some(NetworkMode::Client(settings)) => settings.league_auth.clone(),
             Some(NetworkMode::Host(_)) | None => load_league_auth_settings(self.app_paths.as_ref()),
         }
@@ -74,7 +74,7 @@ impl GameApp {
         &mut self,
         auth: clonk_network::LeagueAuthRequestHead,
     ) {
-        if let Some(NetworkMode::Client(settings)) = self.network_mode.as_mut() {
+        if let Some(NetworkMode::Client(settings)) = self.netplay.mode.as_mut() {
             settings.league_auth = auth.clone();
         }
         if let Some(paths) = self.app_paths.as_ref() {
@@ -82,7 +82,7 @@ impl GameApp {
                 tracing::warn!(%error, "failed to persist league account preference");
             }
         }
-        self.league_auth_session = Some(auth);
+        self.netplay.league_auth_session = Some(auth);
     }
 
     pub(crate) fn current_options_graphic(&self) -> Option<ImageData> {
@@ -606,13 +606,14 @@ impl GameApp {
         &mut self,
         config: clonk_network::NetworkGameAdvertiserConfig,
     ) {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             return;
         }
-        let Some(template) = self.advertised_game_reference.clone() else {
+        let Some(template) = self.netplay.advertised_game_reference.clone() else {
             return;
         };
         let parameters = self
+            .netplay
             .host_join_snapshot
             .as_ref()
             .map(|snapshot| snapshot.parameters.clone())
@@ -620,11 +621,11 @@ impl GameApp {
         let max_players = self
             .engine
             .max_players()
-            .unwrap_or_else(|| i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+            .unwrap_or_else(|| i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX));
         let updated = match game_over_host_reference(
             &template,
             parameters,
-            &self.control_clients,
+            &self.netplay.control_clients,
             &self.players.infos,
             self.engine.teams(),
             max_players,
@@ -640,15 +641,15 @@ impl GameApp {
 
         // The final reference is authoritative even if an optional listener
         // update or one-shot rebind fails.
-        self.advertised_game_reference = Some(updated.clone());
+        self.netplay.advertised_game_reference = Some(updated.clone());
 
-        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+        if let Some(advertiser) = self.netplay.game_advertiser.as_ref() {
             if let Err(error) = advertiser.update_exact(&updated) {
                 tracing::error!(%error, "failed to update game-over host reference");
             }
         } else {
             match clonk_network::NetworkGameAdvertiser::start_exact(config, updated.clone()) {
-                Ok(advertiser) => self.network_game_advertiser = Some(advertiser),
+                Ok(advertiser) => self.netplay.game_advertiser = Some(advertiser),
                 Err(error) => {
                     tracing::warn!(%error, "game-over network advertising unavailable");
                 }
@@ -830,7 +831,7 @@ impl GameApp {
             LobbyOptionKind::ControlMode => {
                 if self.engine.is_control_host()
                     && matches!(value, 0..=2)
-                    && (!self.network_is_league || value != 2)
+                    && (!self.netplay.is_league || value != 2)
                 {
                     self.change_running_network_control_mode(value);
                 }
@@ -838,7 +839,8 @@ impl GameApp {
             LobbyOptionKind::ControlRate => {
                 if self.engine.is_control_host() && (1..=9).contains(&value) {
                     let current = self
-                        .network_control_clock
+                        .netplay
+                        .control_clock
                         .map(NetworkControlClock::control_rate)
                         .unwrap_or_else(|| self.engine.control_rate());
                     if value != current {
@@ -850,7 +852,8 @@ impl GameApp {
                 if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
                     let allowed = value != 0;
                     let result = self
-                        .network
+                        .netplay
+                        .manager
                         .as_ref()
                         .ok_or_else(|| anyhow!("runtime network is unavailable"))
                         .and_then(|network| network.set_join_allowed(allowed));
@@ -858,11 +861,11 @@ impl GameApp {
                         tracing::error!(%error, allowed, "failed to change runtime join admission");
                         return Ok(());
                     }
-                    self.runtime_network_join_allowed = Some(allowed);
+                    self.netplay.runtime_join_allowed = Some(allowed);
                     if let Some(NetworkMode::Host(HostSettings {
                         prepared: Some(prepared),
                         ..
-                    })) = self.network_mode.as_mut()
+                    })) = self.netplay.mode.as_mut()
                     {
                         prepared.set_runtime_join_allowed(allowed);
                     }
@@ -2679,7 +2682,7 @@ impl GameApp {
                         }
                         PendingInputDialogPurpose::NetworkJoinPassword => {
                             if text.is_empty() {
-                                self.pending_network_join = None;
+                                self.netplay.pending_join = None;
                                 self.status_text.clear();
                                 self.resume_startup_music_after_failed_open_game();
                                 break;
@@ -2687,13 +2690,13 @@ impl GameApp {
                             let Some(password) =
                                 clonk_engine::LegacyCString::from_bytes(text.into_bytes())
                             else {
-                                self.pending_network_join = None;
+                                self.netplay.pending_join = None;
                                 self.status_text =
                                     "Network password contains an unsupported NUL byte".to_string();
                                 self.resume_startup_music_after_failed_open_game();
                                 break;
                             };
-                            let Some(settings) = self.pending_network_join.as_mut() else {
+                            let Some(settings) = self.netplay.pending_join.as_mut() else {
                                 self.status_text =
                                     "Network join settings are unavailable".to_string();
                                 break;
@@ -2751,7 +2754,7 @@ impl GameApp {
                             self.close_running_chat()?;
                         }
                         PendingInputDialogPurpose::NetworkJoinPassword => {
-                            self.pending_network_join = None;
+                            self.netplay.pending_join = None;
                             self.status_text.clear();
                             self.resume_startup_music_after_failed_open_game();
                         }

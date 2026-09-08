@@ -23,7 +23,8 @@ impl GameApp {
             return;
         }
         let Some(by_client) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
         else {
@@ -57,7 +58,7 @@ impl GameApp {
                 benchmark.record_submission(tick, &left_release, now);
                 benchmark.record_submission(tick, &right_release, now);
             }
-            if let Some(network) = self.network.as_ref() {
+            if let Some(network) = self.netplay.manager.as_ref() {
                 network.submit_local_control(
                     owner,
                     ControlEvent::Release(ControlButton::Left),
@@ -80,7 +81,8 @@ impl GameApp {
             return Some(path.clone());
         }
         if let Some(path) = info.resource.as_ref().and_then(|resource| {
-            self.admission_resources
+            self.netplay
+                .admission_resources
                 .complete_player_path(resource)
                 .map(Path::to_path_buf)
         }) {
@@ -123,11 +125,12 @@ impl GameApp {
     pub(crate) fn persist_synchronized_local_player_files(&mut self) -> bool {
         tracing::info!("synchronizing local player files");
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or_else(|| self.offline_local_client_id());
-        let league = self.network_is_league;
+        let league = self.netplay.is_league;
         let max_players = self.engine.max_players();
         let candidates = self
             .engine
@@ -237,9 +240,12 @@ impl GameApp {
                 // Native snapshots fOfficial after serializing and before
                 // Derive, then consults that same value after the move.
                 let official_derivation = self.engine.is_control_host();
-                let derivation = self.network.as_ref().and_then(|network| {
+                let derivation = self.netplay.manager.as_ref().and_then(|network| {
                     let resource = info.resource.as_ref()?;
-                    let resource_id = self.admission_resources.derivation_target(resource.id)?;
+                    let resource_id = self
+                        .netplay
+                        .admission_resources
+                        .derivation_target(resource.id)?;
                     let ownership = if local_control {
                         clonk_network::ResourceFileOwnership::Persistent
                     } else {
@@ -263,7 +269,7 @@ impl GameApp {
                         }
                     }
                 });
-                if self.network.is_some() {
+                if self.netplay.manager.is_some() {
                     let preserve_folder_group = local_control && path.is_dir();
                     self.submit_background_save_job(save_worker::player_file_save_job(
                         save_worker::PreparedPlayerFileSave {
@@ -281,14 +287,13 @@ impl GameApp {
                         .with_context(|| format!("persist player profile {}", path.display()))?;
                     if official_derivation {
                         if let (Some(network), Some((derivation, ownership))) =
-                            (self.network.as_ref(), derivation)
+                            (self.netplay.manager.as_ref(), derivation)
                         {
                             match network.finish_resource_derive(derivation) {
-                                Ok(core) => self.admission_resources.register_finished_derivation(
-                                    &core,
-                                    path.clone(),
-                                    ownership,
-                                ),
+                                Ok(core) => self
+                                    .netplay
+                                    .admission_resources
+                                    .register_finished_derivation(&core, path.clone(), ownership),
                                 Err(error) => {
                                     // FinishDerive's result is ignored by
                                     // C4Player::Save; the profile itself has
@@ -566,7 +571,9 @@ impl GameApp {
         // C4Game::LocalPlayerControl handles COM_PlayerMenu and an active
         // C4MainMenu locally; only cursor/object-menu controls enter the
         // synchronized input queue (src/C4Game.cpp:3595-3624).
-        if self.mode == AppMode::Running && (self.network.is_none() || local_main_menu_control) {
+        if self.mode == AppMode::Running
+            && (self.netplay.manager.is_none() || local_main_menu_control)
+        {
             let consumed = if let ControlEvent::Command { command, kind } = event {
                 self.handle_menu_command_failsafe(owner, command, kind)?
             } else {
@@ -587,7 +594,7 @@ impl GameApp {
         // synchronizes the key-up in both styles instead, so scripts can act
         // on a held key in either mode; classic movement is unaffected because
         // C4Object::DirectCom's procedure switch has no release arm.
-        if let Some(network) = self.network.as_ref() {
+        if let Some(network) = self.netplay.manager.as_ref() {
             let tick = self.local_control_submission_tick();
             network.submit_local_control(owner, event, tick);
             return Ok(());
@@ -613,10 +620,11 @@ impl GameApp {
         &mut self,
         command: PlayerCommandControlData,
     ) -> Result<(), EngineError> {
-        if self.network.is_some() {
+        if self.netplay.manager.is_some() {
             let tick = self.local_control_submission_tick();
             if let Some(Err(error)) = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .map(|network| network.submit_player_command(tick, command))
             {
@@ -636,10 +644,11 @@ impl GameApp {
         &mut self,
         selection: PlayerSelectControlData,
     ) -> Result<(), EngineError> {
-        if self.network.is_some() {
+        if self.netplay.manager.is_some() {
             let tick = self.local_control_submission_tick();
             if let Some(Err(error)) = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .map(|network| network.submit_player_select(tick, selection.clone()))
             {
@@ -813,10 +822,11 @@ impl GameApp {
             self.close_ingame_menu_for_player(owner);
         }
         self.engine.mark_team_selection_pending(owner)?;
-        if self.network.is_some() {
+        if self.netplay.manager.is_some() {
             let tick = self.local_control_submission_tick();
             if let Some(Err(error)) = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .map(|network| network.submit_init_scenario_player(tick, owner, team))
             {
@@ -1026,7 +1036,8 @@ impl GameApp {
 
             let has_resource = info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0;
             let complete_path = info.resource.as_ref().and_then(|resource| {
-                self.admission_resources
+                self.netplay
+                    .admission_resources
                     .complete_player_path(resource)
                     .map(Path::to_path_buf)
             });
@@ -1059,7 +1070,8 @@ impl GameApp {
         // rejects directory groups and files already used by Game.Players
         // (src/C4MainMenu.cpp:59-121; src/C4PlayerList.cpp:433-451).
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or_else(|| self.offline_local_client_id());
@@ -1122,7 +1134,7 @@ impl GameApp {
         client_id: i32,
         players: &[clonk_engine::ControlPlayerInfoEntry],
     ) {
-        let resources = &self.admission_resources;
+        let resources = &self.netplay.admission_resources;
         let joins =
             self.players
                 .infos
@@ -1134,7 +1146,8 @@ impl GameApp {
         let tick = self.local_control_submission_tick();
         for join in joins {
             if let Some(Err(error)) = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .map(|network| network.submit_join_player(tick, join))
             {
@@ -1149,8 +1162,8 @@ impl GameApp {
         // queued CreateScriptPlayer admission or the empty fast path.
         let mut host_snapshot_changed = false;
         if let Some(max_players) = self.engine.max_players() {
-            self.network_max_players = usize::try_from(max_players).unwrap_or(0);
-            if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+            self.netplay.max_players = usize::try_from(max_players).unwrap_or(0);
+            if let Some(snapshot) = self.netplay.host_join_snapshot.as_mut() {
                 if snapshot.parameters.max_players != max_players {
                     snapshot.parameters.max_players = max_players;
                     host_snapshot_changed = true;
@@ -1177,7 +1190,7 @@ impl GameApp {
         }
         match self.runtime_network_role() {
             RuntimeNetworkRole::Host => {
-                let Some(network) = self.network.as_ref() else {
+                let Some(network) = self.netplay.manager.as_ref() else {
                     return Ok(());
                 };
                 for update in updates {
@@ -1191,7 +1204,7 @@ impl GameApp {
                     let Some(info) = self
                         .players
                         .infos
-                        .admit_request(update, self.network_max_players)
+                        .admit_request(update, self.netplay.max_players)
                     else {
                         continue;
                     };
@@ -1201,7 +1214,7 @@ impl GameApp {
                     self.recheck_team_memberships_from_player_infos();
                     seed_engine_player_info_parameters(
                         &mut self.engine,
-                        &self.network_league_name,
+                        &self.netplay.league_name,
                         &self.players.infos,
                     );
                     let joins = self
@@ -1236,17 +1249,19 @@ impl GameApp {
     ) -> Vec<clonk_engine::PlayerInfoControlData> {
         let client_id = info.client_id;
         let local_origin = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             == Some(info.by_client);
         let had_client_packet = self.players.infos.client_packet(client_id).is_some();
-        let send_clean_follow_up = matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
+        let send_clean_follow_up = matches!(self.netplay.mode.as_ref(), Some(NetworkMode::Host(_)))
             && info.by_client == 0
             && info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
             && (info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS == 0
                 || !had_client_packet);
-        self.admission_resources
+        self.netplay
+            .admission_resources
             .register_player_info_resources(&info.players);
         self.register_classic_lobby_player_resources(&info.players);
         self.generate_incoming_player_info_teams(&info.players);
@@ -1267,7 +1282,7 @@ impl GameApp {
         };
         seed_engine_player_info_parameters(
             &mut self.engine,
-            &self.network_league_name,
+            &self.netplay.league_name,
             &self.players.infos,
         );
         self.publish_current_host_player_infos();
@@ -1275,9 +1290,9 @@ impl GameApp {
         self.sync_classic_lobby_resource_ready();
         let should_issue_joins = issue_joins
             && self.mode == AppMode::Running
-            && matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
-            && self.control_clients.contains(client_id)
-            && self.control_clients.is_activated(client_id);
+            && matches!(self.netplay.mode.as_ref(), Some(NetworkMode::Host(_)))
+            && self.netplay.control_clients.contains(client_id)
+            && self.netplay.control_clients.is_activated(client_id);
         if should_issue_joins {
             self.issue_unjoined_joins_for_client(client_id);
         }
@@ -1295,9 +1310,9 @@ impl GameApp {
         {
             let capture_join_players = capture_join_players_on_echo
                 && self.mode == AppMode::Running
-                && matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
-                && self.control_clients.contains(info.client_id)
-                && self.control_clients.is_activated(info.client_id);
+                && matches!(self.netplay.mode.as_ref(), Some(NetworkMode::Host(_)))
+                && self.netplay.control_clients.contains(info.client_id)
+                && self.netplay.control_clients.is_activated(info.client_id);
             let join_players_on_echo = if capture_join_players {
                 let mut post_control = self.players.infos.clone();
                 post_control.apply(info.clone());
@@ -1314,7 +1329,8 @@ impl GameApp {
             } else {
                 Vec::new()
             };
-            self.network
+            self.netplay
+                .manager
                 .as_ref()
                 .ok_or_else(|| anyhow!("network session is unavailable"))?
                 .broadcast_preexecuted_player_info(info.clone(), join_players_on_echo.clone())?;
@@ -1340,7 +1356,8 @@ impl GameApp {
         mut join_players_on_echo: Vec<clonk_engine::ControlPlayerInfoEntry>,
     ) {
         let client_id = info.client_id;
-        self.admission_resources
+        self.netplay
+            .admission_resources
             .register_player_info_resources(&info.players);
         self.register_classic_lobby_player_resources(&info.players);
         for player in &mut join_players_on_echo {
@@ -1362,7 +1379,7 @@ impl GameApp {
         {
             seed_engine_player_info_parameters(
                 &mut self.engine,
-                &self.network_league_name,
+                &self.netplay.league_name,
                 &self.players.infos,
             );
             self.publish_current_host_player_infos();
@@ -1399,7 +1416,7 @@ impl GameApp {
                 .admit_request_with_alternate_colors(
                     &mut self.players.infos,
                     request,
-                    self.network_max_players,
+                    self.netplay.max_players,
                     true,
                     false,
                     &restore_players,
@@ -1414,7 +1431,7 @@ impl GameApp {
                     .infos
                     .admit_request_with_attributes_and_alternate_colors(
                         request,
-                        self.network_max_players,
+                        self.netplay.max_players,
                         None,
                         &restore_players,
                         &mut oracle,
@@ -1460,8 +1477,8 @@ impl GameApp {
     /// the network echo.
     pub(crate) fn submit_restart_restore_team_updates_for_new_roster_items(&mut self) {
         if self.players.restart_restore_infos.what & RESTART_RESTORE_PLAYER_TEAMS == 0
-            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
-            || self.network.is_none()
+            || !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
+            || self.netplay.manager.is_none()
             || (self.lobby.classic_host.is_none() && self.lobby.session.is_none())
         {
             return;
@@ -1470,8 +1487,8 @@ impl GameApp {
         let (_, packets) = self.players.infos.retained_rows_snapshot();
         let mut visible_items = HashSet::new();
         for (client_id, _, players) in &packets {
-            if !self.control_clients.contains(*client_id)
-                || self.control_clients.is_observer(*client_id)
+            if !self.netplay.control_clients.contains(*client_id)
+                || self.netplay.control_clients.is_observer(*client_id)
             {
                 continue;
             }
@@ -1490,8 +1507,8 @@ impl GameApp {
         let mut requests = Vec::new();
         let mut restored_teams = Vec::new();
         for (client_id, flags, players) in packets {
-            if !self.control_clients.contains(client_id)
-                || self.control_clients.is_observer(client_id)
+            if !self.netplay.control_clients.contains(client_id)
+                || self.netplay.control_clients.is_observer(client_id)
             {
                 continue;
             }
@@ -1538,7 +1555,7 @@ impl GameApp {
         if generated_team {
             if let (Some(assignment), Some(snapshot)) = (
                 self.players.team_assignment.as_ref(),
-                self.host_join_snapshot.as_mut(),
+                self.netplay.host_join_snapshot.as_mut(),
             ) {
                 snapshot.parameters.teams =
                     clonk_network::join_team_list_snapshot(assignment.teams().clone());
@@ -1546,7 +1563,7 @@ impl GameApp {
             self.publish_updated_host_join_snapshot();
         }
 
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return;
         };
         for request in requests {
@@ -1564,8 +1581,8 @@ impl GameApp {
     pub(crate) fn submit_restart_restore_script_players(&mut self) {
         if self.players.restart_restore_script_players_joined
             || self.players.restart_restore_infos.what & RESTART_RESTORE_SCRIPT_PLAYERS == 0
-            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
-            || self.network.is_none()
+            || !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
+            || self.netplay.manager.is_none()
             || (self.lobby.classic_host.is_none() && self.lobby.session.is_none())
         {
             return;
@@ -1612,7 +1629,7 @@ impl GameApp {
         if generated_team {
             if let (Some(assignment), Some(snapshot)) = (
                 self.players.team_assignment.as_ref(),
-                self.host_join_snapshot.as_mut(),
+                self.netplay.host_join_snapshot.as_mut(),
             ) {
                 snapshot.parameters.teams =
                     clonk_network::join_team_list_snapshot(assignment.teams().clone());
@@ -1621,11 +1638,12 @@ impl GameApp {
         }
 
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or(0);
-        if let Some(Err(error)) = self.network.as_ref().map(|network| {
+        if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
             network.submit_player_info_update(clonk_network::PlayerInfoUpdateRequest {
                 client_id: local_client_id,
                 flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
@@ -1675,7 +1693,7 @@ impl GameApp {
         &mut self,
         execute_offline_control_frame: bool,
     ) -> Result<(), EngineError> {
-        if self.network.is_none() {
+        if self.netplay.manager.is_none() {
             let control_rate = u64::try_from(self.engine.control_rate())
                 .unwrap_or(1)
                 .max(1);
@@ -1698,7 +1716,7 @@ impl GameApp {
         }
         let tick = self.local_control_submission_tick();
         for control in controls {
-            if let Some(Err(error)) = self.network.as_ref().map(|network| {
+            if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
                 network.submit_remove_player(tick, control.player, control.disconnected)
             }) {
                 tracing::warn!(player = control.player, %error, "failed to queue RemovePlr");
@@ -1713,6 +1731,7 @@ impl GameApp {
         // in C4PlayerList order with fNoCalls=false. This is not the silent
         // hard-abort path used by C4Game::Abort.
         let remote_clients = self
+            .netplay
             .control_clients
             .snapshot()
             .into_iter()
@@ -1816,10 +1835,10 @@ impl GameApp {
             {
                 prepared.team_registry = runtime_teams;
             }
-            if let Some(join_data) = self.pending_network_join_data.as_mut() {
+            if let Some(join_data) = self.netplay.pending_join_data.as_mut() {
                 join_data.parameters.teams = snapshot.clone();
             }
-            if let Some(host_snapshot) = self.host_join_snapshot.as_mut() {
+            if let Some(host_snapshot) = self.netplay.host_join_snapshot.as_mut() {
                 host_snapshot.parameters.teams = snapshot;
             }
             return updates;
@@ -1837,7 +1856,7 @@ impl GameApp {
         {
             recheck_runtime_team_memberships_from_infos(&mut prepared.team_registry, &memberships);
         }
-        if let Some(join_data) = self.pending_network_join_data.as_mut() {
+        if let Some(join_data) = self.netplay.pending_join_data.as_mut() {
             recheck_join_team_memberships_from_infos(
                 &mut join_data.parameters.teams.teams,
                 &memberships,

@@ -269,6 +269,7 @@ impl GameApp {
                     }
                     None => {
                         let nick = self
+                            .netplay
                             .control_clients
                             .state(control.by_client)
                             .map(|client| legacy_presentation_text(client.nick.as_bytes()))
@@ -319,7 +320,8 @@ impl GameApp {
                     check_alert = true;
                 } else if self.control_message_has_lobby() {
                     let local_client = self
-                        .network
+                        .netplay
+                        .manager
                         .as_ref()
                         .and_then(|network| i32::try_from(network.local_client_id()).ok())
                         .unwrap_or(0);
@@ -331,6 +333,7 @@ impl GameApp {
                         return outcome;
                     }
                     let nick = self
+                        .netplay
                         .control_clients
                         .state(control.by_client)
                         .map(|client| legacy_presentation_text(client.nick.as_bytes()))
@@ -369,7 +372,11 @@ impl GameApp {
                 check_alert = true;
             }
             MESSAGE_TYPE_SOUND => {
-                if self.control_clients.state(control.by_client).is_none()
+                if self
+                    .netplay
+                    .control_clients
+                    .state(control.by_client)
+                    .is_none()
                     || !self.control_messages.try_allow_sound_at(now)
                 {
                     return outcome;
@@ -468,7 +475,8 @@ impl GameApp {
     /// (clonk-org/clonk-rs#240). The oracle has no such policy, so an unset
     /// `Config.Network.NoRejoinAfterElimination` keeps its behaviour.
     pub(crate) fn rejoin_after_elimination_allowed(&self) -> bool {
-        self.network_rejoin_after_elimination_allowed
+        self.netplay
+            .rejoin_after_elimination_allowed
             .unwrap_or_else(|| {
                 !native_config_text(
                     &load_native_config_bytes(self.app_paths.as_ref()),
@@ -540,7 +548,8 @@ impl GameApp {
                 // send the host's already-applied remote packet to repair a
                 // client that otherwise retains Joined and refuses the file.
                 if let Some(Err(error)) = self
-                    .network
+                    .netplay
+                    .manager
                     .as_ref()
                     .map(|network| network.broadcast_preexecuted_player_info(info, Vec::new()))
                 {

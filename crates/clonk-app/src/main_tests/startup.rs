@@ -804,7 +804,7 @@ fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
     app.open_network_game_dialog();
     let browser_status = app.status_text.clone();
     activate_startup_network_chat(&mut app);
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
     main_assert_eq!(app.status_text => browser_status);
     main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().mode() => clonk_frontend::startup_netdlg::NetDlgMode::Chat);
     main_assert_eq!(app.startup_network.dialog.as_ref().unwrap().chat_connection_state() => clonk_frontend::startup_netdlg::NetDlgChatConnectionState::Connected);

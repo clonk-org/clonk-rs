@@ -130,7 +130,7 @@ impl GameApp {
                 if !game_running {
                     return Ok(false);
                 }
-                if self.network_is_league {
+                if self.netplay.is_league {
                     self.append_running_command_resource(
                         "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
                         "Command not allowed in league games!",
@@ -154,6 +154,7 @@ impl GameApp {
             b"kick" => {
                 if network_host {
                     let target = self
+                        .netplay
                         .control_clients
                         .snapshot()
                         .into_iter()
@@ -169,7 +170,7 @@ impl GameApp {
                         );
                         return Ok(true);
                     };
-                    if self.network_is_league && self.runtime_client_has_players(target.client_id) {
+                    if self.netplay.is_league && self.runtime_client_has_players(target.client_id) {
                         self.submit_own_league_vote(
                             LeagueVoteSubject {
                                 vote_type: clonk_engine::VOTE_TYPE_KICK,
@@ -182,7 +183,7 @@ impl GameApp {
                             "IDS_MSG_KICKFROMMSGBOARD",
                             "kicked from messageboard",
                         );
-                        if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                        if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
                             network.submit_client_remove(clonk_engine::ClientRemoveControlData {
                                 client_id: target.client_id,
                                 reason: clonk_engine::LegacyCString::from_bytes(
@@ -209,6 +210,7 @@ impl GameApp {
                     return Ok(true);
                 }
                 let target = self
+                    .netplay
                     .control_clients
                     .snapshot()
                     .into_iter()
@@ -226,16 +228,16 @@ impl GameApp {
                 };
                 let update = match name {
                     b"activate" => Some((clonk_engine::CLIENT_UPDATE_ACTIVATE, 1)),
-                    b"deactivate" if !self.network_is_league => {
+                    b"deactivate" if !self.netplay.is_league => {
                         Some((clonk_engine::CLIENT_UPDATE_ACTIVATE, 0))
                     }
-                    b"observer" if !self.network_is_league => {
+                    b"observer" if !self.netplay.is_league => {
                         Some((clonk_engine::CLIENT_UPDATE_SET_OBSERVER, 0))
                     }
                     _ => None,
                 };
                 if let Some((update_type, data)) = update {
-                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                    if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
                         network.submit_client_update(clonk_engine::ClientUpdateControlData::new(
                             update_type,
                             target.client_id,
@@ -257,7 +259,7 @@ impl GameApp {
                     self.append_running_command_resource("IDS_MSG_CMD_HOSTONLY", "Host only!");
                     return Ok(true);
                 }
-                if self.network_is_league && name == b"asyncctrl" {
+                if self.netplay.is_league && name == b"asyncctrl" {
                     self.append_running_command_resource(
                         "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
                         "Command not allowed in league games!",
@@ -277,7 +279,9 @@ impl GameApp {
                     // process-local engine state authorize a real client
                     // (src/C4GameControl.cpp:59-68;
                     // src/C4MessageInput.cpp:472-490).
-                    if network_host || (self.network.is_none() && self.engine.is_control_host()) {
+                    if network_host
+                        || (self.netplay.manager.is_none() && self.engine.is_control_host())
+                    {
                         let maximum = legacy_sscanf_decimal_prefix(value).unwrap_or(0);
                         if maximum == 0 && value != b"0" {
                             self.append_control_message_log(
@@ -286,7 +290,7 @@ impl GameApp {
                                 None,
                             );
                         } else if !game_running {
-                            if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                            if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
                                 network.submit_control_set(clonk_network::LegacyControlSet {
                                     value_type: 2,
                                     data: maximum,
@@ -313,7 +317,7 @@ impl GameApp {
                         self.set_running_network_password(value);
                     }
                 } else if let Some(value) = parameter.strip_prefix(b"faircrew ") {
-                    if self.engine.is_control_host() && !self.network_is_league {
+                    if self.engine.is_control_host() && !self.netplay.is_league {
                         let strength = if value == b"on" {
                             Some(configured_fair_crew_strength(&load_native_config_bytes(
                                 self.app_paths.as_ref(),
@@ -335,7 +339,7 @@ impl GameApp {
                 if !game_running {
                     return Ok(false);
                 }
-                if !self.engine.debug_mode() || (self.network.is_some() && !network_host) {
+                if !self.engine.debug_mode() || (self.netplay.manager.is_some() && !network_host) {
                     return Ok(true);
                 }
                 let Some(script) = clonk_engine::LegacyCString::from_bytes(parameter.to_vec())
@@ -366,7 +370,10 @@ impl GameApp {
             // failure along the way, returns false so the caller emits the
             // ordinary unknown-command error.
             b"netgetscen" => {
-                if self.network.is_none() || network_host || self.control_message_has_lobby() {
+                if self.netplay.manager.is_none()
+                    || network_host
+                    || self.control_message_has_lobby()
+                {
                     return Ok(false);
                 }
                 let Some(destination) = self.save_joined_scenario_resource() else {
@@ -758,7 +765,8 @@ impl GameApp {
                 LegacyCString::default()
             });
         let by_client = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .or_else(|| {
@@ -773,7 +781,7 @@ impl GameApp {
         else {
             return Ok(());
         };
-        if let Some(network) = self.network.as_ref() {
+        if let Some(network) = self.netplay.manager.as_ref() {
             let tick = self.local_control_submission_tick();
             if let Err(error) = network.submit_message_board_answer(tick, control) {
                 tracing::error!(%error, "failed to submit message-board answer");
@@ -1018,14 +1026,16 @@ impl GameApp {
 
     pub(crate) fn control_message_mentions_local_nick(&self, control: &MessageControlData) -> bool {
         let local_client = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or(0);
         if local_client == control.by_client {
             return false;
         }
-        self.control_clients
+        self.netplay
+            .control_clients
             .state(local_client)
             .is_some_and(|client| mentions_nick(control.message.as_bytes(), client.nick.as_bytes()))
     }

@@ -12,7 +12,8 @@ impl GameApp {
     }
 
     fn configured_console_lobby_countdown(&self) -> i32 {
-        self.staged_network_host_scenario
+        self.netplay
+            .staged_host_scenario
             .as_ref()
             .map(|staged| staged.lobby.countdown_seconds)
             .or_else(|| {
@@ -27,7 +28,7 @@ impl GameApp {
     }
 
     pub(crate) fn process_console_lobby_start(&mut self, line: &str) -> Result<()> {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             let message = self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
             tracing::warn!(%message, command = line, "console lobby command rejected");
             self.append_lobby_command_log(message);
@@ -80,7 +81,7 @@ impl GameApp {
             GameOptionContext::LobbyClient
         };
 
-        let league = self.network_is_league;
+        let league = self.netplay.is_league;
         let fair_crew = self.engine.use_fair_crew();
         let fair_crew_strength = self.engine.fair_crew_strength();
         let fair_crew_forced = self.engine.fair_crew_forced();
@@ -135,7 +136,7 @@ impl GameApp {
     }
 
     pub(crate) fn has_or_will_have_network_lobby(&self) -> bool {
-        self.network.is_some()
+        self.netplay.manager.is_some()
             && matches!(self.mode, AppMode::Menu)
             && (self.lobby.session.is_some() || self.lobby.classic_host.is_some())
     }
@@ -145,10 +146,12 @@ impl GameApp {
     pub(crate) fn league_player_auth_lobby_active(&self) -> bool {
         if self.mode != AppMode::Menu
             || self
+                .netplay
                 .pending_client_start_status
                 .is_some_and(|status| status.state != clonk_network::NETWORK_STATE_LOBBY)
             || self
-                .runtime_network_status_barrier
+                .netplay
+                .runtime_status_barrier
                 .is_some_and(|pending| pending.status.state != clonk_network::NETWORK_STATE_LOBBY)
         {
             return false;
@@ -157,24 +160,25 @@ impl GameApp {
     }
 
     pub(crate) fn acknowledge_initial_lobby_status_if_ready(&mut self) {
-        if !self.initial_lobby_status_ack_pending
+        if !self.netplay.initial_lobby_status_ack_pending
             || self.lobby.session.is_none()
             || self.startup.view != StartupView::NetworkLobby
         {
             return;
         }
         let Some(current_control_tick) = self
-            .network_control_clock
+            .netplay
+            .control_clock
             .map(NetworkControlClock::current_tick)
         else {
             tracing::error!("cannot acknowledge initial lobby status without a control clock");
             return;
         };
         let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-        match self.network.as_mut().map(|network| {
+        match self.netplay.manager.as_mut().map(|network| {
             network.acknowledge_requested_status_at_frame(current_control_tick, current_frame)
         }) {
-            Some(Ok(())) => self.initial_lobby_status_ack_pending = false,
+            Some(Ok(())) => self.netplay.initial_lobby_status_ack_pending = false,
             Some(Err(error)) => {
                 tracing::error!(%error, "failed to acknowledge initial lobby status");
             }
@@ -195,7 +199,7 @@ impl GameApp {
     }
 
     pub(crate) fn control_message_lobby_chat_color(&self, client_id: i32) -> u32 {
-        if self.control_clients.is_activated(client_id) {
+        if self.netplay.control_clients.is_activated(client_id) {
             let hide_assigned_team_color = self.control_message_has_lobby()
                 && self.engine.team_distribution() == 4
                 && self.engine.team_colors();
@@ -326,7 +330,8 @@ impl GameApp {
             NetworkMode::Host(_) => (LobbyRole::Host, 0),
             NetworkMode::Client(_) => (
                 LobbyRole::Client,
-                self.pending_network_join_data
+                self.netplay
+                    .pending_join_data
                     .as_ref()
                     .map_or(-1, |join| join.status.control_mode),
             ),
@@ -379,14 +384,15 @@ impl GameApp {
     }
 
     fn current_classic_lobby_option_rows(&self) -> Option<Vec<LobbyOptionRow>> {
-        let mode = self.network_mode.as_ref()?;
+        let mode = self.netplay.mode.as_ref()?;
         let runtime_join_allowed = self
             .lobby
             .classic_host
             .as_ref()
             .is_some_and(|lobby| lobby.runtime_join_allowed);
         let control_rate = self
-            .network_control_clock
+            .netplay
+            .control_clock
             .map(NetworkControlClock::control_rate)
             .unwrap_or_else(|| self.engine.control_rate());
         let active_player_count = i32::try_from(
@@ -407,7 +413,7 @@ impl GameApp {
                 .as_ref()
                 .map(NetworkTeamAssignmentState::teams)
                 .map(|teams| Self::engine_team_option_state(teams, active_player_count)),
-            NetworkMode::Client(_) => self.pending_network_join_data.as_ref().map(|join| {
+            NetworkMode::Client(_) => self.netplay.pending_join_data.as_ref().map(|join| {
                 Self::joined_team_option_state(&join.parameters.teams, active_player_count)
             }),
         };
@@ -479,7 +485,8 @@ impl GameApp {
                 .as_ref()
                 .map(|snapshot| &snapshot.parameters),
             NetworkMode::Client(_) => self
-                .pending_network_join_data
+                .netplay
+                .pending_join_data
                 .as_ref()
                 .map(|join| &join.parameters),
             NetworkMode::Host(_) => None,
@@ -487,14 +494,16 @@ impl GameApp {
         let teams = parameters.map(|parameters| &parameters.teams);
         let league_mode = parameters.is_some_and(synchronized_parameters_are_league);
         let default_player_icon = self
-            .staged_network_host_scenario
+            .netplay
+            .staged_host_scenario
             .as_ref()
             .map(|staged| &staged.default_player_icon);
-        let default_crew_icon = self.staged_network_host_scenario.as_ref().map(|staged| {
+        let default_crew_icon = self.netplay.staged_host_scenario.as_ref().map(|staged| {
             clonk_frontend::classic_gui::blacken_transparent_pixels(&staged.default_crew_icon)
         });
         let replay = self
-            .staged_network_host_scenario
+            .netplay
+            .staged_host_scenario
             .as_ref()
             .is_some_and(|staged| {
                 staged
@@ -612,7 +621,11 @@ impl GameApp {
                 .resource
                 .as_ref()
                 .filter(|_| player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0)
-                .and_then(|resource| self.admission_resources.complete_player_path(resource))
+                .and_then(|resource| {
+                    self.netplay
+                        .admission_resources
+                        .complete_player_path(resource)
+                })
                 .map(|path| {
                     if let Some(icon) = load_network_player_big_icon(path) {
                         LobbyRosterIcon::Raster(
@@ -817,7 +830,7 @@ impl GameApp {
                 detail: "classic host lobby requires local client ID zero".to_string(),
             }));
         }
-        let staged = self.staged_network_host_scenario.as_ref().ok_or_else(|| {
+        let staged = self.netplay.staged_host_scenario.as_ref().ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
                 detail: "host connection completed without a staged scenario".to_string(),
             })
@@ -852,7 +865,7 @@ impl GameApp {
             staged.lobby.max_players,
             staged.lobby.has_teams,
             self.startup_irc_client_active(),
-            self.admission_resources.lobby_ready_available(),
+            self.netplay.admission_resources.lobby_ready_available(),
             false,
             staged.lobby.countdown_seconds,
             rows,
@@ -984,16 +997,18 @@ impl GameApp {
                 .flat_map(|client| &client.players)
                 .find(|player| player.id == player_id)
         }
-        self.pending_network_join_data
+        self.netplay
+            .pending_join_data
             .as_ref()
             .and_then(|join| find(&join.parameters.restore_player_infos, player_id))
             .or_else(|| {
-                self.host_join_snapshot
+                self.netplay
+                    .host_join_snapshot
                     .as_ref()
                     .and_then(|snapshot| find(&snapshot.parameters.restore_player_infos, player_id))
             })
             .or_else(|| {
-                self.network_mode.as_ref().and_then(|mode| match mode {
+                self.netplay.mode.as_ref().and_then(|mode| match mode {
                     NetworkMode::Host(HostSettings {
                         prepared: Some(prepared),
                         ..
@@ -1017,7 +1032,7 @@ impl GameApp {
             .as_ref()
             .map(|assignment| assignment.teams().clone())
             .or_else(|| {
-                self.pending_network_join_data.as_ref().and_then(|join| {
+                self.netplay.pending_join_data.as_ref().and_then(|join| {
                     initial_team_metadata_from_join_snapshot(&join.parameters.teams)
                 })
             })
@@ -1059,7 +1074,7 @@ impl GameApp {
             .lobby_kick_client
             .is_some_and(|client_id| {
                 !roster_active
-                    || !self.control_clients.contains(client_id)
+                    || !self.netplay.control_clients.contains(client_id)
                     || self.visible_lobby_client_is_local(client_id).is_none()
             });
         let stale_player = self.context_menus.lobby_player.is_some_and(
@@ -1095,7 +1110,7 @@ impl GameApp {
         if self.lobby.classic_host.is_none() && self.lobby.session.is_none() {
             return false;
         }
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return false;
         };
         let local_client_id = network.local_client_id();
@@ -1171,7 +1186,8 @@ impl GameApp {
             })
             .unwrap_or(LobbySheet::Players);
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or(0);
@@ -1181,7 +1197,8 @@ impl GameApp {
         // does not discard BigIcon/fallback graphics, savegame crew overlays,
         // league metadata, localized headers, or unassigned restore rows.
         let (rich_rows, rich_active_players) = self
-            .network_mode
+            .netplay
+            .mode
             .as_ref()
             .map(|mode| self.classic_host_lobby_roster_rows(mode, "", ""))
             .unwrap_or_default();
@@ -1238,7 +1255,8 @@ impl GameApp {
             }
         }
         let joined_teams = self
-            .pending_network_join_data
+            .netplay
+            .pending_join_data
             .as_ref()
             .and_then(|join| initial_team_metadata_from_join_snapshot(&join.parameters.teams));
         let teams = self
@@ -1249,7 +1267,7 @@ impl GameApp {
             .or(joined_teams.as_ref());
         let has_teams = teams.is_some_and(|teams| teams.active);
         let (mut rows, generic_active_players) = classic_lobby_roster_projection(
-            &self.control_clients,
+            &self.netplay.control_clients,
             &self.players.infos,
             teams,
             local_client_id,
@@ -1371,7 +1389,7 @@ impl GameApp {
                 client.status = LobbyClientStatus::Host;
             }
         }
-        let maximum = i32::try_from(self.network_max_players).unwrap_or(i32::MAX);
+        let maximum = i32::try_from(self.netplay.max_players).unwrap_or(i32::MAX);
         if let Some(lobby) = self.lobby.classic_host.as_mut() {
             lobby.controller.set_rows(rows.clone());
             lobby.controller.set_player_count(active_players, maximum);
@@ -1382,9 +1400,9 @@ impl GameApp {
             lobby.active_players = active_players;
             lobby.max_players = maximum;
             lobby.has_teams = has_teams;
-            lobby.league_mode = self.network_is_league;
+            lobby.league_mode = self.netplay.is_league;
             lobby.controller.set_has_teams(has_teams);
-            lobby.controller.set_league_mode(self.network_is_league);
+            lobby.controller.set_league_mode(self.netplay.is_league);
             lobby.controller.set_rows(rows);
             lobby.controller.set_player_count(active_players, maximum);
         }
@@ -1404,7 +1422,7 @@ impl GameApp {
     }
 
     fn lobby_resource_work_directory(&self) -> PathBuf {
-        match self.network_mode.as_ref() {
+        match self.netplay.mode.as_ref() {
             Some(NetworkMode::Client(settings)) => settings.resource_directory.clone(),
             Some(NetworkMode::Host(settings)) => settings
                 .prepared
@@ -1439,14 +1457,19 @@ impl GameApp {
     }
 
     fn lobby_resource_save_possible(&self, resource_id: i32) -> bool {
-        let Some(core) = self.admission_resources.resource_cores.get(&resource_id) else {
+        let Some(core) = self
+            .netplay
+            .admission_resources
+            .resource_cores
+            .get(&resource_id)
+        else {
             return false;
         };
         let Some(AdmissionResourceState::Complete {
             path,
             removed: false,
             local,
-        }) = self.admission_resources.status(resource_id)
+        }) = self.netplay.admission_resources.status(resource_id)
         else {
             return false;
         };
@@ -1466,6 +1489,7 @@ impl GameApp {
         overwrite: bool,
     ) -> Result<(), EngineError> {
         let Some(core) = self
+            .netplay
             .admission_resources
             .resource_cores
             .get(&resource_id)
@@ -1474,6 +1498,7 @@ impl GameApp {
             return Ok(());
         };
         let Some(source) = self
+            .netplay
             .admission_resources
             .complete_path(resource_id)
             .map(Path::to_path_buf)
@@ -1601,12 +1626,13 @@ impl GameApp {
             .filter_map(|player| player.resource.as_ref())
             .filter_map(|core| {
                 let available = matches!(
-                    self.admission_resources.status(core.id),
+                    self.netplay.admission_resources.status(core.id),
                     Some(AdmissionResourceState::Loading { removed: false })
                         | Some(AdmissionResourceState::Complete { removed: false, .. })
                 );
                 available.then(|| {
                     let percent = self
+                        .netplay
                         .admission_resources
                         .present_percent
                         .get(&core.id)
@@ -1653,13 +1679,16 @@ impl GameApp {
 
     pub(crate) fn remove_classic_lobby_resources_at_client(&mut self, client_id: i32) {
         let owned = |resource_id: &i32| *resource_id >= 0 && (*resource_id >> 16) == client_id;
-        self.admission_resources
+        self.netplay
+            .admission_resources
             .resources
             .retain(|resource_id, _| !owned(resource_id));
-        self.admission_resources
+        self.netplay
+            .admission_resources
             .resource_cores
             .retain(|resource_id, _| !owned(resource_id));
-        self.admission_resources
+        self.netplay
+            .admission_resources
             .present_percent
             .retain(|resource_id, _| !owned(resource_id));
         if let Some(lobby) = self.lobby.classic_host.as_mut() {
@@ -1702,7 +1731,7 @@ impl GameApp {
     }
 
     fn current_lobby_scenario_description_update(&self) -> Option<LobbyScenarioDescriptionUpdate> {
-        match self.network_mode.as_ref()? {
+        match self.netplay.mode.as_ref()? {
             NetworkMode::Host(HostSettings {
                 prepared: Some(prepared),
                 ..
@@ -1721,13 +1750,19 @@ impl GameApp {
                 ))
             }
             NetworkMode::Client(_) => {
-                let join_data = self.pending_network_join_data.as_ref()?;
+                let join_data = self.netplay.pending_join_data.as_ref()?;
                 let scenario = &join_data.parameters.scenario;
                 let resource_id = scenario.id;
                 let title = legacy_presentation_text(join_data.parameters.title.as_bytes());
-                match self.admission_resources.status(resource_id).cloned()? {
+                match self
+                    .netplay
+                    .admission_resources
+                    .status(resource_id)
+                    .cloned()?
+                {
                     AdmissionResourceState::Loading { removed: false } => {
                         let percent = self
+                            .netplay
                             .admission_resources
                             .present_percent
                             .get(&resource_id)
@@ -1882,10 +1917,11 @@ impl GameApp {
     }
 
     fn classic_lobby_player_is_owned(&self, client_id: i32) -> bool {
-        matches!(self.network_mode, Some(NetworkMode::Host(_)))
-            || !self.control_clients.contains(client_id)
+        matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
+            || !self.netplay.control_clients.contains(client_id)
             || self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .and_then(|network| i32::try_from(network.local_client_id()).ok())
                 == Some(client_id)
@@ -1896,7 +1932,8 @@ impl GameApp {
         savegame_player_id: i32,
     ) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
         let Some(local_client_id) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
         else {
@@ -2051,7 +2088,7 @@ impl GameApp {
         &self,
         client_id: i32,
     ) -> Option<Vec<ContextMenuEntry<AppContextMenuCommand>>> {
-        if self.network.is_none() || !self.control_clients.contains(client_id) {
+        if self.netplay.manager.is_none() || !self.netplay.control_clients.contains(client_id) {
             return None;
         }
         let local = self.visible_lobby_client_is_local(client_id)?;
@@ -2078,7 +2115,7 @@ impl GameApp {
                 .with_action(AppContextMenuCommand::LobbyClientToggleMute(client_id)),
             );
         }
-        if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             entries.push(
                 ContextMenuEntry::new(self.runtime_resource_text("IDS_NET_KICKCLIENT", "&Kick"))
                     .with_tooltip(
@@ -2089,7 +2126,7 @@ impl GameApp {
                     )
                     .with_action(AppContextMenuCommand::LobbyKick(client_id)),
             );
-            let activated = self.control_clients.is_activated(client_id);
+            let activated = self.netplay.control_clients.is_activated(client_id);
             entries.push(
                 ContextMenuEntry::new(if activated {
                     self.runtime_resource_text("IDS_NET_DEACTIVATECLIENT", "De&activate")
@@ -2152,28 +2189,29 @@ impl GameApp {
     }
 
     pub(crate) fn toggle_classic_lobby_client_mute(&mut self, client_id: i32) {
-        if self.control_clients.contains(client_id) {
+        if self.netplay.control_clients.contains(client_id) {
             let muted = !self.control_messages.is_muted(client_id);
             self.control_messages.set_muted(client_id, muted);
         }
     }
 
     pub(crate) fn toggle_classic_lobby_client_activation(&mut self, client_id: i32) {
-        if self.network.is_none()
-            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+        if self.netplay.manager.is_none()
+            || !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             || self.visible_lobby_client_is_local(client_id).is_none()
-            || !self.control_clients.contains(client_id)
+            || !self.netplay.control_clients.contains(client_id)
         {
             return;
         }
         let update = clonk_engine::ClientUpdateControlData::new(
             clonk_engine::CLIENT_UPDATE_ACTIVATE,
             client_id,
-            i32::from(!self.control_clients.is_activated(client_id)),
+            i32::from(!self.netplay.control_clients.is_activated(client_id)),
             0,
         );
         if let Some(Err(error)) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .map(|network| network.submit_client_update(update))
         {
@@ -2185,7 +2223,7 @@ impl GameApp {
         &mut self,
         client_id: i32,
     ) -> Result<bool, EngineError> {
-        if self.network.is_none() {
+        if self.netplay.manager.is_none() {
             return Ok(false);
         }
         Self::guard_gui_overlay_result(
@@ -2216,13 +2254,13 @@ impl GameApp {
     }
 
     pub(crate) fn kick_classic_lobby_client(&mut self, client_id: i32) {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             || client_id == 0
-            || !self.control_clients.contains(client_id)
+            || !self.netplay.control_clients.contains(client_id)
         {
             return;
         }
-        let league_vote = self.network_is_league
+        let league_vote = self.netplay.is_league
             && self
                 .players
                 .infos
@@ -2252,7 +2290,8 @@ impl GameApp {
             by_client: 0,
         };
         if let Some(Err(error)) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .map(|network| network.submit_client_remove(remove))
         {
@@ -2273,10 +2312,11 @@ impl GameApp {
         wire_filename: &str,
     ) {
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
-        if local_client_id != Some(client_id) || !self.control_clients.contains(client_id) {
+        if local_client_id != Some(client_id) || !self.netplay.control_clients.contains(client_id) {
             self.report_classic_lobby_error(
                 "The selected lobby client is no longer available for adding a player.",
             );
@@ -2293,14 +2333,15 @@ impl GameApp {
             .visible_classic_lobby_controller()
             .is_some_and(|controller| controller.countdown().is_locked());
         if countdown_active {
-            if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
                 return;
             }
             let abort = clonk_network::LobbyCountdownPacket::new(
                 clonk_network::LobbyCountdownPacket::ABORT,
             );
             if let Some(Err(error)) = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .map(|network| network.submit_lobby_countdown(abort))
             {
@@ -2343,7 +2384,7 @@ impl GameApp {
         &self,
         mut next_random: impl FnMut(usize) -> usize,
     ) -> Option<clonk_engine::PlayerInfoUpdateRequest> {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             return None;
         }
         let metadata = self.players.team_assignment.as_ref()?.teams();
@@ -2379,7 +2420,8 @@ impl GameApp {
         );
         let color = classic_script_player_color(&mut next_random);
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or(0);
@@ -2404,7 +2446,8 @@ impl GameApp {
             return;
         };
         if let Some(Err(error)) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .map(|network| network.submit_player_info_update(request))
         {
@@ -2594,9 +2637,10 @@ impl GameApp {
     pub(crate) fn submit_classic_lobby_control_rate(&mut self, selected: i32) {
         if !(1..=9).contains(&selected)
             || !self.classic_lobby_option_is_editable(LobbyOptionKind::ControlRate)
-            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             || !self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .is_some_and(|network| network.local_client_id() == 0)
         {
@@ -2606,13 +2650,14 @@ impl GameApp {
         // control echoed before this click therefore changes the submitted
         // relative adjustment instead of applying a stale absolute value.
         let current = self
-            .network_control_clock
+            .netplay
+            .control_clock
             .map(NetworkControlClock::control_rate)
             .unwrap_or_else(|| self.engine.control_rate());
         if selected == current {
             return;
         }
-        let result = self.network.as_ref().map(|network| {
+        let result = self.netplay.manager.as_ref().map(|network| {
             network.submit_control_set(clonk_network::LegacyControlSet {
                 value_type: 0,
                 data: selected - current,
@@ -2636,15 +2681,16 @@ impl GameApp {
             _ => return,
         };
         if !self.classic_lobby_option_accepts_choice(option, selected)
-            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             || !self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .is_some_and(|network| network.local_client_id() == 0)
         {
             return;
         }
-        let result = self.network.as_ref().map(|network| {
+        let result = self.netplay.manager.as_ref().map(|network| {
             network.submit_control_set(clonk_network::LegacyControlSet {
                 value_type,
                 data: selected,
@@ -2659,9 +2705,10 @@ impl GameApp {
 
     pub(crate) fn set_classic_lobby_random_team_count(&mut self, selected: i32) {
         if !self.classic_lobby_option_accepts_choice(LobbyOptionKind::RandomTeamCount, selected)
-            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             || !self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .is_some_and(|network| network.local_client_id() == 0)
         {
@@ -2690,16 +2737,16 @@ impl GameApp {
         {
             prepared.team_registry = runtime_teams;
         }
-        if let Some(join_data) = self.pending_network_join_data.as_mut() {
+        if let Some(join_data) = self.netplay.pending_join_data.as_mut() {
             join_data.parameters.teams = team_snapshot.clone();
         }
         let mut host_snapshot_changed = false;
-        if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+        if let Some(snapshot) = self.netplay.host_join_snapshot.as_mut() {
             snapshot.parameters.teams = team_snapshot;
             host_snapshot_changed = true;
         }
         host_snapshot_changed |= self.refresh_current_host_player_infos();
-        if let Some(network) = self.network.as_ref() {
+        if let Some(network) = self.netplay.manager.as_ref() {
             for update in updates {
                 if let Err(error) = network.broadcast_player_info(update) {
                     tracing::error!(%error, "failed to broadcast RandomTeamCount PlayerInfo update");
@@ -2715,9 +2762,10 @@ impl GameApp {
 
     pub(crate) fn set_classic_lobby_runtime_join(&mut self, allowed: bool) {
         if !self.classic_lobby_option_is_editable(LobbyOptionKind::RuntimeJoin)
-            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             || !self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .is_some_and(|network| network.local_client_id() == 0)
         {
@@ -2730,7 +2778,7 @@ impl GameApp {
         if let Some(NetworkMode::Host(HostSettings {
             prepared: Some(prepared),
             ..
-        })) = self.network_mode.as_mut()
+        })) = self.netplay.mode.as_mut()
         {
             prepared.set_runtime_join_allowed(allowed);
         }
@@ -2766,7 +2814,7 @@ impl GameApp {
         let distribution_allows_change = match metadata.team_distribution {
             clonk_engine::InitialNetworkTeamDistribution::Free => true,
             clonk_engine::InitialNetworkTeamDistribution::Host => {
-                matches!(self.network_mode, Some(NetworkMode::Host(_)))
+                matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             }
             clonk_engine::InitialNetworkTeamDistribution::None
             | clonk_engine::InitialNetworkTeamDistribution::Random
@@ -2830,7 +2878,7 @@ impl GameApp {
             return;
         };
         player.team = team_id;
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             tracing::error!(
                 player_id,
                 team_id,
@@ -2859,7 +2907,7 @@ impl GameApp {
         let distribution_allows_change = match metadata.team_distribution {
             clonk_engine::InitialNetworkTeamDistribution::Free => true,
             clonk_engine::InitialNetworkTeamDistribution::Host => {
-                matches!(self.network_mode, Some(NetworkMode::Host(_)))
+                matches!(self.netplay.mode, Some(NetworkMode::Host(_)))
             }
             clonk_engine::InitialNetworkTeamDistribution::None
             | clonk_engine::InitialNetworkTeamDistribution::Random
@@ -2877,7 +2925,8 @@ impl GameApp {
             return;
         }
         let Some(local_client_id) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
         else {
@@ -2896,7 +2945,7 @@ impl GameApp {
         if !changed {
             return;
         }
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return;
         };
         if let Err(error) = network.submit_player_info_update(request) {
@@ -2906,7 +2955,7 @@ impl GameApp {
 
     fn classic_lobby_player_action_is_allowed(&self, client_id: i32, player_id: i32) -> bool {
         player_id != 0
-            && self.network.is_some()
+            && self.netplay.manager.is_some()
             && self.classic_lobby_player_is_owned(client_id)
             && self
                 .visible_classic_lobby_controller()
@@ -2932,7 +2981,8 @@ impl GameApp {
             return;
         }
         let Some(local_client_id) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
         else {
@@ -2949,7 +2999,7 @@ impl GameApp {
             return;
         };
         player.savegame_player = savegame_player_id;
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return;
         };
         if let Err(error) = network.submit_player_info_update(request) {
@@ -2970,7 +3020,7 @@ impl GameApp {
             .visible_classic_lobby_controller()
             .is_some_and(|controller| controller.countdown().is_locked());
         if countdown_locked {
-            if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
                 return;
             }
             if !self.abort_network_lobby_countdown() {
@@ -2991,13 +3041,13 @@ impl GameApp {
             return;
         };
         request.players.swap_remove(index);
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return;
         };
         if let Err(error) = network.submit_player_info_update(request) {
             tracing::error!(%error, client_id, player_id, "failed to remove lobby player");
         }
-        if self.network_is_league {
+        if self.netplay.is_league {
             // C++ clears this immediately after the void update request so
             // account changes require fresh authentication on the next join.
             self.clear_remembered_league_password();
@@ -3019,7 +3069,7 @@ impl GameApp {
             return;
         };
         player.color = player.original_color;
-        let Some(network) = self.network.as_ref() else {
+        let Some(network) = self.netplay.manager.as_ref() else {
             return;
         };
         if let Err(error) = network.submit_player_info_update(request) {
@@ -3044,7 +3094,8 @@ impl GameApp {
     fn prepare_network_lobby_countdown(&mut self) -> Result<bool, EngineError> {
         if self.lobby.classic_host.is_some() {
             if let Some(overrides) = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .map(|staged| &staged.pending_global_gui_failures)
             {
@@ -3063,7 +3114,7 @@ impl GameApp {
                     ))
                 })?;
         }
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             self.network_game_start_guard_passes();
             return Ok(false);
         }
@@ -3083,7 +3134,7 @@ impl GameApp {
         if !self.prepare_network_lobby_countdown()? {
             return Ok(());
         }
-        if countdown_seconds <= 0 || self.network.is_none() {
+        if countdown_seconds <= 0 || self.netplay.manager.is_none() {
             return self.start_network_game_now();
         }
         self.lobby.host_countdown = Some(HostLobbyCountdown::with_seconds(countdown_seconds));
@@ -3102,7 +3153,7 @@ impl GameApp {
         if !self.prepare_network_lobby_countdown()? {
             return Ok(());
         }
-        if self.network.is_none() {
+        if self.netplay.manager.is_none() {
             return self.start_network_game_now();
         }
         self.lobby.host_countdown = Some(HostLobbyCountdown::with_seconds(0));
@@ -3121,7 +3172,7 @@ impl GameApp {
     }
 
     fn submit_and_apply_lobby_countdown(&mut self, packet: clonk_network::LobbyCountdownPacket) {
-        if let Some(network) = self.network.as_ref() {
+        if let Some(network) = self.netplay.manager.as_ref() {
             match network.submit_lobby_countdown(packet) {
                 Ok(()) => self.lobby.pending_local_countdown_echoes.push_back(packet),
                 Err(error) => {
@@ -3231,7 +3282,7 @@ impl GameApp {
         &mut self,
         now: Instant,
     ) -> Result<bool, EngineError> {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             return Ok(false);
         }
         if !self.lobby.ready_check_cooldown.try_reset_at(now) {
@@ -3247,12 +3298,13 @@ impl GameApp {
                 }
             }
         }
-        if self.control_clients.clear_nonhost_lobby_ready() {
+        if self.netplay.control_clients.clear_nonhost_lobby_ready() {
             self.publish_updated_host_join_snapshot();
         }
         self.sync_classic_lobby_roster();
         if let Some(Err(error)) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .map(|network| network.submit_ready_check(clonk_network::ReadyCheckData::Request))
         {
@@ -3266,13 +3318,14 @@ impl GameApp {
         packet: clonk_network::ReadyCheckPacket,
     ) {
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         if local_client_id == Some(packet.client_id) {
             return;
         }
-        let Some(client) = self.control_clients.state(packet.client_id) else {
+        let Some(client) = self.netplay.control_clients.state(packet.client_id) else {
             return;
         };
         let client_name = legacy_presentation_text(client.name.as_bytes());
@@ -3306,7 +3359,7 @@ impl GameApp {
         }) {
             return Ok(());
         }
-        if !matches!(self.network_mode, Some(NetworkMode::Client(_))) || packet.client_id != 0 {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Client(_))) || packet.client_id != 0 {
             return Ok(());
         }
         if let Some(lobby) = self.lobby.session.as_mut() {
@@ -3316,11 +3369,11 @@ impl GameApp {
                 }
             }
         }
-        if !self.admission_resources.lobby_ready_available() {
-            if let Some(Err(error)) = self
-                .network
-                .as_ref()
-                .map(|network| network.submit_ready_check(clonk_network::ReadyCheckData::NotReady))
+        if !self.netplay.admission_resources.lobby_ready_available() {
+            if let Some(Err(error)) =
+                self.netplay.manager.as_ref().map(|network| {
+                    network.submit_ready_check(clonk_network::ReadyCheckData::NotReady)
+                })
             {
                 tracing::error!(%error, "failed to submit lobby ready check response");
             }
@@ -3495,11 +3548,11 @@ impl GameApp {
         &mut self,
         changed_client_id: ClientId,
     ) -> Result<(), EngineError> {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             return Ok(());
         }
         let player_infos = &self.players.infos;
-        let clients = self.control_clients.snapshot();
+        let clients = self.netplay.control_clients.snapshot();
         let first_unready_control_client = || {
             clients.iter().find_map(|client| {
                 let relevant = client.client_id == 0
@@ -3538,7 +3591,8 @@ impl GameApp {
         }
         if self.lobby.host_countdown.is_none() {
             let countdown_seconds = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .map(|staged| {
                     let configured = if staged.lobby.countdown_seconds < 0 {
@@ -3546,7 +3600,7 @@ impl GameApp {
                     } else {
                         staged.lobby.countdown_seconds
                     };
-                    if self.network_is_league {
+                    if self.netplay.is_league {
                         configured.max(5)
                     } else {
                         configured
@@ -3884,7 +3938,7 @@ impl GameApp {
                 return Ok(());
             }
             LobbyAction::ToggleReady => {
-                if !self.admission_resources.lobby_ready_available() {
+                if !self.netplay.admission_resources.lobby_ready_available() {
                     return Ok(());
                 }
                 if let Some((changed_client_id, ready)) =
@@ -3978,7 +4032,8 @@ impl GameApp {
                 };
                 if let Some(control) = control {
                     if let Some(Err(error)) = self
-                        .network
+                        .netplay
+                        .manager
                         .as_ref()
                         .map(|network| network.submit_message(control))
                     {
@@ -4006,13 +4061,18 @@ impl GameApp {
         };
         if i32::try_from(changed_client_id)
             .ok()
-            .is_some_and(|client_id| self.control_clients.set_lobby_ready(client_id, ready))
+            .is_some_and(|client_id| {
+                self.netplay
+                    .control_clients
+                    .set_lobby_ready(client_id, ready)
+            })
         {
             self.publish_updated_host_join_snapshot();
         }
         self.sync_classic_lobby_roster();
         if let Some(Err(error)) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .map(|network| network.submit_ready_check(data))
         {
@@ -4339,7 +4399,8 @@ impl GameApp {
             .any(|action| matches!(action, ClassicLobbyAction::StartRequested { .. }))
         {
             if let Some(overrides) = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .map(|staged| &staged.pending_global_gui_failures)
             {
@@ -4501,7 +4562,7 @@ impl GameApp {
     }
 
     fn check_classic_lobby_league_rules_start(&mut self) -> Result<bool, EngineError> {
-        if !self.network_is_league {
+        if !self.netplay.is_league {
             return Ok(true);
         }
         let teams_custom = self
@@ -4518,7 +4579,8 @@ impl GameApp {
         let melee = if teams_custom {
             false
         } else {
-            self.staged_network_host_scenario
+            self.netplay
+                .staged_host_scenario
                 .as_ref()
                 .ok_or_else(|| {
                     classic_game_lobby_model_engine_error(
@@ -4569,7 +4631,8 @@ impl GameApp {
                         "league split-screen reason contains an embedded NUL",
                     )
                 })?;
-                let known_nonhost = client_id != 0 && self.control_clients.contains(client_id);
+                let known_nonhost =
+                    client_id != 0 && self.netplay.control_clients.contains(client_id);
                 if known_nonhost {
                     removals.push(clonk_engine::ClientRemoveControlData {
                         client_id,
@@ -4583,7 +4646,8 @@ impl GameApp {
         }
         for remove in removals {
             if let Some(Err(error)) = self
-                .network
+                .netplay
+                .manager
                 .as_ref()
                 .map(|network| network.submit_client_remove(remove))
             {
@@ -4605,7 +4669,11 @@ impl GameApp {
     }
 
     fn apply_classic_lobby_ready_change(&mut self, ready: bool) -> Result<(), EngineError> {
-        let Some(local_client_id) = self.network.as_ref().map(NetworkManager::local_client_id)
+        let Some(local_client_id) = self
+            .netplay
+            .manager
+            .as_ref()
+            .map(NetworkManager::local_client_id)
         else {
             self.status_text = "Network lobby ready state is unavailable".to_string();
             return Ok(());
@@ -4618,12 +4686,13 @@ impl GameApp {
             lobby.controller.set_ready(ready);
         }
         if self
+            .netplay
             .control_clients
             .set_lobby_ready(local_client_id_i32, ready)
         {
             self.publish_updated_host_join_snapshot();
         }
-        if let Some(Err(error)) = self.network.as_ref().map(|network| {
+        if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
             network.submit_ready_check(if ready {
                 clonk_network::ReadyCheckData::Ready
             } else {
@@ -4664,9 +4733,9 @@ impl GameApp {
     }
 
     pub(crate) fn sync_classic_lobby_resource_ready(&mut self) {
-        let ready = self.admission_resources.lobby_ready_available();
-        let context_ready = self.staged_network_host_scenario.is_some()
-            || self.pending_network_join_data.is_some()
+        let ready = self.netplay.admission_resources.lobby_ready_available();
+        let context_ready = self.netplay.staged_host_scenario.is_some()
+            || self.netplay.pending_join_data.is_some()
             || self.catalog_host_preload_scenario().is_some();
         let mut automatic_preload = false;
         let actions = if let Some(lobby) = self.lobby.classic_host.as_mut() {
@@ -4771,7 +4840,7 @@ impl GameApp {
             liquid_animation_enabled: self.assets.liquid_animation_enabled(),
         };
         let global_system_scripts = self.global_scripts_for_session();
-        if let Some(staged) = self.staged_network_host_scenario.as_ref() {
+        if let Some(staged) = self.netplay.staged_host_scenario.as_ref() {
             let frontend = staged.frontend.clone();
             let scenario_path = frontend
                 .path
@@ -4805,10 +4874,11 @@ impl GameApp {
         }
 
         let join_data = self
-            .pending_network_join_data
+            .netplay
+            .pending_join_data
             .clone()
             .ok_or_else(|| "client JoinData is unavailable".to_string())?;
-        let (resource_directory, maker) = match self.network_mode.as_ref() {
+        let (resource_directory, maker) = match self.netplay.mode.as_ref() {
             Some(NetworkMode::Client(settings)) => (
                 settings.resource_directory.clone(),
                 settings.group_maker.clone(),
@@ -4817,27 +4887,31 @@ impl GameApp {
         };
         let filename = format!("Combined{}.c4s", join_data.client_id);
         let scenario_path = self
+            .netplay
             .client_combined_scenario_path
             .clone()
             .unwrap_or_else(|| resource_directory.join(&filename));
-        let (scenario_resources, staging_path) = if self.client_combined_scenario_path.is_some() {
-            (None, None)
-        } else {
-            let resources = resolve_client_scenario_resources(&join_data, |core| {
-                self.admission_resources
-                    .complete_path(core.id)
-                    .map(Path::to_path_buf)
-            })
-            .map_err(|error| error.to_string())?;
-            let serial = LOBBY_PRELOAD_SERIAL.fetch_add(1, AtomicOrdering::Relaxed);
-            let staging_path = resource_directory.join(format!(
-                ".{filename}.preload-{}-{serial}.tmp",
-                std::process::id()
-            ));
-            (Some(resources), Some(staging_path))
-        };
+        let (scenario_resources, staging_path) =
+            if self.netplay.client_combined_scenario_path.is_some() {
+                (None, None)
+            } else {
+                let resources = resolve_client_scenario_resources(&join_data, |core| {
+                    self.netplay
+                        .admission_resources
+                        .complete_path(core.id)
+                        .map(Path::to_path_buf)
+                })
+                .map_err(|error| error.to_string())?;
+                let serial = LOBBY_PRELOAD_SERIAL.fetch_add(1, AtomicOrdering::Relaxed);
+                let staging_path = resource_directory.join(format!(
+                    ".{filename}.preload-{}-{serial}.tmp",
+                    std::process::id()
+                ));
+                (Some(resources), Some(staging_path))
+            };
         let game_resources = resolve_client_game_resources(&join_data, |core| {
-            self.admission_resources
+            self.netplay
+                .admission_resources
                 .complete_path(core.id)
                 .map(Path::to_path_buf)
         })
@@ -5157,7 +5231,8 @@ impl GameApp {
     ) -> std::result::Result<(), String> {
         if let Some(client) = artifact.client.as_mut() {
             let current = self
-                .pending_network_join_data
+                .netplay
+                .pending_join_data
                 .as_ref()
                 .is_some_and(|join_data| {
                     join_data.client_id == client.client_id
@@ -5165,13 +5240,15 @@ impl GameApp {
                         && u64::from(join_data.parameters.random_seed as u32) == client.random_seed
                 });
             if !current {
-                if self.client_combined_scenario_path.as_ref() == Some(&artifact.scenario_path) {
+                if self.netplay.client_combined_scenario_path.as_ref()
+                    == Some(&artifact.scenario_path)
+                {
                     self.clear_client_preload_projection();
                 }
                 Self::discard_lobby_preload_artifact(artifact);
                 return Err("client preload completed for stale JoinData".to_string());
             }
-            self.client_combined_scenario_path = Some(artifact.scenario_path.clone());
+            self.netplay.client_combined_scenario_path = Some(artifact.scenario_path.clone());
             self.scenario_lifecycle.network_material_resource_groups =
                 Some(std::mem::take(&mut client.material_groups));
         } else if let Some(catalog_host) = artifact.catalog_host.as_ref() {
@@ -5182,7 +5259,8 @@ impl GameApp {
             }
         } else {
             let current = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .is_some_and(|staged| {
                     let definition_paths = staged
@@ -5220,7 +5298,8 @@ impl GameApp {
                     if let Some(staging_path) = staging_path {
                         let current = {
                             let client = artifact.client.as_ref().expect("client artifact");
-                            self.pending_network_join_data
+                            self.netplay
+                                .pending_join_data
                                 .as_ref()
                                 .is_some_and(|join_data| {
                                     join_data.client_id == client.client_id
@@ -5233,16 +5312,17 @@ impl GameApp {
                         let commit = if !current {
                             Err("client preload completed for stale JoinData".to_string())
                         } else {
-                            self.client_combined_preload_file.clear();
+                            self.netplay.client_combined_preload_file.clear();
                             if artifact.scenario_path.exists() {
                                 let _ = fs::remove_file(&artifact.scenario_path);
                             }
                             fs::rename(&staging_path, &artifact.scenario_path)
                                 .map(|()| {
                                     committed = true;
-                                    self.client_combined_scenario_path =
+                                    self.netplay.client_combined_scenario_path =
                                         Some(artifact.scenario_path.clone());
-                                    self.client_combined_preload_file
+                                    self.netplay
+                                        .client_combined_preload_file
                                         .replace(artifact.scenario_path.clone());
                                 })
                                 .map_err(|error| {
@@ -5259,7 +5339,8 @@ impl GameApp {
                                 .as_ref()
                                 .expect("client artifact")
                                 .dynamic_resource_id;
-                            self.network
+                            self.netplay
+                                .manager
                                 .as_ref()
                                 .ok_or_else(|| {
                                     "client network disappeared during preload commit".to_string()
@@ -5345,7 +5426,7 @@ impl GameApp {
         if finished {
             if start_host_when_ready {
                 self.start_network_game_now()?;
-            } else if self.pending_client_start_status.is_some() {
+            } else if self.netplay.pending_client_start_status.is_some() {
                 self.prepare_client_network_scenario_if_ready()?;
             }
         }
@@ -5353,7 +5434,7 @@ impl GameApp {
     }
 
     fn classic_lobby_authoritative_has_unassociated_savegame_players(&self) -> Option<bool> {
-        let save_game = self.staged_network_host_scenario.as_ref().map(|staged| {
+        let save_game = self.netplay.staged_host_scenario.as_ref().map(|staged| {
             staged
                 .scenario
                 .as_ref()
@@ -5365,8 +5446,8 @@ impl GameApp {
         if save_game == Some(false) {
             return Some(false);
         }
-        let restore_snapshot = self.host_join_snapshot.as_ref().or_else(|| {
-            self.network_mode.as_ref().and_then(|mode| match mode {
+        let restore_snapshot = self.netplay.host_join_snapshot.as_ref().or_else(|| {
+            self.netplay.mode.as_ref().and_then(|mode| match mode {
                 NetworkMode::Host(HostSettings {
                     prepared: Some(prepared),
                     ..
@@ -5499,7 +5580,8 @@ impl GameApp {
             });
         let host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or(0);
@@ -5607,7 +5689,8 @@ impl GameApp {
                 {
                     player.original_color = color;
                     if let Some(Err(error)) = self
-                        .network
+                        .netplay
+                        .manager
                         .as_ref()
                         .map(|network| network.submit_player_info_update(update))
                     {
@@ -5625,7 +5708,8 @@ impl GameApp {
                 return Ok(true);
             }
             let configured = self
-                .staged_network_host_scenario
+                .netplay
+                .staged_host_scenario
                 .as_ref()
                 .map(|staged| staged.lobby.countdown_seconds)
                 .unwrap_or(DEFAULT_LOBBY_COUNTDOWN_SECONDS);
@@ -5645,7 +5729,7 @@ impl GameApp {
             };
             let countdown_seconds = if requested < 0 {
                 DEFAULT_LOBBY_COUNTDOWN_SECONDS
-            } else if self.network_is_league {
+            } else if self.netplay.is_league {
                 requested.max(5)
             } else {
                 requested
@@ -5694,6 +5778,7 @@ impl GameApp {
         if command == b"/kick" {
             if host {
                 let target = self
+                    .netplay
                     .control_clients
                     .snapshot()
                     .into_iter()
@@ -5711,7 +5796,7 @@ impl GameApp {
                     );
                     return Ok(true);
                 };
-                let league_vote = self.network_is_league
+                let league_vote = self.netplay.is_league
                     && self
                         .engine
                         .players()
@@ -5729,7 +5814,7 @@ impl GameApp {
                         "IDS_MSG_KICKFROMMSGBOARD",
                         "kicked from messageboard",
                     );
-                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                    if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
                         network.submit_client_remove(clonk_engine::ClientRemoveControlData {
                             client_id: target.client_id,
                             reason: clonk_engine::LegacyCString::from_bytes(
@@ -5753,6 +5838,7 @@ impl GameApp {
                 return Ok(true);
             }
             let target = self
+                .netplay
                 .control_clients
                 .snapshot()
                 .into_iter()
@@ -5768,13 +5854,13 @@ impl GameApp {
                 );
                 return Ok(true);
             };
-            if self.network_is_league {
+            if self.netplay.is_league {
                 let message = self.classic_lobby_resource_text(
                     "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
                     "Command not allowed in league games!",
                 );
                 self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
-            } else if let Some(Err(error)) = self.network.as_ref().map(|network| {
+            } else if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
                 network.submit_client_update(clonk_engine::ClientUpdateControlData::new(
                     clonk_engine::CLIENT_UPDATE_SET_OBSERVER,
                     target.client_id,
@@ -5796,7 +5882,7 @@ impl GameApp {
                         CONTROL_LOG_COLOR,
                         None,
                     );
-                } else if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                } else if let Some(Err(error)) = self.netplay.manager.as_ref().map(|network| {
                     network.submit_control_set(clonk_network::LegacyControlSet {
                         value_type: 2,
                         data: maximum,
@@ -5806,7 +5892,7 @@ impl GameApp {
                     tracing::error!(%error, "failed to submit lobby maximum-player update");
                 }
             }
-            if host && self.network.is_some() {
+            if host && self.netplay.manager.is_some() {
                 if parameter == b"comment" || parameter.starts_with(b"comment ") {
                     let value = parameter.strip_prefix(b"comment ").unwrap_or_default();
                     let value = &value[..value
@@ -5826,7 +5912,7 @@ impl GameApp {
                     return Ok(true);
                 }
             }
-            if host && !self.network_is_league {
+            if host && !self.netplay.is_league {
                 if let Some(value) = parameter.strip_prefix(b"faircrew ") {
                     let value = if value == b"on" {
                         Some(configured_fair_crew_strength(&load_native_config_bytes(
@@ -6210,7 +6296,8 @@ impl GameApp {
                 };
                 if let Some(control) = control {
                     if let Some(Err(error)) = self
-                        .network
+                        .netplay
+                        .manager
                         .as_ref()
                         .map(|network| network.submit_message(control))
                     {
@@ -7271,7 +7358,7 @@ impl GameApp {
         if self.config.compat_profile == crate::settings::CompatProfile::Normal {
             return None;
         }
-        let report = if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        let report = if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             // A client never states the session's profile -- the host owns
             // that. What it can answer for is its own request, and
             // clonk-org/clonk-rs#588 forbids letting that be downgraded in
@@ -7494,7 +7581,7 @@ impl GameApp {
     }
 
     pub(crate) fn tick_network_lobby_countdown(&mut self) -> bool {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Host(_))) {
             return false;
         }
         let Some((next, broadcast)) = self
@@ -7570,7 +7657,7 @@ impl GameApp {
         password_needed: bool,
         comment: clonk_engine::LegacyCString,
     ) {
-        let Some(reference) = self.advertised_game_reference.clone() else {
+        let Some(reference) = self.netplay.advertised_game_reference.clone() else {
             return;
         };
         let updated = match reference.replacing_lobby_options(password_needed, comment) {
@@ -7581,13 +7668,13 @@ impl GameApp {
                 return;
             }
         };
-        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+        if let Some(advertiser) = self.netplay.game_advertiser.as_ref() {
             if let Err(error) = advertiser.update_exact(&updated) {
                 tracing::error!(%error, "failed to publish lobby game-option reference");
             }
         }
-        self.advertised_game_reference = Some(updated);
-        if let Some(network) = self.network.as_ref() {
+        self.netplay.advertised_game_reference = Some(updated);
+        if let Some(network) = self.netplay.manager.as_ref() {
             if let Err(error) = network.invalidate_league_reference() {
                 tracing::error!(%error, "failed to invalidate lobby game-option reference");
             }
@@ -7607,15 +7694,15 @@ impl GameApp {
                 live_lobby,
             } => {
                 debug_assert!(live_lobby);
-                if let Some(pending) = self.pending_lobby_internet_signup.as_ref() {
+                if let Some(pending) = self.netplay.pending_masterserver_signup.as_ref() {
                     self.scenario_game_options
                         .apply_lobby_internet_result(pending.previous_enabled());
                     return Ok(());
                 }
                 let config = load_prepared_league_host_config(self.app_paths.as_ref(), false);
                 let server_name = config.endpoint.clone();
-                let reference = self.advertised_game_reference.clone();
-                let result = match (self.network.as_ref(), reference) {
+                let reference = self.netplay.advertised_game_reference.clone();
+                let result = match (self.netplay.manager.as_ref(), reference) {
                     (Some(network), Some(reference)) => {
                         network.begin_masterserver_signup(enabled, config, reference)
                     }
@@ -7626,7 +7713,7 @@ impl GameApp {
                         let previous_enabled = pending.previous_enabled();
                         self.scenario_game_options
                             .apply_lobby_internet_result(previous_enabled);
-                        self.pending_lobby_internet_signup = Some(pending);
+                        self.netplay.pending_masterserver_signup = Some(pending);
                         if enabled {
                             if let Err(error) =
                                 self.open_live_masterserver_signup_dialog(&server_name)
@@ -7678,7 +7765,7 @@ impl GameApp {
                         "Network password contains an unsupported NUL byte".to_string();
                     return Ok(());
                 };
-                if let Some(network) = self.network.as_ref() {
+                if let Some(network) = self.netplay.manager.as_ref() {
                     if let Err(error) = network.set_host_password(network_password) {
                         tracing::error!(%error, "failed to update live host password");
                         self.status_text = format!("Unable to update network password: {error}");
@@ -7693,6 +7780,7 @@ impl GameApp {
                         .persist_game_option_text("Network", "LastPassword", password);
                 }
                 let comment = self
+                    .netplay
                     .advertised_game_reference
                     .as_ref()
                     .map(|reference| reference.metadata().comment.clone())
@@ -7718,6 +7806,7 @@ impl GameApp {
                 self.config
                     .persist_game_option_text("Network", "Comment", &comment);
                 let password_needed = self
+                    .netplay
                     .advertised_game_reference
                     .as_ref()
                     .is_some_and(|reference| reference.summary().password_needed);
@@ -7731,7 +7820,7 @@ impl GameApp {
                     .apply_lobby_comment_result(comment);
             }
             GameOptionAction::SendLobbyFairCrewControl { value } => {
-                if let Some(network) = self.network.as_ref() {
+                if let Some(network) = self.netplay.manager.as_ref() {
                     if let Err(error) =
                         network.submit_control_set(clonk_network::LegacyControlSet {
                             value_type: 5,
@@ -7795,6 +7884,7 @@ impl GameApp {
         // unless it is still exactly GS_Lobby. DoLobby normally deletes the
         // lobby and closes this dialog as soon as GS_Go is installed.
         let status_left_lobby = self
+            .netplay
             .pending_client_start_status
             .is_some_and(|status| status.state != clonk_network::NETWORK_STATE_LOBBY);
         if !matches!(self.mode, AppMode::Menu) || status_left_lobby || self.lobby.session.is_none()
@@ -7816,13 +7906,18 @@ impl GameApp {
         };
         if changed_client_id
             .and_then(|client_id| i32::try_from(client_id).ok())
-            .is_some_and(|client_id| self.control_clients.set_lobby_ready(client_id, ready))
+            .is_some_and(|client_id| {
+                self.netplay
+                    .control_clients
+                    .set_lobby_ready(client_id, ready)
+            })
         {
             self.publish_updated_host_join_snapshot();
         }
         self.sync_classic_lobby_roster();
         if let Some(Err(error)) = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .map(|network| network.submit_ready_check(data))
         {

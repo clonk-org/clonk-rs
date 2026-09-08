@@ -261,7 +261,7 @@ fn staged_host_prebind_accepts_league_signup_and_rejects_missing_resource() {
         )
         .test_value();
     main_assert!(staged.options.league_server_signup);
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
     main_assert!(app.startup_network.connection.is_none());
 
     app.scenario_game_options = GameOptionButtons::new(
@@ -291,7 +291,7 @@ fn staged_host_prebind_accepts_league_signup_and_rejects_missing_resource() {
         Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources { detail }))
             if detail.contains("GUIContext.png")
     ));
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.manager.is_none());
     main_assert!(app.startup_network.connection.is_none());
 }
 
@@ -299,12 +299,12 @@ fn staged_host_prebind_accepts_league_signup_and_rejects_missing_resource() {
 fn classic_host_start_honors_the_league_split_screen_gate() {
     let mut app = new_menu_app(640, 480);
     install_test_classic_host_team_lobby(&mut app);
-    app.network_is_league = true;
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.is_league = true;
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 11112, "Exact Host".to_string(), None),
     ));
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
         countdown_seconds: 5,
@@ -342,16 +342,16 @@ fn classic_league_start_removes_a_known_remote_split_screen_client() {
             by_client: 0,
         }],
     );
-    app.control_clients.replace_snapshot([
+    app.netplay.control_clients.replace_snapshot([
         message_client(0, b"Exact Host"),
         message_client(7, b"Remote"),
     ]);
-    app.network_is_league = true;
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.is_league = true;
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 11112, "Exact Host".to_string(), None),
     ));
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
 
     app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
         countdown_seconds: 5,
@@ -376,7 +376,7 @@ fn classic_league_start_removes_a_known_remote_split_screen_client() {
 fn forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
     let mut app = new_real_classic_menu_app(640, 480);
     let (_events, mut commands) = install_classic_host_network_stub(&mut app);
-    app.control_clients.replace_snapshot([
+    app.netplay.control_clients.replace_snapshot([
         message_client(0, b"Exact Host"),
         message_client(7, b"Remote"),
     ]);
@@ -427,10 +427,10 @@ fn network_start_wait_kick_click_reuses_direct_and_league_paths() {
     let setup = |league: bool| {
         let mut app = new_menu_app(640, 480);
         let (network, _events, commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
-        app.network = Some(network);
-        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-        app.network_is_league = league;
-        app.control_clients
+        app.netplay.manager = Some(network);
+        app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+        app.netplay.is_league = league;
+        app.netplay.control_clients
             .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
         if league {
             app.players.infos.replace_snapshot(
@@ -497,15 +497,15 @@ fn remove_aborts_countdown_before_swap_removed_update_and_clears_league_password
     app.app_paths = Some(paths.clone());
     let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
-    app.league_auth_session = Some(clonk_network::LeagueAuthRequestHead {
+    app.netplay.league_auth_session = Some(clonk_network::LeagueAuthRequestHead {
         password: LegacyCString::from_bytes(b"remembered secret".to_vec()).test_value(),
         ..Default::default()
     });
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     app.lobby.host_countdown = Some(HostLobbyCountdown::with_seconds(5));
     app.apply_lobby_countdown_presentation(clonk_network::LobbyCountdownPacket::new(5));
 
@@ -532,7 +532,7 @@ fn remove_aborts_countdown_before_swap_removed_update_and_clears_league_password
     );
     main_assert!(app.lobby.host_countdown.is_none());
     main_assert!(!app.lobby.classic_host.as_ref().unwrap().controller.countdown().is_locked());
-    main_assert!(app.league_auth_session.as_ref().expect("league session").password.is_empty());
+    main_assert!(app.netplay.league_auth_session.as_ref().expect("league session").password.is_empty());
     main_assert!(load_league_auth_settings(Some(&paths)).password.is_empty(), "league removal rerequires authentication");
 }
 
@@ -542,12 +542,12 @@ fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
         let mut app = new_menu_app(640, 480);
         install_test_classic_host_lobby(&mut app);
         let (manager, _events, commands) = NetworkManager::test_stub_with_commands();
-        app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Host(
+        app.netplay.manager = Some(manager);
+        app.netplay.mode = Some(NetworkMode::Host(
             league_fixture!(host: 0, "Host".to_string(), None),
         ));
-        app.network_is_league = league;
-        app.control_clients.replace_snapshot([
+        app.netplay.is_league = league;
+        app.netplay.control_clients.replace_snapshot([
             league_fixture!(client {
                 client_id: 0,
                 activated: true,
@@ -605,7 +605,7 @@ fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
     );
     main_assert!(direct_commands.take_submitted_votes().is_empty());
     direct
-        .control_clients
+        .netplay.control_clients
         .apply_remove(&clonk_engine::ClientRemoveControlData {
             client_id: 7,
             reason: LegacyCString::default(),
@@ -637,7 +637,7 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
     let mut observer = message_client(9, b"Spectator");
     observer.activated = false;
     observer.observer = true;
-    direct.control_clients.replace_snapshot([
+    direct.netplay.control_clients.replace_snapshot([
         observer,
         message_client(7, b"Remote"),
         message_client(0, b"Host"),
@@ -711,9 +711,9 @@ fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
 
     let mut league = new_running_sandbox_app();
     let (_events, mut league_commands) = install_running_network_stub(&mut league, 0, 40, 4);
-    league.network_is_league = true;
+    league.netplay.is_league = true;
     league
-        .control_clients
+        .netplay.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     league
         .engine
@@ -1262,13 +1262,13 @@ async fn headless_round_end_drains_pending_league_record_stream() {
         .test_value()
         .initial_stream_chunk = b"initial record".to_vec();
     let (network, _events) = NetworkManager::test_stub_with_league_record_stream(endpoint);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Headless host".to_string(), None),
     ));
     app.headless = true;
     app.start_recording(true).test_value();
-    app.network
+    app.netplay.manager
         .as_ref()
         .test_value()
         .append_league_record_bytes(b"terminal tail")
@@ -1301,7 +1301,7 @@ fn forced_recording_writes_replay_group_and_league_sha() {
     let directory = tempdir();
     let output_path = directory.path().join("001-Scenario.c4s");
     let mut app = new_state_only_running_sandbox_app();
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     let game_number = app.players.local_owner;
     app.players.infos.replace_snapshot(
         17,
@@ -1423,8 +1423,8 @@ async fn league_streamed_player_strip_and_record_name_match_cpp_bytes() {
         .test_value()
         .initial_stream_chunk = initial_chunk.clone();
     let (network, _events) = NetworkManager::test_stub_with_league_record_stream(endpoint);
-    app.network = Some(network);
-    app.network_is_league = true;
+    app.netplay.manager = Some(network);
+    app.netplay.is_league = true;
     main_assert!(app.engine.definition_name("CLNK").is_some());
     let mut ranked = test_definition("RANK", "Ranked crew", "");
     ranked.set_rank_system(
@@ -1512,8 +1512,8 @@ async fn league_streamed_player_strip_and_record_name_match_cpp_bytes() {
         filename: LegacyCString::from_bytes(b"Players/Alice.c4p".to_vec()).test_value(),
         ..clonk_engine::NetworkResourceCore::default()
     };
-    app.admission_resources.register_lobby_resource(&core);
-    app.admission_resources
+    app.netplay.admission_resources.register_lobby_resource(&core);
+    app.netplay.admission_resources
         .mark_complete(17, player_path.clone());
     let packet = clonk_engine::ControlPacket::JoinPlayer(clonk_engine::JoinPlayerControlData {
         filename: LegacyCString::from_bytes(b"Alice.c4p".to_vec()).test_value(),
@@ -1763,7 +1763,7 @@ fn running_fast_slow_commands_bound_and_honor_league_gate() {
 
     app.full_speed = true;
     app.frame_skip = 37;
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     app.process_running_chat_text("/fast 7");
     main_assert!(app.full_speed);
     main_assert_eq!(app.frame_skip => 37);
@@ -1779,7 +1779,7 @@ fn running_fast_slow_commands_bound_and_honor_league_gate() {
 fn running_kick_uses_exact_name_and_live_player_league_gate() {
     let mut app = new_state_only_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
-    app.control_clients
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
 
     app.process_running_chat_text("/kick Remote");
@@ -1790,7 +1790,7 @@ fn running_kick_uses_exact_name_and_live_player_league_gate() {
     main_assert_eq!(removals[0].reason.as_bytes() => b"kicked from messageboard");
     main_assert!(commands.take_submitted_votes().is_empty());
 
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     app.engine
         .register_player(PlayerConfig::new(17, "Remote Player"))
         .test_value();
@@ -2051,8 +2051,8 @@ fn change_to_local_preserves_synchronized_league_state() {
     // src/C4GameControl.cpp:93-127; src/C4Network2.cpp:1595-1602).
     let mut app = new_state_only_running_sandbox_app();
     let (manager, event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
@@ -2099,9 +2099,9 @@ fn change_to_local_preserves_synchronized_league_state() {
         .test_value();
 
     app.test_network_events();
-    app.pending_network_join_data = None;
+    app.netplay.pending_join_data = None;
 
-    main_assert_eq!(app.network_league_name => b"League");
+    main_assert_eq!(app.netplay.league_name => b"League");
     main_assert_eq!(app.engine.snapshot().league_name => b"League");
     main_assert_eq!(app.engine.snapshot().player_info_league_progress_data.get(&41) => Some(&Some(b"retained-progress".to_vec())));
 
@@ -2112,7 +2112,7 @@ fn change_to_local_preserves_synchronized_league_state() {
 
     app.change_network_control_to_local(7);
     main_assert!(app.main_menu_conditions().is_league);
-    main_assert_eq!(app.network_max_players => synchronized_max_players);
+    main_assert_eq!(app.netplay.max_players => synchronized_max_players);
     main_assert_eq!(app.engine.snapshot().league_name => b"League");
     main_assert_eq!(app.engine.snapshot().player_info_league_progress_data.get(&41) => Some(&Some(b"retained-progress".to_vec())));
 }
@@ -2122,9 +2122,9 @@ fn league_update_applies_projected_gains_and_directly_rebroadcasts_owners() {
     let mut app = new_state_only_running_sandbox_app();
     let (manager, event_tx, mut commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
     app.players.infos.replace_snapshot(
         20,
         [
@@ -2186,9 +2186,9 @@ fn league_host_and_client_report_the_correct_connection_failure_players() {
     let mut host = new_state_only_running_sandbox_app();
     let (manager, event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    host.network = Some(manager);
-    host.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    host.network_is_league = true;
+    host.netplay.manager = Some(manager);
+    host.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    host.netplay.is_league = true;
     host.players.infos
         .replace_snapshot(41, [league_fixture!(player_data: 8, vec![joined(41)])]);
     let host_report = std::thread::spawn(move || commands.complete_league_disconnect_report());
@@ -2204,9 +2204,9 @@ fn league_host_and_client_report_the_correct_connection_failure_players() {
     let mut client = new_state_only_running_sandbox_app();
     let (manager, event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    client.network = Some(manager);
-    client.network_mode = Some(NetworkMode::Client(client_network_settings()));
-    client.network_is_league = true;
+    client.netplay.manager = Some(manager);
+    client.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
+    client.netplay.is_league = true;
     client
         .players.infos
         .replace_snapshot(55, [league_fixture!(player_data: 7, vec![joined(55)])]);
@@ -2308,17 +2308,17 @@ fn league_client_authenticates_each_published_player_and_submits_only_auid_survi
     app.freeze_configured_client_players_for_game().test_value();
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let auth = clonk_network::LeagueAuthRequestHead {
         account: clonk_engine::LegacyCString::from_bytes(b"account".to_vec()).test_value(),
         password: clonk_engine::LegacyCString::from_bytes(b"password".to_vec()).test_value(),
         ..Default::default()
     };
-    app.network_mode = Some(NetworkMode::Client(
+    app.netplay.mode = Some(NetworkMode::Client(
         ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
             .with_league_auth(auth.clone()),
     ));
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     let configured_paths = [accepted_path, rejected_path];
     let cores = configured_paths
         .iter()
@@ -2386,8 +2386,8 @@ fn league_client_authenticates_each_published_player_and_submits_only_auid_survi
 
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
-    if let Some(NetworkMode::Client(settings)) = app.network_mode.as_mut() {
+    app.netplay.manager = Some(manager);
+    if let Some(NetworkMode::Client(settings)) = app.netplay.mode.as_mut() {
         settings.league_auth = auth;
     }
     let observer = thread::spawn(move || {
@@ -2420,13 +2420,13 @@ fn league_auth_wait_is_abortable_and_success_uses_exact_welcome_confirmation() {
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let auth = clonk_network::LeagueAuthRequestHead {
         account: LegacyCString::from_bytes(b"account".to_vec()).test_value(),
         password: LegacyCString::from_bytes(b"password".to_vec()).test_value(),
         ..Default::default()
     };
-    app.network_mode = Some(NetworkMode::Client(
+    app.netplay.mode = Some(NetworkMode::Client(
         ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
             .with_league_auth(auth.clone()),
     ));
@@ -2471,7 +2471,7 @@ fn league_auth_wait_is_abortable_and_success_uses_exact_welcome_confirmation() {
         LeaguePlayerAuthStatus::Completed(false)
     );
     main_assert_eq!(
-        app.pending_league_player_auth
+        app.netplay.pending_league_player_auth
             .as_ref()
             .map(|pending| GameApp::league_auth_continuation_player_name(&pending.continuation)) =>
         Some("Exact Player".to_string())
@@ -2539,13 +2539,13 @@ fn league_auth_error_dialog_retries_with_cleared_password() {
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let auth = clonk_network::LeagueAuthRequestHead {
         account: LegacyCString::from_bytes(b"account".to_vec()).test_value(),
         password: LegacyCString::from_bytes(b"password".to_vec()).test_value(),
         ..Default::default()
     };
-    app.network_mode = Some(NetworkMode::Client(
+    app.netplay.mode = Some(NetworkMode::Client(
         ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
             .with_league_auth(auth.clone()),
     ));
@@ -2653,13 +2653,13 @@ fn league_runtime_player_auth_defers_add_until_welcome_approval() {
     let mut app = new_menu_app_with_paths(640, 480, &paths);
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let auth = clonk_network::LeagueAuthRequestHead {
         account: LegacyCString::from_bytes(b"account".to_vec()).test_value(),
         password: LegacyCString::from_bytes(b"password".to_vec()).test_value(),
         ..Default::default()
     };
-    app.network_mode = Some(NetworkMode::Client(
+    app.netplay.mode = Some(NetworkMode::Client(
         ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
             .with_league_auth(auth.clone()),
     ));
@@ -2755,7 +2755,7 @@ fn league_signup_persists_account_but_not_session_password() {
     main_assert!(load_league_auth_settings(Some(&paths)).password.is_empty());
     main_assert!(app.league_login_prompt_required());
 
-    app.league_auth_session = Some(clonk_network::LeagueAuthRequestHead {
+    app.netplay.league_auth_session = Some(clonk_network::LeagueAuthRequestHead {
         account,
         password: LegacyCString::from_bytes(b"session secret".to_vec()).test_value(),
         ..Default::default()
@@ -2971,7 +2971,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     // Keep the already-loaded exact GUI bundle while making credentials,
     // auto-login and the registration Nick preference deterministic.
     app.app_paths = None;
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     let pending_player = || {
         league_fixture!(player {
             name: LegacyCString::from_bytes(b"Exact Player".to_vec()).test_value(),
@@ -2996,12 +2996,12 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     // reaching this assertion also proves no Auth request was submitted.
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
+    app.netplay.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
     main_assert_eq!(app.continue_league_player_auth(continuation(pending_request())).expect("open missing-password login") => LeaguePlayerAuthStatus::Pending);
     let login = &app.dialogs.league_signup.test_ref().controller;
     main_assert_eq!(login.mode() => LeagueSignupMode::Login);
@@ -3040,7 +3040,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     app.process_league_signup_actions(vec![submission])
         .test_value();
     poll_league_auth_until(&mut app, "login completion", |app| {
-        app.pending_league_player_auth.is_none()
+        app.netplay.pending_league_player_auth.is_none()
     });
     let (order, auth_heads, _, requests) = observer.test_join();
     main_assert_eq!(order => vec!["auth", "player-info"]);
@@ -3061,8 +3061,8 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     };
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
-    app.league_auth_session = Some(failed_auth.clone());
+    app.netplay.manager = Some(manager);
+    app.netplay.league_auth_session = Some(failed_auth.clone());
     let observer = thread::spawn(move || {
         commands.complete_initial_league_client_join(
             Vec::new(),
@@ -3089,7 +3089,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     let failure = app.dialogs.messages.last().test_value();
     main_assert_eq!(failure.state.caption() => "League Login Failed");
     main_assert_eq!(failure.state.message() => "League server reply: Invalid password");
-    main_assert_eq!(app.league_auth_session.as_ref().expect("credentials remain while message is modal").password.as_bytes() => b"outdated");
+    main_assert_eq!(app.netplay.league_auth_session.as_ref().expect("credentials remain while message is modal").password.as_bytes() => b"outdated");
     app.finish_message_dialog_at(
         app.dialogs.messages.len() - 1,
         clonk_frontend::message_dialog::MessageDialogResult::Ok,
@@ -3099,7 +3099,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     main_assert_eq!(retry.mode() => LeagueSignupMode::Login);
     main_assert_eq!(retry.account() => "account");
     main_assert!(retry.password().is_empty());
-    main_assert!(app.league_auth_session.as_ref().expect("session credentials").password.is_empty());
+    main_assert!(app.netplay.league_auth_session.as_ref().expect("session credentials").password.is_empty());
     let retry_submission = {
         let retry = &mut app.dialogs.league_signup.test_mut().controller;
         retry.set_password("replacement");
@@ -3108,7 +3108,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     app.process_league_signup_actions(vec![retry_submission])
         .test_value();
     poll_league_auth_until(&mut app, "login retry completion", |app| {
-        app.pending_league_player_auth.is_none()
+        app.netplay.pending_league_player_auth.is_none()
     });
     let (order, auth_heads, _, requests) = observer.test_join();
     main_assert_eq!(order => vec!["auth", "auth", "player-info"]);
@@ -3121,8 +3121,8 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     // after that modal closes is the empty initial PlayerInfo submitted.
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
-    app.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
+    app.netplay.manager = Some(manager);
+    app.netplay.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
     main_assert_eq!(app.continue_league_player_auth(continuation(pending_request())).expect("open cancellable login") => LeaguePlayerAuthStatus::Pending);
     let abort = app.dialogs.league_signup.test_mut().controller.abort();
     app.process_league_signup_actions(vec![abort]).test_value();
@@ -3150,8 +3150,8 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     };
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
-    app.league_auth_session = Some(old_auth.clone());
+    app.netplay.manager = Some(manager);
+    app.netplay.league_auth_session = Some(old_auth.clone());
     let observer = thread::spawn(move || {
         commands.complete_initial_league_client_join(
             Vec::new(),
@@ -3204,7 +3204,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
         clonk_frontend::message_dialog::MessageDialogResult::Ok,
     )
     .test_value();
-    main_assert!(app.league_auth_session.as_ref().expect("session credentials").password.is_empty());
+    main_assert!(app.netplay.league_auth_session.as_ref().expect("session credentials").password.is_empty());
     let retry_submission = {
         let registration = &mut app.dialogs.league_signup.test_mut().controller;
         main_assert_eq!(registration.mode() => LeagueSignupMode::Registration);
@@ -3216,7 +3216,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     app.process_league_signup_actions(vec![retry_submission])
         .test_value();
     poll_league_auth_until(&mut app, "registration retry completion", |app| {
-        app.pending_league_player_auth.is_none()
+        app.netplay.pending_league_player_auth.is_none()
     });
     let (order, auth_heads, _, requests) = observer.test_join();
     main_assert_eq!(order => vec!["auth", "auth", "auth", "player-info"]);
@@ -3248,8 +3248,8 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     };
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
-    app.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
+    app.netplay.manager = Some(manager);
+    app.netplay.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
     main_assert_eq!(app.continue_league_player_auth(local_add()).expect("open local-add login") => LeaguePlayerAuthStatus::Pending);
     main_assert_eq!(app.dialogs.league_signup.as_ref().expect("local-add login").controller.mode() => LeagueSignupMode::Login);
     let observer = thread::spawn(move || {
@@ -3269,7 +3269,7 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     app.process_league_signup_actions(vec![submission])
         .test_value();
     poll_league_auth_until(&mut app, "local-add completion", |app| {
-        app.pending_league_player_auth.is_none()
+        app.netplay.pending_league_player_auth.is_none()
     });
     let (order, _, _, requests) = observer.test_join();
     main_assert_eq!(order => vec!["auth", "player-info"]);
@@ -3279,8 +3279,8 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
 
     let (manager, _event_tx, mut commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(7);
-    app.network = Some(manager);
-    app.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
+    app.netplay.manager = Some(manager);
+    app.netplay.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
     main_assert_eq!(app.continue_league_player_auth(local_add()).expect("open cancellable local-add login") => LeaguePlayerAuthStatus::Pending);
     let abort = app.dialogs.league_signup.test_mut().controller.abort();
     app.process_league_signup_actions(vec![abort]).test_value();
@@ -3296,9 +3296,9 @@ fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
     // startup without rerunning Auth during host finalization.
     let (manager, _event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = None;
-    app.network_mode = None;
-    app.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
+    app.netplay.manager = None;
+    app.netplay.mode = None;
+    app.netplay.league_auth_session = Some(clonk_network::LeagueAuthRequestHead::default());
     let host_continuation = LeaguePlayerAuthContinuation::StartupHost {
         mode: NetworkMode::Host(league_fixture!(host: 0, "Host".to_string(), None)),
         manager,
@@ -3352,9 +3352,9 @@ fn league_lobby_checks_only_new_ids_removes_failures_and_consumes_successful_aui
     let legacy =
         |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
     let mut app = new_menu_app(320, 200);
-    app.network_is_league = true;
-    app.network_league_name = b"Cup".to_vec();
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.is_league = true;
+    app.netplay.league_name = b"Cup".to_vec();
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
     app.lobby.session = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
     app.players.infos.replace_snapshot(
         1,
@@ -3371,7 +3371,7 @@ fn league_lobby_checks_only_new_ids_removes_failures_and_consumes_successful_aui
     );
     let (manager, event_tx, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let responses = vec![
                 clonk_network::decode_league_join_response(
                     b"[Response]\r\nStatus=Failure\r\nMessage=Rejected\r\n",
@@ -3464,9 +3464,9 @@ fn league_player_info_request_after_lobby_resets_stored_gains_but_is_not_admitte
     // return, but neither auth checks nor direct broadcasts occur
     // (src/C4Network2Players.cpp:160-239).
     let mut app = new_state_only_running_sandbox_app();
-    app.network_is_league = true;
-    app.network_league_name = b"Cup".to_vec();
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.is_league = true;
+    app.netplay.league_name = b"Cup".to_vec();
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
     app.players.infos.replace_snapshot(
         1,
         [league_fixture!(player_data:
@@ -3479,7 +3479,7 @@ fn league_player_info_request_after_lobby_resets_stored_gains_but_is_not_admitte
     );
     let (manager, event_tx, mut commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     event_tx
         .send(NetworkEvent::PlayerInfoUpdateRequest {
             origin: 3,
@@ -3506,10 +3506,10 @@ fn league_player_info_request_after_lobby_resets_stored_gains_but_is_not_admitte
 fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
     let mut app = new_state_only_running_sandbox_app();
     let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
-    app.network_league_name = b"League".to_vec();
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
+    app.netplay.league_name = b"League".to_vec();
     app.players.infos.replace_snapshot(
         41,
         [league_fixture!(player_data:
@@ -3522,7 +3522,7 @@ fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
     );
     seed_engine_player_info_parameters(
         &mut app.engine,
-        &app.network_league_name,
+        &app.netplay.league_name,
         &app.players.infos,
     );
     app.engine
@@ -3603,7 +3603,7 @@ fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
     app.handle_script_player_info_updates().test_value();
     let published = commands.take_published_join_snapshots();
     main_assert_eq!(published.last().expect("SetMaxPlayer publishes JoinData").parameters.max_players => 5);
-    main_assert_eq!(app.host_join_snapshot.as_ref().expect("host parameters remain retained").parameters.max_players => 5);
+    main_assert_eq!(app.netplay.host_join_snapshot.as_ref().expect("host parameters remain retained").parameters.max_players => 5);
 }
 
 #[test]
@@ -3614,9 +3614,9 @@ fn league_client_desync_reports_joined_local_players_before_change_to_local() {
     app.engine
         .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients.register(0, true, false);
-    app.control_clients.register(local_client, true, false);
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients.register(0, true, false);
+    app.netplay.control_clients.register(local_client, true, false);
     app.players.infos.replace_snapshot(
         local_info,
         [league_fixture!(player_data:
@@ -3626,18 +3626,18 @@ fn league_client_desync_reports_joined_local_players_before_change_to_local() {
     );
     let (manager, events, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(local_client as u32);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_is_league = true;
+    app.netplay.is_league = true;
 
     let local = app.engine.sync_check(local_client);
     let mut remote = local.clone();
     remote.random_count = remote.random_count.wrapping_add(1);
     remote.by_client = 0;
-    app.sync_checks.record_local(local);
+    app.netplay.sync_checks.record_local(local);
     events
         .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
             remote,
@@ -3652,8 +3652,8 @@ fn league_client_desync_reports_joined_local_players_before_change_to_local() {
     main_assert_eq!(players.client_id => local_client);
     main_assert_eq!(players.players.len() => 1);
     main_assert_eq!(players.players[0].id => local_info);
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert_eq!(app.snapshot.round_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::NetworkError));
     main_assert_eq!(app.snapshot.round_results.network_result_message.as_slice() => &b"Network: Synchronization loss!"[..]);
 }
@@ -3666,8 +3666,8 @@ fn observer_soft_kicks_players_but_plain_deactivation_does_not() {
     // (src/C4Control.cpp:588-620; src/C4PlayerList.cpp:219-239).
     let mut app = new_state_only_running_sandbox_app();
     let (manager, _event_tx) = NetworkManager::test_stub();
-    app.network = Some(manager);
-    app.control_clients.register(3, true, false);
+    app.netplay.manager = Some(manager);
+    app.netplay.control_clients.register(3, true, false);
     app.engine
         .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
         .test_value();
@@ -3693,9 +3693,9 @@ fn observer_soft_kicks_players_but_plain_deactivation_does_not() {
     )
     .test_value();
 
-    main_assert!(app.control_clients.contains(3));
-    main_assert!(app.control_clients.is_observer(3));
-    main_assert!(!app.control_clients.is_activated(3));
+    main_assert!(app.netplay.control_clients.contains(3));
+    main_assert!(app.netplay.control_clients.is_observer(3));
+    main_assert!(!app.netplay.control_clients.is_activated(3));
     main_assert!(app.engine.snapshot().players.iter().all(|player| player.player_info_id != 7));
     let retained = app.players.infos.get(7).test_value();
     let expected_flags = clonk_engine::PLAYER_INFO_FLAG_JOINED
@@ -3714,8 +3714,8 @@ fn observer_soft_kick_releases_local_control_assignment_for_reuse() {
     // 219-268,466-477,556-562).
     let mut app = new_state_only_running_sandbox_app();
     let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
-    app.network = Some(manager);
-    app.control_clients.register(3, true, false);
+    app.netplay.manager = Some(manager);
+    app.netplay.control_clients.register(3, true, false);
     app.engine
         .register_player(PlayerConfig::new(17, "Local").with_player_info_id(7))
         .test_value();
@@ -3777,10 +3777,10 @@ fn league_end_transport_retry_reissues_and_broadcasts_the_successful_result() {
     let (_, reference) = default_exact_host_reference();
     let (network, _events, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_is_league = true;
-    app.pending_league_end = Some(PendingLeagueEnd {
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.is_league = true;
+    app.netplay.pending_league_end = Some(PendingLeagueEnd {
         reference,
         record: None,
         attempts: 0,
@@ -3829,10 +3829,10 @@ fn league_end_retry_is_capped_at_ten_attempts_before_failed_broadcast() {
     let (_, reference) = default_exact_host_reference();
     let (network, _events, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_is_league = true;
-    app.pending_league_end = Some(PendingLeagueEnd {
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.is_league = true;
+    app.netplay.pending_league_end = Some(PendingLeagueEnd {
         reference,
         record: None,
         attempts: 0,
@@ -3849,7 +3849,7 @@ fn league_end_retry_is_capped_at_ten_attempts_before_failed_broadcast() {
 
     app.run_pending_league_end_attempt().test_value();
     for attempt in 1..=LEAGUE_END_MAX_ATTEMPTS {
-        main_assert_eq!(app.pending_league_end.as_ref().expect("End remains pending").attempts => attempt);
+        main_assert_eq!(app.netplay.pending_league_end.as_ref().expect("End remains pending").attempts => attempt);
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Retry)
             .test_value();
     }
@@ -3859,7 +3859,7 @@ fn league_end_retry_is_capped_at_ten_attempts_before_failed_broadcast() {
     main_assert_eq!(observed.finalizations => vec![b"Could not send game result: offline".to_vec()]);
     main_assert_eq!(observed.broadcasts.len() => 1);
     main_assert!(!observed.broadcasts[0].success);
-    main_assert!(app.pending_league_end.is_none());
+    main_assert!(app.netplay.pending_league_end.is_none());
     main_assert!(app.dialogs.game_over.is_some());
     main_assert_eq!(app.snapshot.round_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::LeagueError));
 }
@@ -3870,10 +3870,10 @@ fn league_end_server_rejection_is_abort_only_and_preserves_legacy_text() {
     let (_, reference) = default_exact_host_reference();
     let (network, _events, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_is_league = true;
-    app.pending_league_end = Some(PendingLeagueEnd {
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.is_league = true;
+    app.netplay.pending_league_end = Some(PendingLeagueEnd {
         reference,
         record: None,
         attempts: 0,
@@ -3911,10 +3911,10 @@ fn league_end_network_teardown_finalizes_and_broadcasts_an_open_retry() {
     let (_, reference) = default_exact_host_reference();
     let (network, _events, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(0);
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.network_is_league = true;
-    app.pending_league_end = Some(PendingLeagueEnd {
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.is_league = true;
+    app.netplay.pending_league_end = Some(PendingLeagueEnd {
         reference,
         record: None,
         attempts: 0,
@@ -3936,17 +3936,17 @@ fn league_end_network_teardown_finalizes_and_broadcasts_an_open_retry() {
     main_assert_eq!(observed.finalizations => vec![b"Could not send game result: closing outage".to_vec()]);
     main_assert_eq!(observed.broadcasts.len() => 1);
     main_assert!(!observed.broadcasts[0].success);
-    main_assert!(app.pending_league_end.is_none());
-    main_assert!(app.network.is_none());
+    main_assert!(app.netplay.pending_league_end.is_none());
+    main_assert!(app.netplay.manager.is_none());
 }
 
 #[test]
 fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
     let mut app = new_menu_app(320, 200);
     let (network, _events) = NetworkManager::test_stub();
-    app.network = Some(network);
-    app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
+    app.netplay.manager = Some(network);
+    app.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    app.netplay.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
     let team_metadata = set_control_test_metadata(
         false,
         vec![
@@ -4029,7 +4029,7 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
     main_assert!(!app.engine.snapshot().player_info_league_scores.contains_key(&91));
     main_assert!(app.engine.teams()[0].player_ids.is_empty());
     main_assert_eq!(app.engine.teams()[1].player_ids => vec![7]);
-    let host = app.host_join_snapshot.test_ref();
+    let host = app.netplay.host_join_snapshot.test_ref();
     main_assert_eq!(host.parameters.player_infos.clients[0].players[0].id => 7);
     main_assert!(host.parameters.teams.teams[0].player_ids.is_empty());
     main_assert_eq!(host.parameters.teams.teams[1].player_ids => vec![7]);
@@ -4041,8 +4041,8 @@ fn runtime_client_list_league_actions_gate_activate_and_vote_to_kick() {
 
     let mut app = new_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    app.network_is_league = true;
-    app.control_clients
+    app.netplay.is_league = true;
+    app.netplay.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     app.engine
         .register_player(PlayerConfig::new(17, "Remote Player"))
@@ -4082,7 +4082,7 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
         .collect::<Vec<_>>();
     main_assert_eq!(pause_changes.len() => 1);
     main_assert_eq!((pause_changes[0].state, pause_changes[0].target_tick) => (clonk_network::NETWORK_STATE_PAUSE, pause_target));
-    main_assert!(host.host_reference_paused);
+    main_assert!(host.netplay.host_reference_paused);
 
     let go_target = host.displayed_network_control_tick();
     host.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
@@ -4097,8 +4097,8 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
     main_assert_eq!(go_changes.len() => 1);
     main_assert_eq!((go_changes[0].state, go_changes[0].target_tick) => (clonk_network::NETWORK_STATE_GO, go_target));
     main_assert_eq!(go_target => 0, "Start uses native's current ControlTick");
-    main_assert_eq!(host.runtime_network_status_barrier.expect("Go replaces the pending Pause barrier").status => go_changes[0]);
-    main_assert!(!host.host_reference_paused);
+    main_assert_eq!(host.netplay.runtime_status_barrier.expect("Go replaces the pending Pause barrier").status => go_changes[0]);
+    main_assert!(!host.netplay.host_reference_paused);
     main_assert!(!host.take_exit_request());
 
     for (local_client_id, paused, expected_data) in
@@ -4107,15 +4107,15 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
         let mut league = new_running_sandbox_app();
         let (_events, mut commands) =
             install_running_network_stub(&mut league, local_client_id, 0, 1);
-        league.network_is_league = true;
-        league.network_control_running = !paused;
+        league.netplay.is_league = true;
+        league.netplay.control_running = !paused;
         let pause_target = league.next_network_control_tick();
         league.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
         if local_client_id == 0 && !paused {
-            let barrier = league.runtime_network_status_barrier.test_value();
+            let barrier = league.netplay.runtime_status_barrier.test_value();
             main_assert_eq!((barrier.status.state, barrier.status.target_tick) => (clonk_network::NETWORK_STATE_PAUSE, pause_target));
             main_assert!(league.lobby.league_votes.paused_for_vote);
-            main_assert!(league.host_reference_paused);
+            main_assert!(league.netplay.host_reference_paused);
         }
         main_assert_eq!(
             commands.take_submitted_votes() =>
@@ -4132,7 +4132,7 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
     let mut evaluated_league_host = new_running_sandbox_app();
     let (_events, mut evaluated_commands) =
         install_running_network_stub(&mut evaluated_league_host, 0, 0, 1);
-    evaluated_league_host.network_is_league = true;
+    evaluated_league_host.netplay.is_league = true;
     evaluated_league_host.game_over_handled = true;
     evaluated_league_host.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     main_assert!(evaluated_commands
@@ -4155,8 +4155,8 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
     let mut ambiguous = new_running_sandbox_app();
     let (ambiguous_manager, _events, mut ambiguous_commands) =
         NetworkManager::test_stub_with_commands_for_client_id(3);
-    ambiguous.network = Some(ambiguous_manager);
-    ambiguous.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    ambiguous.netplay.manager = Some(ambiguous_manager);
+    ambiguous.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
     main_assert_eq!(ambiguous.runtime_network_role() => RuntimeNetworkRole::Ambiguous);
     ambiguous.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     main_assert!(ambiguous_commands.take_runtime_status_commands().is_empty());
@@ -4165,8 +4165,8 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
 
     let mut disconnected_host = new_running_sandbox_app();
     let (manager, _events, commands) = NetworkManager::test_stub_with_commands();
-    disconnected_host.network = Some(manager);
-    disconnected_host.network_mode = Some(NetworkMode::Host(host_network_settings()));
+    disconnected_host.netplay.manager = Some(manager);
+    disconnected_host.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
     drop(commands);
     disconnected_host.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
     main_assert!(!disconnected_host.take_exit_request());
@@ -4178,7 +4178,7 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
         .set(Err("unsupported Pause override".to_string()))
         .test_value();
     unavailable_key_config.test_key(VirtualKeyCode::Pause, ElementState::Pressed);
-    main_assert_eq!(unavailable_key_config.offline_halt_count => 0);
+    main_assert_eq!(unavailable_key_config.netplay.offline_halt_count => 0);
     main_assert!(!unavailable_key_config.take_exit_request());
 }
 
@@ -4186,7 +4186,7 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
 fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     let mut host = new_running_sandbox_app();
     let (_host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
-    host.network_is_league = true;
+    host.netplay.is_league = true;
     main_assert!(host.show_abort_dialog(host.players.local_owner));
     finish_abort_dialog(
         &mut host,
@@ -4198,7 +4198,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     let mut restart_host = new_running_sandbox_app();
     let (_restart_events, mut restart_commands) =
         install_running_network_stub(&mut restart_host, 0, 0, 1);
-    restart_host.network_is_league = true;
+    restart_host.netplay.is_league = true;
     main_assert!(restart_host.show_abort_dialog(restart_host.players.local_owner));
     finish_abort_dialog(
         &mut restart_host,
@@ -4223,7 +4223,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     let mut client = new_running_sandbox_app();
     let (_client_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 1);
     client.engine.set_control_host(false);
-    client.network_is_league = true;
+    client.netplay.is_league = true;
     main_assert!(client.show_abort_dialog(client.players.local_owner));
     finish_abort_dialog(
         &mut client,
@@ -4238,7 +4238,7 @@ fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
     observer.engine.set_control_host(false);
     observer.engine.set_local_players([]);
     observer.local_controls = LocalControlRegistry::default();
-    observer.network_is_league = true;
+    observer.netplay.is_league = true;
     main_assert!(observer.show_abort_dialog(OWNER_NONE));
     finish_abort_dialog(
         &mut observer,
@@ -4277,7 +4277,7 @@ fn network_surrender_menu_queues_the_next_authenticated_control_tick() {
         .test_player_mut(player)
         .set_at_client(clonk_engine::PlayerAtClient::new(3));
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(3);
-    app.network = Some(manager);
+    app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();
 
     app.apply_ingame_menu_action(MenuAction::Surrender)
@@ -4319,34 +4319,34 @@ fn non_league_network_part_continues_the_running_round_locally() {
 
     let (manager, _events, commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_control_clock = Some(NetworkControlClock::new(23, 3));
-    app.network_control_running = true;
-    app.network_max_players = 8;
-    app.network_is_league = false;
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients.register(0, true, false);
-    app.control_clients.register(local_client, false, false);
+    app.netplay.control_clock = Some(NetworkControlClock::new(23, 3));
+    app.netplay.control_running = true;
+    app.netplay.max_players = 8;
+    app.netplay.is_league = false;
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients.register(0, true, false);
+    app.netplay.control_clients.register(local_client, false, false);
     app.players.infos.apply(league_fixture!(player_data:
         0,
         vec![league_fixture!(player: remote_info, clonk_engine::PLAYER_INFO_FLAG_JOINED)],
     ));
     let queued_check = app.engine.sync_check(local_client);
-    app.network_ticks.queue(
+    app.netplay.ticks.queue(
         23,
         23,
         vec![NetworkControl::SyncCheck(queued_check.clone())],
     );
-    app.network_sync.queue(
+    app.netplay.sync.queue(
         23,
         23,
         vec![NetworkControl::SyncCheck(queued_check.clone())],
     );
-    app.sync_checks.record_local(queued_check);
+    app.netplay.sync_checks.record_local(queued_check);
     app.apply_ingame_menu_action(MenuAction::ActivateOptions)
         .test_value();
     main_assert!(app.engine.snapshot().round_results.network_result.is_none(), "fresh Part fixture has no earlier, more-specific result");
@@ -4368,18 +4368,18 @@ fn non_league_network_part_continues_the_running_round_locally() {
     main_assert_eq!(app.engine.control_rate => 1);
     main_assert_eq!(app.scenario_lifecycle.active.as_ref().map(|scenario| scenario.identifier.clone()) => scenario_before);
     main_assert_eq!(app.ingame_menus.players.as_ref().map(IngameMenuState::page) => Some(ingame_menu::MenuPage::Options));
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
-    main_assert!(app.network_control_clock.is_none());
-    main_assert_eq!(app.network_max_players => 8);
-    main_assert!(!app.network_is_league);
-    main_assert!(app.network_ticks.ready.is_empty());
-    main_assert!(app.network_sync.scheduled.is_empty());
-    main_assert!(app.sync_checks.local.is_empty());
-    main_assert!(app.sync_checks.remote.is_empty());
-    main_assert!(app.control_clients.contains(local_client));
-    main_assert!(app.control_clients.is_activated(local_client));
-    main_assert!(!app.control_clients.contains(0));
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
+    main_assert!(app.netplay.control_clock.is_none());
+    main_assert_eq!(app.netplay.max_players => 8);
+    main_assert!(!app.netplay.is_league);
+    main_assert!(app.netplay.ticks.ready.is_empty());
+    main_assert!(app.netplay.sync.scheduled.is_empty());
+    main_assert!(app.netplay.sync_checks.local.is_empty());
+    main_assert!(app.netplay.sync_checks.remote.is_empty());
+    main_assert!(app.netplay.control_clients.contains(local_client));
+    main_assert!(app.netplay.control_clients.is_activated(local_client));
+    main_assert!(!app.netplay.control_clients.contains(0));
     main_assert!(app.engine.player(local_player).is_some());
     main_assert!(app.engine.player(remote_player).is_none());
     let engine_results = app.engine.snapshot().round_results;
@@ -4435,20 +4435,20 @@ fn league_network_part_submits_authenticated_self_kick_vote() {
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client as i32));
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_is_league = true;
+    app.netplay.is_league = true;
     app.engine.initialize_network_control_timing(
         clonk_engine::NetworkControlTiming::new(31, 3).test_value(),
     );
 
     app.apply_ingame_menu_action(MenuAction::Part).test_value();
 
-    main_assert!(app.network.is_some());
-    main_assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
+    main_assert!(app.netplay.manager.is_some());
+    main_assert!(matches!(app.netplay.mode, Some(NetworkMode::Client(_))));
     main_assert_eq!(app.engine.control_rate => 3);
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert_eq!(commands.take_submitted_votes() => vec![league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, local_client as i32, local_client as i32)]);
@@ -4467,7 +4467,7 @@ fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
         let mut app = new_running_sandbox_app();
         let (manager, _events, commands) =
             NetworkManager::test_stub_with_commands_for_client_id(local_client);
-        app.network = Some(manager);
+        app.netplay.manager = Some(manager);
         (app, commands)
     };
 
@@ -4526,12 +4526,12 @@ fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client as i32));
     let (manager, _events, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_is_league = true;
+    app.netplay.is_league = true;
 
     app.apply_ingame_menu_action(MenuAction::Part).test_value();
     app.apply_ingame_menu_action(MenuAction::Part).test_value();
@@ -4584,8 +4584,8 @@ fn host_sec1_vote_timeout_queues_negative_vote_end() {
     // (src/C4Network2.cpp:675-731).
     let mut app = new_state_only_running_sandbox_app();
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
     let vote = league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, 7, 2);
@@ -4607,11 +4607,11 @@ fn host_single_joined_player_approves_first_vote() {
     app.engine
         .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients.register(0, true, false);
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients.register(0, true, false);
     let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
     let vote = league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, 7, 0);
@@ -4632,14 +4632,14 @@ fn only_host_vote_end_clears_its_exact_subject() {
     // src/C4Network2.cpp:2888-2911).
     let mut app = new_state_only_running_sandbox_app();
     let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients.register(0, true, false);
-    app.control_clients.register(7, true, false);
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients.register(0, true, false);
+    app.netplay.control_clients.register(7, true, false);
     let kick = league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, 7, 7);
     let cancel = league_fixture!(vote: clonk_engine::VOTE_TYPE_CANCEL, true, 0, 0);
     app.execute_league_vote(kick).test_value();
@@ -4676,11 +4676,11 @@ fn approved_kick_vote_end_queues_host_client_removal() {
     // (src/C4Control.cpp:1482-1496; LanguageUS.txt:1399).
     let mut app = new_state_only_running_sandbox_app();
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
-    app.control_clients.register(7, true, false);
+    app.netplay.control_clients.register(7, true, false);
     app.players.infos.replace_snapshot(
         72,
         [league_fixture!(player_data:
@@ -4727,9 +4727,9 @@ fn approved_kick_vote_end_queues_host_client_removal() {
     let mut game_over = new_state_only_running_sandbox_app();
     main_assert!(game_over.engine.request_game_over_from_control().expect("mark the round game over"));
     let (manager, _events, _commands) = NetworkManager::test_stub_with_commands();
-    game_over.network = Some(manager);
-    game_over.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    game_over.control_clients.register(7, true, false);
+    game_over.netplay.manager = Some(manager);
+    game_over.netplay.mode = Some(NetworkMode::Host(host_network_settings()));
+    game_over.netplay.control_clients.register(7, true, false);
     game_over.players.infos.replace_snapshot(
         81,
         [league_fixture!(player_data: 7, vec![league_fixture!(player: 81, clonk_engine::PLAYER_INFO_FLAG_JOINED)])],
@@ -4766,14 +4766,14 @@ fn approved_self_kick_clears_network_and_ends_local_round() {
         .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients.register(0, true, false);
-    app.control_clients.register(local_client, true, false);
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients.register(0, true, false);
+    app.netplay.control_clients.register(local_client, true, false);
 
     app.apply_ready_controls(
         23,
@@ -4783,8 +4783,8 @@ fn approved_self_kick_clears_network_and_ends_local_round() {
     )
     .test_value();
 
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(app.engine.player(app.players.local_owner).expect("local player remains for evaluation").surrendered());
     app.test_update();
     main_assert!(app.snapshot.game_over);
@@ -4804,12 +4804,12 @@ fn eligible_client_vote_prompt_defaults_no_and_yes_submits_ballot() {
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, event_tx, mut commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.control_clients.replace_snapshot([
+    app.netplay.control_clients.replace_snapshot([
         league_fixture!(client {
             client_id: 0,
             name: clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).test_value(),
@@ -4860,13 +4860,13 @@ fn rejected_own_self_kick_opens_default_no_surrender_prompt() {
         .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.control_clients.register(0, true, false);
-    app.control_clients.register(local_client, true, false);
+    app.netplay.control_clients.register(0, true, false);
+    app.netplay.control_clients.register(local_client, true, false);
     app.execute_league_vote(
         league_fixture!(vote: clonk_engine::VOTE_TYPE_KICK, true, local_client, local_client),
     )
@@ -4890,7 +4890,7 @@ fn rejected_own_self_kick_opens_default_no_surrender_prompt() {
         .test_value();
 
     main_assert!(app.dialogs.messages.is_empty());
-    main_assert!(app.network.is_some());
+    main_assert!(app.netplay.manager.is_some());
     main_assert!(matches!(app.mode, AppMode::Running));
 }
 
@@ -4906,14 +4906,14 @@ fn accepting_league_surrender_clears_network_and_aborts_round() {
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events, commands) =
         NetworkManager::test_stub_with_league_commands_for_client_id(local_client as u32);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.network_is_league = true;
-    app.control_clients.register(0, true, false);
-    app.control_clients.register(local_client, true, false);
+    app.netplay.is_league = true;
+    app.netplay.control_clients.register(0, true, false);
+    app.netplay.control_clients.register(local_client, true, false);
     let local_info = 55;
     app.players.infos.replace_snapshot(
         local_info,
@@ -4939,13 +4939,13 @@ fn accepting_league_surrender_clears_network_and_aborts_round() {
         .test_value();
 
     let (engine_results, presentation_results, network_was_live) =
-        app.league_surrender_pre_abort_results.take().test_value();
+        app.netplay.league_surrender_pre_abort_results.take().test_value();
     main_assert!(network_was_live, "the result precedes Network.Clear");
     main_assert_eq!(engine_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::NetworkError));
     main_assert_eq!(engine_results.network_result_message.as_slice() => b"You have surrendered the league game.");
     main_assert_eq!(presentation_results => engine_results, "the presentation snapshot exposes the verdict before teardown");
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(matches!(app.mode, AppMode::Menu));
     main_assert_eq!(no_report.join().expect("league report listener exits") => None, "the surrendering client leaves reporting to the other clients");
 }
@@ -4961,8 +4961,8 @@ fn approved_cancel_vote_end_aborts_network_round() {
         .test_player_mut(app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::new(local_client));
     let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
@@ -4975,8 +4975,8 @@ fn approved_cancel_vote_end_aborts_network_round() {
     )
     .test_value();
 
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(matches!(app.mode, AppMode::Menu));
 }
 
@@ -4993,15 +4993,15 @@ fn host_vote_pause_lifecycle_matches_pause_vote_result() {
         .test_player_mut(pause_app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
     let (pause_snapshot, pause_reference) = default_exact_host_reference();
-    pause_app.control_clients = ControlClientRegistry::default();
+    pause_app.netplay.control_clients = ControlClientRegistry::default();
     pause_app
-        .control_clients
+        .netplay.control_clients
         .replace_snapshot(pause_snapshot.parameters.clients.clients.clone());
-    pause_app.host_join_snapshot = Some(pause_snapshot);
-    pause_app.advertised_game_reference = Some(pause_reference);
+    pause_app.netplay.host_join_snapshot = Some(pause_snapshot);
+    pause_app.netplay.advertised_game_reference = Some(pause_reference);
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-    pause_app.network = Some(manager);
-    pause_app.network_mode = Some(NetworkMode::Host(
+    pause_app.netplay.manager = Some(manager);
+    pause_app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
     let pause = league_fixture!(vote: clonk_engine::VOTE_TYPE_PAUSE, true, 1, 0);
@@ -5011,10 +5011,10 @@ fn host_vote_pause_lifecycle_matches_pause_vote_result() {
     let pause_changes = commands.take_status_changes();
     main_assert_eq!(pause_changes.len() => 1);
     main_assert_eq!(pause_changes[0].state => clonk_network::NETWORK_STATE_PAUSE);
-    main_assert_eq!(pause_app.advertised_game_reference.as_ref().expect("pause refreshes the retained reference").summary().state => "Paused");
+    main_assert_eq!(pause_app.netplay.advertised_game_reference.as_ref().expect("pause refreshes the retained reference").summary().state => "Paused");
     pause_app.execute_league_vote_end(pause);
     main_assert!(commands.take_status_changes().is_empty());
-    main_assert_eq!(pause_app.advertised_game_reference.as_ref().expect("approved pause remains advertised").summary().state => "Paused");
+    main_assert_eq!(pause_app.netplay.advertised_game_reference.as_ref().expect("approved pause remains advertised").summary().state => "Paused");
 
     let mut unpause_app = new_state_only_running_sandbox_app();
     unpause_app
@@ -5022,20 +5022,20 @@ fn host_vote_pause_lifecycle_matches_pause_vote_result() {
         .test_player_mut(unpause_app.players.local_owner)
         .set_at_client(clonk_engine::PlayerAtClient::HOST);
     let (unpause_snapshot, unpause_reference) = default_exact_host_reference();
-    unpause_app.control_clients = ControlClientRegistry::default();
+    unpause_app.netplay.control_clients = ControlClientRegistry::default();
     unpause_app
-        .control_clients
+        .netplay.control_clients
         .replace_snapshot(unpause_snapshot.parameters.clients.clients.clone());
-    unpause_app.host_join_snapshot = Some(unpause_snapshot);
-    unpause_app.advertised_game_reference = Some(unpause_reference);
+    unpause_app.netplay.host_join_snapshot = Some(unpause_snapshot);
+    unpause_app.netplay.advertised_game_reference = Some(unpause_reference);
     let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
-    unpause_app.network = Some(manager);
-    unpause_app.network_mode = Some(NetworkMode::Host(
+    unpause_app.netplay.manager = Some(manager);
+    unpause_app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
-    unpause_app.network_control_running = false;
+    unpause_app.netplay.control_running = false;
     unpause_app.lobby.league_votes.paused_for_vote = true;
-    unpause_app.host_reference_paused = true;
+    unpause_app.netplay.host_reference_paused = true;
     unpause_app.publish_running_host_reference();
     let unpause = clonk_engine::VoteControlData { data: 0, ..pause };
 
@@ -5046,7 +5046,7 @@ fn host_vote_pause_lifecycle_matches_pause_vote_result() {
     let go_changes = commands.take_status_changes();
     main_assert_eq!(go_changes.len() => 1);
     main_assert_eq!(go_changes[0].state => clonk_network::NETWORK_STATE_GO);
-    main_assert_eq!(unpause_app.advertised_game_reference.as_ref().expect("GO request refreshes the retained reference").summary().state => "Running");
+    main_assert_eq!(unpause_app.netplay.advertised_game_reference.as_ref().expect("GO request refreshes the retained reference").summary().state => "Running");
 }
 
 #[test]
@@ -5060,22 +5060,22 @@ fn league_observer_part_uses_ordinary_network_clear_path() {
     app.engine.remove_player(app.players.local_owner).test_value();
     let (manager, _events, commands) =
         NetworkManager::test_stub_with_commands_for_client_id(local_client);
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(ClientSettings::new(
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Observer",
     )));
-    app.network_is_league = true;
-    app.control_clients = ControlClientRegistry::default();
-    app.control_clients
+    app.netplay.is_league = true;
+    app.netplay.control_clients = ControlClientRegistry::default();
+    app.netplay.control_clients
         .register(local_client as i32, false, true);
     let graceful_write = thread::spawn(move || commands.complete_graceful_part());
 
     app.apply_ingame_menu_action(MenuAction::Part).test_value();
 
     main_assert!(graceful_write.join().expect("graceful writer exits"));
-    main_assert!(app.network.is_none());
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none());
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(matches!(app.mode, AppMode::Running));
     main_assert_eq!(app.snapshot.round_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::NetworkError));
     main_assert_eq!(
@@ -5135,8 +5135,8 @@ fn a_refused_host_registration_offers_the_native_ok_or_abort_choice() {
     let staged_host = || {
         let mut app = new_menu_app(320, 200);
         let (manager, _events) = NetworkManager::test_stub();
-        app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Host(
+        app.netplay.manager = Some(manager);
+        app.netplay.mode = Some(NetworkMode::Host(
             league_fixture!(host: 0, "Host".to_string(), None),
         ));
         app
@@ -5159,7 +5159,7 @@ fn a_refused_host_registration_offers_the_native_ok_or_abort_choice() {
 
     app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
         .test_value();
-    main_assert!(app.network.is_some(), "OK keeps the unregistered host running, exactly as InitHost falls through");
+    main_assert!(app.netplay.manager.is_some(), "OK keeps the unregistered host running, exactly as InitHost falls through");
 
     let mut aborted = staged_host();
     aborted
@@ -5168,7 +5168,7 @@ fn a_refused_host_registration_offers_the_native_ok_or_abort_choice() {
     aborted
         .finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
         .test_value();
-    main_assert!(aborted.network.is_none(), "Abort is the one answer that makes InitHost fail");
+    main_assert!(aborted.netplay.manager.is_none(), "Abort is the one answer that makes InitHost fail");
     main_assert_eq!(aborted.scensel.mode => ScenarioSelectorMode::NetworkHost);
 }
 
@@ -5185,15 +5185,15 @@ fn requesting_the_application_exit_ends_the_league_registration() {
     // the last point that still runs on an ordinary loop turn.
     let mut app = new_menu_app(320, 200);
     let (manager, _events) = NetworkManager::test_stub();
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
 
     app.request_exit("the main menu Quit item");
 
-    main_assert!(app.network.is_none(), "a quitting host must end its registration while the loop can still block on it");
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none(), "a quitting host must end its registration while the loop can still block on it");
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(app.exit_requested, "the teardown must not swallow the quit it was asked for");
     main_assert_eq!(app.exit_reason => Some("the main menu Quit item"));
 }
@@ -5212,22 +5212,22 @@ fn requesting_the_application_exit_ends_the_league_registration() {
 fn a_macos_terminate_request_ends_the_league_registration() {
     let mut app = new_menu_app(320, 200);
     let (manager, _events) = NetworkManager::test_stub();
-    app.network = Some(manager);
-    app.network_mode = Some(NetworkMode::Host(
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Host(
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
 
     // Nothing pending: the loop turn must not invent a quit.
     main_assert!(!crate::macos_terminate::take_terminate_request());
-    main_assert!(app.network.is_some(), "the host is still registered");
+    main_assert!(app.netplay.manager.is_some(), "the host is still registered");
 
     // What the delegate does, without an AppKit terminate to raise.
     crate::macos_terminate::note_terminate_request();
     main_assert!(crate::macos_terminate::take_terminate_request(), "the loop turn observes the request");
     app.request_exit("macOS terminate");
 
-    main_assert!(app.network.is_none(), "a terminate must end the registration on the loop turn, not inside AppKit's terminate");
-    main_assert!(app.network_mode.is_none());
+    main_assert!(app.netplay.manager.is_none(), "a terminate must end the registration on the loop turn, not inside AppKit's terminate");
+    main_assert!(app.netplay.mode.is_none());
     main_assert!(app.exit_requested);
     main_assert_eq!(app.exit_reason => Some("macOS terminate"));
 }

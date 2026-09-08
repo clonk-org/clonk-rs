@@ -1207,7 +1207,8 @@ impl GameApp {
         client_id: i32,
     ) -> Result<bool, EngineError> {
         let local_client_id = self
-            .network
+            .netplay
+            .manager
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let local_row = self.visible_classic_lobby_controller().is_some_and(|controller| {
