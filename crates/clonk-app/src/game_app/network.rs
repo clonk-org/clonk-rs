@@ -7969,21 +7969,22 @@ impl GameApp {
         if let Some(pending) = self.netplay.pending_runtime_dynamic_request.as_mut() {
             pending.save_generation = Some(generation);
         }
-        self.submit_background_save_job(save_worker::runtime_dynamic_save_job(
-            save_worker::RuntimeDynamicSaveRequest {
-                generation,
-                synchronized_control_tick,
-                dynamic_tick,
-                parameters,
-                group_filename,
-                maker,
-                parameter_bytes,
-                save,
-                restore_infos: restore_plan.restore_infos,
-                player_groups,
-            },
-        ))
-        .map_err(|error| format!("queue synchronized runtime dynamic: {error:#}"))?;
+        self.saves
+            .submit_background_job(save_worker::runtime_dynamic_save_job(
+                save_worker::RuntimeDynamicSaveRequest {
+                    generation,
+                    synchronized_control_tick,
+                    dynamic_tick,
+                    parameters,
+                    group_filename,
+                    maker,
+                    parameter_bytes,
+                    save,
+                    restore_infos: restore_plan.restore_infos,
+                    player_groups,
+                },
+            ))
+            .map_err(|error| format!("queue synchronized runtime dynamic: {error:#}"))?;
 
         Ok(None)
     }

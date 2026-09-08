@@ -10813,7 +10813,7 @@ fn blocked_save_finalizer_does_not_block_two_peer_control_or_input_progress() {
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
 
-    host.submit_background_save_job(Box::new(move || {
+    host.saves.submit_background_job(Box::new(move || {
         started_tx.send(()).expect("report blocked finalizer");
         release_rx.recv().expect("release blocked finalizer");
         save_worker::BackgroundSaveCompletion::PlayerFile(

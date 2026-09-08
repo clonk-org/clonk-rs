@@ -108,6 +108,31 @@ pub(crate) struct SaveState {
     pub(crate) network_recreation_progress: Option<NetworkSavegameRecreationProgress>,
 }
 
+impl SaveState {
+    /// Hand a job to the background save worker, starting the worker on the
+    /// first job.
+    pub(crate) fn submit_background_job(
+        &mut self,
+        job: save_worker::BackgroundSaveJob<save_worker::BackgroundSaveCompletion>,
+    ) -> Result<()> {
+        if self.background_worker.is_none() {
+            self.background_worker = Some(save_worker::new_app_save_worker()?);
+        }
+        let worker = self
+            .background_worker
+            .as_ref()
+            .context("background save worker is unavailable")?;
+        worker.try_submit(job).map_err(|error| match error {
+            save_worker::BackgroundSaveSubmitError::Full => {
+                anyhow!("too many saves are already pending")
+            }
+            save_worker::BackgroundSaveSubmitError::Disconnected => {
+                anyhow!("background save worker stopped unexpectedly")
+            }
+        })
+    }
+}
+
 /// The scenario selector: what was discovered, what is shown, and the
 /// gestures in flight over it.
 ///
