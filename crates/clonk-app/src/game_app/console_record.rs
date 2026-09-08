@@ -1031,7 +1031,7 @@ impl GameApp {
     }
 
     pub(crate) fn recording_player_info_snapshot(&self) -> clonk_network::PlayerInfoListSnapshot {
-        let (last_player_id, clients) = self.control_player_infos.retained_rows_snapshot();
+        let (last_player_id, clients) = self.players.infos.retained_rows_snapshot();
         clonk_network::PlayerInfoListSnapshot {
             last_player_id,
             clients: clients
@@ -1099,7 +1099,7 @@ impl GameApp {
             });
         parameters.random_seed = (self.engine.random_seed() as u32) as i32;
         parameters.startup_player_count = self.engine.startup_player_count().unwrap_or_else(|| {
-            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX)
+            i32::try_from(self.players.infos.nonremoved_player_count()).unwrap_or(i32::MAX)
         });
         parameters.max_players = self.engine.max_players().unwrap_or(defaults.max_players);
         parameters.use_fair_crew = self.engine.use_fair_crew();
@@ -1187,7 +1187,7 @@ impl GameApp {
     ) -> std::result::Result<(), String> {
         let records_title = self.runtime_resource_string("IDS_GAME_RECORDSTITLE");
         let player_infos = self.recording_player_info_snapshot();
-        let nonremoved_player_count = self.control_player_infos.nonremoved_player_count();
+        let nonremoved_player_count = self.players.infos.nonremoved_player_count();
         let client_registry =
             clonk_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
         let player_save_options = self.developer_console_player_save_options();

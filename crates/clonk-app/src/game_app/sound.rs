@@ -324,7 +324,8 @@ impl GameApp {
                         .and_then(|network| i32::try_from(network.local_client_id()).ok())
                         .unwrap_or(0);
                     if !self
-                        .control_player_infos
+                        .players
+                        .infos
                         .has_same_team_players(control.by_client, local_client)
                     {
                         return outcome;
@@ -507,14 +508,16 @@ impl GameApp {
         // gates always share one lifetime: every path that replaces the
         // registry drops both together.
         let rejoin_allowed = self.rejoin_after_elimination_allowed();
-        self.control_player_infos
+        self.players
+            .infos
             .set_rejoin_after_elimination_allowed(rejoin_allowed);
         let mut changed = false;
         let mut changed_remote_clients = Vec::new();
         for player_info in retired_player_infos {
-            let client_id = self.control_player_infos.client_id_for_info(player_info);
+            let client_id = self.players.infos.client_id_for_info(player_info);
             if self
-                .control_player_infos
+                .players
+                .infos
                 .mark_retired(player_info, game_part_frame)
             {
                 changed = true;
@@ -529,7 +532,7 @@ impl GameApp {
             changed_remote_clients.sort_unstable();
             changed_remote_clients.dedup();
             for client_id in changed_remote_clients {
-                let Some(info) = self.control_player_infos.client_packet(client_id) else {
+                let Some(info) = self.players.infos.client_packet(client_id) else {
                     continue;
                 };
                 // C++ mutates the shared PlayerInfo inside Player::Remove on

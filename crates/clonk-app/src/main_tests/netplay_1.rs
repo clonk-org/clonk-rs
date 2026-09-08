@@ -3030,7 +3030,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     snapshot.parameters.teams = clonk_network::join_team_list_snapshot(metadata.clone());
     app.host_join_snapshot = Some(snapshot);
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         3,
         [n1_fixture!(player_data {
             client_id: 0,
@@ -3131,7 +3131,7 @@ fn classic_host_savegame_warning_ignores_an_assigned_restore_player() {
         .collect();
     lobby.controller.set_rows(rows);
 
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         91,
         [n1_fixture!(player_data {
             client_id: 0,
@@ -5359,7 +5359,7 @@ fn hostility_menu_lists_other_players_and_toggles_hostility() {
     let mut teams = app.engine.team_configuration();
     teams.allow_hostility_change = true;
     app.engine.set_team_configuration(teams);
-    app.control_player_infos.apply(n1_fixture!(player_data {
+    app.players.infos.apply(n1_fixture!(player_data {
         client_id: 0,
         players: vec![
             n1_fixture!(player {

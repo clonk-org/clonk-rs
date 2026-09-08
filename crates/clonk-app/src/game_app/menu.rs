@@ -4997,8 +4997,8 @@ impl GameApp {
         }
         self.rendering.active_game_graphics = None;
         self.ingame_menus.graphics = None;
-        self.runtime_player_big_icons.clear();
-        self.runtime_player_big_icon_misses.clear();
+        self.players.big_icons.clear();
+        self.players.big_icon_misses.clear();
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.close_context_menu_silently();
@@ -5125,8 +5125,8 @@ impl GameApp {
         }
         self.network_client_activity.clear();
         if session == NetworkSessionTeardown::Clear {
-            self.control_player_infos = ControlPlayerInfoRegistry::default();
-            self.local_player_profile_paths.clear();
+            self.players.infos = ControlPlayerInfoRegistry::default();
+            self.players.local_profile_paths.clear();
         }
         self.players.team_assignment = None;
         self.clear_blocking_resource_wait();
@@ -5145,7 +5145,7 @@ impl GameApp {
         seed_engine_player_info_parameters(
             &mut self.engine,
             &self.network_league_name,
-            &self.control_player_infos,
+            &self.players.infos,
         );
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;

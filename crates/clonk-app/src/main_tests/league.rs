@@ -326,7 +326,7 @@ fn classic_host_start_honors_the_league_split_screen_gate() {
 fn classic_league_start_removes_a_known_remote_split_screen_client() {
     let mut app = new_menu_app(640, 480);
     let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         8,
         [clonk_engine::PlayerInfoControlData {
             client_id: 7,
@@ -433,7 +433,7 @@ fn network_start_wait_kick_click_reuses_direct_and_league_paths() {
         app.control_clients
             .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
         if league {
-            app.control_player_infos.replace_snapshot(
+            app.players.infos.replace_snapshot(
                 1,
                 [league_fixture!(player_data:
                     7,
@@ -560,7 +560,7 @@ fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
             }),
         ]);
         if league {
-            app.control_player_infos.replace_snapshot(
+            app.players.infos.replace_snapshot(
                 1,
                 [league_fixture!(player_data:
                     7,
@@ -621,7 +621,7 @@ fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
     main_assert!(league_commands.take_submitted_client_removes().is_empty());
 
     let (mut removed, mut removed_commands) = setup(true);
-    removed.control_player_infos.replace_snapshot(
+    removed.players.infos.replace_snapshot(
         1,
         [league_fixture!(player_data: 7, vec![league_fixture!(player: 1, clonk_engine::PLAYER_INFO_FLAG_REMOVED)])],
     );
@@ -1303,7 +1303,7 @@ fn forced_recording_writes_replay_group_and_league_sha() {
     let mut app = new_state_only_running_sandbox_app();
     app.network_is_league = true;
     let game_number = app.players.local_owner;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         17,
         [league_fixture!(player_data:
             0,
@@ -2125,7 +2125,7 @@ fn league_update_applies_projected_gains_and_directly_rebroadcasts_owners() {
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         20,
         [
             league_fixture!(player_data:
@@ -2167,7 +2167,7 @@ fn league_update_applies_projected_gains_and_directly_rebroadcasts_owners() {
 
     app.test_network_events();
 
-    main_assert_eq!(app.control_player_infos.get(20).unwrap().league_projected_gain => 7);
+    main_assert_eq!(app.players.infos.get(20).unwrap().league_projected_gain => 7);
     let (broadcasts, invalidations) = commands.take_league_update_effects();
     main_assert_eq!(broadcasts.iter().map(|packet| packet.client_id).collect::<Vec<_>>() => vec![4]);
     main_assert_eq!(invalidations => 1);
@@ -2189,7 +2189,7 @@ fn league_host_and_client_report_the_correct_connection_failure_players() {
     host.network = Some(manager);
     host.network_mode = Some(NetworkMode::Host(host_network_settings()));
     host.network_is_league = true;
-    host.control_player_infos
+    host.players.infos
         .replace_snapshot(41, [league_fixture!(player_data: 8, vec![joined(41)])]);
     let host_report = std::thread::spawn(move || commands.complete_league_disconnect_report());
     event_tx
@@ -2208,7 +2208,7 @@ fn league_host_and_client_report_the_correct_connection_failure_players() {
     client.network_mode = Some(NetworkMode::Client(client_network_settings()));
     client.network_is_league = true;
     client
-        .control_player_infos
+        .players.infos
         .replace_snapshot(55, [league_fixture!(player_data: 7, vec![joined(55)])]);
     let client_report = std::thread::spawn(move || commands.complete_league_disconnect_report());
     event_tx
@@ -3356,7 +3356,7 @@ fn league_lobby_checks_only_new_ids_removes_failures_and_consumes_successful_aui
     app.network_league_name = b"Cup".to_vec();
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [league_fixture!(player_data:
             3,
@@ -3467,7 +3467,7 @@ fn league_player_info_request_after_lobby_resets_stored_gains_but_is_not_admitte
     app.network_is_league = true;
     app.network_league_name = b"Cup".to_vec();
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [league_fixture!(player_data:
             2,
@@ -3497,8 +3497,8 @@ fn league_player_info_request_after_lobby_resets_stored_gains_but_is_not_admitte
 
     app.test_network_events();
 
-    main_assert_eq!(app.control_player_infos.get(1).expect("retained player").league_projected_gain => -1);
-    main_assert!(app.control_player_infos.get(2).is_none());
+    main_assert_eq!(app.players.infos.get(1).expect("retained player").league_projected_gain => -1);
+    main_assert!(app.players.infos.get(2).is_none());
     main_assert!(commands.take_broadcast_player_infos().is_empty());
 }
 
@@ -3510,7 +3510,7 @@ fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
     app.network_league_name = b"League".to_vec();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         41,
         [league_fixture!(player_data:
             0,
@@ -3523,7 +3523,7 @@ fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
     seed_engine_player_info_parameters(
         &mut app.engine,
         &app.network_league_name,
-        &app.control_player_infos,
+        &app.players.infos,
     );
     app.engine
         .install_scenario_script_with_convention(
@@ -3547,7 +3547,7 @@ fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
         .call_scenario_script_function("WriteProgress", Vec::new())
         .test_value();
     app.handle_script_player_info_updates().test_value();
-    let info = app.control_player_infos.get(41).test_value();
+    let info = app.players.infos.get(41).test_value();
     main_assert!(!info.league_progress_data_is_null);
     main_assert_eq!(info.league_progress_data.as_bytes() => b"data");
     let published = commands.take_published_join_snapshots();
@@ -3565,7 +3565,7 @@ fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
         .call_scenario_script_function("EmptyProgress", Vec::new())
         .test_value();
     app.handle_script_player_info_updates().test_value();
-    let info = app.control_player_infos.get(41).test_value();
+    let info = app.players.infos.get(41).test_value();
     main_assert!(!info.league_progress_data_is_null);
     main_assert!(info.league_progress_data.is_empty());
     let published = commands.take_published_join_snapshots();
@@ -3583,7 +3583,7 @@ fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
         .call_scenario_script_function("ClearProgress", Vec::new())
         .test_value();
     app.handle_script_player_info_updates().test_value();
-    let info = app.control_player_infos.get(41).test_value();
+    let info = app.players.infos.get(41).test_value();
     main_assert!(info.league_progress_data_is_null);
     main_assert!(info.league_progress_data.is_empty());
     let published = commands.take_published_join_snapshots();
@@ -3617,7 +3617,7 @@ fn league_client_desync_reports_joined_local_players_before_change_to_local() {
     app.control_clients = ControlClientRegistry::default();
     app.control_clients.register(0, true, false);
     app.control_clients.register(local_client, true, false);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         local_info,
         [league_fixture!(player_data:
             local_client,
@@ -3671,7 +3671,7 @@ fn observer_soft_kicks_players_but_plain_deactivation_does_not() {
     app.engine
         .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
         .test_value();
-    app.control_player_infos.apply(league_fixture!(player_data:
+    app.players.infos.apply(league_fixture!(player_data:
         3,
         vec![league_fixture!(player: 7, clonk_engine::PLAYER_INFO_FLAG_JOINED)],
     ));
@@ -3697,7 +3697,7 @@ fn observer_soft_kicks_players_but_plain_deactivation_does_not() {
     main_assert!(app.control_clients.is_observer(3));
     main_assert!(!app.control_clients.is_activated(3));
     main_assert!(app.engine.snapshot().players.iter().all(|player| player.player_info_id != 7));
-    let retained = app.control_player_infos.get(7).test_value();
+    let retained = app.players.infos.get(7).test_value();
     let expected_flags = clonk_engine::PLAYER_INFO_FLAG_JOINED
         | clonk_engine::PLAYER_INFO_FLAG_REMOVED
         | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED;
@@ -3722,7 +3722,7 @@ fn observer_soft_kick_releases_local_control_assignment_for_reuse() {
     app.engine
         .register_player(PlayerConfig::new(18, "Remote").with_player_info_id(8))
         .test_value();
-    app.control_player_infos.apply(league_fixture!(player_data:
+    app.players.infos.apply(league_fixture!(player_data:
         3,
         vec![
             league_fixture!(player: 7, clonk_engine::PLAYER_INFO_FLAG_JOINED),
@@ -3959,7 +3959,7 @@ fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
     ));
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&team_metadata));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         91,
         [league_fixture!(player_data:
             3,
@@ -4331,7 +4331,7 @@ fn non_league_network_part_continues_the_running_round_locally() {
     app.control_clients = ControlClientRegistry::default();
     app.control_clients.register(0, true, false);
     app.control_clients.register(local_client, false, false);
-    app.control_player_infos.apply(league_fixture!(player_data:
+    app.players.infos.apply(league_fixture!(player_data:
         0,
         vec![league_fixture!(player: remote_info, clonk_engine::PLAYER_INFO_FLAG_JOINED)],
     ));
@@ -4386,7 +4386,7 @@ fn non_league_network_part_continues_the_running_round_locally() {
     main_assert_eq!(engine_results.network_result => Some(clonk_engine::RoundResultsNetworkResult::NetworkError));
     main_assert_eq!(engine_results.network_result_message.as_slice() => b"Game left via player menu.");
     main_assert_eq!(app.snapshot.round_results => engine_results, "the eventual evaluation screen sees the Part verdict immediately");
-    let removed = app.control_player_infos.get(remote_info).test_value();
+    let removed = app.players.infos.get(remote_info).test_value();
     main_assert_ne!(removed.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED => 0);
     main_assert_ne!(removed.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED => 0);
     app.engine
@@ -4681,7 +4681,7 @@ fn approved_kick_vote_end_queues_host_client_removal() {
         league_fixture!(host: 0, "Host".to_string(), None),
     ));
     app.control_clients.register(7, true, false);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         72,
         [league_fixture!(player_data:
             7,
@@ -4713,9 +4713,9 @@ fn approved_kick_vote_end_queues_host_client_removal() {
             by_client: 0,
         }]
     );
-    main_assert_ne!(app.control_player_infos.get(71).expect("active target player info").flags & clonk_engine::PLAYER_INFO_FLAG_VOTED_OUT => 0,);
+    main_assert_ne!(app.players.infos.get(71).expect("active target player info").flags & clonk_engine::PLAYER_INFO_FLAG_VOTED_OUT => 0,);
     main_assert_eq!(
-        app.control_player_infos
+        app.players.infos
             .get(72)
             .expect("removed target player info")
             .flags
@@ -4730,7 +4730,7 @@ fn approved_kick_vote_end_queues_host_client_removal() {
     game_over.network = Some(manager);
     game_over.network_mode = Some(NetworkMode::Host(host_network_settings()));
     game_over.control_clients.register(7, true, false);
-    game_over.control_player_infos.replace_snapshot(
+    game_over.players.infos.replace_snapshot(
         81,
         [league_fixture!(player_data: 7, vec![league_fixture!(player: 81, clonk_engine::PLAYER_INFO_FLAG_JOINED)])],
     );
@@ -4744,7 +4744,7 @@ fn approved_kick_vote_end_queues_host_client_removal() {
         .test_value();
     main_assert_eq!(
         game_over
-            .control_player_infos
+            .players.infos
             .get(81)
             .expect("completed-round target row")
             .flags
@@ -4915,7 +4915,7 @@ fn accepting_league_surrender_clears_network_and_aborts_round() {
     app.control_clients.register(0, true, false);
     app.control_clients.register(local_client, true, false);
     let local_info = 55;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         local_info,
         [league_fixture!(player_data:
             local_client,

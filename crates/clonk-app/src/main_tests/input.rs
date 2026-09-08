@@ -3151,7 +3151,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
     let mut app = new_menu_app(640, 480);
     let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
     let script = input_fixture!(player_info: LegacyCString::from_bytes(b"Script player".to_vec()).test_value());
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         8,
         [clonk_engine::PlayerInfoControlData::new(
             0,
@@ -3241,7 +3241,7 @@ fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
         "the physical double click clones one full packet and mutates every local User"
     );
     main_assert_eq!(
-        app.control_player_infos
+        app.players.infos
             .client_update_request(0)
             .expect("authoritative packet")
             .players =>

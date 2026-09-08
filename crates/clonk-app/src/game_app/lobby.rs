@@ -199,7 +199,8 @@ impl GameApp {
                 && self.engine.team_distribution() == 4
                 && self.engine.team_colors();
             let teams = self.engine.teams();
-            self.control_player_infos
+            self.players
+                .infos
                 .first_user_lobby_color(client_id, hide_assigned_team_color, |team_id| {
                     teams.iter().any(|team| team.id == team_id)
                 })
@@ -387,7 +388,8 @@ impl GameApp {
             .map(NetworkControlClock::control_rate)
             .unwrap_or_else(|| self.engine.control_rate());
         let active_player_count = i32::try_from(
-            self.control_player_infos
+            self.players
+                .infos
                 .retained_rows_snapshot()
                 .1
                 .iter()
@@ -499,7 +501,7 @@ impl GameApp {
                         metadata.head().is_replay()
                     })
             });
-        let (_, retained) = self.control_player_infos.retained_rows_snapshot();
+        let (_, retained) = self.players.infos.retained_rows_snapshot();
         let retained_players = retained
             .iter()
             .flat_map(|(client_id, _, players)| {
@@ -1237,7 +1239,7 @@ impl GameApp {
         let has_teams = teams.is_some_and(|teams| teams.active);
         let (mut rows, generic_active_players) = classic_lobby_roster_projection(
             &self.control_clients,
-            &self.control_player_infos,
+            &self.players.infos,
             teams,
             local_client_id,
             active_sheet,
@@ -1885,10 +1887,7 @@ impl GameApp {
         else {
             return Vec::new();
         };
-        let Some(request) = self
-            .control_player_infos
-            .client_update_request(local_client_id)
-        else {
+        let Some(request) = self.players.infos.client_update_request(local_client_id) else {
             return Vec::new();
         };
         let using_player = self.runtime_resource_text("IDS_MSG_USINGPLR", "Using %s");
@@ -1959,9 +1958,10 @@ impl GameApp {
         let player = if client_id == -1 {
             // Replay rows deliberately use the synthetic client -1 while
             // looking up presentation data in the global PlayerInfos list.
-            self.control_player_infos.get(player_id).cloned()
+            self.players.infos.get(player_id).cloned()
         } else {
-            self.control_player_infos
+            self.players
+                .infos
                 .client_update_request(client_id)
                 .and_then(|request| {
                     request
@@ -2207,7 +2207,8 @@ impl GameApp {
         }
         let league_vote = self.network_is_league
             && self
-                .control_player_infos
+                .players
+                .infos
                 .retained_rows_snapshot()
                 .1
                 .into_iter()
@@ -2329,7 +2330,7 @@ impl GameApp {
             return None;
         }
         let metadata = self.players.team_assignment.as_ref()?.teams();
-        let (_, packets) = self.control_player_infos.retained_rows_snapshot();
+        let (_, packets) = self.players.infos.retained_rows_snapshot();
         let active = packets
             .iter()
             .flat_map(|(_, _, players)| players)
@@ -2652,7 +2653,7 @@ impl GameApp {
         let has_or_will_have_lobby = self.has_or_will_have_network_lobby();
         let Some((metadata, updates)) = self.players.team_assignment.as_mut().map(|assignment| {
             let updates = assignment.set_random_team_count(
-                &mut self.control_player_infos,
+                &mut self.players.infos,
                 selected,
                 has_or_will_have_lobby,
             );
@@ -2729,7 +2730,8 @@ impl GameApp {
 
     fn classic_lobby_team_change_is_allowed(&self, player_id: i32, client_id: i32) -> bool {
         let player_is_eligible = self
-            .control_player_infos
+            .players
+            .infos
             .client_update_request(client_id)
             .and_then(|request| {
                 request
@@ -2800,7 +2802,7 @@ impl GameApp {
         {
             return;
         }
-        let Some(mut request) = self.control_player_infos.client_update_request(client_id) else {
+        let Some(mut request) = self.players.infos.client_update_request(client_id) else {
             return;
         };
         let Some(player) = request
@@ -2864,10 +2866,7 @@ impl GameApp {
         else {
             return;
         };
-        let Some(mut request) = self
-            .control_player_infos
-            .client_update_request(local_client_id)
-        else {
+        let Some(mut request) = self.players.infos.client_update_request(local_client_id) else {
             return;
         };
         let mut changed = false;
@@ -2922,10 +2921,7 @@ impl GameApp {
         else {
             return;
         };
-        let Some(mut request) = self
-            .control_player_infos
-            .client_update_request(local_client_id)
-        else {
+        let Some(mut request) = self.players.infos.client_update_request(local_client_id) else {
             return;
         };
         let Some(player) = request
@@ -2967,7 +2963,7 @@ impl GameApp {
             }
         }
 
-        let Some(mut request) = self.control_player_infos.client_update_request(client_id) else {
+        let Some(mut request) = self.players.infos.client_update_request(client_id) else {
             return;
         };
         let Some(index) = request
@@ -2995,7 +2991,7 @@ impl GameApp {
         if !self.classic_lobby_player_action_is_allowed(client_id, player_id) {
             return;
         }
-        let Some(mut request) = self.control_player_infos.client_update_request(client_id) else {
+        let Some(mut request) = self.players.infos.client_update_request(client_id) else {
             return;
         };
         let Some(player) = request
@@ -3482,7 +3478,7 @@ impl GameApp {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return Ok(());
         }
-        let player_infos = &self.control_player_infos;
+        let player_infos = &self.players.infos;
         let clients = self.control_clients.snapshot();
         let first_unready_control_client = || {
             clients.iter().find_map(|client| {
@@ -4508,7 +4504,7 @@ impl GameApp {
         let template_bytes =
             self.runtime_resource_bytes_with_fallback("IDS_MSG_NOSPLITSCREENINLEAGUE", fallback);
         let caption = self.runtime_resource_text("IDS_NET_ERR_LEAGUE", "League error");
-        let (_, clients) = self.control_player_infos.retained_rows_snapshot();
+        let (_, clients) = self.players.infos.retained_rows_snapshot();
         let mut removals = Vec::new();
         let mut blocking_reason = None;
         for (client_id, _, players) in clients {
@@ -5349,7 +5345,8 @@ impl GameApp {
         })?;
         let restore_infos = host_restore_player_info_entries(Some(restore_snapshot));
         (!restore_infos.is_empty()).then(|| {
-            self.control_player_infos
+            self.players
+                .infos
                 .has_unassociated_restore_info(&restore_infos)
         })
     }
@@ -5517,7 +5514,8 @@ impl GameApp {
                 .filter(|position| *position > 0);
             let target = if let Some(separator) = named_player {
                 let pattern = &parameter[..separator];
-                self.control_player_infos
+                self.players
+                    .infos
                     .retained_rows_snapshot()
                     .1
                     .into_iter()
@@ -5531,7 +5529,8 @@ impl GameApp {
                     .min_by_key(|(_, player)| player.id)
                     .map(|(client_id, player)| (client_id, player.id))
             } else {
-                self.control_player_infos
+                self.players
+                    .infos
                     .retained_rows_snapshot()
                     .1
                     .into_iter()
@@ -5569,7 +5568,7 @@ impl GameApp {
             if color == 0 {
                 color = 1;
             }
-            if let Some(mut update) = self.control_player_infos.client_update_request(client_id) {
+            if let Some(mut update) = self.players.infos.client_update_request(client_id) {
                 if let Some(player) = update
                     .players
                     .iter_mut()
@@ -7482,7 +7481,7 @@ impl GameApp {
             return false;
         };
         let players =
-            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX);
+            i32::try_from(self.players.infos.nonremoved_player_count()).unwrap_or(i32::MAX);
         if players >= minimum {
             return false;
         }

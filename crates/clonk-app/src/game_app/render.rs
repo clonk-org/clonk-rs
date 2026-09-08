@@ -6463,7 +6463,8 @@ impl GameApp {
                     .engine
                     .players()
                     .filter_map(|player| {
-                        self.runtime_player_big_icons
+                        self.players
+                            .big_icons
                             .get(&player.player_info_id())
                             .cloned()
                             .map(|icon| (player.id(), icon))

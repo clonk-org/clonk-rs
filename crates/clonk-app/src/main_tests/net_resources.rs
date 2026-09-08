@@ -661,7 +661,7 @@ fn player_resource_abort_releases_only_the_waiting_join() {
         ],
     )
     .test_value();
-    main_assert!(!app.control_player_infos.get(99).expect("player info was still applied").is_joined());
+    main_assert!(!app.players.infos.get(99).expect("player info was still applied").is_joined());
     main_assert!(!app.engine.snapshot().players.iter().any(|player| player.player_info_id == 99));
     main_assert!(!app.aborted_player_resource_joins.contains(&(core.id, 99)));
 }
@@ -818,7 +818,7 @@ fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
     };
     app.control_clients
         .replace_snapshot([message_client(0, b"Exact Host")]);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         4,
         [clonk_engine::PlayerInfoControlData::new(
             0,
@@ -855,7 +855,7 @@ fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
         vec![expected],
         0,
     );
-    app.control_player_infos
+    app.players.infos
         .replace_snapshot(4, [authoritative.clone()]);
     app.sync_classic_lobby_roster();
     let expected_color = [0xff, 0x17, 0x17, 0xff];
@@ -876,7 +876,7 @@ fn plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
         message_client(7, b"Client"),
     ]);
     client
-        .control_player_infos
+        .players.infos
         .replace_snapshot(4, [authoritative]);
     client.sync_classic_lobby_roster();
     main_assert!(client
@@ -970,7 +970,7 @@ fn takeover_selection_submits_full_local_packet_with_savegame_association() {
         ..Default::default()
     };
     let packet_flags = clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         99,
         [clonk_engine::PlayerInfoControlData::new(
             7,
@@ -991,7 +991,7 @@ fn takeover_selection_submits_full_local_packet_with_savegame_association() {
 
     let mut live_sibling = sibling.clone();
     live_sibling.color = 0x0000_00bb;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         99,
         [clonk_engine::PlayerInfoControlData::new(
             7,
@@ -1010,7 +1010,7 @@ fn takeover_selection_submits_full_local_packet_with_savegame_association() {
     expected_chosen.savegame_player = 50;
     main_assert_eq!(commands.take_player_info_updates() => vec![clonk_network::PlayerInfoUpdateRequest::new(7, packet_flags, vec![expected_chosen, live_sibling])]);
     main_assert_eq!(
-        app.control_player_infos
+        app.players.infos
             .client_update_request(7)
             .unwrap()
             .players[0]
@@ -1026,7 +1026,7 @@ fn new_color_resets_only_current_color_in_full_packet() {
     let mut app = new_menu_app(640, 480);
     let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
     chooser.color = 0x00ab_cdef;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         9,
         [clonk_engine::PlayerInfoControlData::new(
             0,
@@ -1060,7 +1060,7 @@ fn new_color_resets_only_current_color_in_full_packet() {
             vec![reset, companion]
         )]
     );
-    main_assert_eq!(app.control_player_infos.client_update_request(0).unwrap().players[0].color => chooser.color, "the roster waits for the authoritative echo");
+    main_assert_eq!(app.players.infos.client_update_request(0).unwrap().players[0].color => chooser.color, "the roster waits for the authoritative echo");
 }
 
 #[test]
@@ -2417,7 +2417,7 @@ fn synchronized_player_file_with_empty_filename_never_resolves_the_install_root(
     player.status = clonk_engine::PlayerStatus::Active;
     player.script_player = false;
     app.engine.restore_state(&state).test_value();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         info_id,
         [clonk_engine::PlayerInfoControlData::new(
             0,
@@ -2431,7 +2431,7 @@ fn synchronized_player_file_with_empty_filename_never_resolves_the_install_root(
         )],
     );
 
-    let info = app.control_player_infos.get(info_id).cloned().test_value();
+    let info = app.players.infos.get(info_id).cloned().test_value();
     main_assert_eq!(info.filename.as_bytes() => b"");
     main_assert_eq!(app.synchronized_player_profile_path(&info) => None);
 
@@ -2751,7 +2751,7 @@ fn host_direct_player_info_rebalances_random_teams_and_broadcasts_changed_packet
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         30,
         [clonk_engine::PlayerInfoControlData::new(
             3,
@@ -2783,9 +2783,9 @@ fn host_direct_player_info_rebalances_random_teams_and_broadcasts_changed_packet
     let teams = app.players.team_assignment.test_ref().teams();
     main_assert_eq!(teams.teams[0].player_ids => vec![20, 30]);
     main_assert_eq!(teams.teams[1].player_ids => vec![10]);
-    main_assert_eq!(app.control_player_infos.get(10).unwrap().team => 2);
-    main_assert_eq!(app.control_player_infos.get(20).unwrap().team => 1);
-    main_assert_eq!(app.control_player_infos.get(30).unwrap().team => 1);
+    main_assert_eq!(app.players.infos.get(10).unwrap().team => 2);
+    main_assert_eq!(app.players.infos.get(20).unwrap().team => 1);
+    main_assert_eq!(app.players.infos.get(30).unwrap().team => 1);
 
     let broadcasts = commands.take_broadcast_player_infos();
     let [updated] = broadcasts.as_slice() else {
@@ -2892,7 +2892,7 @@ fn synchronized_client_remove_rebalances_random_teams_and_broadcasts_changed_pac
     let mut gain_only = player(50, 0, 0x0000_00f4, 0x0000_00f4, 4, b"History", b"");
     gain_only.flags =
         clonk_engine::PLAYER_INFO_FLAG_JOINED | clonk_engine::PLAYER_INFO_FLAG_REMOVED;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         50,
         [
             clonk_engine::PlayerInfoControlData::new(
@@ -2928,15 +2928,15 @@ fn synchronized_client_remove_rebalances_random_teams_and_broadcasts_changed_pac
     .test_value();
 
     main_assert!(!app.control_clients.contains(4));
-    main_assert!(app.control_player_infos.get(40).is_none());
+    main_assert!(app.players.infos.get(40).is_none());
     let teams = app.players.team_assignment.test_ref().teams();
     main_assert_eq!(teams.teams[0].player_ids => vec![20, 30]);
     main_assert_eq!(teams.teams[1].player_ids => vec![10]);
-    main_assert_eq!(app.control_player_infos.get(10).unwrap().team => 2);
-    main_assert_eq!(app.control_player_infos.get(10).unwrap().color => 0x00f4_0000);
-    main_assert!(app.control_player_infos.get(10).unwrap().forced_name.is_empty());
+    main_assert_eq!(app.players.infos.get(10).unwrap().team => 2);
+    main_assert_eq!(app.players.infos.get(10).unwrap().color => 0x00f4_0000);
+    main_assert!(app.players.infos.get(10).unwrap().forced_name.is_empty());
     main_assert_eq!(
-        app.control_player_infos
+        app.players.infos
             .client_packet(3)
             .unwrap()
             .players
@@ -3204,7 +3204,7 @@ fn player_join_with_a_deleted_completed_path_fails_closed() {
             client_id: at_client,
             ..Default::default()
         }]);
-    app.control_player_infos
+    app.players.infos
         .apply(clonk_engine::PlayerInfoControlData {
             client_id: at_client,
             players: vec![clonk_engine::ControlPlayerInfoEntry {
@@ -3240,7 +3240,7 @@ fn player_join_with_a_deleted_completed_path_fails_closed() {
         }
     ));
     main_assert!(app.engine.players().all(|player| player.player_info_id() != info_id));
-    main_assert!(!app.control_player_infos.get(info_id).test_value().is_joined());
+    main_assert!(!app.players.infos.get(info_id).test_value().is_joined());
 }
 
 #[test]
@@ -3290,7 +3290,7 @@ fn unknown_loadable_resource_join_stalls_until_resource_completion() {
 
     main_assert_eq!(app.engine.frame() => initial_frame);
     main_assert!(app.network_ticks.ready.contains_key(&tick));
-    main_assert!(app.control_player_infos.get(info_id).is_none());
+    main_assert!(app.players.infos.get(info_id).is_none());
     main_assert_eq!(app.admission_resources.status(resource_id) => Some(&AdmissionResourceState::Loading { removed: false }));
     let wait = app.blocking_resource_wait.test_ref();
     main_assert_eq!(wait.scope => BlockingResourceScope::PlayerJoin);

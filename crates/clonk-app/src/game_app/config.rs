@@ -625,7 +625,7 @@ impl GameApp {
             &template,
             parameters,
             &self.control_clients,
-            &self.control_player_infos,
+            &self.players.infos,
             self.engine.teams(),
             max_players,
             self.engine.startup_player_count(),

@@ -76,7 +76,7 @@ impl GameApp {
         &self,
         info: &clonk_engine::ControlPlayerInfoEntry,
     ) -> Option<PathBuf> {
-        if let Some(path) = self.local_player_profile_paths.get(&info.id) {
+        if let Some(path) = self.players.local_profile_paths.get(&info.id) {
             return Some(path.clone());
         }
         if let Some(path) = info.resource.as_ref().and_then(|resource| {
@@ -177,7 +177,7 @@ impl GameApp {
                     player_number,
                 );
             }
-            let Some(info) = self.control_player_infos.get(info_id).cloned() else {
+            let Some(info) = self.players.infos.get(info_id).cloned() else {
                 tracing::warn!(
                     player_number,
                     info_id,
@@ -393,7 +393,8 @@ impl GameApp {
             .filter_map(|object| {
                 let owner = self.engine.player(object.owner)?;
                 let invisible = self
-                    .control_player_infos
+                    .players
+                    .infos
                     .get(owner.player_info_id())
                     .is_some_and(|info| info.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE != 0);
                 if invisible {
@@ -939,7 +940,8 @@ impl GameApp {
                 .filter(|opponent| {
                     opponent.id() != player
                         && !self
-                            .control_player_infos
+                            .players
+                            .infos
                             .get(opponent.player_info_id())
                             .is_some_and(|info| {
                                 info.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE != 0
@@ -986,8 +988,8 @@ impl GameApp {
             .iter()
             .map(|result| result.player_info_id)
             .filter(|info_id| {
-                !self.runtime_player_big_icons.contains_key(info_id)
-                    && !self.runtime_player_big_icon_misses.contains(info_id)
+                !self.players.big_icons.contains_key(info_id)
+                    && !self.players.big_icon_misses.contains(info_id)
             })
             .collect::<HashSet<_>>();
         self.hydrate_player_big_icons(pending);
@@ -999,8 +1001,8 @@ impl GameApp {
             .players()
             .map(|player| player.player_info_id())
             .filter(|info_id| {
-                !self.runtime_player_big_icons.contains_key(info_id)
-                    && !self.runtime_player_big_icon_misses.contains(info_id)
+                !self.players.big_icons.contains_key(info_id)
+                    && !self.players.big_icon_misses.contains(info_id)
             })
             .collect::<HashSet<_>>();
         self.hydrate_player_big_icons(pending);
@@ -1008,16 +1010,16 @@ impl GameApp {
 
     fn hydrate_player_big_icons(&mut self, pending: HashSet<i32>) {
         for info_id in pending {
-            let Some(info) = self.control_player_infos.get(info_id).cloned() else {
+            let Some(info) = self.players.infos.get(info_id).cloned() else {
                 continue;
             };
             if let Some(startup) = self.startup.player_files.iter().find(|startup| {
                 clonk_script::c4_string_bytes(&startup.file_name) == info.filename.as_bytes()
             }) {
                 if let Some(icon) = startup.render_model.big_icon.clone() {
-                    self.runtime_player_big_icons.insert(info_id, icon);
+                    self.players.big_icons.insert(info_id, icon);
                 } else {
-                    self.runtime_player_big_icon_misses.insert(info_id);
+                    self.players.big_icon_misses.insert(info_id);
                 }
                 continue;
             }
@@ -1030,25 +1032,25 @@ impl GameApp {
             });
             if let Some(path) = complete_path {
                 if let Some(icon) = load_network_player_big_icon(&path) {
-                    self.runtime_player_big_icons.insert(info_id, icon);
+                    self.players.big_icons.insert(info_id, icon);
                 } else {
-                    self.runtime_player_big_icon_misses.insert(info_id);
+                    self.players.big_icon_misses.insert(info_id);
                 }
             } else if !has_resource {
                 // Fileless script/scenario players have no player-group
                 // BigIcon to discover later.
-                self.runtime_player_big_icon_misses.insert(info_id);
+                self.players.big_icon_misses.insert(info_id);
             }
         }
     }
 
     pub(crate) fn cache_joined_player_big_icon(&mut self, info_id: i32, icon: Option<&ImageData>) {
-        self.runtime_player_big_icon_misses.remove(&info_id);
+        self.players.big_icon_misses.remove(&info_id);
         if let Some(icon) = icon {
-            self.runtime_player_big_icons.insert(info_id, icon.clone());
+            self.players.big_icons.insert(info_id, icon.clone());
         } else {
-            self.runtime_player_big_icons.remove(&info_id);
-            self.runtime_player_big_icon_misses.insert(info_id);
+            self.players.big_icons.remove(&info_id);
+            self.players.big_icon_misses.insert(info_id);
         }
     }
 
@@ -1062,7 +1064,8 @@ impl GameApp {
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or_else(|| self.offline_local_client_id());
         let joined_player_paths = self
-            .control_player_infos
+            .players
+            .infos
             .retained_rows_snapshot()
             .1
             .into_iter()
@@ -1102,7 +1105,8 @@ impl GameApp {
             .players()
             .filter(|player| {
                 !self
-                    .control_player_infos
+                    .players
+                    .infos
                     .get(player.player_info_id())
                     .is_some_and(|info| info.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE != 0)
             })
@@ -1120,7 +1124,8 @@ impl GameApp {
     ) {
         let resources = &self.admission_resources;
         let joins =
-            self.control_player_infos
+            self.players
+                .infos
                 .issue_reserved_player_snapshots(client_id, players, |core| {
                     resources.complete_player_path(core).and_then(|path| {
                         clonk_engine::LegacyCString::from_bytes(path_to_legacy_bytes(path))
@@ -1156,7 +1161,8 @@ impl GameApp {
         let mut player_infos_changed = self.refresh_current_player_info_teams();
         for (player_info_id, data) in progress_updates {
             player_infos_changed |= self
-                .control_player_infos
+                .players
+                .infos
                 .set_league_progress_data(player_info_id, data);
         }
         if player_infos_changed {
@@ -1183,22 +1189,24 @@ impl GameApp {
             RuntimeNetworkRole::Offline => {
                 for update in updates {
                     let Some(info) = self
-                        .control_player_infos
+                        .players
+                        .infos
                         .admit_request(update, self.network_max_players)
                     else {
                         continue;
                     };
                     let client_id = info.client_id;
                     self.generate_incoming_player_info_teams(&info.players);
-                    self.control_player_infos.apply(info);
+                    self.players.infos.apply(info);
                     self.recheck_team_memberships_from_player_infos();
                     seed_engine_player_info_parameters(
                         &mut self.engine,
                         &self.network_league_name,
-                        &self.control_player_infos,
+                        &self.players.infos,
                     );
                     let joins = self
-                        .control_player_infos
+                        .players
+                        .infos
                         .issue_unjoined_local_players(client_id, |_| {
                             Some(clonk_engine::LegacyCString::default())
                         });
@@ -1232,7 +1240,7 @@ impl GameApp {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             == Some(info.by_client);
-        let had_client_packet = self.control_player_infos.client_packet(client_id).is_some();
+        let had_client_packet = self.players.infos.client_packet(client_id).is_some();
         let send_clean_follow_up = matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
             && info.by_client == 0
             && info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
@@ -1242,7 +1250,7 @@ impl GameApp {
             .register_player_info_resources(&info.players);
         self.register_classic_lobby_player_resources(&info.players);
         self.generate_incoming_player_info_teams(&info.players);
-        self.control_player_infos.apply(info);
+        self.players.infos.apply(info);
         self.prune_host_local_alternate_colors();
         let rebalance_updates = self.recheck_team_memberships_from_player_infos();
         let follow_ups = if local_origin {
@@ -1253,14 +1261,14 @@ impl GameApp {
             if send_clean_follow_up {
                 updated_clients.insert(client_id);
             }
-            self.control_player_infos.client_packets(&updated_clients)
+            self.players.infos.client_packets(&updated_clients)
         } else {
             Vec::new()
         };
         seed_engine_player_info_parameters(
             &mut self.engine,
             &self.network_league_name,
-            &self.control_player_infos,
+            &self.players.infos,
         );
         self.publish_current_host_player_infos();
         self.sync_classic_lobby_roster();
@@ -1291,7 +1299,7 @@ impl GameApp {
                 && self.control_clients.contains(info.client_id)
                 && self.control_clients.is_activated(info.client_id);
             let join_players_on_echo = if capture_join_players {
-                let mut post_control = self.control_player_infos.clone();
+                let mut post_control = self.players.infos.clone();
                 post_control.apply(info.clone());
                 post_control
                     .client_packet(info.client_id)
@@ -1312,7 +1320,8 @@ impl GameApp {
                 .broadcast_preexecuted_player_info(info.clone(), join_players_on_echo.clone())?;
             let follow_ups = self.apply_direct_player_info_control(info, issue_joins_now);
             if capture_join_players {
-                self.control_player_infos
+                self.players
+                    .infos
                     .reserve_unjoined_player_snapshots(&join_players_on_echo);
             }
             for follow_up in follow_ups.into_iter().rev() {
@@ -1347,13 +1356,14 @@ impl GameApp {
             player.resource.clone_from(&normalized.resource);
         }
         if self
-            .control_player_infos
+            .players
+            .infos
             .apply_player_resource_normalization(&original, &info)
         {
             seed_engine_player_info_parameters(
                 &mut self.engine,
                 &self.network_league_name,
-                &self.control_player_infos,
+                &self.players.infos,
             );
             self.publish_current_host_player_infos();
         }
@@ -1378,7 +1388,8 @@ impl GameApp {
             .map_err(|error| error.to_string())?;
         self.refresh_current_player_info_teams();
         let next_info_id = self
-            .control_player_infos
+            .players
+            .infos
             .retained_rows_snapshot()
             .0
             .wrapping_add(1);
@@ -1386,7 +1397,7 @@ impl GameApp {
         let admission = match self.players.team_assignment.as_mut() {
             Some(team_assignment) => team_assignment
                 .admit_request_with_alternate_colors(
-                    &mut self.control_player_infos,
+                    &mut self.players.infos,
                     request,
                     self.network_max_players,
                     true,
@@ -1399,7 +1410,8 @@ impl GameApp {
                 let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
                     self.players.generated_team_name_template.clone(),
                 );
-                self.control_player_infos
+                self.players
+                    .infos
                     .admit_request_with_attributes_and_alternate_colors(
                         request,
                         self.network_max_players,
@@ -1425,7 +1437,8 @@ impl GameApp {
         let resolved_profile =
             offline_player_real_path(source_path).unwrap_or_else(|_| source_path.to_path_buf());
         for player in &admitted.players {
-            self.local_player_profile_paths
+            self.players
+                .local_profile_paths
                 .insert(player.id, resolved_profile.clone());
         }
         updated_existing.push(admitted);
@@ -1454,7 +1467,7 @@ impl GameApp {
             return;
         }
 
-        let (_, packets) = self.control_player_infos.retained_rows_snapshot();
+        let (_, packets) = self.players.infos.retained_rows_snapshot();
         let mut visible_items = HashSet::new();
         for (client_id, _, players) in &packets {
             if !self.control_clients.contains(*client_id)
@@ -1643,11 +1656,10 @@ impl GameApp {
         let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
         self.remove_runtime_player_with_viewport_feedback(control.player)?;
         if info_id != 0
-            && self.control_player_infos.mark_removed(
-                info_id,
-                control.disconnected,
-                game_part_frame,
-            )
+            && self
+                .players
+                .infos
+                .mark_removed(info_id, control.disconnected, game_part_frame)
         {
             self.prune_host_local_alternate_colors();
             self.publish_current_host_player_infos();
@@ -1720,7 +1732,8 @@ impl GameApp {
                 };
                 match self.remove_runtime_player_with_viewport_feedback(player_id) {
                     Ok(()) => {
-                        self.control_player_infos
+                        self.players
+                            .infos
                             .mark_removed(info_id, true, game_part_frame);
                     }
                     Err(error) => {
@@ -1776,14 +1789,15 @@ impl GameApp {
         let recheck_random_teams = recheck_random_teams
             && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host)
             && self.engine.is_control_host();
-        let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
+        let memberships = ordered_control_player_team_memberships(&self.players.infos);
         let exact_metadata = self.players.team_assignment.as_mut().map(|assignment| {
             if recheck_memberships {
-                self.control_player_infos
+                self.players
+                    .infos
                     .recheck_team_players(assignment.teams_mut());
             }
             let updates = if recheck_random_teams {
-                assignment.recheck_random_teams(&mut self.control_player_infos)
+                assignment.recheck_random_teams(&mut self.players.infos)
             } else {
                 Vec::new()
             };
@@ -1852,14 +1866,11 @@ impl GameApp {
             })
             .collect::<Vec<_>>();
         if let Some(maximum_id) = updates.iter().map(|(info_id, _, _)| *info_id).max() {
-            self.control_player_infos
-                .reserve_player_ids_through(maximum_id);
+            self.players.infos.reserve_player_ids_through(maximum_id);
         }
         let mut changed = false;
         for (info_id, team, color) in updates {
-            changed |= self
-                .control_player_infos
-                .set_team_and_color(info_id, team, color);
+            changed |= self.players.infos.set_team_and_color(info_id, team, color);
         }
         changed
     }

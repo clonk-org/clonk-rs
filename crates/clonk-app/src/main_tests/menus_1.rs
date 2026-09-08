@@ -1521,7 +1521,7 @@ fn takeover_submenu_lists_only_local_unissued_unassociated_players() {
         forced_name: LegacyCString::from_bytes(b"Forced B".to_vec()).test_value(),
         ..Default::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         99,
         [
             clonk_engine::PlayerInfoControlData::new(
@@ -1912,7 +1912,7 @@ fn takeover_submenu_fills_live_at_open() {
     let local_packet = |players: Vec<clonk_engine::ControlPlayerInfoEntry>| {
         clonk_engine::PlayerInfoControlData::new(7, packet_flags, players, 7)
     };
-    app.control_player_infos
+    app.players.infos
         .replace_snapshot(99, [local_packet(vec![first.clone()])]);
 
     app.process_classic_lobby_actions(vec![
@@ -1925,7 +1925,7 @@ fn takeover_submenu_fills_live_at_open() {
     // fills the children in OnContextTakeOver only at submenu-open
     // (src/C4PlayerInfoListBox.cpp:503-505,535-556), so the submenu must
     // reflect this update rather than a root-open snapshot.
-    app.control_player_infos
+    app.players.infos
         .replace_snapshot(100, [local_packet(vec![first.clone(), second.clone()])]);
 
     let root = app.context_menus.open.as_ref().test_value().layout().panels[0].rows[0].rect;
@@ -1942,7 +1942,7 @@ fn takeover_submenu_fills_live_at_open() {
     main_assert_eq!(app.context_menus.open.as_ref().unwrap().layout().panels.len() => 1);
     let mut issued_first = first.clone();
     issued_first.flags |= clonk_engine::PLAYER_INFO_FLAG_JOIN_ISSUED;
-    app.control_player_infos
+    app.players.infos
         .replace_snapshot(101, [local_packet(vec![issued_first, second.clone()])]);
     app.handle_context_menu_key(VirtualKeyCode::ArrowRight, ElementState::Pressed)
         .test_value();
@@ -1996,7 +1996,7 @@ fn player_context_root_matches_cpp_entry_gates() {
         player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
         ..Default::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         51,
         [
             clonk_engine::PlayerInfoControlData::new(

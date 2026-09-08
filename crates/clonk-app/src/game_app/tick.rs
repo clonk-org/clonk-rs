@@ -218,7 +218,8 @@ impl GameApp {
                             let player_name = pending
                                 .player_name
                                 .or_else(|| {
-                                    self.control_player_infos
+                                    self.players
+                                        .infos
                                         .get(pending.info_id)
                                         .map(|player| {
                                             legacy_presentation_text(player.name.as_bytes())

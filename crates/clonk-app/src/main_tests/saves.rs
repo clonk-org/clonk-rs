@@ -188,7 +188,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
     let scenario = FrontendScenario::from_command_line(&scenario_path);
     let mut app = new_state_only_menu_app(320, 200);
     app.records.directory = Some(directory.path().join("Records.c4f"));
-    app.control_player_infos
+    app.players.infos
         .apply(clonk_engine::PlayerInfoControlData::new(
             0,
             0,
@@ -255,7 +255,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
     .test_value();
     // InitPlayers performs this only after InitControl has snapshotted
     // the initial record's current roster.
-    app.control_player_infos
+    app.players.infos
         .resume_joined_savegame_player(17, 0, false);
     let packed = app.records.template.test_ref().group.pack().test_value();
     let record = Group::from_memory(PathBuf::from("Loaded.c4s"), packed).test_value();
@@ -267,7 +267,7 @@ fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice()
     .test_value();
     main_assert_eq!(initial_players.clients[0].players[0].id => 117);
     main_assert_eq!(initial_players.clients[0].players[0].flags => 0);
-    main_assert_eq!(app.control_player_infos.recreation_info_ids() => vec![17], "live takeover rows resume only after fInitial");
+    main_assert_eq!(app.players.infos.recreation_info_ids() => vec![17], "live takeover rows resume only after fInitial");
 
     let objects = String::from_utf8(record.read_file("Objects.txt").test_value()).test_value();
     main_assert!(objects.contains("id=TST1\r\n"));
@@ -743,7 +743,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
             "Replay",
         )
     );
-    let resumed_info = app.control_player_infos.get(7).test_value();
+    let resumed_info = app.players.infos.get(7).test_value();
     main_assert!(resumed_info.filename.is_empty(), "DeleteTempFile clears the extracted Recreate filename after the join");
     main_assert!(resumed_info.resource.is_none());
     main_assert_eq!(
@@ -752,9 +752,9 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
         "replay DiscardResource has no live resource pointer and preserves HasRes"
     );
     main_assert_eq!((resumed_info.game_number, resumed_info.game_join_frame) => (-1, -1), "non-scenario-init recreation does not call SetJoined");
-    main_assert!(app.control_player_infos.get(91).is_none());
+    main_assert!(app.players.infos.get(91).is_none());
     main_assert!(
-        app.control_player_infos
+        app.players.infos
             .get(6)
             .is_some_and(|info| { info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0 }),
         "a failed filename-backed replay join marks its PlayerInfo removed"
@@ -801,7 +801,7 @@ fn resumed_savegame_replay_recreates_players_from_recorded_profiles() {
     main_assert_eq!(teams.iter().find(|team| team.id == 3).map(|team| team.player_ids.as_slice()) => Some(&[7][..]));
     main_assert!(app.control_clients.snapshot().is_empty(), "replay PlayerInfos packets do not synthesize Parameters.Clients");
     main_assert_eq!(app.engine.game_time() => 17);
-    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7, "SavePlayerInfos overwrites the replay PlayerInfos ID counter");
+    main_assert_eq!(app.players.infos.retained_rows_snapshot().0 => 7, "SavePlayerInfos overwrites the replay PlayerInfos ID counter");
     // InitGame snapshots the raw PlayerInfos before InitPlayers merges the
     // restore list (C4Game.cpp:2390-2399,2827-2850).
     main_assert_eq!(
@@ -912,8 +912,8 @@ fn savegame_replay_empty_current_packet_does_not_adopt_restore_players() {
 
     main_assert!(app.engine.player(2).is_none());
     main_assert_eq!(app.engine.object_snapshot(clonk_engine::ObjectId::new(10)).expect("unassociated crew tombstone").status => clonk_engine::ObjectStatus::Deleted);
-    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7);
-    main_assert!(app.control_player_infos.contains_client(4));
+    main_assert_eq!(app.players.infos.retained_rows_snapshot().0 => 7);
+    main_assert!(app.players.infos.contains_client(4));
     reset_cached_app_paths();
 }
 
@@ -984,9 +984,9 @@ fn savegame_replay_removed_restore_rows_do_not_gain_associations() {
     app.start_scenario(frontend).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
-    let current = app.control_player_infos.get(91).test_value();
+    let current = app.players.infos.get(91).test_value();
     main_assert_eq!(current.savegame_player => 0);
-    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7);
+    main_assert_eq!(app.players.infos.retained_rows_snapshot().0 => 7);
     reset_cached_app_paths();
 }
 
@@ -1035,8 +1035,8 @@ fn savegame_replay_removed_only_restore_still_overwrites_id_counter() {
     app.start_scenario(frontend).test_value();
     wait_for_running_with_attempts(&mut app, 2_400);
 
-    main_assert_eq!(app.control_player_infos.retained_rows_snapshot().0 => 7);
-    main_assert!(app.control_player_infos.get(7).is_none());
+    main_assert_eq!(app.players.infos.retained_rows_snapshot().0 => 7);
+    main_assert!(app.players.infos.get(7).is_none());
     reset_cached_app_paths();
 }
 
@@ -1432,7 +1432,7 @@ fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
         name: LegacyCString::from_bytes(format!("Player {id}").into_bytes()).test_value(),
         ..Default::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [
             clonk_engine::PlayerInfoControlData::new(
@@ -3234,7 +3234,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
         .test_player_mut(player_number)
         .set_game_join_time(10);
     app.engine.set_local_players([player_number]);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         info_id,
         [clonk_engine::PlayerInfoControlData::new(
             0,
@@ -3250,7 +3250,7 @@ fn save_player_files_synchronize_persists_local_player_core_and_crew() {
             0,
         )],
     );
-    app.local_player_profile_paths
+    app.players.local_profile_paths
         .insert(info_id, profile_path.clone());
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
 
@@ -4554,7 +4554,7 @@ fn saved_game_skips_removed_current_player_without_deleting_objects() {
     let owner = app.players.local_owner;
     let info_id = app.engine.test_player(owner).player_info_id();
     let object = app.engine.snapshot().objects.first().test_value().id;
-    app.control_player_infos
+    app.players.infos
         .apply(clonk_engine::PlayerInfoControlData::new(
             0,
             0,
@@ -5023,7 +5023,7 @@ fn quick_save_round_trips_state() {
         let saved_game_time = app.snapshot.game_time;
         let saved_player_info_id = app.engine.test_player(app.players.local_owner).player_info_id();
         let saved_big_icon = ImageData::new(1, 1, vec![12, 34, 56, 255]);
-        app.runtime_player_big_icons
+        app.players.big_icons
             .insert(saved_player_info_id, saved_big_icon.clone());
 
         app.quick_save().test_value();
@@ -5048,7 +5048,7 @@ fn quick_save_round_trips_state() {
         main_assert_eq!(app.snapshot.game_time => saved_game_time, "quick load should restore Game.Time");
         main_assert_eq!(app.game_time_seconds() => saved_game_time.max(0) as u64);
         main_assert_eq!(
-            app.runtime_player_big_icons.get(&saved_player_info_id) =>
+            app.players.big_icons.get(&saved_player_info_id) =>
             Some(&saved_big_icon),
             "in-round restore keeps C4Player::BigIcon by stable player-info ID"
         );
