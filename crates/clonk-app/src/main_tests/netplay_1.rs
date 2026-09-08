@@ -666,7 +666,7 @@ fn context_command_coordinates_include_letterbox_and_ignore_camera_zoom() {
 #[test]
 fn help_regions_share_one_native_caption_slot() {
     let (mut app, owner, _crew, _first, target, inventory_point) = inventory_region_fixture();
-    app.live_input.ingame_mouse_help = true;
+    app.input_routing.live.ingame_mouse_help = true;
 
     app.test_cursor(PhysicalPosition::new(
         f64::from(inventory_point.x),
@@ -680,7 +680,7 @@ fn help_regions_share_one_native_caption_slot() {
         "a target-bearing region uses the Help tooltip caption"
     );
     main_assert!(
-        app.live_input.ingame_mouse_caption.caption.is_none(),
+        app.input_routing.live.ingame_mouse_caption.caption.is_none(),
         "the red object-name caption cannot coexist with the Help tooltip"
     );
 
@@ -693,7 +693,7 @@ fn help_regions_share_one_native_caption_slot() {
         app.ingame_mouse.help_caption.is_none(),
         "a targetless region replaces the prior Help tooltip"
     );
-    let caption = app.live_input.ingame_mouse_caption.caption.test_ref();
+    let caption = app.input_routing.live.ingame_mouse_caption.caption.test_ref();
     let expected = app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
     let viewport = app.rendering.graphics.viewport_rect(owner).test_value();
     let button_rect = clonk_frontend::hud::viewport_button_rect(
@@ -702,7 +702,7 @@ fn help_regions_share_one_native_caption_slot() {
     );
     main_assert_eq!(caption.text => expected);
     main_assert_eq!(caption.caption_bottom_y => Some(button_rect.y - viewport.y));
-    main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
+    main_assert_eq!(app.input_routing.live.ingame_mouse_caption.cursor => IngameMouseCursorKind::Region);
 }
 
 #[test]
@@ -4274,16 +4274,16 @@ fn platform_cursor_tracks_client_area_and_focus_in_every_mode() {
     let mut app = new_menu_app(64, 48);
     app.test_cursor(PhysicalPosition::new(20.0, 18.0));
     main_assert!(!app.platform_cursor_visible());
-    let retained = app.live_input.window_pointer;
+    let retained = app.input_routing.live.window_pointer;
 
     app.window_active = false;
     app.handle_focus_lost().test_value();
     main_assert!(app.platform_cursor_visible());
-    main_assert_eq!(app.live_input.window_pointer => retained);
-    main_assert!(app.live_input.pointer_inside_window);
+    main_assert_eq!(app.input_routing.live.window_pointer => retained);
+    main_assert!(app.input_routing.live.pointer_inside_window);
 
     app.handle_focus_gained().test_value();
-    main_assert_eq!(app.live_input.window_pointer => retained);
+    main_assert_eq!(app.input_routing.live.window_pointer => retained);
     for mode in [AppMode::Menu, AppMode::Loading, AppMode::Running] {
         app.mode = mode;
         main_assert!(!app.platform_cursor_visible(), "{mode:?}");
@@ -4291,7 +4291,7 @@ fn platform_cursor_tracks_client_area_and_focus_in_every_mode() {
     app.mode = AppMode::Menu;
     app.pointer_left().test_value();
     main_assert!(app.platform_cursor_visible());
-    main_assert_eq!(app.live_input.window_pointer => None);
+    main_assert_eq!(app.input_routing.live.window_pointer => None);
 }
 
 #[test]

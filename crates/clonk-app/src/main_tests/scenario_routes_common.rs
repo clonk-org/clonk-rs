@@ -122,7 +122,7 @@ fn app_cursor_inventory_contains(app: &mut GameApp, clonk: ObjectId, definition:
         &app.snapshot,
         Some(clonk),
         &app.bindings,
-        &app.gamepad_bindings,
+        &app.input_routing.gamepad_bindings,
     );
     populate_crew_inventories(
         &app.engine,

@@ -2284,7 +2284,7 @@ fn run() -> Result<()> {
                         if let Some(paths) = app_paths.as_ref() {
                             if let Err(error) = persist_dirty_gamepad_axis_calibration(
                                 paths.as_ref(),
-                                &mut app.gamepad_bindings,
+                                &mut app.input_routing.gamepad_bindings,
                             ) {
                                 tracing::warn!(
                                     %error,
@@ -2933,33 +2933,8 @@ impl GameApp {
                 ..SaveState::default()
             },
             allow_scripting_in_replays,
-            input: InputDispatcher::new(),
             bindings,
-            gamepad_bindings,
             local_controls: LocalControlRegistry::default(),
-            live_input: InputState {
-                pressed_engine_keys: HashSet::new(),
-                modifiers: ModifiersState::empty(),
-                gamepads,
-                window_pointer: None,
-                pointer_inside_window: false,
-                running_pointer: None,
-                gui_mouse_owned: false,
-                world_mouse_owned: true,
-                primary_left_down: false,
-                last_left_press: None,
-                ingame_gui_pointer: None,
-                ingame_pointer: None,
-                ingame_mouse_help: false,
-                ingame_mouse_init_centered: false,
-                ingame_viewport_mouse: None,
-                ingame_edge_scroll: None,
-                ingame_mouse_caption: IngameMouseCaptionState::default(),
-                ingame_mouse_target: None,
-            },
-            engine_key_repeated: false,
-            key_event_suppresses_text: false,
-            scoreboard_tab_raw_pressed: false,
             pending_screenshots: VecDeque::new(),
             pending_options_display_requests: VecDeque::new(),
             presentation: PresentationState {
@@ -2993,7 +2968,6 @@ impl GameApp {
                 graphics_smoke_level,
             },
             #[cfg(test)]
-            gamepad_poll_count: 0,
             #[cfg(test)]
             sec1_timer_call_count: 0,
             snapshot,
@@ -3284,7 +3258,6 @@ impl GameApp {
             configuration_reset_requested: false,
             game_over_handled: false,
             pending_league_end: None,
-            runtime_key_config_cache: OnceLock::new(),
             runtime_flash_resources_cache,
             runtime_flash_message: None,
             film_view_player: None,
@@ -3319,6 +3292,35 @@ impl GameApp {
                 right: None,
                 dragged_objects: Vec::new(),
                 help_caption: None,
+            },
+            input_routing: InputRouting {
+                dispatcher: InputDispatcher::new(),
+                live: InputState {
+                    pressed_engine_keys: HashSet::new(),
+                    modifiers: ModifiersState::empty(),
+                    gamepads,
+                    window_pointer: None,
+                    pointer_inside_window: false,
+                    running_pointer: None,
+                    gui_mouse_owned: false,
+                    world_mouse_owned: true,
+                    primary_left_down: false,
+                    last_left_press: None,
+                    ingame_gui_pointer: None,
+                    ingame_pointer: None,
+                    ingame_mouse_help: false,
+                    ingame_mouse_init_centered: false,
+                    ingame_viewport_mouse: None,
+                    ingame_edge_scroll: None,
+                    ingame_mouse_caption: IngameMouseCaptionState::default(),
+                    ingame_mouse_target: None,
+                },
+                gamepad_bindings,
+                gamepad_poll_count: 0,
+                engine_key_repeated: false,
+                key_event_suppresses_text: false,
+                runtime_key_config_cache: OnceLock::new(),
+                scoreboard_tab_raw_pressed: false,
             },
             league_signup_consumed_keys: HashSet::new(),
             league_signup_pointer_capture: false,
@@ -3735,7 +3737,7 @@ impl GameApp {
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
         self.game_option_pointer_capture = false;
-        self.live_input.running_pointer = None;
+        self.input_routing.live.running_pointer = None;
         self.ingame_menus.close_pointer_capture = None;
         self.ingame_menus.script_close_pointer_capture = None;
         self.scoreboard_pointer_left();
@@ -4203,7 +4205,7 @@ impl GameApp {
 
     fn handle_modifiers_changed(&mut self, modifiers: ModifiersState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
-        self.live_input.modifiers = modifiers;
+        self.input_routing.live.modifiers = modifiers;
         Ok(())
     }
 
@@ -4665,7 +4667,7 @@ impl GameApp {
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
-        self.live_input.primary_left_down = false;
+        self.input_routing.live.primary_left_down = false;
         self.ingame_menus.close_pointer_capture = None;
         self.ingame_menus.script_close_pointer_capture = None;
         self.dialogs.menu_title_drag = None;
@@ -4708,10 +4710,10 @@ impl GameApp {
         self.game_option_consumed_keys.clear();
         self.game_option_pointer_capture = false;
         self.chat.paste_consumed_keys.clear();
-        self.live_input.pressed_engine_keys.clear();
-        self.scoreboard_tab_raw_pressed = false;
-        self.live_input.modifiers = ModifiersState::empty();
-        self.live_input.running_pointer = None;
+        self.input_routing.live.pressed_engine_keys.clear();
+        self.input_routing.scoreboard_tab_raw_pressed = false;
+        self.input_routing.live.modifiers = ModifiersState::empty();
+        self.input_routing.live.running_pointer = None;
         if let Some(rename) = self.startup.crew_rename.as_mut() {
             rename.edit.cancel_pointer_selection();
             rename.last_click = None;
@@ -4745,7 +4747,7 @@ impl GameApp {
 
     fn handle_focus_gained(&mut self) -> Result<(), EngineError> {
         self.window_active = true;
-        let Some(point) = self.live_input.window_pointer else {
+        let Some(point) = self.input_routing.live.window_pointer else {
             return Ok(());
         };
         // Focus loss clears C4MouseControl/C4GUI hover ownership but retains
@@ -4781,7 +4783,11 @@ impl GameApp {
         if let Some(packet) = (NetworkControl::Player { owner, event }).into_packet() {
             self.record_control_batch(std::slice::from_ref(&packet));
         }
-        if let Err(err) = self.input.handle_event(&mut self.engine, owner, event) {
+        if let Err(err) = self
+            .input_routing
+            .dispatcher
+            .handle_event(&mut self.engine, owner, event)
+        {
             let status = control_script_error_to_status(err)?;
             tracing::error!(status, "control script error (non-fatal like C++)");
             self.status_text = status;
@@ -4815,9 +4821,11 @@ impl GameApp {
         {
             self.record_control_batch(std::slice::from_ref(&packet));
         }
-        let _ = self
-            .input
-            .handle_event(&mut self.engine, owner, ControlEvent::ClearPressed)?;
+        let _ = self.input_routing.dispatcher.handle_event(
+            &mut self.engine,
+            owner,
+            ControlEvent::ClearPressed,
+        )?;
         Ok(())
     }
 
@@ -5195,8 +5203,8 @@ impl GameApp {
         self.arm_terminal_loader_frame_presentation();
         self.loading_state = None;
         self.pending_client_start_status = None;
-        self.live_input.gui_mouse_owned = false;
-        self.live_input.world_mouse_owned = true;
+        self.input_routing.live.gui_mouse_owned = false;
+        self.input_routing.live.world_mouse_owned = true;
         self.install_session_game_tick_delay();
         self.mode = AppMode::Running;
         Ok(true)
@@ -5935,14 +5943,14 @@ impl GameApp {
     /// The return value identifies the player whose camera was mutated;
     /// observer cameras are presentation-owned and return `None`.
     fn apply_ingame_edge_scroll(&mut self) -> Result<Option<i32>, EngineError> {
-        if self.live_input.ingame_edge_scroll.is_none() {
+        if self.input_routing.live.ingame_edge_scroll.is_none() {
             return Ok(None);
         }
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
-            self.live_input.ingame_edge_scroll = None;
+            self.input_routing.live.ingame_edge_scroll = None;
             return Ok(None);
         };
-        self.live_input.ingame_edge_scroll = Some(scroll);
+        self.input_routing.live.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
     }
 
@@ -5952,20 +5960,20 @@ impl GameApp {
     /// effect without a new platform motion event.
     fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<Option<i32>, EngineError> {
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
-            self.live_input.ingame_edge_scroll = None;
+            self.input_routing.live.ingame_edge_scroll = None;
             return Ok(None);
         };
-        self.live_input.ingame_edge_scroll = Some(scroll);
+        self.input_routing.live.ingame_edge_scroll = Some(scroll);
         self.perform_ingame_edge_scroll(scroll, viewport)
     }
 
     fn reevaluate_ingame_edge_scroll(
         &mut self,
     ) -> Result<Option<(ActiveViewportEdgeScroll, ActiveViewportProjection)>, EngineError> {
-        let Some(retained) = self.live_input.ingame_viewport_mouse else {
+        let Some(retained) = self.input_routing.live.ingame_viewport_mouse else {
             return Ok(None);
         };
-        let Some(gui_point) = self.live_input.ingame_gui_pointer else {
+        let Some(gui_point) = self.input_routing.live.ingame_gui_pointer else {
             return Ok(None);
         };
         let routing_still_active = if retained.observer {
@@ -6033,7 +6041,7 @@ impl GameApp {
         if let Some(state) = self.ingame_mouse.right.as_mut() {
             state.update_with_fog(pointer, fog_blocked);
         }
-        self.live_input.ingame_pointer = Some(pointer);
+        self.input_routing.live.ingame_pointer = Some(pointer);
         self.update_ingame_drag_selection_kinds();
         self.refresh_ingame_mouse_help_region_caption(pointer);
         let Some(edge) =
@@ -6081,7 +6089,7 @@ impl GameApp {
                     .graphics
                     .scroll_observer_viewport(scroll.viewport_index, delta)
                 {
-                    self.live_input.ingame_edge_scroll = None;
+                    self.input_routing.live.ingame_edge_scroll = None;
                     break;
                 }
             }
@@ -6253,7 +6261,7 @@ impl GameApp {
         let context = AppCommandContext {
             engine: &self.engine,
             bindings: &self.bindings,
-            gamepad_bindings: &self.gamepad_bindings,
+            gamepad_bindings: &self.input_routing.gamepad_bindings,
             snapshot: &self.snapshot,
             resources: &self.startup_tooltip_resources,
         };
@@ -6331,7 +6339,7 @@ impl GameApp {
         if self.ingame_pointer_fog_blocked(pointer) {
             return Some((IngameMouseCursorKind::Nothing, None));
         }
-        let control_down = self.live_input.modifiers.control_key();
+        let control_down = self.input_routing.live.modifiers.control_key();
         let target = control_down
             .then(|| {
                 self.rendering.graphics.object_at_point_with_ocf(
@@ -6343,7 +6351,7 @@ impl GameApp {
             })
             .flatten();
         if control_down {
-            self.live_input.ingame_mouse_target = target;
+            self.input_routing.live.ingame_mouse_target = target;
         }
         let Some(target) = target else {
             let kind = match source {
@@ -6405,7 +6413,7 @@ impl GameApp {
     }
 
     fn advance_ingame_time_on_target(&mut self, kind: IngameMouseCursorKind) -> bool {
-        let state = &mut self.live_input.ingame_mouse_caption;
+        let state = &mut self.input_routing.live.ingame_mouse_caption;
         if state.cursor == kind {
             state.time_on_target = state.time_on_target.saturating_add(1);
             state.time_on_target >= INGAME_MOUSE_CAPTION_DELAY && state.keep_caption == 0
@@ -6524,7 +6532,7 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
-        let shift_append = self.live_input.modifiers.shift_key();
+        let shift_append = self.input_routing.live.modifiers.shift_key();
         let mut add_mode = 1;
         for _ in 0..selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
@@ -6560,7 +6568,7 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(motion.last);
-        let shift_append = self.live_input.modifiers.shift_key();
+        let shift_append = self.input_routing.live.modifiers.shift_key();
         let mut add_mode = 1;
         for object in selected {
             let (command, x, y, target, target2) = match cursor {
@@ -6648,7 +6656,8 @@ impl GameApp {
             return self.finish_ingame_noop_drag(drag.motion, selected.len());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let put_cursor = self.live_input.ingame_mouse_caption.cursor == IngameMouseCursorKind::Put;
+        let put_cursor =
+            self.input_routing.live.ingame_mouse_caption.cursor == IngameMouseCursorKind::Put;
         let put_target = put_cursor
             .then(|| self.retained_ingame_mouse_target())
             .flatten();
@@ -6663,7 +6672,7 @@ impl GameApp {
         }
         self.show_startup_hint = false;
         let mut add_mode = 1;
-        let shift_append = self.live_input.modifiers.shift_key();
+        let shift_append = self.input_routing.live.modifiers.shift_key();
         for object in selected {
             let (command, x, y, target, target2) = if put_cursor {
                 (
@@ -6712,13 +6721,13 @@ impl GameApp {
             return self.finish_ingame_noop_drag(drag.motion, selected.len());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let put_target = (self.live_input.ingame_mouse_caption.cursor
+        let put_target = (self.input_routing.live.ingame_mouse_caption.cursor
             == IngameMouseCursorKind::VehiclePut)
             .then(|| self.retained_ingame_mouse_target())
             .flatten();
         self.show_startup_hint = false;
         let mut add_mode = 1;
-        let shift_append = self.live_input.modifiers.shift_key();
+        let shift_append = self.input_routing.live.modifiers.shift_key();
         for vehicle in selected {
             self.submit_or_execute_player_command(PlayerCommandControlData {
                 player: self.players.local_owner,
@@ -6754,7 +6763,7 @@ impl GameApp {
             }
             return match button {
                 clonk_frontend::hud::ViewportButton::Help => {
-                    self.live_input.ingame_mouse_help = true;
+                    self.input_routing.live.ingame_mouse_help = true;
                     Ok(())
                 }
                 clonk_frontend::hud::ViewportButton::PlayerMenu => {
@@ -8894,16 +8903,16 @@ impl GameApp {
             .set_allow_debug(saved_allow_debug.unwrap_or(parameter_bootstrap.1));
         self.engine.set_control_rate(parameter_bootstrap.2);
         self.apply_material_library();
-        self.input = InputDispatcher::new();
-        self.live_input.pressed_engine_keys.clear();
-        self.scoreboard_tab_raw_pressed = false;
-        self.live_input.ingame_gui_pointer = None;
-        self.live_input.ingame_pointer = None;
-        self.live_input.ingame_mouse_init_centered = false;
-        self.live_input.ingame_viewport_mouse = None;
-        self.live_input.ingame_edge_scroll = None;
-        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.live_input.ingame_mouse_target = None;
+        self.input_routing.dispatcher = InputDispatcher::new();
+        self.input_routing.live.pressed_engine_keys.clear();
+        self.input_routing.scoreboard_tab_raw_pressed = false;
+        self.input_routing.live.ingame_gui_pointer = None;
+        self.input_routing.live.ingame_pointer = None;
+        self.input_routing.live.ingame_mouse_init_centered = false;
+        self.input_routing.live.ingame_viewport_mouse = None;
+        self.input_routing.live.ingame_edge_scroll = None;
+        self.input_routing.live.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.input_routing.live.ingame_mouse_target = None;
         self.ingame_mouse.left = None;
         self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
@@ -9389,10 +9398,10 @@ impl GameApp {
                     .loading_state
                     .as_ref()
                     .is_some_and(|loading| loading.prepared_go.is_some());
-        self.live_input.ingame_mouse_help = false;
+        self.input_routing.live.ingame_mouse_help = false;
         self.ingame_mouse.help_caption = None;
-        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.live_input.ingame_mouse_target = None;
+        self.input_routing.live.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.input_routing.live.ingame_mouse_target = None;
         self.ingame_mouse.left = None;
         self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
@@ -9495,8 +9504,8 @@ impl GameApp {
         self.dialogs.stack.clear();
         self.dialogs.running_active = None;
         self.dialogs.client_list_consumed_keys.clear();
-        self.runtime_key_config_cache = OnceLock::new();
-        let _ = self.runtime_key_config_cache.set(
+        self.input_routing.runtime_key_config_cache = OnceLock::new();
+        let _ = self.input_routing.runtime_key_config_cache.set(
             load_runtime_global_key_config(self.app_paths.as_ref())
                 .map_err(|error| format!("{error:#}")),
         );
@@ -9508,8 +9517,8 @@ impl GameApp {
         self.dialogs.chart_consumed_keys.clear();
         self.dialogs.chart_pointer_capture = false;
         self.reset_runtime_default_dialog_order();
-        self.live_input.gui_mouse_owned = false;
-        self.live_input.world_mouse_owned = true;
+        self.input_routing.live.gui_mouse_owned = false;
+        self.input_routing.live.world_mouse_owned = true;
         self.mode = AppMode::Running;
         self.reconcile_network_stats_series();
         // Startup hint + join log line for the HUD. Game.Time is owned by the

@@ -2966,7 +2966,7 @@ mod tests {
             "host pointer position leaked into evidence"
         );
         assert_eq!(
-            app.live_input.window_pointer,
+            app.input_routing.live.window_pointer,
             Some(clonk_frontend::GuiPoint::new(32.0, 32.0))
         );
         Ok(())

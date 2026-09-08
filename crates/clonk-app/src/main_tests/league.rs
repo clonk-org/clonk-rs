@@ -4172,9 +4172,9 @@ fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
     main_assert!(!disconnected_host.take_exit_request());
 
     let mut unavailable_key_config = new_running_sandbox_app();
-    unavailable_key_config.runtime_key_config_cache = OnceLock::new();
+    unavailable_key_config.input_routing.runtime_key_config_cache = OnceLock::new();
     unavailable_key_config
-        .runtime_key_config_cache
+        .input_routing.runtime_key_config_cache
         .set(Err("unsupported Pause override".to_string()))
         .test_value();
     unavailable_key_config.test_key(VirtualKeyCode::Pause, ElementState::Pressed);

@@ -99,7 +99,7 @@ impl GameApp {
                 && keyboard_scope_available
                 && self.voice_activation().is_none(),
             eligible,
-            self.engine_key_repeated,
+            self.input_routing.engine_key_repeated,
             key,
             state,
         ) {

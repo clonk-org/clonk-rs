@@ -3617,7 +3617,7 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let modifiers = self.live_input.modifiers
+        let modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers != ModifiersState::ALT
             && modifiers != (ModifiersState::ALT | ModifiersState::SHIFT)
@@ -3672,7 +3672,7 @@ impl GameApp {
         if !self.joined_network_lobby_active() {
             return Ok(false);
         }
-        let c4_modifiers = self.live_input.modifiers
+        let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !c4_modifiers.is_empty() && c4_modifiers != ModifiersState::SHIFT {
             return Ok(false);
@@ -3718,7 +3718,7 @@ impl GameApp {
         if gui_key != KeyCode::Tab && !controller_focused {
             return Ok(false);
         }
-        let shift = self.live_input.modifiers.shift_key();
+        let shift = self.input_routing.live.modifiers.shift_key();
         let assets = Arc::clone(&self.assets);
         let actions = {
             let lobby = self
@@ -3764,7 +3764,7 @@ impl GameApp {
         if !chat_focused {
             return Ok(false);
         }
-        let c4_modifiers = self.live_input.modifiers
+        let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let modifiers = LobbyChatKeyModifiers {
             shift: c4_modifiers.contains(ModifiersState::SHIFT),
@@ -6311,7 +6311,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
-        let c4_modifiers = self.live_input.modifiers
+        let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if state == ElementState::Pressed {
             let chat_focused = self
@@ -6437,7 +6437,7 @@ impl GameApp {
             }
         }
         let alt_combo_open = state == ElementState::Pressed
-            && self.live_input.modifiers.alt_key()
+            && self.input_routing.live.modifiers.alt_key()
             && matches!(key, VirtualKeyCode::ArrowDown | VirtualKeyCode::Space)
             && self
                 .classic_host_lobby
@@ -6449,7 +6449,7 @@ impl GameApp {
                     self.classic_host_lobby.as_mut().map(|lobby| {
                         lobby.controller.key_down(
                             key,
-                            self.live_input.modifiers.shift_key(),
+                            self.input_routing.live.modifiers.shift_key(),
                             &layout,
                             &roster,
                             Instant::now(),
@@ -6493,7 +6493,7 @@ impl GameApp {
                     .map(|lobby| {
                         lobby.controller.key_down(
                             key,
-                            self.live_input.modifiers.shift_key(),
+                            self.input_routing.live.modifiers.shift_key(),
                             &layout,
                             &roster,
                             Instant::now(),
@@ -6833,12 +6833,13 @@ impl GameApp {
         };
         let tab = state == ElementState::Pressed
             && key == VirtualKeyCode::Tab
-            && (self.live_input.modifiers.is_empty()
-                || self.live_input.modifiers == ModifiersState::SHIFT);
-        let no_modifiers = self.live_input.modifiers.is_empty();
+            && (self.input_routing.live.modifiers.is_empty()
+                || self.input_routing.live.modifiers == ModifiersState::SHIFT);
+        let no_modifiers = self.input_routing.live.modifiers.is_empty();
         let default_focus_modifiers =
-            no_modifiers || self.live_input.modifiers == ModifiersState::SHIFT;
-        let combo_open_modifiers = no_modifiers || self.live_input.modifiers == ModifiersState::ALT;
+            no_modifiers || self.input_routing.live.modifiers == ModifiersState::SHIFT;
+        let combo_open_modifiers =
+            no_modifiers || self.input_routing.live.modifiers == ModifiersState::ALT;
         let roster_has_rows = self
             .network_lobby
             .as_ref()
@@ -6896,7 +6897,7 @@ impl GameApp {
             return Ok(false);
         };
         let (layout, roster) = self.joined_lobby_layouts()?;
-        let shift = self.live_input.modifiers.shift_key();
+        let shift = self.input_routing.live.modifiers.shift_key();
         let actions = self
             .network_lobby
             .as_mut()

@@ -111,8 +111,8 @@ fn install_runtime_key_config(
     app: &mut GameApp,
     config: std::result::Result<RuntimeKeyConfig, String>,
 ) {
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache.set(config).test_value();
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache.set(config).test_value();
 }
 
 fn open_test_console_viewport(app: &mut GameApp, player: Option<i32>) -> u64 {
@@ -3815,7 +3815,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     app.open_options_menu();
     let controls = load_options_control_state(
         &app.bindings,
-        &app.gamepad_bindings,
+        &app.input_routing.gamepad_bindings,
         3,
         app.config.gamepad_gui_control,
     );
@@ -3850,7 +3850,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     app.test_key(VirtualKeyCode::Digit3, ElementState::Pressed);
     runtime_assert_eq!(
         selected_options_control_set(&app, ControlDevice::Gamepad) => 2;
-        app.live_input.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
+        app.input_routing.live.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
     );
 
     for key in [VirtualKeyCode::Digit4, VirtualKeyCode::Digit0] {
@@ -3858,7 +3858,7 @@ fn options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
     }
     runtime_assert_eq!(
         selected_options_control_set(&app, ControlDevice::Gamepad) => 2;
-        app.live_input.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
+        app.input_routing.live.gamepads.options_open_slot() => Some(GamepadSlot::new(2));
     );
 }
 
@@ -4327,7 +4327,7 @@ fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
 #[test]
 fn unconfigured_stick_and_hat_emit_no_gameplay_controls() {
     let mut app = new_running_sandbox_app();
-    app.gamepad_bindings = GamepadBindings::from_config(&Config::new());
+    app.input_routing.gamepad_bindings = GamepadBindings::from_config(&Config::new());
     app.local_controls = LocalControlRegistry::default();
     app.local_controls.initialize(test_local_control_init(
         app.players.local_owner,
@@ -4385,7 +4385,7 @@ fn axis_up_fires_dig_and_hat_zero_fires_configured_left() {
             .to_string(),
     );
     let mut app = new_running_sandbox_app();
-    app.gamepad_bindings = GamepadBindings::from_config(&config);
+    app.input_routing.gamepad_bindings = GamepadBindings::from_config(&config);
     app.local_controls = LocalControlRegistry::default();
     app.local_controls.initialize(test_local_control_init(
         app.players.local_owner,
@@ -5174,12 +5174,12 @@ fn detached_play_mode_motion_drives_the_gameplay_mouse() {
     app.developer_console_edit_mode = ConsoleEditMode::Play;
     let identity = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    app.live_input.ingame_viewport_mouse = None;
+    app.input_routing.live.ingame_viewport_mouse = None;
 
     app.console_viewport_motion(identity, (48, 36), 1.0, false, false);
 
     let retained = app
-        .live_input
+        .input_routing.live
         .ingame_viewport_mouse
         .as_ref()
         .expect("Play-mode motion reaches C4MouseControl::Move");
@@ -5291,13 +5291,13 @@ fn detached_middle_and_wheel_follow_their_native_arms() {
         app.viewports.console_viewport_player_lock(owning),
         "a fresh viewport starts locked (C4Viewport::Default)"
     );
-    app.live_input.ingame_mouse_init_centered = false;
+    app.input_routing.live.ingame_mouse_init_centered = false;
     assert!(
         !app.scroll_console_viewport(owning, 3, 0),
         "a locked viewport still reports no scroll of its own view"
     );
     assert!(
-        app.live_input.ingame_mouse_init_centered,
+        app.input_routing.live.ingame_mouse_init_centered,
         "but the wheel reached the gameplay mouse"
     );
 
@@ -5326,11 +5326,11 @@ fn the_detached_double_click_stamp_is_shared_across_windows() {
     let owning = open_local_test_console_viewport(&mut app);
     assert!(app.render_console_viewport(owning, 320, 200).is_some());
 
-    app.live_input.last_left_press = None;
+    app.input_routing.live.last_left_press = None;
     app.console_viewport_motion(owning, (48, 36), 1.0, false, false);
     app.console_viewport_press(owning, (48, 36), 1.0, false, false);
     assert!(
-        app.live_input.last_left_press.is_some(),
+        app.input_routing.live.last_left_press.is_some(),
         "the first press stamps the shared clock"
     );
 
@@ -5338,7 +5338,7 @@ fn the_detached_double_click_stamp_is_shared_across_windows() {
     // exactly as `if (timeGetTime() - last_left_click < 400)` does.
     app.console_viewport_press(owning, (48, 36), 1.0, false, false);
     assert!(
-        app.live_input.last_left_press.is_none(),
+        app.input_routing.live.last_left_press.is_none(),
         "the second press is a LeftDouble and resets the stamp to 0"
     );
 }
@@ -5805,8 +5805,8 @@ fn console_scope_gamepad_overrides_reach_the_edit_cursor_and_tools() {
         let source = format!("[Keys]\n{name}=\\x0042000a\n");
         let mut app = new_running_sandbox_app();
         app.console_mode = console;
-        app.runtime_key_config_cache = OnceLock::new();
-        app.runtime_key_config_cache
+        app.input_routing.runtime_key_config_cache = OnceLock::new();
+        app.input_routing.runtime_key_config_cache
             .set(Ok(parse_runtime_key_config(source.as_bytes()).test_value()))
             .test_value();
         app
@@ -6492,12 +6492,12 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     };
 
     // Plain click replaces.
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     click(&mut app, 3);
     runtime_assert_eq!(app.developer_selection.objects() => &[rows[3].id]);
 
     // Ctrl-click adds — and the writeback is in path order, not click order.
-    app.live_input.modifiers = ModifiersState::CONTROL;
+    app.input_routing.live.modifiers = ModifiersState::CONTROL;
     click(&mut app, 1);
     runtime_assert_eq!(
         app.developer_selection.objects() => &[rows[1].id, rows[3].id],
@@ -6511,7 +6511,7 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     // Shift-click covers the anchor through the clicked row, replacing. The
     // anchor is row 3: a Ctrl-click *sets* it, so an extension afterwards
     // starts from the row that was Ctrl-clicked and not from the first one.
-    app.live_input.modifiers = ModifiersState::SHIFT;
+    app.input_routing.live.modifiers = ModifiersState::SHIFT;
     click(&mut app, 4);
     runtime_assert_eq!(
         app.developer_selection.objects() => &[rows[3].id, rows[4].id]
@@ -6524,14 +6524,14 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
     );
 
     // Ctrl+Shift adds the range to what is already selected.
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     click(&mut app, 4);
-    app.live_input.modifiers = ModifiersState::CONTROL;
+    app.input_routing.live.modifiers = ModifiersState::CONTROL;
     click(&mut app, 0);
     runtime_assert_eq!(
         app.developer_selection.objects() => &[rows[0].id, rows[4].id]
     );
-    app.live_input.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    app.input_routing.live.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
     click(&mut app, 2);
     runtime_assert_eq!(
         app.developer_selection.objects() =>
@@ -6552,7 +6552,7 @@ fn object_list_clicks_toggle_and_extend_in_tree_path_order() {
 
     // Empty space clears, as `gtk_tree_selection_get_selected_rows` returning
     // nothing does.
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     app.developer_object_list_click((10, extent.1 as i32 - 4), extent);
     runtime_assert!(app.developer_selection.objects().is_empty());
     let _ = SelectionWriter::ObjectTree;
@@ -7945,7 +7945,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     modified_first.test_modifiers(ModifiersState::ALT);
     modified_first.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     runtime_assert!(modified_first
-        .live_input
+        .input_routing.live
         .pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     modified_first.test_modifiers(ModifiersState::empty());
@@ -7984,7 +7984,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     changed_on_release.test_modifiers(ModifiersState::CONTROL);
     changed_on_release.test_key(VirtualKeyCode::F3, ElementState::Released);
     runtime_assert!(!changed_on_release
-        .live_input
+        .input_routing.live
         .pressed_engine_keys
         .contains(&VirtualKeyCode::F3));
     changed_on_release
@@ -8000,7 +8000,7 @@ fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifier
     let sound_before = focus.test_audio_ref().options.sound_enabled;
     focus.test_modifiers(ModifiersState::CONTROL);
     focus.handle_focus_lost().test_value();
-    assert!(focus.live_input.modifiers.is_empty());
+    assert!(focus.input_routing.live.modifiers.is_empty());
     focus.test_key(VirtualKeyCode::F3, ElementState::Pressed);
     runtime_assert_eq!(focus.test_audio_ref().options.sound_enabled => sound_before);
     assert!(focus.runtime_flash_message.is_some());
@@ -8967,7 +8967,7 @@ fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
         app.test_key(key, ElementState::Pressed);
         runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
         runtime_assert_ne!(app.engine.player(secondary).expect("secondary local player").control.pressed_coms & left_mask => 0);
-        assert!(app.live_input.pressed_engine_keys.contains(&key));
+        assert!(app.input_routing.live.pressed_engine_keys.contains(&key));
         assert!(!app.dialogs.help_visible);
         assert!(app.runtime_flash_message.is_none());
 
@@ -8977,7 +8977,7 @@ fn secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
             "{key:?} release must use the matching secondary owner's auto-stop style",
         );
         runtime_assert_eq!(app.engine.player(primary).expect("primary local player").control.pressed_coms & left_mask => 0);
-        assert!(!app.live_input.pressed_engine_keys.contains(&key));
+        assert!(!app.input_routing.live.pressed_engine_keys.contains(&key));
         assert!(!app.dialogs.help_visible);
         assert!(app.runtime_flash_message.is_none());
     }
@@ -9008,7 +9008,7 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
             .test_player(app.players.local_owner)
             .control
             .pressed_coms;
-        let pressed_engine_keys = app.live_input.pressed_engine_keys.clone();
+        let pressed_engine_keys = app.input_routing.live.pressed_engine_keys.clone();
         assert!(app.show_startup_hint);
 
         for state in [ElementState::Pressed, ElementState::Released] {
@@ -9024,7 +9024,7 @@ fn modified_f1_does_not_match_an_unmodified_player_binding() {
                     expected_raw_keys.remove(&VirtualKeyCode::F1);
                 }
             }
-            runtime_assert_eq!(app.live_input.pressed_engine_keys => expected_raw_keys, "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}");
+            runtime_assert_eq!(app.input_routing.live.pressed_engine_keys => expected_raw_keys, "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}");
             runtime_assert!(
                 app.show_startup_hint,
                 "modifiers {modifiers:?}, state {state:?}"
@@ -10100,8 +10100,8 @@ fn runtime_pause_gamepad_button_override_toggles_once_per_press() {
     let config =
         parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=\\x0042000a\n").test_value();
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache.set(Ok(config)).test_value();
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache.set(Ok(config)).test_value();
     runtime_assert!(!app.runtime_halt_active());
 
     app.handle_gamepad_button(
@@ -10142,8 +10142,8 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
     let bound = |name: &str| {
         let source = format!("[Keys]\n{name}=\\x0042000a\n");
         let mut app = new_running_sandbox_app();
-        app.runtime_key_config_cache = OnceLock::new();
-        app.runtime_key_config_cache
+        app.input_routing.runtime_key_config_cache = OnceLock::new();
+        app.input_routing.runtime_key_config_cache
             .set(Ok(parse_runtime_key_config(source.as_bytes()).test_value()))
             .test_value();
         app
@@ -10192,8 +10192,8 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
     for (name, delta) in [("CtrlRateUp", 1), ("CtrlRateDown", -1)] {
         let mut rate = new_classic_running_sandbox_app();
         let (_events, mut commands) = install_running_network_stub(&mut rate, 0, 40, 4);
-        rate.runtime_key_config_cache = OnceLock::new();
-        rate.runtime_key_config_cache
+        rate.input_routing.runtime_key_config_cache = OnceLock::new();
+        rate.input_routing.runtime_key_config_cache
             .set(Ok(parse_runtime_key_config(
                 format!("[Keys]\n{name}=\\x0042000a\n").as_bytes(),
             )
@@ -10239,8 +10239,8 @@ fn network_global_gamepad_overrides_reach_their_callbacks() {
 fn runtime_pause_gamepad_direction_override_toggles_the_hold() {
     let config = parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=Joy1A\n").test_value();
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache.set(Ok(config)).test_value();
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache.set(Ok(config)).test_value();
 
     app.handle_gamepad_direction(
         GamepadSlot::new(0),
@@ -10303,8 +10303,8 @@ fn runtime_pause_gamepad_override_is_refused_under_the_evaluation_dialog() {
     let config =
         parse_runtime_key_config(b"[Keys]\nFullscreenPauseToggle=\\x0042000a\n").test_value();
     let mut app = new_game_over_keyboard_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache.set(Ok(config)).test_value();
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache.set(Ok(config)).test_value();
     runtime_assert!(
         app.runtime_halt_active(),
         "the evaluation dialog owns a halt of its own"
@@ -10332,8 +10332,8 @@ fn runtime_pause_gamepad_override_yields_to_a_colliding_player_control() {
     )
     .test_value();
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache.set(Ok(config)).test_value();
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache.set(Ok(config)).test_value();
     runtime_assert!(
         !app.runtime_control_candidates_for_gamepad_button(0, 0, ElementState::Pressed)
             .is_empty(),
@@ -10385,8 +10385,8 @@ fn runtime_gamepad_overrides_reach_every_fullscreen_global_action() {
     // The F1 help needs the classic UpperBoard resource, as it does for the
     // keyboard route.
     let mut app = new_classic_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(config.as_bytes()).test_value()))
         .test_value();
 
@@ -10482,8 +10482,8 @@ fn runtime_gamepad_fullscreen_globals_have_no_default_binding() {
 #[test]
 fn runtime_gamepad_stats_toggle_yields_its_code_to_the_actions_it_shadows() {
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(
             b"[Keys]\nStatsToggle=\\x0042000a\nChartToggle=\\x0042000a\n",
         )
@@ -10511,8 +10511,8 @@ fn runtime_gamepad_stats_toggle_yields_its_code_to_the_actions_it_shadows() {
 fn observer_next_player_gamepad_override_keeps_its_free_view_scope() {
     let bound = || {
         let mut app = new_running_sandbox_app();
-        app.runtime_key_config_cache = OnceLock::new();
-        app.runtime_key_config_cache
+        app.input_routing.runtime_key_config_cache = OnceLock::new();
+        app.input_routing.runtime_key_config_cache
             .set(Ok(parse_runtime_key_config(
                 b"[Keys]\nNetObsNextPlayer=\\x0042000a\n",
             )
@@ -10580,8 +10580,8 @@ fn debug_global_gamepad_overrides_reach_every_debug_toggle() {
         ("DbgShowSolidMaskToggle", 3, RuntimeDebugKey::SolidMask),
     ] {
         let mut app = new_running_sandbox_app();
-        app.runtime_key_config_cache = OnceLock::new();
-        app.runtime_key_config_cache
+        app.input_routing.runtime_key_config_cache = OnceLock::new();
+        app.input_routing.runtime_key_config_cache
             .set(Ok(parse_runtime_key_config(
                 format!("[Keys]\n{name}=\\x0042000{:x}\n", 10 + button).as_bytes(),
             )
@@ -10609,8 +10609,8 @@ fn debug_global_gamepad_overrides_reach_every_debug_toggle() {
 #[test]
 fn an_earlier_registration_outranks_a_debug_gamepad_override() {
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(
             b"[Keys]\nMsgBoardScrollUp=\\x0042000a\nDbgModeToggle=\\x0042000a\n",
         )
@@ -10630,8 +10630,8 @@ fn an_earlier_registration_outranks_a_debug_gamepad_override() {
 #[test]
 fn a_refused_debug_gamepad_override_flashes_without_toggling() {
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(
             b"[Keys]\nDbgShowVtxToggle=\\x0042000a\n",
         )
@@ -10667,8 +10667,8 @@ fn a_refused_debug_gamepad_override_flashes_without_toggling() {
 #[test]
 fn runtime_gamepad_view_actions_stay_inside_their_keyboard_scope() {
     let mut app = new_running_sandbox_app();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(
             b"[Keys]\nFreeViewScrollLeft=\\x0042000a\nFilmNextPlayer=\\x0042000b\n",
         )
