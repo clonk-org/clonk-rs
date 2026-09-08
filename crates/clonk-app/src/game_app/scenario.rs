@@ -2069,7 +2069,7 @@ impl GameApp {
         // so a constructor calling `GetPlayerByName` finds them.
         if offline_savegame.is_some() {
             self.install_local_controls(LocalControlRegistry::default());
-            self.mouse_control_allowed = !scenario_data.disables_mouse();
+            self.ingame_mouse.control_allowed = !scenario_data.disables_mouse();
         }
         if let Some(savegame) = offline_savegame.as_ref() {
             remove_unassociated_savegame_player_objects_with_logs(
@@ -2296,12 +2296,12 @@ impl GameApp {
         self.live_input.ingame_edge_scroll = None;
         self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.live_input.ingame_mouse_target = None;
-        self.mouse_state = None;
-        self.ingame_right_mouse_state = None;
+        self.ingame_mouse.left = None;
+        self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
-        self.ingame_dragged_objects.clear();
-        self.mouse_control_allowed = !scenario_data.disables_mouse();
-        self.mouse_control = self.mouse_control_allowed;
+        self.ingame_mouse.dragged_objects.clear();
+        self.ingame_mouse.control_allowed = !scenario_data.disables_mouse();
+        self.ingame_mouse.control = self.ingame_mouse.control_allowed;
         if replay {
             if let Some(startup) = replay_player_startup.as_mut() {
                 let restored = std::mem::take(&mut startup.local_controls);
@@ -2309,7 +2309,7 @@ impl GameApp {
                 if let Some(owner) = startup.local_players.first().copied() {
                     self.players.local_owner = owner;
                 }
-                self.mouse_control = self.local_controls.mouse_owner().is_some();
+                self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
             }
         }
         self.advance_scenario_loader(97, "Input and audio runtime initialized");
@@ -2428,7 +2428,7 @@ impl GameApp {
                         prefers_mouse: player_file.pref_mouse,
                         gamepads_enabled: self.config.gamepads_enabled,
                         replay: false,
-                        disable_mouse: !self.mouse_control_allowed,
+                        disable_mouse: !self.ingame_mouse.control_allowed,
                     });
                     self.engine
                         .set_local_players(self.local_controls.owners().collect::<Vec<_>>());
@@ -2511,7 +2511,7 @@ impl GameApp {
                         })
                     });
                 }
-                self.mouse_control = self.local_controls.mouse_owner().is_some();
+                self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
                 if let Some(first) = local_players.first().copied() {
                     self.players.local_owner = first;
                 }
@@ -2735,12 +2735,12 @@ impl GameApp {
         self.live_input.ingame_edge_scroll = None;
         self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.live_input.ingame_mouse_target = None;
-        self.mouse_state = None;
-        self.ingame_right_mouse_state = None;
+        self.ingame_mouse.left = None;
+        self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
-        self.ingame_dragged_objects.clear();
-        self.mouse_control_allowed = true;
-        self.mouse_control = true;
+        self.ingame_mouse.dragged_objects.clear();
+        self.ingame_mouse.control_allowed = true;
+        self.ingame_mouse.control = true;
         self.active_definition_load = None;
         self.active_description_definition_modules.clear();
         self.rendering.sky = None;

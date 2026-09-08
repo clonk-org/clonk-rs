@@ -673,7 +673,7 @@ fn help_regions_share_one_native_caption_slot() {
         f64::from(inventory_point.y),
     ));
     main_assert_eq!(
-        app.ingame_mouse_help_caption
+        app.ingame_mouse.help_caption
             .as_ref()
             .map(|caption| caption.text.as_str()) =>
         app.engine.object_help_caption(target).as_deref(),
@@ -690,7 +690,7 @@ fn help_regions_share_one_native_caption_slot() {
         f64::from(help_button.y),
     ));
     main_assert!(
-        app.ingame_mouse_help_caption.is_none(),
+        app.ingame_mouse.help_caption.is_none(),
         "a targetless region replaces the prior Help tooltip"
     );
     let caption = app.live_input.ingame_mouse_caption.caption.test_ref();

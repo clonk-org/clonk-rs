@@ -441,7 +441,7 @@ fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
         f64::from(target.x),
         f64::from(target.y),
     ));
-    let drag = app.ingame_right_mouse_state.test_value();
+    let drag = app.ingame_mouse.right.test_value();
     main_assert_eq!(drag.motion.selection_kind => IngameDragSelectionKind::Crew);
     main_assert_eq!(app.ingame_selection_candidates(drag.motion) => vec![replacement], "C4MouseControl's transient Selection contains the framed crew");
     app.test_right_button(ElementState::Released);
@@ -551,7 +551,7 @@ fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
         f64::from(frame_end.x),
         f64::from(frame_end.y),
     ));
-    let drag = app.ingame_right_mouse_state.test_value();
+    let drag = app.ingame_mouse.right.test_value();
     main_assert_eq!(drag.motion.selection_kind => IngameDragSelectionKind::Objects);
     main_assert_eq!(app.ingame_selection_candidates(drag.motion) => vec![second_bag, first_bag], "object marks retain C++ Game.Objects newest-first order");
     app.test_right_button(ElementState::Released);
@@ -736,7 +736,7 @@ fn real_alchemy_control_right_drag_puts_carryable_into_hut(
         f64::from(hut_point.x),
         f64::from(hut_point.y),
     ));
-    main_assert!(app.ingame_right_mouse_state.is_some_and(|state| state.motion.world_drag_started));
+    main_assert!(app.ingame_mouse.right.is_some_and(|state| state.motion.world_drag_started));
     main_assert_eq!(app.live_input.ingame_mouse_caption.cursor => IngameMouseCursorKind::Put);
     main_assert_eq!(app.live_input.ingame_mouse_target => Some(hut));
     app.test_right_button(ElementState::Released);
@@ -2751,7 +2751,7 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
     // covers the real key map and ObjectComUp entrance path.
     let mut app = real_tutorial_app(3, "Tutorial 3 app virtual player");
     main_assert!(
-            !app.mouse_control,
+            !app.ingame_mouse.control,
             "Tutorial03 DisableMouse=1 must suppress player mouse control and the menu close X like C++ (C4Player.cpp:1907-1912; C4Menu.cpp:1270-1276)"
         );
     main_assert!(!app.option_flags(app.players.local_owner).mouse_shown, "DisableMouse must remove the in-game Options entry like C++ (C4MainMenu.cpp:563-571)");

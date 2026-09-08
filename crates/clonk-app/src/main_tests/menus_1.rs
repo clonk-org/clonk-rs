@@ -193,7 +193,7 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
             ModifiersState::empty(),
             ModifiersState::empty(),
         );
-        main_assert!(app.ingame_mouse_help_caption.is_some());
+        main_assert!(app.ingame_mouse.help_caption.is_some());
         app.test_cursor(PhysicalPosition::new(
             f64::from(release.x),
             f64::from(release.y),
@@ -205,7 +205,7 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
         main_assert_eq!(app.engine.crew_cursor(owner) => cursor);
         main_assert_eq!(commands.take_submitted_mouse_controls() => (Vec::new(), Vec::new(), Vec::new()), "Help right-up queues neither Context nor player selection");
         main_assert_eq!(
-            app.ingame_mouse_help_caption =>
+            app.ingame_mouse.help_caption =>
             Some(IngameMouseHelpCaption {
                 text: "Right target".to_string(),
                 keep_moves: 0,
@@ -213,7 +213,7 @@ fn help_right_up_exits_without_context_or_crew_cycle() {
             "right-up clears KeepCaption without erasing the caption immediately"
         );
         app.update_ingame_pointer(release).test_value();
-        main_assert!(app.ingame_mouse_help_caption.is_none());
+        main_assert!(app.ingame_mouse.help_caption.is_none());
     }
 }
 
@@ -274,7 +274,7 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
     app.engine.remove_player(removed_owner).test_value();
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
-    app.mouse_control = false;
+    app.ingame_mouse.control = false;
     render_mouse_test_app(&mut app);
 
     let viewport = app.active_ingame_mouse_viewport().test_value();
@@ -304,7 +304,7 @@ fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
         f64::from(world.y),
     ));
     app.test_left_button(ElementState::Pressed);
-    main_assert!(app.mouse_state.is_none(), "passive observers never enter native DragNone world state");
+    main_assert!(app.ingame_mouse.left.is_none(), "passive observers never enter native DragNone world state");
     app.test_left_button(ElementState::Released);
 
     let mut network_commands = install_mouse_network_capture(&mut app);
@@ -442,11 +442,11 @@ fn script_menu_owns_threshold_crossing_inventory_drag_move() {
         f64::from(menu_point.x),
         f64::from(menu_point.y),
     ));
-    main_assert!(app.mouse_state.is_some_and(|state| {!state.motion.moved && !state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()}));
-    main_assert!(app.ingame_dragged_objects.is_empty());
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| {!state.motion.moved && !state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()}));
+    main_assert!(app.ingame_mouse.dragged_objects.is_empty());
     app.handle_ingame_mouse_button(ElementState::Released)
         .test_value();
-    main_assert!(app.mouse_state.is_none());
+    main_assert!(app.ingame_mouse.left.is_none());
 }
 
 #[test]

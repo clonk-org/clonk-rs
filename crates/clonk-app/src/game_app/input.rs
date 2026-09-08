@@ -688,7 +688,7 @@ impl GameApp {
             }
             self.initialize_ingame_mouse_for_wheel();
             self.advance_ingame_mouse_caption_lifetime();
-            if !self.mouse_control {
+            if !self.ingame_mouse.control {
                 self.restore_ingame_mouse_region_caption();
                 return Ok(());
             }
@@ -1409,9 +1409,11 @@ impl GameApp {
             return release_captured;
         };
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         let action = self
             .dialogs
@@ -1456,9 +1458,11 @@ impl GameApp {
             return false;
         };
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         dialog.pointer_move(point, preferred, resources)
     }
@@ -2298,9 +2302,11 @@ impl GameApp {
         let dialog = self.dialogs.client_list.as_ref()?;
         let font = &self.assets.clonk_fonts.as_deref()?.text;
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         dialog.prepare_info_lines(preferred, font);
         Some((preferred, font.line_height))
@@ -7804,8 +7810,8 @@ impl GameApp {
                                     // menu. With no button gesture, retain native's
                                     // projected viewport pointer even when menu
                                     // resources fail before ownership resolves.
-                                    if self.mouse_state.is_none()
-                                        && self.ingame_right_mouse_state.is_none()
+                                    if self.ingame_mouse.left.is_none()
+                                        && self.ingame_mouse.right.is_none()
                                     {
                                         let _ = self.update_ingame_pointer(point);
                                     }
@@ -7848,10 +7854,10 @@ impl GameApp {
         if self.mode != AppMode::Running {
             return;
         }
-        if let Some(state) = self.mouse_state.as_mut() {
+        if let Some(state) = self.ingame_mouse.left.as_mut() {
             state.motion.moved = true;
         }
-        if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+        if let Some(state) = self.ingame_mouse.right.as_mut() {
             state.motion.moved = true;
         }
         self.live_input.ingame_pointer = None;
@@ -8009,7 +8015,7 @@ impl GameApp {
             return false;
         }
         match self.local_controls.mouse_owner() {
-            Some(mouse_owner) => self.mouse_control && mouse_owner == owner,
+            Some(mouse_owner) => self.ingame_mouse.control && mouse_owner == owner,
             None => owner == OWNER_NONE && viewport.is_no_owner_viewport,
         }
     }
@@ -8024,7 +8030,7 @@ impl GameApp {
         self.live_input.ingame_viewport_mouse = None;
         self.live_input.ingame_edge_scroll = None;
         self.live_input.ingame_mouse_help = false;
-        self.ingame_mouse_help_caption = None;
+        self.ingame_mouse.help_caption = None;
         self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.live_input.ingame_mouse_target = None;
         self.cancel_ingame_mouse_gestures();
@@ -8077,9 +8083,9 @@ impl GameApp {
     }
 
     pub(crate) fn clear_ingame_world_mouse_gestures(&mut self) {
-        self.mouse_state = None;
-        self.ingame_right_mouse_state = None;
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.left = None;
+        self.ingame_mouse.right = None;
+        self.ingame_mouse.dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
     }
@@ -8139,21 +8145,25 @@ impl GameApp {
             let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
             let cancel_left_selection = over_region
                 && self
-                    .mouse_state
+                    .ingame_mouse
+                    .left
                     .is_some_and(|state| state.motion.moved && state.motion.selection_frame);
             let cancel_right_selection = over_region
                 && self
-                    .ingame_right_mouse_state
+                    .ingame_mouse
+                    .right
                     .is_some_and(|state| state.motion.moved && state.motion.selection_frame);
             let refresh_left_region_drag = self
-                .mouse_state
+                .ingame_mouse
+                .left
                 .is_some_and(|state| state.motion.region_drag_started);
             let refresh_right_region_drag = self
-                .ingame_right_mouse_state
+                .ingame_mouse
+                .right
                 .is_some_and(|state| state.motion.region_drag_started);
             let mut left_region_drag = None;
             let mut left_world_drag = None;
-            if let Some(state) = self.mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.left.as_mut() {
                 if state.update_with_fog(pointer, fog_blocked) {
                     left_region_drag = state.motion.down_region.and_then(|region| match region {
                         IngameViewportRegion::Inventory(target) => Some(target),
@@ -8173,7 +8183,7 @@ impl GameApp {
             }
             let mut right_region_drag = None;
             let mut right_world_drag = None;
-            if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.right.as_mut() {
                 if state.update_with_fog(pointer, fog_blocked) {
                     right_region_drag = state.motion.down_region.and_then(|region| match region {
                         IngameViewportRegion::Inventory(target) => Some(target),
@@ -8194,20 +8204,20 @@ impl GameApp {
             if let Some(target) = left_region_drag {
                 let source = self.engine.mouse_region_drag_source(target);
                 if source.is_some() {
-                    self.ingame_dragged_objects =
+                    self.ingame_mouse.dragged_objects =
                         self.engine.mouse_region_drag_objects(target, false);
                 }
-                if let Some(state) = self.mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.left.as_mut() {
                     state.motion.region_drag_started = source.is_some();
                 }
             }
             if let Some(target) = right_region_drag {
                 let source = self.engine.mouse_region_drag_source(target);
                 if source.is_some() {
-                    self.ingame_dragged_objects =
+                    self.ingame_mouse.dragged_objects =
                         self.engine.mouse_region_drag_objects(target, true);
                 }
-                if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.right.as_mut() {
                     state.motion.region_drag_started = source.is_some();
                 }
             }
@@ -8216,7 +8226,7 @@ impl GameApp {
                     .engine
                     .mouse_world_drag_source(owner, target, position)
                     .is_some();
-                if let Some(state) = self.mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.left.as_mut() {
                     state.motion.world_drag_started = started;
                 }
             }
@@ -8225,18 +8235,18 @@ impl GameApp {
                     .engine
                     .mouse_world_drag_source(owner, target, position)
                     .is_some();
-                if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.right.as_mut() {
                     state.motion.world_drag_started = started;
                 }
             }
             if refresh_left_region_drag || refresh_right_region_drag {
                 let region_drag_cursor = self.current_ingame_region_drag_cursor(pointer);
-                if let Some(state) = self.mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.left.as_mut() {
                     if refresh_left_region_drag {
                         state.motion.region_drag_cursor = region_drag_cursor;
                     }
                 }
-                if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.right.as_mut() {
                     if refresh_right_region_drag {
                         state.motion.region_drag_cursor = region_drag_cursor;
                     }
@@ -8286,10 +8296,10 @@ impl GameApp {
                 selection_drag_before_move,
             );
         } else {
-            if let Some(state) = self.mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.left.as_mut() {
                 state.motion.moved = true;
             }
-            if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.right.as_mut() {
                 state.motion.moved = true;
             }
             self.live_input.ingame_pointer = None;
@@ -8343,12 +8353,16 @@ impl GameApp {
             // drags that originated in a viewport inventory region.
             return None;
         }
-        let carryable = self.ingame_dragged_objects.iter().find_map(|object| {
-            self.engine
-                .object_snapshot(*object)
-                .filter(|object| object.status != clonk_engine::ObjectStatus::Deleted)
-                .map(|object| object.ocf & clonk_engine::ocf::CARRYABLE != 0)
-        })?;
+        let carryable = self
+            .ingame_mouse
+            .dragged_objects
+            .iter()
+            .find_map(|object| {
+                self.engine
+                    .object_snapshot(*object)
+                    .filter(|object| object.status != clonk_engine::ObjectStatus::Deleted)
+                    .map(|object| object.ocf & clonk_engine::ocf::CARRYABLE != 0)
+            })?;
         let put_target = self
             .live_input
             .modifiers
@@ -8386,10 +8400,12 @@ impl GameApp {
             return;
         }
         let refresh_left = self
-            .mouse_state
+            .ingame_mouse
+            .left
             .is_some_and(|state| state.motion.region_drag_started);
         let refresh_right = self
-            .ingame_right_mouse_state
+            .ingame_mouse
+            .right
             .is_some_and(|state| state.motion.region_drag_started);
         if !refresh_left && !refresh_right {
             return;
@@ -8399,12 +8415,12 @@ impl GameApp {
         };
         let cursor = self.current_ingame_region_drag_cursor(pointer);
         if refresh_left {
-            if let Some(state) = self.mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.left.as_mut() {
                 state.motion.region_drag_cursor = cursor;
             }
         }
         if refresh_right {
-            if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.right.as_mut() {
                 state.motion.region_drag_cursor = cursor;
             }
         }
@@ -8418,7 +8434,7 @@ impl GameApp {
             return None;
         }
         let player = match self.local_controls.mouse_owner() {
-            Some(player) if self.mouse_control => player,
+            Some(player) if self.ingame_mouse.control => player,
             None if self
                 .active_ingame_mouse_viewport()
                 .is_some_and(|viewport| viewport.is_no_owner_viewport) =>
@@ -8655,22 +8671,23 @@ impl GameApp {
     }
 
     fn clear_ingame_single_mouse_selection(&mut self, owner: i32) {
-        let clears_single_selection =
-            self.ingame_dragged_objects
-                .first()
-                .copied()
-                .is_some_and(|object| {
-                    self.snapshot.object(object).is_some_and(|snapshot| {
-                        snapshot.category & clonk_engine::CATEGORY_MOUSE_SELECT != 0
-                    }) || self
-                        .snapshot
-                        .players
-                        .iter()
-                        .find(|player| player.id == owner)
-                        .is_some_and(|player| player.crew.contains(&object))
-                });
+        let clears_single_selection = self
+            .ingame_mouse
+            .dragged_objects
+            .first()
+            .copied()
+            .is_some_and(|object| {
+                self.snapshot.object(object).is_some_and(|snapshot| {
+                    snapshot.category & clonk_engine::CATEGORY_MOUSE_SELECT != 0
+                }) || self
+                    .snapshot
+                    .players
+                    .iter()
+                    .find(|player| player.id == owner)
+                    .is_some_and(|player| player.crew.contains(&object))
+            });
         if clears_single_selection {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
         }
     }
 
@@ -8700,16 +8717,16 @@ impl GameApp {
         } else {
             0
         };
-        self.ingame_mouse_help_caption = Some(IngameMouseHelpCaption { text, keep_moves });
+        self.ingame_mouse.help_caption = Some(IngameMouseHelpCaption { text, keep_moves });
     }
 
     /// Top-of-`C4MouseControl::Move` caption lifetime update. A countdown
     /// reaching zero remains visible through that move and clears on the
     /// following one.
     fn advance_ingame_mouse_help_caption(&mut self) {
-        match self.ingame_mouse_help_caption.as_mut() {
+        match self.ingame_mouse.help_caption.as_mut() {
             Some(caption) if caption.keep_moves != 0 => caption.keep_moves -= 1,
-            Some(_) => self.ingame_mouse_help_caption = None,
+            Some(_) => self.ingame_mouse.help_caption = None,
             None => {}
         }
     }
@@ -8847,7 +8864,7 @@ impl GameApp {
     }
 
     fn set_ingame_mouse_caption(&mut self, text: String, caption_bottom_y: Option<i32>) {
-        self.ingame_mouse_help_caption = None;
+        self.ingame_mouse.help_caption = None;
         let Some(retained) = self.live_input.ingame_viewport_mouse else {
             return;
         };
@@ -8975,7 +8992,7 @@ impl GameApp {
                 self.ingame_help_mouse_target(pointer.owner, pointer.screen);
             self.clear_ingame_single_mouse_selection(pointer.owner);
             let show_caption = self.advance_ingame_time_on_target(IngameMouseCursorKind::Help);
-            if show_caption && self.ingame_mouse_help_caption.is_none() {
+            if show_caption && self.ingame_mouse.help_caption.is_none() {
                 let caption =
                     self.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
                 self.set_ingame_mouse_caption(caption, None);
@@ -8983,7 +9000,7 @@ impl GameApp {
             return;
         }
 
-        if !self.mouse_control {
+        if !self.ingame_mouse.control {
             self.live_input.ingame_mouse_caption.cursor = if pointer.owner == OWNER_NONE {
                 IngameMouseCursorKind::Region
             } else {
@@ -9003,8 +9020,8 @@ impl GameApp {
         );
         match cursor {
             MouseWorldCursor::Select(target) => {
-                self.ingame_dragged_objects.clear();
-                self.ingame_dragged_objects.push(target);
+                self.ingame_mouse.dragged_objects.clear();
+                self.ingame_mouse.dragged_objects.push(target);
             }
             _ => self.clear_ingame_single_mouse_selection(pointer.owner),
         }
@@ -9167,7 +9184,7 @@ impl GameApp {
                     // The platform emits LeftDouble instead of a second
                     // LeftDown. C4MouseControl clears the down state and
                     // consumes the subsequent LeftUp (cpp:982-988).
-                    self.mouse_state = None;
+                    self.ingame_mouse.left = None;
                     self.ingame_ignore_left_up = true;
                     self.on_ingame_mouse_double()
                 } else {
@@ -9181,7 +9198,7 @@ impl GameApp {
                     if let Some(pointer) = self.live_input.ingame_pointer {
                         self.refresh_ingame_mouse_help_region_caption(pointer);
                     }
-                    self.mouse_state = None;
+                    self.ingame_mouse.left = None;
                     Ok(())
                 } else {
                     self.on_ingame_mouse_up()
@@ -9989,17 +10006,17 @@ impl GameApp {
             return Ok(());
         }
         if self.live_input.ingame_mouse_help && button_state == ElementState::Released {
-            self.ingame_right_mouse_state = None;
+            self.ingame_mouse.right = None;
             self.live_input.ingame_mouse_help = false;
-            if let Some(caption) = self.ingame_mouse_help_caption.as_mut() {
+            if let Some(caption) = self.ingame_mouse.help_caption.as_mut() {
                 caption.keep_moves = 0;
             }
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             return Ok(());
         }
         let moving_drag = self.ingame_moving_drag_active();
         let captured_release = button_state == ElementState::Released
-            && self.ingame_right_mouse_state.is_some_and(|state| {
+            && self.ingame_mouse.right.is_some_and(|state| {
                 state.motion.region_drag_started || state.motion.world_drag_started
             });
         let script_menu_owner = self.local_controls.mouse_owner();
@@ -10039,9 +10056,9 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if !self.mouse_control {
-            self.ingame_right_mouse_state = None;
-            self.ingame_dragged_objects.clear();
+        if !self.ingame_mouse.control {
+            self.ingame_mouse.right = None;
+            self.ingame_mouse.dragged_objects.clear();
             return Ok(());
         }
 
@@ -10052,11 +10069,11 @@ impl GameApp {
 
         if button_state == ElementState::Pressed {
             let Some(pointer) = self.live_input.ingame_pointer else {
-                self.ingame_right_mouse_state = None;
+                self.ingame_mouse.right = None;
                 return Ok(());
             };
             if pointer.owner != self.players.local_owner {
-                self.ingame_right_mouse_state = None;
+                self.ingame_mouse.right = None;
                 return Ok(());
             }
             let region = self.ingame_viewport_region(self.players.local_owner, pointer.screen);
@@ -10081,22 +10098,22 @@ impl GameApp {
                 state.motion.selection_frame = false;
                 state.down_cursor_nothing = down_target.is_none();
             }
-            self.ingame_right_mouse_state = Some(state);
+            self.ingame_mouse.right = Some(state);
             if self.live_input.ingame_mouse_help {
                 self.refresh_ingame_mouse_help_region_caption(pointer);
             }
             return Ok(());
         }
 
-        let drag = self.ingame_right_mouse_state.take();
+        let drag = self.ingame_mouse.right.take();
         if let Some(drag) = drag {
             if drag.motion.start.owner != self.players.local_owner {
-                self.ingame_dragged_objects.clear();
+                self.ingame_mouse.dragged_objects.clear();
                 return Ok(());
             }
             if drag.motion.moved && !drag.motion.selection_cancelled_by_region {
                 if drag.motion.region_drag_started {
-                    let mut selected = std::mem::take(&mut self.ingame_dragged_objects);
+                    let mut selected = std::mem::take(&mut self.ingame_mouse.dragged_objects);
                     selected.retain(|object| {
                         self.engine.object_snapshot(*object).is_some_and(|object| {
                             object.status != clonk_engine::ObjectStatus::Deleted
@@ -10184,7 +10201,7 @@ impl GameApp {
                     objects: vec![next.as_u64() as i32],
                     by_client: -1,
                 })?;
-                self.ingame_dragged_objects.clear();
+                self.ingame_mouse.dragged_objects.clear();
             }
         }
         // Native queues Select before Context, but both target lookups finish
@@ -10194,7 +10211,8 @@ impl GameApp {
             self.submit_or_execute_player_select(PlayerSelectControlData {
                 player: self.players.local_owner,
                 objects: self
-                    .ingame_dragged_objects
+                    .ingame_mouse
+                    .dragged_objects
                     .iter()
                     .copied()
                     .filter(|object| {
@@ -10263,7 +10281,7 @@ impl GameApp {
         owner: i32,
         point: GuiPoint,
     ) -> Result<Option<EngineScriptMenuPointerTarget>, EngineError> {
-        if self.engine.film_replay() || !self.mouse_control {
+        if self.engine.film_replay() || !self.ingame_mouse.control {
             return Ok(None);
         }
         if !self.menu_owner_has_unsuppressed_viewport(owner) {
@@ -10451,12 +10469,12 @@ impl GameApp {
 
     fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
         let Some(pointer) = self.live_input.ingame_pointer else {
-            self.mouse_state = None;
+            self.ingame_mouse.left = None;
             return Ok(());
         };
         let region = self.ingame_viewport_region(pointer.owner, pointer.screen);
         if !self.ingame_mouse_controls_owner(pointer.owner)
-            || (!self.mouse_control
+            || (!self.ingame_mouse.control
                 && !self.live_input.ingame_mouse_help
                 && !matches!(region, Some(IngameViewportRegion::ViewportButton(_))))
         {
@@ -10487,7 +10505,7 @@ impl GameApp {
             state.motion.selection_frame = false;
             state.down_cursor_nothing = down_target.is_none();
         }
-        self.mouse_state = Some(state);
+        self.ingame_mouse.left = Some(state);
 
         if !self.live_input.ingame_mouse_help {
             if let Some(region) = region {
@@ -10510,14 +10528,14 @@ impl GameApp {
         if let Some(pointer) = self.live_input.ingame_pointer {
             self.refresh_ingame_mouse_help_region_caption(pointer);
         }
-        let Some(drag) = self.mouse_state.take() else {
+        let Some(drag) = self.ingame_mouse.left.take() else {
             return Ok(());
         };
         let motion = drag.motion;
         if !self.ingame_mouse_controls_owner(motion.start.owner) {
             self.ingame_last_left_down = None;
             self.ingame_ignore_left_up = false;
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             return Ok(());
         }
         if motion.moved {
@@ -10527,7 +10545,7 @@ impl GameApp {
             self.ingame_last_left_down = None;
         }
         if drag.down_cursor_help {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             let release_is_region = self
                 .ingame_viewport_region(motion.last.owner, motion.last.screen)
                 .is_some();
@@ -10548,7 +10566,7 @@ impl GameApp {
                 && motion.region_drag_started
                 && matches!(down_region, IngameViewportRegion::Inventory(_))
             {
-                let mut selected = std::mem::take(&mut self.ingame_dragged_objects);
+                let mut selected = std::mem::take(&mut self.ingame_mouse.dragged_objects);
                 selected.retain(|object| {
                     self.engine
                         .object_snapshot(*object)
@@ -10574,18 +10592,18 @@ impl GameApp {
                 return self.dispatch_ingame_region_control(motion.start.owner, down_region, true);
             }
             if current_is_region {
-                self.ingame_dragged_objects.clear();
+                self.ingame_mouse.dragged_objects.clear();
                 return self.dispatch_ingame_region_control(motion.start.owner, down_region, false);
             }
             // Classic control evaluates the current cursor on button-up. A
             // stored region payload released outside can therefore fall
             // through to the world, unlike AutoStop's early release branch.
             let result = self.handle_ingame_mouse_click(motion.last);
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             return result;
         }
         if motion.selection_cancelled_by_region {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             return if current_is_region {
                 self.dispatch_control_event_for_local_player(
                     motion.start.owner,
@@ -10599,7 +10617,7 @@ impl GameApp {
             };
         }
         if current_is_region {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             return self.dispatch_control_event_for_local_player(
                 motion.start.owner,
                 ControlEvent::RawPlayerControl {
@@ -10612,7 +10630,7 @@ impl GameApp {
             if !self.finish_ingame_moved_drag(drag, false)? {
                 // A non-draggable world DownCursor (for example Entrance) or
                 // an empty landscape frame remains a consumed drag.
-                self.ingame_dragged_objects.clear();
+                self.ingame_mouse.dragged_objects.clear();
             }
             return Ok(());
         }
@@ -10620,7 +10638,7 @@ impl GameApp {
         // LeftUpDragNone clears C4MouseControl's local Selection after
         // dispatching the click command. Clear first so an error cannot
         // strand the local Selection lifecycle.
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.dragged_objects.clear();
         self.handle_ingame_mouse_click(motion.last)?;
         Ok(())
     }
@@ -10630,7 +10648,7 @@ impl GameApp {
         pointer: ViewportPointer,
     ) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running)
-            || !self.mouse_control
+            || !self.ingame_mouse.control
             || self.local_controls.mouse_owner() != Some(pointer.owner)
         {
             return Ok(());
@@ -10704,7 +10722,7 @@ impl GameApp {
         if let Some(pointer) = self.live_input.ingame_pointer {
             self.refresh_ingame_mouse_help_region_caption(pointer);
         }
-        if self.live_input.ingame_mouse_help || !self.mouse_control {
+        if self.live_input.ingame_mouse_help || !self.ingame_mouse.control {
             return Ok(());
         }
         let Some(pointer) = self.live_input.ingame_pointer else {
@@ -12811,10 +12829,10 @@ impl GameApp {
                 if let Some(dialog) = self.dialogs.client_list.as_mut() {
                     dialog.pointer_left();
                 }
-                if let Some(state) = self.mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.left.as_mut() {
                     state.motion.moved = true;
                 }
-                if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                if let Some(state) = self.ingame_mouse.right.as_mut() {
                     state.motion.moved = true;
                 }
                 self.live_input.ingame_gui_pointer = None;

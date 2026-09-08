@@ -5783,7 +5783,7 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
         let resources = app.assets.network_chart_resources().test_value();
         let preferred = scoreboard_preferred_rect(
             app.rendering.graphics
-                .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
+                .preferred_dialog_rect(app.ingame_mouse.control.then_some(app.players.local_owner)),
         );
         let layout = app
             .dialogs.chart
@@ -5984,7 +5984,7 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
     let resources = assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.rendering.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
+            .preferred_dialog_rect(app.ingame_mouse.control.then_some(app.players.local_owner)),
     );
     let layout = app
         .dialogs.chart
@@ -13073,7 +13073,7 @@ fn saved_raw_mouse_control_survives_a_failed_restore_preference_gate() {
 
     main_assert_eq!(app.engine.player(owner).expect("restored sandbox player").mouse_control() => 2);
     main_assert_eq!(app.local_controls.mouse_owner() => Some(owner));
-    main_assert!(app.mouse_control);
+    main_assert!(app.ingame_mouse.control);
 }
 
 /// Run a test body on an explicitly sized thread. Debug builds keep one
@@ -13900,7 +13900,7 @@ fn runtime_client_list_wheel_precedes_running_player_control() {
     app.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
-    main_assert!(app.mouse_control);
+    main_assert!(app.ingame_mouse.control);
     main_assert!(app.local_controls.mouse_owner().is_some());
 
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
@@ -14036,16 +14036,16 @@ fn runtime_client_list_consumption_cancels_world_mouse_gestures() {
         left.motion.moved = true;
         let mut right = IngameButtonMouseState::new(pointer, Some(retained), false);
         right.motion.moved = true;
-        app.mouse_state = Some(left);
-        app.ingame_right_mouse_state = Some(right);
-        app.ingame_dragged_objects = vec![retained];
+        app.ingame_mouse.left = Some(left);
+        app.ingame_mouse.right = Some(right);
+        app.ingame_mouse.dragged_objects = vec![retained];
         app.ingame_last_left_down = Some(Instant::now());
         app.ingame_ignore_left_up = true;
     };
     let assert_cancelled = |app: &GameApp| {
-        main_assert!(app.mouse_state.is_none());
-        main_assert!(app.ingame_right_mouse_state.is_none());
-        main_assert!(app.ingame_dragged_objects.is_empty());
+        main_assert!(app.ingame_mouse.left.is_none());
+        main_assert!(app.ingame_mouse.right.is_none());
+        main_assert!(app.ingame_mouse.dragged_objects.is_empty());
         main_assert!(app.ingame_last_left_down.is_none());
         main_assert!(!app.ingame_ignore_left_up);
     };

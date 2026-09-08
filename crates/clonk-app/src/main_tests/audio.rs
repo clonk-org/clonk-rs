@@ -4179,11 +4179,11 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
         f64::from(start.x + 3.0),
         f64::from(start.y + 3.0),
     ));
-    main_assert!(!app.ingame_right_mouse_state.expect("right-down remains live").motion.moved, "five logical pixels or less must not start C4MC_Drag_Selecting");
+    main_assert!(!app.ingame_mouse.right.expect("right-down remains live").motion.moved, "five logical pixels or less must not start C4MC_Drag_Selecting");
     app.test_render(&mut frame);
 
     app.test_cursor(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)));
-    let drag = app.ingame_right_mouse_state.test_value();
+    let drag = app.ingame_mouse.right.test_value();
     main_assert!(drag.motion.moved);
     let down_world = ingame_pointer_world_pixel(drag.motion.start);
     app.test_render(&mut frame);
@@ -4205,7 +4205,7 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
     );
 
     app.test_right_button(ElementState::Released);
-    main_assert!(app.ingame_right_mouse_state.is_none());
+    main_assert!(app.ingame_mouse.right.is_none());
     app.test_render(&mut frame);
     main_assert_ne!(app.rendering.graphics.surface().get_pixel(sample_x as u32, sample_y as u32) => Some(expected), "ButtonUpDragSelecting removes the presentation frame");
 
@@ -4215,9 +4215,9 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)));
-    main_assert!(app.mouse_state.expect("left selection drag remains live").motion.selection_frame, "left and right landscape drags share C4MC_Drag_Selecting");
+    main_assert!(app.ingame_mouse.left.expect("left selection drag remains live").motion.selection_frame, "left and right landscape drags share C4MC_Drag_Selecting");
     app.test_render(&mut frame);
-    let left_down_world = ingame_pointer_world_pixel(app.mouse_state.test_value().motion.start);
+    let left_down_world = ingame_pointer_world_pixel(app.ingame_mouse.left.test_value().motion.start);
     let (left_down_x, _) = app
         .rendering.graphics
         .world_to_screen(owner, left_down_world)
@@ -4231,7 +4231,7 @@ fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
         "left C4MC_Drag_Selecting uses the same frame renderer"
     );
     app.test_left_button(ElementState::Released);
-    main_assert!(app.mouse_state.is_none());
+    main_assert!(app.ingame_mouse.left.is_none());
 }
 
 #[test]

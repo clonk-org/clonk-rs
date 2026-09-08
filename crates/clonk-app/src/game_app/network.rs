@@ -990,7 +990,7 @@ impl GameApp {
             prefers_mouse,
             gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
-            disable_mouse: !self.mouse_control_allowed,
+            disable_mouse: !self.ingame_mouse.control_allowed,
         });
         self.engine
             .set_local_players(self.local_controls.owners().collect::<Vec<_>>());
@@ -1035,7 +1035,7 @@ impl GameApp {
         };
         debug_assert_eq!(joined.number(), predicted_owner);
         self.players.local_owner = joined.number();
-        self.mouse_control = self.local_controls.mouse_owner().is_some();
+        self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
         if matches!(
             joined,
             clonk_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
@@ -1194,9 +1194,11 @@ impl GameApp {
             return false;
         };
         let preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         let bounds = dialog.layout(preferred, resources).bounds;
         point.x >= bounds.x as f32
@@ -8637,7 +8639,7 @@ impl GameApp {
             prefers_mouse,
             gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
-            disable_mouse: !self.mouse_control_allowed,
+            disable_mouse: !self.ingame_mouse.control_allowed,
         };
         let previous_mouse_owner = self.local_controls.mouse_owner();
         let control = if locally_controlled {
@@ -8679,7 +8681,7 @@ impl GameApp {
                 if self.local_controls.mouse_owner() != previous_mouse_owner {
                     self.reset_ingame_mouse_control();
                 }
-                self.mouse_control = self.local_controls.mouse_owner().is_some();
+                self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
                 // C4Game::JoinPlayer creates the local viewport for the number
                 // this join produced, and C4Player::FinalInit initializes
                 // C4MouseControl with it (C4Game.cpp:3552-3553;
@@ -10269,7 +10271,7 @@ impl GameApp {
             prefers_mouse,
             gamepads_enabled: self.config.gamepads_enabled,
             replay: false,
-            disable_mouse: !self.mouse_control_allowed,
+            disable_mouse: !self.ingame_mouse.control_allowed,
         };
         let control = if locally_controlled {
             self.local_controls
@@ -10344,7 +10346,7 @@ impl GameApp {
                     .players()
                     .map(|player| (player.id(), player.status())),
             );
-            self.mouse_control = self.local_controls.mouse_owner().is_some();
+            self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
             self.saves.network_recreation_progress = None;
             return Ok(true);
         }
@@ -10376,7 +10378,7 @@ impl GameApp {
                         .players()
                         .map(|player| (player.id(), player.status())),
                 );
-                self.mouse_control = self.local_controls.mouse_owner().is_some();
+                self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
                 self.saves.network_recreation_progress = None;
                 self.saves.deferred_network_recreation.clear();
                 return Ok(true);
@@ -10816,7 +10818,7 @@ impl GameApp {
                 prefers_mouse,
                 gamepads_enabled: self.config.gamepads_enabled,
                 replay: false,
-                disable_mouse: !self.mouse_control_allowed,
+                disable_mouse: !self.ingame_mouse.control_allowed,
             };
             let control = if locally_controlled {
                 let control = rebound_local_controls
@@ -10849,7 +10851,7 @@ impl GameApp {
             self.players.local_owner = owner;
         }
         self.engine.set_local_players(local_players);
-        self.mouse_control = self.local_controls.mouse_owner().is_some();
+        self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
         self.saves.deferred_network_recreation.clear();
         Ok(())
     }

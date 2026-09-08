@@ -3053,8 +3053,6 @@ impl GameApp {
             runtime_player_big_icon_misses: HashSet::new(),
             white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
-            mouse_control: true,
-            mouse_control_allowed: true,
             mode: AppMode::Loading,
             scensel: ScenarioSelectorState {
                 // The constructor discovers the first generation up front; the
@@ -3277,10 +3275,6 @@ impl GameApp {
                 message_pointer_capture_index: None,
                 message_consumed_keys: HashSet::new(),
             },
-            ingame_mouse_help_caption: None,
-            mouse_state: None,
-            ingame_right_mouse_state: None,
-            ingame_dragged_objects: Vec::new(),
             ingame_last_left_down: None,
             ingame_ignore_left_up: false,
             window_active: true,
@@ -3317,6 +3311,14 @@ impl GameApp {
                 close_pointer_capture: None,
                 script_close_pointer_capture: None,
                 construction_drag: None,
+            },
+            ingame_mouse: IngameMouse {
+                control: true,
+                control_allowed: true,
+                left: None,
+                right: None,
+                dragged_objects: Vec::new(),
+                help_caption: None,
             },
             league_signup_consumed_keys: HashSet::new(),
             league_signup_pointer_capture: false,
@@ -4475,9 +4477,11 @@ impl GameApp {
         let assets = Arc::clone(&self.assets);
         let resources = assets.scoreboard_resources(&font_images)?;
         let live_preferred = scoreboard_preferred_rect(
-            self.rendering
-                .graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+            self.rendering.graphics.preferred_dialog_rect(
+                self.ingame_mouse
+                    .control
+                    .then_some(self.players.local_owner),
+            ),
         );
         let preferred = self
             .dialogs
@@ -4516,9 +4520,11 @@ impl GameApp {
         let layout_revision = self.engine.scoreboard_layout_revision();
         if self.dialogs.scoreboard_runtime.layout_revision != layout_revision {
             let preferred = scoreboard_preferred_rect(
-                self.rendering
-                    .graphics
-                    .preferred_dialog_rect(self.mouse_control.then_some(self.players.local_owner)),
+                self.rendering.graphics.preferred_dialog_rect(
+                    self.ingame_mouse
+                        .control
+                        .then_some(self.players.local_owner),
+                ),
             );
             self.dialogs.scoreboard_runtime.preferred = Some(preferred);
             self.dialogs
@@ -4719,10 +4725,10 @@ impl GameApp {
             .unwrap_or_default();
         self.process_startup_player_properties_actions(portrait_actions);
         self.pointer_left_unchecked();
-        self.mouse_state = None;
-        self.ingame_right_mouse_state = None;
+        self.ingame_mouse.left = None;
+        self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         Ok(())
@@ -5843,18 +5849,20 @@ impl GameApp {
     }
 
     fn ingame_moving_drag_active(&self) -> bool {
-        self.mouse_state.is_some_and(|state| {
+        self.ingame_mouse.left.is_some_and(|state| {
             state.motion.region_drag_started || state.motion.world_drag_started
-        }) || self.ingame_right_mouse_state.is_some_and(|state| {
+        }) || self.ingame_mouse.right.is_some_and(|state| {
             state.motion.region_drag_started || state.motion.world_drag_started
         })
     }
 
     fn ingame_selection_drag_active(&self) -> bool {
-        self.mouse_state
+        self.ingame_mouse
+            .left
             .is_some_and(|state| state.motion.moved && state.motion.selection_frame)
             || self
-                .ingame_right_mouse_state
+                .ingame_mouse
+                .right
                 .is_some_and(|state| state.motion.moved && state.motion.selection_frame)
     }
 
@@ -5865,7 +5873,7 @@ impl GameApp {
         if mouse_owner != previous_mouse_owner {
             self.reset_ingame_mouse_control();
         }
-        self.mouse_control = mouse_owner.is_some();
+        self.ingame_mouse.control = mouse_owner.is_some();
     }
 
     fn ingame_construction_drag_active(&self) -> bool {
@@ -6019,10 +6027,10 @@ impl GameApp {
             return Ok(None);
         };
         let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
-        if let Some(state) = self.mouse_state.as_mut() {
+        if let Some(state) = self.ingame_mouse.left.as_mut() {
             state.update_with_fog(pointer, fog_blocked);
         }
-        if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+        if let Some(state) = self.ingame_mouse.right.as_mut() {
             state.update_with_fog(pointer, fog_blocked);
         }
         self.live_input.ingame_pointer = Some(pointer);
@@ -6097,17 +6105,17 @@ impl GameApp {
 
     fn cancel_ingame_selection_for_region(&mut self, cancel_left: bool, cancel_right: bool) {
         if cancel_left || cancel_right {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
         }
         if cancel_left {
-            if let Some(state) = self.mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.left.as_mut() {
                 state.motion.selection_frame = false;
                 state.motion.selection_kind = IngameDragSelectionKind::Unknown;
                 state.motion.selection_cancelled_by_region = true;
             }
         }
         if cancel_right {
-            if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.right.as_mut() {
                 state.motion.selection_frame = false;
                 state.motion.selection_kind = IngameDragSelectionKind::Unknown;
                 state.motion.selection_cancelled_by_region = true;
@@ -6162,22 +6170,24 @@ impl GameApp {
 
     fn update_ingame_drag_selection_kinds(&mut self) {
         let left_selection = self
-            .mouse_state
+            .ingame_mouse
+            .left
             .and_then(|state| self.ingame_drag_selection(state.motion));
         let right_selection = self
-            .ingame_right_mouse_state
+            .ingame_mouse
+            .right
             .and_then(|state| self.ingame_drag_selection(state.motion));
         if let Some((kind, selection)) = left_selection {
-            if let Some(state) = self.mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.left.as_mut() {
                 state.motion.selection_kind = kind;
             }
-            self.ingame_dragged_objects = selection;
+            self.ingame_mouse.dragged_objects = selection;
         }
         if let Some((kind, selection)) = right_selection {
-            if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+            if let Some(state) = self.ingame_mouse.right.as_mut() {
                 state.motion.selection_kind = kind;
             }
-            self.ingame_dragged_objects = selection;
+            self.ingame_mouse.dragged_objects = selection;
         }
     }
 
@@ -6282,21 +6292,23 @@ impl GameApp {
 
     fn active_ingame_moving_drag(&self) -> Option<(MouseDragSource, Vec<ObjectId>)> {
         let state = self
-            .mouse_state
+            .ingame_mouse
+            .left
             .as_ref()
             .filter(|state| state.motion.region_drag_started || state.motion.world_drag_started)
             .or_else(|| {
-                self.ingame_right_mouse_state.as_ref().filter(|state| {
+                self.ingame_mouse.right.as_ref().filter(|state| {
                     state.motion.region_drag_started || state.motion.world_drag_started
                 })
             })?;
         let target = state.down_target?;
-        let mut selected =
-            if state.motion.region_drag_started || self.ingame_dragged_objects.contains(&target) {
-                self.ingame_dragged_objects.clone()
-            } else {
-                vec![target]
-            };
+        let mut selected = if state.motion.region_drag_started
+            || self.ingame_mouse.dragged_objects.contains(&target)
+        {
+            self.ingame_mouse.dragged_objects.clone()
+        } else {
+            vec![target]
+        };
         selected.retain(|object| {
             self.snapshot
                 .object(*object)
@@ -6440,7 +6452,7 @@ impl GameApp {
             .ingame_viewport_region(drag.motion.start.owner, drag.motion.last.screen)
             .is_some()
         {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             return Ok(true);
         }
         if drag.motion.selection_frame {
@@ -6451,7 +6463,7 @@ impl GameApp {
             let selected = self.ingame_selection_candidates(drag.motion);
             match drag.motion.selection_kind {
                 IngameDragSelectionKind::Crew => {
-                    self.ingame_dragged_objects.clear();
+                    self.ingame_mouse.dragged_objects.clear();
                     self.submit_or_execute_player_select(PlayerSelectControlData {
                         player: owner,
                         objects: selected
@@ -6465,10 +6477,10 @@ impl GameApp {
                     self.refresh_focus();
                 }
                 IngameDragSelectionKind::Objects => {
-                    self.ingame_dragged_objects = selected;
+                    self.ingame_mouse.dragged_objects = selected;
                 }
                 IngameDragSelectionKind::Unknown => {
-                    self.ingame_dragged_objects.clear();
+                    self.ingame_mouse.dragged_objects.clear();
                 }
             }
             return Ok(true);
@@ -6507,7 +6519,7 @@ impl GameApp {
         motion: IngameMouseState,
         selected: usize,
     ) -> Result<(), EngineError> {
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.dragged_objects.clear();
         if motion.last.owner != self.players.local_owner {
             return Ok(());
         }
@@ -6543,7 +6555,7 @@ impl GameApp {
         if cursor.is_none() {
             return self.finish_ingame_noop_drag(motion, selected.len());
         }
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.dragged_objects.clear();
         if motion.last.owner != self.players.local_owner {
             return Ok(());
         }
@@ -6621,12 +6633,12 @@ impl GameApp {
         region_selection: Option<Vec<ObjectId>>,
     ) -> Result<(), EngineError> {
         let selected = if let Some(selected) = region_selection {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             selected
-        } else if self.ingame_dragged_objects.contains(&down_target) {
-            std::mem::take(&mut self.ingame_dragged_objects)
+        } else if self.ingame_mouse.dragged_objects.contains(&down_target) {
+            std::mem::take(&mut self.ingame_mouse.dragged_objects)
         } else {
-            self.ingame_dragged_objects.clear();
+            self.ingame_mouse.dragged_objects.clear();
             vec![down_target]
         };
         if drag.motion.last.owner != self.players.local_owner {
@@ -6691,7 +6703,7 @@ impl GameApp {
         down_target: ObjectId,
         region_selection: Option<Vec<ObjectId>>,
     ) -> Result<(), EngineError> {
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.dragged_objects.clear();
         let selected = region_selection.unwrap_or_else(|| vec![down_target]);
         if drag.motion.last.owner != self.players.local_owner {
             return Ok(());
@@ -8595,7 +8607,8 @@ impl GameApp {
         if motion.selection_kind == IngameDragSelectionKind::Unknown {
             return Vec::new();
         }
-        self.ingame_dragged_objects
+        self.ingame_mouse
+            .dragged_objects
             .iter()
             .copied()
             .filter(|object| {
@@ -8891,12 +8904,12 @@ impl GameApp {
         self.live_input.ingame_edge_scroll = None;
         self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.live_input.ingame_mouse_target = None;
-        self.mouse_state = None;
-        self.ingame_right_mouse_state = None;
+        self.ingame_mouse.left = None;
+        self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
-        self.ingame_dragged_objects.clear();
-        self.mouse_control_allowed = true;
-        self.mouse_control = true;
+        self.ingame_mouse.dragged_objects.clear();
+        self.ingame_mouse.control_allowed = true;
+        self.ingame_mouse.control = true;
         self.active_definition_load = None;
         self.active_description_definition_modules.clear();
         let mut recording_scenario_data = None;
@@ -8952,8 +8965,8 @@ impl GameApp {
                     path.display()
                 )
             })?;
-            self.mouse_control_allowed = !scenario_data.disables_mouse();
-            self.mouse_control = self.mouse_control_allowed;
+            self.ingame_mouse.control_allowed = !scenario_data.disables_mouse();
+            self.ingame_mouse.control = self.ingame_mouse.control_allowed;
             if self.network.is_none() {
                 if let Some(metadata) = scenario_data.lobby_metadata() {
                     let embedded = metadata.embedded_game_parameter_values();
@@ -9247,7 +9260,7 @@ impl GameApp {
                 prefers_mouse,
                 gamepads_enabled: self.config.gamepads_enabled,
                 replay: false,
-                disable_mouse: !self.mouse_control_allowed,
+                disable_mouse: !self.ingame_mouse.control_allowed,
             };
             let control = if locally_controlled {
                 let control = rebound_local_controls
@@ -9332,7 +9345,7 @@ impl GameApp {
                 .set_scenario_music_level(Some(restored_music_level));
         }
 
-        self.mouse_control = self.local_controls.mouse_owner().is_some();
+        self.ingame_mouse.control = self.local_controls.mouse_owner().is_some();
         if let Some(max_players) = self.engine.max_players() {
             self.network_max_players = usize::try_from(max_players).unwrap_or(0);
         }
@@ -9377,13 +9390,13 @@ impl GameApp {
                     .as_ref()
                     .is_some_and(|loading| loading.prepared_go.is_some());
         self.live_input.ingame_mouse_help = false;
-        self.ingame_mouse_help_caption = None;
+        self.ingame_mouse.help_caption = None;
         self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.live_input.ingame_mouse_target = None;
-        self.mouse_state = None;
-        self.ingame_right_mouse_state = None;
+        self.ingame_mouse.left = None;
+        self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
-        self.ingame_dragged_objects.clear();
+        self.ingame_mouse.dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         self.presentation.frames_per_second = 0;

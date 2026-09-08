@@ -4582,7 +4582,7 @@ fn ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
         .test_value();
     app.engine.set_local_players([]);
     app.local_controls = LocalControlRegistry::default();
-    app.mouse_control = false;
+    app.ingame_mouse.control = false;
     app.snapshot = app.engine.snapshot();
     app.film_view_player = Some(owner);
     let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -5214,7 +5214,7 @@ fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
         "and it must not take the edit cursor's hold"
     );
     assert!(
-        app.mouse_state.is_some(),
+        app.ingame_mouse.left.is_some(),
         "it is an ordinary gameplay LeftDown instead"
     );
 
@@ -5223,7 +5223,7 @@ fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
         "its release is not an edit-cursor release either",
     );
     assert!(
-        app.mouse_state.is_none(),
+        app.ingame_mouse.left.is_none(),
         "the gameplay LeftUp completes the click"
     );
 }
@@ -5247,7 +5247,7 @@ fn detached_play_mode_right_button_is_a_gameplay_click() {
         "a Play-mode right press edits no selection",
     );
     assert!(
-        app.ingame_right_mouse_state.is_some(),
+        app.ingame_mouse.right.is_some(),
         "it is an ordinary gameplay RightDown instead"
     );
 
@@ -5257,7 +5257,7 @@ fn detached_play_mode_right_button_is_a_gameplay_click() {
         "the Play arm never reaches DoContextMenu"
     );
     assert!(
-        app.ingame_right_mouse_state.is_none(),
+        app.ingame_mouse.right.is_none(),
         "the gameplay RightUp completes the click"
     );
 }

@@ -536,7 +536,7 @@ impl GameApp {
                 .as_ref()
                 .map(|audio| audio.borrow().options.music_enabled)
                 .unwrap_or(false),
-            mouse_shown: self.mouse_control_allowed
+            mouse_shown: self.ingame_mouse.control_allowed
                 && player_mouse.is_some()
                 && (mouse || !mouse_taken),
             mouse,

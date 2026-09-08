@@ -4269,7 +4269,7 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
         .toggle_mouse(app.players.local_owner)
         .test_value();
     assert_eq!(app.local_controls.mouse_owner(), None);
-    app.mouse_control = false;
+    app.ingame_mouse.control = false;
     app.live_input.ingame_mouse_init_centered = true;
     let controls_before = app.local_controls.assignments().collect::<Vec<_>>();
     let viewports_before = app.rendering.graphics.active_viewport_projections();

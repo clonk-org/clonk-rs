@@ -1430,7 +1430,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
         .line_height;
     let mut preferred = scoreboard_preferred_rect(
         app.rendering.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
+            .preferred_dialog_rect(app.ingame_mouse.control.then_some(app.players.local_owner)),
     );
     let mut runtime = RuntimeClientListDialog::new(
         "Network clients",
@@ -1510,7 +1510,7 @@ fn dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
     main_assert!(!app.dialogs.client_list.as_ref().expect("runtime list").has_positional_pointer_drag());
     preferred = scoreboard_preferred_rect(
         app.rendering.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
+            .preferred_dialog_rect(app.ingame_mouse.control.then_some(app.players.local_owner)),
     );
     let retained_after_resize = app
         .dialogs.client_list

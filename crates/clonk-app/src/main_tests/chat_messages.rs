@@ -109,7 +109,7 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
     ));
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)));
-    main_assert!(app.mouse_state.is_some_and(|state| { state.motion.moved && state.motion.world_drag_started }));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| { state.motion.moved && state.motion.world_drag_started }));
 
     app.start_running_chat(RunningChatMode::All);
     app.push_message_dialog(
@@ -121,9 +121,9 @@ fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
         MessageDialogContinuation::None,
     )
     .test_value();
-    main_assert!(app.mouse_state.is_some_and(|state| state.motion.world_drag_started));
+    main_assert!(app.ingame_mouse.left.is_some_and(|state| state.motion.world_drag_started));
     app.test_left_button(ElementState::Released);
-    main_assert!(app.mouse_state.is_none());
+    main_assert!(app.ingame_mouse.left.is_none());
     main_assert!(app.chat.running.is_some());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.running_chat_text() => Some(""));
@@ -1498,7 +1498,7 @@ fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
     let resources = app.assets.network_chart_resources().test_value();
     let preferred = scoreboard_preferred_rect(
         app.rendering.graphics
-            .preferred_dialog_rect(app.mouse_control.then_some(app.players.local_owner)),
+            .preferred_dialog_rect(app.ingame_mouse.control.then_some(app.players.local_owner)),
     );
     let chart = app
         .dialogs.chart
