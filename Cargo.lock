@@ -1015,6 +1015,7 @@ dependencies = [
  "clonk-core",
  "clonk-engine",
  "clonk-engine-core",
+ "clonk-platform",
  "clonk-resources",
  "clonk-script",
  "image",
