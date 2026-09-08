@@ -60,7 +60,11 @@ pub(crate) struct AdapterEvidence {
 }
 
 impl AdapterEvidence {
-    fn from_info(info: &wgpu::AdapterInfo) -> Self {
+    pub(crate) fn backend(&self) -> &'static str {
+        self.backend
+    }
+
+    pub(crate) fn from_info(info: &wgpu::AdapterInfo) -> Self {
         let wgpu::AdapterInfo {
             name,
             vendor,

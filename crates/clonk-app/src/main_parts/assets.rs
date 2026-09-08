@@ -246,6 +246,33 @@ pub(crate) struct Cli {
     pub(crate) headed_surface_smoke: Option<std::path::PathBuf>,
 
     #[arg(
+        long = "device-loss-probe",
+        value_name = "REPORT.json",
+        conflicts_with_all = [
+            "headless",
+            "test_load",
+            "integration_test",
+            "host",
+            "join",
+            "dump_frame",
+            "dump_menu_frame",
+            "headed_surface_smoke",
+            "software_present_smoke"
+        ],
+        hide = true
+    )]
+    pub(crate) device_loss_probe: Option<std::path::PathBuf>,
+
+    #[arg(
+        long = "device-loss-probe-after-frames",
+        value_name = "N",
+        default_value_t = crate::device_loss_probe::DEFAULT_INJECT_AFTER_FRAMES,
+        requires = "device_loss_probe",
+        hide = true
+    )]
+    pub(crate) device_loss_probe_after_frames: u32,
+
+    #[arg(
         long = "software-present-smoke",
         value_name = "REPORT.json",
         conflicts_with_all = [
@@ -319,6 +346,7 @@ pub(crate) fn debug_hud_launch(cli: &Cli) -> DebugHudLaunch {
         || cli.headless
         || cli.headed_surface_smoke.is_some()
         || cli.software_present_smoke.is_some()
+        || cli.device_loss_probe.is_some()
     {
         DebugHudLaunch::ParityCapture
     } else {

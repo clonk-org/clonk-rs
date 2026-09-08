@@ -144,6 +144,7 @@ mod display_sleep_inhibitor;
 mod dock_icon;
 mod macos_terminate;
 use clonk_app_render::draw_commands;
+mod device_loss_probe;
 mod game_message;
 mod gamepad;
 mod gpu_instance;
@@ -720,6 +721,9 @@ fn run() -> Result<()> {
     if let Some(report_path) = cli.headed_surface_smoke.as_deref() {
         headed_surface_smoke::prepare(report_path)?;
     }
+    if let Some(report_path) = cli.device_loss_probe.as_deref() {
+        device_loss_probe::prepare(report_path)?;
+    }
     // The startup-failure reporter in `main` is installed before this point
     // and has no access to the parsed command line. A dedicated server must
     // never wait on a modal acknowledgement, so latch the choice as soon as it
@@ -1210,6 +1214,9 @@ fn run() -> Result<()> {
                 )
             })
             .transpose()?;
+        let mut device_loss_probe = cli.device_loss_probe.clone().map(|report_path| {
+            device_loss_probe::DeviceLossProbe::new(report_path, cli.device_loss_probe_after_frames)
+        });
         let mut software_present_smoke = cli
             .software_present_smoke
             .clone()
@@ -1628,6 +1635,13 @@ fn run() -> Result<()> {
                     // before probes and simulation so its window is exactly
                     // half-open: [started, deadline).
                     let benchmark_now = Instant::now();
+                    if let Some(probe) = device_loss_probe.as_mut() {
+                        if probe.check_deadline(benchmark_now).is_some() {
+                            probe.conclude(&event_handler_exit_code);
+                            event_target.exit();
+                            return;
+                        }
+                    }
                     let benchmark_runtime_ready =
                         presentation_benchmark_runtime_readiness.ready(app.mode);
                     if let Some(mut report) =
@@ -1904,6 +1918,27 @@ fn run() -> Result<()> {
                         let fallback_to_cpu = match present_result {
                             Ok(RetainedGpuProfiledOutcome::Presented(profile)) => {
                                 surface_rebuild.note_presented();
+                                if let Some(probe) = device_loss_probe.as_mut() {
+                                    match probe.note_retained_presentation(
+                                        retained_gpu_renderer.generation(),
+                                        Instant::now(),
+                                    ) {
+                                        Some(device_loss_probe::ProbeStep::Inject) => {
+                                            probe.record_adapter(&pixels.device().adapter_info());
+                                            tracing::warn!(
+                                                generation = retained_gpu_renderer.generation(),
+                                                "device-loss probe: destroying the live GPU device"
+                                            );
+                                            pixels.device().destroy();
+                                        }
+                                        Some(_) => {
+                                            probe.conclude(&event_handler_exit_code);
+                                            event_target.exit();
+                                            return;
+                                        }
+                                        None => {}
+                                    }
+                                }
                                 let presented_terminal_loader =
                                     app.loader.finish_terminal_loader_frame_presentation();
                                 if app.mode == AppMode::Running
@@ -1968,6 +2003,9 @@ fn run() -> Result<()> {
                                         retained_gpu_renderer,
                                     ) {
                                         Ok(()) => {
+                                            if let Some(probe) = device_loss_probe.as_mut() {
+                                                probe.note_rebuild(format!("{error:#}"), true);
+                                            }
                                             render_floor.note_refused_presentation(Instant::now());
                                             if rebuild_schedule == SurfaceRebuildSchedule::Immediate
                                             {
@@ -1979,6 +2017,10 @@ fn run() -> Result<()> {
                                                 ?rebuild_error,
                                                 "retained GPU recovery failed"
                                             );
+                                            if let Some(probe) = device_loss_probe.as_mut() {
+                                                probe.note_rebuild(format!("{error:#}"), false);
+                                                probe.conclude(&event_handler_exit_code);
+                                            }
                                             event_target.exit();
                                         }
                                     }
@@ -2168,6 +2210,13 @@ fn run() -> Result<()> {
                     match present_result {
                         Ok(RetainedGpuPresentOutcome::Presented) => {
                             surface_rebuild.note_presented();
+                            if let Some(probe) = device_loss_probe.as_mut() {
+                                if probe.note_software_presentation().is_some() {
+                                    probe.conclude(&event_handler_exit_code);
+                                    event_target.exit();
+                                    return;
+                                }
+                            }
                             let presented_terminal_loader =
                                 app.loader.finish_terminal_loader_frame_presentation();
                             while !app.pending_screenshots.is_empty() {
@@ -2386,6 +2435,9 @@ fn run() -> Result<()> {
                         tracing::error!(%error, "software presentation smoke report failed");
                         event_handler_exit_code.store(1, AtomicOrdering::Relaxed);
                     }
+                }
+                if let Some(probe) = device_loss_probe.as_mut() {
+                    probe.conclude(&event_handler_exit_code);
                 }
                 if let Some(smoke) = headed_surface_smoke.as_mut() {
                     if let Err(error) = smoke.finish(&destroyed, developer_windows.is_empty()) {
