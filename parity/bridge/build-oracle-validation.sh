@@ -63,26 +63,26 @@ if [ "$head" != "$PIN" ]; then
 	exit 1
 fi
 
-# Keep the oracle commit fixed while layering the reviewed weather transport
+# Keep the oracle commit fixed while layering the reviewed runtime observation
 # instrumentation needed by this checkout. Refuse a partial or drifted patch:
 # neither applying nor cleanly reversing the complete patch is trustworthy.
 if [ ! -f "$ORACLE_PATCH" ]; then
-	echo "error: missing oracle weather patch: $ORACLE_PATCH" >&2
+	echo "error: missing oracle runtime patch: $ORACLE_PATCH" >&2
 	exit 1
 fi
 if git -C "$ORACLE_ROOT" apply --check "$ORACLE_PATCH" >/dev/null 2>&1; then
 	git -C "$ORACLE_ROOT" apply "$ORACLE_PATCH"
-	echo "==> applied the oracle weather instrumentation patch"
+	echo "==> applied the oracle runtime instrumentation patch"
 elif git -C "$ORACLE_ROOT" apply --reverse --check "$ORACLE_PATCH" >/dev/null 2>&1; then
-	echo "==> oracle weather instrumentation patch already applied"
+	echo "==> oracle runtime instrumentation patch already applied"
 else
-	echo "error: oracle weather patch is partially applied or does not match $PIN" >&2
+	echo "error: oracle runtime patch is partially applied or does not match $PIN" >&2
 	exit 1
 fi
 
 # The config bridge's C++ never compiled at the pin: two assigners in
 # src/C4Config.cpp take the wrong types (clonk-org/clonk-rs#1264). The fix is
-# layered the same way as the weather instrumentation, and only when the
+# layered the same way as the runtime instrumentation, and only when the
 # option that compiles that code is requested.
 CONFIG_PATCH="$REPO_ROOT/parity/bridge/oracle-config-bridge.patch"
 if [ "$USE_RUST_CONFIG" = ON ]; then
@@ -124,7 +124,7 @@ fi
 #    unchanged, so a copy that has drifted from the pin's own rust/include/ is
 #    a hard error: the bridge would then link a surface the oracle never
 #    called. The engine header is exempt because it deliberately extends the
-#    pin with the weather transport that the layered weather patch consumes.
+#    pin with the observation transports that the layered runtime patch consumes.
 mkdir -p "$REPO_ROOT/include"
 for header in lc_config_ffi.h lc_group_ffi.h lc_platform_ffi.h; do
 	if ! git -C "$ORACLE_ROOT" show "${PIN}:rust/include/$header" | cmp -s - "$REPO_ROOT/parity/bridge/$header"; then

@@ -39,12 +39,13 @@ That builds the pinned oracle with `-DUSE_RUST_ENGINE_VALIDATION=ON` linking
 script is not a convenience wrapper — four things have to be true at once or
 the build silently uses the wrong engine, or does not configure at all:
 
-- **The pinned source predates this tree's weather transport.** The script
+- **The pinned source predates this tree's runtime observation transports.** The script
   applies `parity/bridge/oracle-weather.patch` on top of the unchanged pinned
   commit. The patch is validation instrumentation only: it captures the
-  already-evaluated rain gate and supplies the native weather payload. The
-  script accepts either a wholly unapplied or a wholly applied patch and
-  rejects partial or otherwise drifted source.
+  already-evaluated rain gate, supplies native weather, and projects the
+  existing landscape state without executing simulation work. The script
+  accepts either a wholly unapplied or a wholly applied patch and rejects
+  partial or otherwise drifted source.
 - **The pinned `CMakeLists.txt` cannot configure this option as shipped.** It
   carries a literal backspace (`0x08`) glued to the `clonk_engine_static` target
   name in all three places it appears, so CMake rejects the name as invalid
@@ -74,9 +75,9 @@ LC_RUST_ENGINE_RECORD=<path> ./clonk    # C++ snapshots as JSON, for triage
 
 Divergences are reported as `Rust runtime parity mismatch: ...`.
 
-To prove that independently transported weather is active even when no object
-reads it, compare a normal armed run with one that perturbs only the native
-payload's wind value:
+To prove that independently transported weather and landscape state are active
+even when no object reads them, compare a normal armed run with the diagnostic
+faults below:
 
 ```sh
 LC_RUST_ENGINE_RUNTIME=1 ./clonk
@@ -84,13 +85,23 @@ LC_RUST_ENGINE_RUNTIME=1 ./clonk
 LC_RUST_ENGINE_RUNTIME=1 \
 LC_RUST_ENGINE_RUNTIME_WEATHER_FAULT=wind \
 ./clonk
+
+LC_RUST_ENGINE_RUNTIME=1 \
+LC_RUST_ENGINE_RUNTIME_LANDSCAPE_FAULT=surface8 \
+./clonk
+
+LC_RUST_ENGINE_RUNTIME=1 \
+LC_RUST_ENGINE_RUNTIME_LANDSCAPE_RUST_FAULT=surface8 \
+./clonk
 ```
 
-The normal run leaves the payload untouched. On an otherwise matching run, the
-fault-injected command must stop at its first comparison with a diagnostic of
-the form
-`frame N: weather wind rust X, cpp Y`; it is a wiring check, not a scenario
-parity result.
+The normal run leaves both sides untouched. The weather fault changes only the
+copied native payload. The two landscape faults change either the copied native
+Surface8 payload or the Rust value used only for comparison; neither mutates a
+live engine. On an otherwise matching run, each command must stop at its first
+comparison with `frame N: weather wind rust X, cpp Y` or
+`frame N: landscape pixel (X, Y) rust A, cpp B`. A fault whose target is absent
+fails explicitly. These are wiring checks, not scenario parity results.
 
 ### Counting events across a run
 
@@ -148,12 +159,12 @@ result.
 ## Comparison boundary
 
 The normal, non-authoritative loop compares the frame number, synchronized RNG
-ledger, independently executing weather/environment state, ordered live-object
-snapshots and definition histogram, global effects, particles, crew selection
-and roles, eliminated/known crew ownership, per-player HUD core, controls, and
-network-packet snapshots. Object comparison includes raw fixed position,
-velocity, and rotation state; do not replace those fields with their whole-pixel
-mirrors.
+ledger, independently executing weather/environment and landscape state,
+ordered live-object snapshots and definition histogram, global effects,
+particles, crew selection and roles, eliminated/known crew ownership,
+per-player HUD core, controls, and network-packet snapshots. Object comparison
+includes raw fixed position, velocity, and rotation state; do not replace those
+fields with their whole-pixel mirrors.
 
 ### Weather/environment handoff
 
@@ -206,13 +217,51 @@ payload. A semantic mismatch reports the compared frame and the first differing
 weather field, for example `frame 0: weather wind rust 0, cpp 1`.
 Authoritative mode is unchanged and does not use this comparison handoff.
 
-One determinism-critical plane remains outside the normal comparison:
+### Landscape/material handoff
 
-- **Landscape/material state:** each engine generates and mutates its own
-  landscape in a normal run, but `runtime_snapshot_mismatch` has no landscape
-  checksum or byte-plane comparison. `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`
-  pushes Rust's landscape into C++ and therefore cannot prove independent
-  agreement. This is tracked by clonk-org/clonk-rs#1240.
+The ordinary non-authoritative branch collects `Game.Landscape` after the same
+completed-frame boundary as weather and supplies it through
+`lc_engine_runtime_supply_landscape_snapshot`. Rust has already generated and
+mutated its own landscape from the same scenario path, content root, seed, and
+recorded controls; no state is copied from one engine into the other. The
+authoritative branch remains separate and is not evidence of independent
+landscape agreement.
+
+The versioned payload covers the complete logical Surface8 material/texture
+plane and retained Map plane, including their dimensions, pitches, clips, and
+packed visible bytes. It also compares the future-driving state behind equal
+bytes: `Pix2Mat`, `Pix2Dens`, `Pix2Place`, `MatCount`, effective material
+counts, `PixCnt`, scan cursor and boundary modes, gravity and map parameters,
+resolved material conversions and reaction routing, texture-map entries and
+inventory, retained S2 map-creator topology/callback bitmaps, and every live
+solid mask in native list order with its frozen alpha and saved background.
+It also preserves latent simulation state that can diverge on a later frame
+while both planes still match:
+
+- PXS allocation topology, each chunk's live-count ledger, the last execute
+  count, and every live particle's absolute chunk/slot, raw material index,
+  and raw fixed position and velocity;
+- the mass-mover count and allocation cursor plus every live mover's absolute
+  slot, material, and coordinates; and
+- every compiled `C4MaterialCore` value, including presentation fields and
+  source custom reactions because synchronized `GetMaterialVal` scripts can
+  branch on them, alongside the separately resolved material targets and
+  effective reaction table.
+
+Pointer identities, dead-slot payload, render-only surfaces, padding bytes,
+and addresses are not serialized. One native PXS allocation appearing through
+two chunk pointers is rejected explicitly: the pinned `SyncClearance` can
+create that invalid ownership topology, whose later double execution and
+deallocation cannot be represented safely as ordinary state.
+
+The bridge fills caller-owned backing first and wires pointers only after its
+vectors stop moving. Rust validates the ABI, dimensions, extents, flags, and
+reserved bytes, then deep-copies all nested storage before returning from the
+supply call. Weather and landscape are one-shot, frame-tagged parts of the same
+observation envelope: either missing half, a duplicate, or a wrong frame fails
+closed, and both are consumed by one compare attempt. The mismatch order is RNG,
+weather, landscape, then object state. A plane mismatch therefore names its
+frame and first coordinate before a later object contact can obscure the cause.
 
 Render-surface equivalence is outside this engine-state ABI. Rendering has its
 own contract in

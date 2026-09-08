@@ -1595,11 +1595,7 @@ pub(crate) fn material_render_placement(material: &clonk_resources::MaterialDefi
         if !material.bool_flag("BlastFree").unwrap_or(false) {
             placement += 10;
         }
-        if !material
-            .bool_flag("Dig2ObjectRequest")
-            .or_else(|| material.bool_flag("Dig2ObjectOnRequestOnly"))
-            .unwrap_or(false)
-        {
+        if !material.bool_flag("Dig2ObjectRequest").unwrap_or(false) {
             placement += 10;
         }
         placement

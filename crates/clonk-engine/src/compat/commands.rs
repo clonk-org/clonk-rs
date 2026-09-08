@@ -570,18 +570,14 @@ pub(crate) fn preview_raster_blast(
                 original_material.and_then(|id| materials.get_by_id(id).map(|entry| (id, entry)))
             {
                 clear = material.blast_free();
-                if let Some(byte) = material
-                    .blast_shift_to_spec()
-                    .zip(material.blast_shift_to_target())
-                    .and_then(|(spec, fallback)| {
-                        landscape.crossmapped_material_texture_byte(
-                            spec,
-                            material_id,
-                            materials,
-                            fallback,
-                        )
-                    })
-                {
+                if let Some(byte) = material.blast_shift_to_spec().and_then(|spec| {
+                    landscape.crossmapped_material_texture_byte(
+                        spec,
+                        material_id,
+                        materials,
+                        material.blast_shift_to_target(),
+                    )
+                }) {
                     let total = counts.get(&material_id).copied().unwrap_or(0);
                     if i64::from(rng.random(total)) < threshold {
                         shift_byte = Some(byte);

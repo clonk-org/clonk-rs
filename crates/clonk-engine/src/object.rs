@@ -2076,7 +2076,7 @@ pub struct Object {
     /// rectangle is empty. Such a put has no raster bake, but it must remain
     /// logically put so movement can restore riders and a later Remove can
     /// clear the lifecycle state (C4SolidMask.cpp:75-79,176-195,231-262).
-    pub(crate) solid_mask_empty_put: bool,
+    pub(crate) solid_mask_empty_put: Option<SolidMaskEmptyPut>,
     /// Construction order of the live C4SolidMask instance. This survives
     /// ordinary Remove/Put cycles (including fully off-landscape puts) and is
     /// cleared only when C++ would delete pSolidMaskData.
@@ -2333,7 +2333,7 @@ impl Object {
             frame_shape_contact_cnat: 0,
             frame_shape_contact_count: 0,
             solid_mask_bake: None,
-            solid_mask_empty_put: false,
+            solid_mask_empty_put: None,
             solid_mask_instance_sequence: None,
             state,
             upright_t_attach: 0,

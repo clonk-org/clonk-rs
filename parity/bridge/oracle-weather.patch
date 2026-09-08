@@ -1,3 +1,219 @@
+diff --git a/src/C4Landscape.h b/src/C4Landscape.h
+index c13e2deab..1714bdcb0 100644
+--- a/src/C4Landscape.h
++++ b/src/C4Landscape.h
+@@ -81,6 +81,10 @@ protected:
+ 	uint8_t *PixCnt;
+ 	C4Rect Relights[C4LS_MaxRelights];
+ 
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
++
+ public:
+ 	void Default();
+ 	void Clear(bool fClearMapCreator = true, bool fClearSky = true);
+diff --git a/src/C4MapCreatorS2.h b/src/C4MapCreatorS2.h
+index d89c1dd07..9385a663f 100644
+--- a/src/C4MapCreatorS2.h
++++ b/src/C4MapCreatorS2.h
+@@ -128,6 +128,9 @@ public:
+ 	void Execute(int32_t iMapZoom); // evaluate the array
+ 
+ 	friend class C4MCCallbackArrayList;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ };
+ 
+ // callback array list: contains all callbacks
+@@ -144,6 +147,9 @@ public:
+ 	void Add(C4MCCallbackArray *pNewArray); // add given array to list
+ 	void Clear(); // clear the list
+ 	void Execute(int32_t iMapZoom); // execute all arrays
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ };
+ 
+ // generic map creator tree node
+@@ -194,6 +200,9 @@ protected:
+ 	private:
+ 		int32_t value;
+ 		bool percent;
++#ifdef USE_RUST_ENGINE_VALIDATION
++		friend struct RustEngineLandscapeValidationAccess;
++#endif
+ 	};
+ 
+ public:
+@@ -203,6 +212,9 @@ public:
+ 
+ 	friend class C4MCParser;
+ 	friend struct C4MCNodeAttr;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ };
+ 
+ // node attribute entry for SetField search
+@@ -312,6 +324,9 @@ protected:
+ public:
+ 	int32_t X, Y;
+ 	int_bool RX, RY;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	bool RustEngineValidationRXSet, RustEngineValidationRYSet;
++#endif
+ 
+ 	virtual void Evaluate() override; // called when all fields are initialized
+ 	bool SetField(C4MCParser *pParser, const char *szField, const char *szSVal, int32_t iVal, C4MCTokenType ValType) override; // set field
+@@ -386,6 +401,9 @@ public:
+ 	friend class C4MCMap;
+ 	friend class C4MCParser;
+ 	friend class C4MCCallbackArray;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ };
+ 
+ // file parser for map creator
+diff --git a/src/C4MapCreatorS2.cpp b/src/C4MapCreatorS2.cpp
+index b5e781123..b6853e045 100644
+--- a/src/C4MapCreatorS2.cpp
++++ b/src/C4MapCreatorS2.cpp
+@@ -576,6 +576,9 @@ C4MCPoint::C4MCPoint(C4MCNode *pOwner) : C4MCNode(pOwner)
+ {
+ 	// zero members
+ 	X = Y = 0;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	RustEngineValidationRXSet = RustEngineValidationRYSet = false;
++#endif
+ }
+ 
+ C4MCPoint::C4MCPoint(C4MCNode *pOwner, C4MCPoint &rTemplate, bool fClone) : C4MCNode(pOwner, rTemplate, fClone)
+@@ -583,11 +586,18 @@ C4MCPoint::C4MCPoint(C4MCNode *pOwner, C4MCPoint &rTemplate, bool fClone) : C4MC
+ 	// copy fields
+ 	X = rTemplate.X; Y = rTemplate.Y;
+ 	RX = rTemplate.RX; RY = rTemplate.RY;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	RustEngineValidationRXSet = rTemplate.RustEngineValidationRXSet;
++	RustEngineValidationRYSet = rTemplate.RustEngineValidationRYSet;
++#endif
+ }
+ 
+ void C4MCPoint::Default()
+ {
+ 	X = Y = 0;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	RustEngineValidationRXSet = RustEngineValidationRYSet = false;
++#endif
+ }
+ 
+ bool C4MCPoint::SetField(C4MCParser *pParser, const char *szField, const char *szSVal, int32_t iVal, C4MCTokenType ValType)
+@@ -597,11 +607,17 @@ bool C4MCPoint::SetField(C4MCParser *pParser, const char *szField, const char *s
+ 	if (SEqual(szField, "x"))
+ 	{
+ 		RX.Set(IntPar, ValType == MCT_PERCENT);
++#ifdef USE_RUST_ENGINE_VALIDATION
++		RustEngineValidationRXSet = true;
++#endif
+ 		return true;
+ 	}
+ 	else if (SEqual(szField, "y"))
+ 	{
+ 		RY.Set(IntPar, ValType == MCT_PERCENT);
++#ifdef USE_RUST_ENGINE_VALIDATION
++		RustEngineValidationRYSet = true;
++#endif
+ 		return true;
+ 	}
+ 	return false;
+diff --git a/src/C4MassMover.h b/src/C4MassMover.h
+index 9f766e942..c8e764f1c 100644
+--- a/src/C4MassMover.h
++++ b/src/C4MassMover.h
+@@ -29,6 +29,9 @@ class C4MassMoverSet;
+ class C4MassMover
+ {
+ 	friend class C4MassMoverSet;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ 
+ protected:
+ 	int32_t Mat, x, y;
+@@ -42,6 +45,9 @@ protected:
+ 
+ class C4MassMoverSet
+ {
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ public:
+ 	C4MassMoverSet();
+ 	~C4MassMoverSet();
+diff --git a/src/C4PXS.h b/src/C4PXS.h
+index 3501de294..0a4da1afa 100644
+--- a/src/C4PXS.h
++++ b/src/C4PXS.h
+@@ -27,6 +27,9 @@ class C4PXS
+ 	C4PXS() : Mat(MNone), x(Fix0), y(Fix0), xdir(Fix0), ydir(Fix0) {}
+ 
+ 	friend class C4PXSSystem;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ 
+ protected:
+ 	int32_t Mat;
+@@ -41,6 +44,9 @@ const size_t PXSChunkSize = 500, PXSMaxChunk = 20;
+ 
+ class C4PXSSystem
+ {
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ public:
+ 	C4PXSSystem();
+ 	~C4PXSSystem();
+diff --git a/src/C4SolidMask.h b/src/C4SolidMask.h
+index f7861908f..68138d91a 100644
+--- a/src/C4SolidMask.h
++++ b/src/C4SolidMask.h
+@@ -62,6 +62,9 @@ protected:
+ 
+ 	friend class C4Landscape;
+ 	friend class DensityProvider;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ 
+ public:
+ 	// Linked list of all solidmasks
+diff --git a/src/C4Texture.h b/src/C4Texture.h
+index 59a953f7b..df85498c1 100644
+--- a/src/C4Texture.h
++++ b/src/C4Texture.h
+@@ -26,6 +26,9 @@
+ class C4Texture
+ {
+ 	friend class C4TextureMap;
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ 
+ public:
+ 	C4Texture();
+@@ -65,6 +68,9 @@ public:
+ 
+ class C4TextureMap
+ {
++#ifdef USE_RUST_ENGINE_VALIDATION
++	friend struct RustEngineLandscapeValidationAccess;
++#endif
+ public:
+ 	C4TextureMap();
+ 	~C4TextureMap();
 diff --git a/src/C4Weather.cpp b/src/C4Weather.cpp
 index 58f201ba2..7892cd5a1 100644
 --- a/src/C4Weather.cpp
@@ -63,13 +279,2157 @@ index b31eb4e4d..5dcc8b96f 100644
  public:
  	void Default();
 diff --git a/src/rust/RustEngineBridge.cpp b/src/rust/RustEngineBridge.cpp
-index f76f6934e..1f65fd0d0 100644
+index f76f6934e..774099cb5 100644
 --- a/src/rust/RustEngineBridge.cpp
 +++ b/src/rust/RustEngineBridge.cpp
-@@ -853,6 +853,77 @@ struct SnapshotBuffer {
+@@ -10,13 +10,19 @@
+ #include <C4Control.h>
+ #include <C4Game.h>
+ #include <C4GraphicsSystem.h>
++#include <C4Landscape.h>
+ #include <C4Log.h>
++#include <C4MapCreatorS2.h>
++#include <C4MassMover.h>
+ #include <C4Object.h>
+ #include <C4ObjectList.h>
+ #include <C4Effects.h>
+ #include <C4Particles.h>
+ #include <C4Player.h>
+ #include <C4Material.h>
++#include <C4PXS.h>
++#include <C4SolidMask.h>
++#include <C4Texture.h>
+ #include <C4Weather.h>
+ #include <C4Viewport.h>
+ #include <C4Wrappers.h>
+@@ -25,6 +31,7 @@
+ #include <Fixed.h>
+ 
+ #include <algorithm>
++#include <array>
+ #include <atomic>
+ #include <cctype>
+ #include <cmath>
+@@ -47,6 +54,151 @@
+ #include <unordered_map>
+ #include <unordered_set>
+ 
++struct RustEngineLandscapeValidationAccess {
++    static const CSurface8 *Surface8(const C4Landscape &landscape) {
++        return landscape.Surface8;
++    }
++    static const int32_t *Pix2Mat(const C4Landscape &landscape) {
++        return landscape.Pix2Mat;
++    }
++    static const int32_t *Pix2Dens(const C4Landscape &landscape) {
++        return landscape.Pix2Dens;
++    }
++    static const int32_t *Pix2Place(const C4Landscape &landscape) {
++        return landscape.Pix2Place;
++    }
++    static int32_t PixCntPitch(const C4Landscape &landscape) {
++        return landscape.PixCntPitch;
++    }
++    static const uint8_t *PixCnt(const C4Landscape &landscape) {
++        return landscape.PixCnt;
++    }
++
++    static const C4PXS *PxsChunk(
++        const C4PXSSystem &system,
++        size_t chunk) {
++        return system.Chunk[chunk];
++    }
++    static size_t PxsChunkCount(
++        const C4PXSSystem &system,
++        size_t chunk) {
++        return system.iChunkPXS[chunk];
++    }
++    static int32_t PxsMaterial(const C4PXS &pxs) { return pxs.Mat; }
++    static int32_t PxsX(const C4PXS &pxs) { return pxs.x.val; }
++    static int32_t PxsY(const C4PXS &pxs) { return pxs.y.val; }
++    static int32_t PxsXDir(const C4PXS &pxs) { return pxs.xdir.val; }
++    static int32_t PxsYDir(const C4PXS &pxs) { return pxs.ydir.val; }
++
++    static const C4MassMover &MassMoverAt(
++        const C4MassMoverSet &set,
++        size_t index) {
++        return set.Set[index];
++    }
++    static int32_t MassMoverMaterial(const C4MassMover &mover) {
++        return mover.Mat;
++    }
++    static int32_t MassMoverX(const C4MassMover &mover) { return mover.x; }
++    static int32_t MassMoverY(const C4MassMover &mover) { return mover.y; }
++
++    static bool TexMapOverloadMaterials(const C4TextureMap &texmap) {
++        return texmap.fOverloadMaterials;
++    }
++    static bool TexMapOverloadTextures(const C4TextureMap &texmap) {
++        return texmap.fOverloadTextures;
++    }
++    static bool TexMapInitialized(const C4TextureMap &texmap) {
++        return texmap.fInitialized;
++    }
++    static const C4Texture *FirstTexture(const C4TextureMap &texmap) {
++        return texmap.FirstTexture;
++    }
++    static const C4Texture *NextTexture(const C4Texture &texture) {
++        return texture.Next;
++    }
++    static const char *TextureName(const C4Texture &texture) {
++        return texture.Name;
++    }
++
++    static bool SolidMaskPut(const C4SolidMask &mask) { return mask.MaskPut; }
++    static int32_t SolidMaskPutRotation(const C4SolidMask &mask) {
++        return mask.MaskPutRotation;
++    }
++    static int32_t SolidMaskPitch(const C4SolidMask &mask) {
++        return mask.MatBuffPitch;
++    }
++    static int32_t SolidMaskAttachmentCount(const C4SolidMask &mask) {
++        return mask.iAttachingObjectsCount;
++    }
++    static const C4TargetRect &SolidMaskPutRect(const C4SolidMask &mask) {
++        return mask.MaskPutRect;
++    }
++    static const uint8_t *SolidMaskAlpha(const C4SolidMask &mask) {
++        return mask.pSolidMask;
++    }
++    static const uint8_t *SolidMaskBackground(const C4SolidMask &mask) {
++        return mask.pSolidMaskMatBuff;
++    }
++    static const C4Object *SolidMaskOwner(const C4SolidMask &mask) {
++        return mask.pForObject;
++    }
++
++    static const C4SLandscape *CreatorLandscape(const C4MapCreatorS2 &creator) {
++        return creator.Landscape;
++    }
++    static const C4TextureMap *CreatorTexMap(const C4MapCreatorS2 &creator) {
++        return creator.TexMap;
++    }
++    static const C4MaterialMap *CreatorMatMap(const C4MapCreatorS2 &creator) {
++        return creator.MatMap;
++    }
++    static const C4MCMap &CreatorDefaultMap(const C4MapCreatorS2 &creator) {
++        return creator.DefaultMap;
++    }
++    static const C4MCOverlay &CreatorDefaultOverlay(const C4MapCreatorS2 &creator) {
++        return creator.DefaultOverlay;
++    }
++    static const C4MCPoint &CreatorDefaultPoint(const C4MapCreatorS2 &creator) {
++        return creator.DefaultPoint;
++    }
++    static const C4MCMap *CreatorCurrentMap(const C4MapCreatorS2 &creator) {
++        return creator.pCurrentMap;
++    }
++    static const C4MCCallbackArray *CreatorFirstCallback(
++        const C4MapCreatorS2 &creator) {
++        return creator.CallbackArrays.pFirst;
++    }
++
++    static int32_t IntBoolValue(const C4MCNode::int_bool &value) {
++        return value.value;
++    }
++    static bool IntBoolPercent(const C4MCNode::int_bool &value) {
++        return value.percent;
++    }
++
++    static const C4MapCreatorS2 *CallbackCreator(
++        const C4MCCallbackArray &callback) {
++        return callback.pMapCreator;
++    }
++    static const uint8_t *CallbackMap(const C4MCCallbackArray &callback) {
++        return callback.pMap;
++    }
++    static int32_t CallbackWidth(const C4MCCallbackArray &callback) {
++        return callback.iWdt;
++    }
++    static int32_t CallbackHeight(const C4MCCallbackArray &callback) {
++        return callback.iHgt;
++    }
++    static const C4AulFunc *CallbackFunction(
++        const C4MCCallbackArray &callback) {
++        return callback.pSF;
++    }
++    static const C4MCCallbackArray *CallbackNext(
++        const C4MCCallbackArray &callback) {
++        return callback.pNext;
++    }
++};
++
+ namespace {
+ 
+ constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+@@ -853,6 +1005,2041 @@ struct SnapshotBuffer {
      std::vector<LcEngineNetworkPacketSnapshot> network_packet_raw;
  };
  
++static_assert(sizeof(void *) == 8, "runtime validation ABI requires 64-bit pointers");
++static_assert(sizeof(size_t) == 8, "runtime validation ABI requires 64-bit size_t");
++static_assert(
++    C4MaxMaterial == LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY,
++    "native and runtime landscape material capacities differ");
++static_assert(
++    C4M_MaxTexIndex == LC_ENGINE_RUNTIME_LANDSCAPE_TEXMAP_CAPACITY,
++    "native and runtime landscape texture-map capacities differ");
++static_assert(
++    sizeof(LcEngineRuntimeLandscapeTexMapEntrySnapshot) == 40,
++    "LcEngineRuntimeLandscapeTexMapEntrySnapshot ABI must remain 40 bytes");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeTexMapEntrySnapshot, material_index) == 32,
++    "landscape texmap material_index ABI offset changed");
++static_assert(
++    sizeof(LcEngineRuntimeLandscapeSolidMaskSnapshot) == 112,
++    "LcEngineRuntimeLandscapeSolidMaskSnapshot ABI must remain 112 bytes");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSolidMaskSnapshot, alpha) == 64,
++    "landscape solid-mask alpha ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSolidMaskSnapshot, mask_put) == 104,
++    "landscape solid-mask mask_put ABI offset changed");
++static_assert(
++    sizeof(LcEngineRuntimeLandscapeSnapshot) == 10016,
++    "LcEngineRuntimeLandscapeSnapshot ABI must remain 10016 bytes");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, surface8) == 48,
++    "landscape Surface8 ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, map) == 104,
++    "landscape Map ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, map_creator_state) == 168,
++    "landscape map-creator ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, material_reaction_state) == 184,
++    "landscape material-reaction ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, material_behavior_state) == 200,
++    "landscape material-behavior ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, pxs_state) == 216,
++    "landscape PXS ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, mass_mover_state) == 232,
++    "landscape mass-mover ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, in_mat_convert_to) == 252,
++    "landscape InMatConvertTo ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, pix_cnt) == 4832,
++    "landscape PixCnt ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, solid_masks) == 4920,
++    "landscape solid-mask ABI offset changed");
++static_assert(
++    offsetof(LcEngineRuntimeLandscapeSnapshot, texmap) == 4936,
++    "landscape texmap ABI offset changed");
++
++struct LandscapeSolidMaskBacking {
++    std::vector<uint8_t> alpha;
++    std::vector<uint8_t> background;
++};
++
++// All pointers published through `snapshot` refer into this caller-owned
++// object. The Rust FFI deep-copies them synchronously in
++// lc_engine_runtime_supply_landscape_snapshot.
++struct LandscapeSnapshotBuffer {
++    LcEngineRuntimeLandscapeSnapshot snapshot{};
++    std::vector<uint8_t> surface8;
++    std::vector<uint8_t> map;
++    std::vector<uint8_t> default_mat_tex;
++    std::vector<uint8_t> material_crossmap;
++    std::vector<uint8_t> texture_inventory;
++    std::vector<uint8_t> map_creator_state;
++    std::vector<uint8_t> material_reaction_state;
++    std::vector<uint8_t> material_behavior_state;
++    std::vector<uint8_t> pxs_state;
++    std::vector<uint8_t> mass_mover_state;
++    std::vector<uint8_t> pix_cnt;
++    std::array<std::vector<uint8_t>, LC_ENGINE_RUNTIME_LANDSCAPE_TEXMAP_CAPACITY>
++        texmap_material_names;
++    std::array<std::vector<uint8_t>, LC_ENGINE_RUNTIME_LANDSCAPE_TEXMAP_CAPACITY>
++        texmap_texture_names;
++    std::vector<LandscapeSolidMaskBacking> solid_mask_backing;
++    std::vector<LcEngineRuntimeLandscapeSolidMaskSnapshot> solid_masks;
++};
++
++bool CheckedProduct(size_t left, size_t right, size_t &result) {
++    if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
++        return false;
++    }
++    result = left * right;
++    return true;
++}
++
++bool BoundedCStringBytes(
++    const char *value,
++    size_t capacity,
++    std::vector<uint8_t> &bytes,
++    const std::string &label,
++    std::string &error) {
++    if (!value) {
++        error = label + " is null";
++        return false;
++    }
++    size_t length = 0;
++    while (length < capacity && value[length] != '\0') {
++        ++length;
++    }
++    if (length == capacity) {
++        error = std::format("{} is not NUL-terminated within {} bytes", label, capacity);
++        return false;
++    }
++    bytes.assign(
++        reinterpret_cast<const uint8_t *>(value),
++        reinterpret_cast<const uint8_t *>(value) + length);
++    return true;
++}
++
++class LandscapeStateEncoder {
++public:
++    explicit LandscapeStateEncoder(std::vector<uint8_t> &bytes)
++        : bytes(bytes) {}
++
++    void PushU8(uint8_t value) { bytes.push_back(value); }
++
++    void PushBool(bool value) { PushU8(value ? 1u : 0u); }
++
++    void PushU32(uint32_t value) {
++        for (unsigned int shift = 0; shift < 32; shift += 8) {
++            bytes.push_back(static_cast<uint8_t>(value >> shift));
++        }
++    }
++
++    void PushI32(int32_t value) { PushU32(static_cast<uint32_t>(value)); }
++
++    bool PushLength(size_t length, const std::string &label, std::string &error) {
++        if (length > std::numeric_limits<uint32_t>::max()) {
++            error = label + " exceeds u32";
++            return false;
++        }
++        PushU32(static_cast<uint32_t>(length));
++        return true;
++    }
++
++    bool PushBytes(
++        const uint8_t *value,
++        size_t length,
++        const std::string &label,
++        std::string &error) {
++        if (length != 0 && !value) {
++            error = label + " is null with a nonzero length";
++            return false;
++        }
++        if (length != 0 &&
++            std::find(value, value + length, uint8_t{0}) != value + length) {
++            error = label + " contains an embedded NUL";
++            return false;
++        }
++        if (!PushLength(length, label + " length", error)) {
++            return false;
++        }
++        if (length != 0) {
++            bytes.insert(bytes.end(), value, value + length);
++        }
++        return true;
++    }
++
++    bool PushRawBytes(
++        const uint8_t *value,
++        size_t length,
++        const std::string &label,
++        std::string &error) {
++        if (length != 0 && !value) {
++            error = label + " is null with a nonzero length";
++            return false;
++        }
++        if (!PushLength(length, label + " length", error)) {
++            return false;
++        }
++        AppendRaw(value, length);
++        return true;
++    }
++
++    void AppendRaw(const uint8_t *value, size_t length) {
++        if (length != 0) {
++            bytes.insert(bytes.end(), value, value + length);
++        }
++    }
++
++    bool PushCString(
++        const char *value,
++        size_t capacity,
++        const std::string &label,
++        std::string &error) {
++        std::vector<uint8_t> encoded;
++        if (!BoundedCStringBytes(value, capacity, encoded, label, error)) {
++            return false;
++        }
++        return PushBytes(encoded.data(), encoded.size(), label, error);
++    }
++
++private:
++    std::vector<uint8_t> &bytes;
++};
++
++static_assert(PXSChunkSize == 500, "native PXS chunk size changed");
++static_assert(PXSMaxChunk == 20, "native PXS chunk count changed");
++static_assert(PXSMaxChunk <= 32, "PXS allocated-chunk mask exceeds u32");
++static_assert(C4MassMoverChunk == 10000, "native mass-mover capacity changed");
++
++struct PxsValidationRecord {
++    uint32_t chunk;
++    uint32_t slot;
++    int32_t material;
++    int32_t x;
++    int32_t y;
++    int32_t xdir;
++    int32_t ydir;
++};
++
++bool EncodePxsState(
++    const C4PXSSystem &system,
++    std::vector<uint8_t> &bytes,
++    std::string &error) {
++    struct ChunkAddressRange {
++        uintptr_t begin;
++        uintptr_t end;
++        size_t index;
++    };
++    std::vector<ChunkAddressRange> ranges;
++    std::array<uint32_t, PXSMaxChunk> chunk_counts{};
++    std::vector<PxsValidationRecord> records;
++    uint32_t allocated_chunk_mask = 0;
++    for (size_t chunk_index = 0; chunk_index < PXSMaxChunk; ++chunk_index) {
++        const C4PXS *chunk =
++            RustEngineLandscapeValidationAccess::PxsChunk(system, chunk_index);
++        const size_t expected_live =
++            RustEngineLandscapeValidationAccess::PxsChunkCount(
++                system,
++                chunk_index);
++        if (expected_live > PXSChunkSize) {
++            error = std::format(
++                "PXS chunk {} occupancy {} exceeds {}",
++                chunk_index,
++                expected_live,
++                PXSChunkSize);
++            return false;
++        }
++        chunk_counts[chunk_index] = static_cast<uint32_t>(expected_live);
++        if (!chunk) {
++            if (expected_live != 0) {
++                error = std::format(
++                    "PXS chunk {} is null with occupancy {}",
++                    chunk_index,
++                    expected_live);
++                return false;
++            }
++            continue;
++        }
++
++        const uintptr_t begin = reinterpret_cast<uintptr_t>(chunk);
++        constexpr size_t chunk_bytes = sizeof(C4PXS) * PXSChunkSize;
++        if (begin % alignof(C4PXS) != 0 ||
++            begin > std::numeric_limits<uintptr_t>::max() - chunk_bytes) {
++            error = std::format(
++                "PXS chunk {} has an invalid storage address",
++                chunk_index);
++            return false;
++        }
++        const uintptr_t end = begin + chunk_bytes;
++        for (const auto &range : ranges) {
++            if (begin < range.end && range.begin < end) {
++                error = std::format(
++                    "PXS chunks {} and {} alias storage",
++                    range.index,
++                    chunk_index);
++                return false;
++            }
++        }
++        ranges.push_back({begin, end, chunk_index});
++        allocated_chunk_mask |= uint32_t{1} << chunk_index;
++
++        size_t actual_live = 0;
++        for (size_t slot = 0; slot < PXSChunkSize; ++slot) {
++            const C4PXS &pxs = chunk[slot];
++            const int32_t material =
++                RustEngineLandscapeValidationAccess::PxsMaterial(pxs);
++            if (material == MNone) {
++                continue;
++            }
++            ++actual_live;
++            records.push_back({
++                static_cast<uint32_t>(chunk_index),
++                static_cast<uint32_t>(slot),
++                material,
++                RustEngineLandscapeValidationAccess::PxsX(pxs),
++                RustEngineLandscapeValidationAccess::PxsY(pxs),
++                RustEngineLandscapeValidationAccess::PxsXDir(pxs),
++                RustEngineLandscapeValidationAccess::PxsYDir(pxs),
++            });
++        }
++        if (actual_live != expected_live) {
++            error = std::format(
++                "PXS chunk {} occupancy ledger {}, scanned {}",
++                chunk_index,
++                expected_live,
++                actual_live);
++            return false;
++        }
++    }
++
++    bytes.clear();
++    LandscapeStateEncoder encoder(bytes);
++    encoder.AppendRaw(reinterpret_cast<const uint8_t *>("LCPX"), 4);
++    encoder.PushU32(1);
++    encoder.PushI32(system.Count);
++    encoder.PushU32(allocated_chunk_mask);
++    for (uint32_t count : chunk_counts) {
++        encoder.PushI32(static_cast<int32_t>(count));
++    }
++    if (!encoder.PushLength(records.size(), "PXS live slot count", error)) {
++        return false;
++    }
++    for (const auto &record : records) {
++        encoder.PushU32(record.chunk);
++        encoder.PushU32(record.slot);
++        encoder.PushI32(record.material);
++        encoder.PushI32(record.x);
++        encoder.PushI32(record.y);
++        encoder.PushI32(record.xdir);
++        encoder.PushI32(record.ydir);
++    }
++    return true;
++}
++
++struct MassMoverValidationRecord {
++    uint32_t index;
++    int32_t material;
++    int32_t x;
++    int32_t y;
++};
++
++bool EncodeMassMoverState(
++    const C4MassMoverSet &set,
++    std::vector<uint8_t> &bytes,
++    std::string &error) {
++    if (set.CreatePtr < 0 || set.CreatePtr >= C4MassMoverChunk) {
++        error = std::format(
++            "mass-mover CreatePtr {} is outside 0..{}",
++            set.CreatePtr,
++            C4MassMoverChunk - 1);
++        return false;
++    }
++
++    std::vector<MassMoverValidationRecord> records;
++    records.reserve(C4MassMoverChunk);
++    for (size_t index = 0; index < C4MassMoverChunk; ++index) {
++        const C4MassMover &mover =
++            RustEngineLandscapeValidationAccess::MassMoverAt(set, index);
++        const int32_t material =
++            RustEngineLandscapeValidationAccess::MassMoverMaterial(mover);
++        if (material == MNone) {
++            continue;
++        }
++        records.push_back({
++            static_cast<uint32_t>(index),
++            material,
++            RustEngineLandscapeValidationAccess::MassMoverX(mover),
++            RustEngineLandscapeValidationAccess::MassMoverY(mover),
++        });
++    }
++
++    bytes.clear();
++    LandscapeStateEncoder encoder(bytes);
++    encoder.AppendRaw(reinterpret_cast<const uint8_t *>("LCMM"), 4);
++    encoder.PushU32(1);
++    encoder.PushI32(set.Count);
++    encoder.PushI32(set.CreatePtr);
++    if (!encoder.PushLength(records.size(), "mass-mover live slot count", error)) {
++        return false;
++    }
++    for (const auto &record : records) {
++        encoder.PushU32(record.index);
++        encoder.PushI32(record.material);
++        encoder.PushI32(record.x);
++        encoder.PushI32(record.y);
++    }
++    return true;
++}
++
++bool PushMaterialString(
++    LandscapeStateEncoder &encoder,
++    const StdStrBuf &value,
++    const std::string &label,
++    std::string &error) {
++    return encoder.PushRawBytes(
++        reinterpret_cast<const uint8_t *>(value.getData()),
++        value.getLength(),
++        label,
++        error);
++}
++
++const char *MaterialReactionTypeName(const C4MaterialReaction &reaction) {
++    if (reaction.pFunc == &C4MaterialMap::mrfScript) {
++        return "Script";
++    }
++    if (reaction.pFunc == &C4MaterialMap::mrfConvert) {
++        return "Convert";
++    }
++    if (reaction.pFunc == &C4MaterialMap::mrfPoof) {
++        return "Poof";
++    }
++    if (reaction.pFunc == &C4MaterialMap::mrfCorrode) {
++        return "Corrode";
++    }
++    if (reaction.pFunc == &C4MaterialMap::mrfInsert) {
++        return "Insert";
++    }
++    // C4MaterialReaction::CompileFunc decompiles NoReaction and function
++    // pointers outside ReactionFuncMap as the empty Type value.
++    return "";
++}
++
++bool EncodeMaterialBehaviorState(
++    const C4MaterialMap &materials,
++    std::vector<uint8_t> &bytes,
++    std::string &error) {
++    if (materials.Num < 0 ||
++        materials.Num >
++            static_cast<int32_t>(LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY)) {
++        error = std::format(
++            "material behavior count {} is outside 0..{}",
++            materials.Num,
++            LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY);
++        return false;
++    }
++    if (materials.Num != 0 && !materials.Map) {
++        error = "material behavior map has a nonzero count but no entries";
++        return false;
++    }
++
++    bytes.clear();
++    LandscapeStateEncoder encoder(bytes);
++    encoder.AppendRaw(reinterpret_cast<const uint8_t *>("LCMB"), 4);
++    encoder.PushU32(1);
++    encoder.PushU32(static_cast<uint32_t>(materials.Num));
++    for (int32_t index = 0; index < materials.Num; ++index) {
++        const C4Material &material = materials.Map[index];
++        const std::string label = std::format("material behavior {}", index);
++        if (!encoder.PushCString(
++                material.Name,
++                sizeof(material.Name),
++                label + " Name",
++                error)) {
++            return false;
++        }
++        for (uint32_t value : material.Color) {
++            encoder.PushU32(value);
++        }
++        for (uint32_t value : material.Alpha) {
++            encoder.PushU32(value);
++        }
++        for (int32_t value : {
++                 material.MapChunkType,
++                 material.Density,
++                 material.Friction,
++                 material.DigFree,
++                 material.BlastFree,
++             }) {
++            encoder.PushI32(value);
++        }
++        encoder.PushU32(static_cast<uint32_t>(material.Blast2Object));
++        encoder.PushU32(static_cast<uint32_t>(material.Dig2Object));
++        for (int32_t value : {
++                 material.Dig2ObjectRatio,
++                 material.Dig2ObjectOnRequestOnly,
++                 material.Blast2ObjectRatio,
++                 material.Blast2PXSRatio,
++                 material.Instable,
++                 material.MaxAirSpeed,
++                 material.MaxSlide,
++                 material.WindDrift,
++                 material.Inflammable,
++                 material.Incindiary,
++                 material.Corrode,
++                 material.Corrosive,
++                 material.Extinguisher,
++                 material.Soil,
++                 material.Placement,
++             }) {
++            encoder.PushI32(value);
++        }
++        if (!PushMaterialString(
++                encoder,
++                material.sTextureOverlay,
++                label + " TextureOverlay",
++                error)) {
++            return false;
++        }
++        encoder.PushI32(material.OverlayType);
++        if (!PushMaterialString(
++                encoder,
++                material.sPXSGfx,
++                label + " PXSGfx",
++                error)) {
++            return false;
++        }
++        for (int32_t value : {
++                 material.PXSGfxRt.x,
++                 material.PXSGfxRt.y,
++                 material.PXSGfxRt.Wdt,
++                 material.PXSGfxRt.Hgt,
++                 material.PXSGfxRt.tx,
++                 material.PXSGfxRt.ty,
++                 material.PXSGfxSize,
++                 material.TempConvStrength,
++             }) {
++            encoder.PushI32(value);
++        }
++        if (!PushMaterialString(
++                encoder,
++                material.sBlastShiftTo,
++                label + " BlastShiftTo",
++                error) ||
++            !PushMaterialString(
++                encoder,
++                material.sInMatConvert,
++                label + " InMatConvert",
++                error) ||
++            !PushMaterialString(
++                encoder,
++                material.sInMatConvertTo,
++                label + " InMatConvertTo",
++                error)) {
++            return false;
++        }
++        encoder.PushI32(material.InMatConvertDepth);
++        encoder.PushI32(material.AboveTempConvert);
++        encoder.PushI32(material.AboveTempConvertDir);
++        if (!PushMaterialString(
++                encoder,
++                material.sAboveTempConvertTo,
++                label + " AboveTempConvertTo",
++                error)) {
++            return false;
++        }
++        encoder.PushI32(material.BelowTempConvert);
++        encoder.PushI32(material.BelowTempConvertDir);
++        if (!PushMaterialString(
++                encoder,
++                material.sBelowTempConvertTo,
++                label + " BelowTempConvertTo",
++                error)) {
++            return false;
++        }
++        encoder.PushI32(material.MinHeightCount);
++        encoder.PushI32(material.SplashRate);
++
++        if (!encoder.PushLength(
++                material.CustomReactionList.size(),
++                label + " reaction count",
++                error)) {
++            return false;
++        }
++        for (size_t reaction_index = 0;
++             reaction_index < material.CustomReactionList.size();
++             ++reaction_index) {
++            const C4MaterialReaction &reaction =
++                material.CustomReactionList[reaction_index];
++            const std::string reaction_label = std::format(
++                "{} reaction {}",
++                label,
++                reaction_index);
++            const char *type = MaterialReactionTypeName(reaction);
++            if (!encoder.PushRawBytes(
++                    reinterpret_cast<const uint8_t *>(type),
++                    std::strlen(type),
++                    reaction_label + " Type",
++                    error) ||
++                !PushMaterialString(
++                    encoder,
++                    reaction.TargetSpec,
++                    reaction_label + " TargetSpec",
++                    error) ||
++                !PushMaterialString(
++                    encoder,
++                    reaction.ScriptFunc,
++                    reaction_label + " ScriptFunc",
++                    error)) {
++                return false;
++            }
++            encoder.PushU32(reaction.iExecMask);
++            encoder.PushBool(reaction.fReverse);
++            encoder.PushBool(reaction.fInverseSpec);
++            encoder.PushBool(reaction.fInsertionCheck);
++            encoder.PushI32(reaction.iDepth);
++            if (!PushMaterialString(
++                    encoder,
++                    reaction.sConvertMat,
++                    reaction_label + " ConvertMat",
++                    error)) {
++                return false;
++            }
++            encoder.PushI32(reaction.iCorrosionRate);
++        }
++    }
++    return true;
++}
++
++template<typename IntBool>
++bool PushMapCreatorIntBool(
++    LandscapeStateEncoder &encoder,
++    const IntBool &value) {
++    encoder.PushI32(RustEngineLandscapeValidationAccess::IntBoolValue(value));
++    encoder.PushBool(RustEngineLandscapeValidationAccess::IntBoolPercent(value));
++    return true;
++}
++
++bool MapCreatorOperationTag(
++    C4MCTokenType operation,
++    uint8_t &tag,
++    std::string &error) {
++    switch (operation) {
++    case MCT_NONE: tag = 0; return true;
++    case MCT_AND: tag = 1; return true;
++    case MCT_OR: tag = 2; return true;
++    case MCT_XOR: tag = 3; return true;
++    default:
++        error = std::format("map creator overlay has invalid operation {}", static_cast<int>(operation));
++        return false;
++    }
++}
++
++bool MapCreatorAlgorithmTag(
++    const C4MCAlgorithm *algorithm,
++    uint8_t &tag,
++    std::string &error) {
++    for (uint8_t index = 0; index < 14; ++index) {
++        if (algorithm == &C4MCAlgoMap[index]) {
++            tag = index;
++            return true;
++        }
++    }
++    error = "map creator overlay has an unknown algorithm pointer";
++    return false;
++}
++
++bool PushMapCreatorCallbackOrdinal(
++    LandscapeStateEncoder &encoder,
++    const C4MCCallbackArray *callback,
++    const std::unordered_map<const C4MCCallbackArray *, int32_t> &ordinals,
++    const std::string &label,
++    std::string &error) {
++    if (!callback) {
++        encoder.PushI32(-1);
++        return true;
++    }
++    const auto found = ordinals.find(callback);
++    if (found == ordinals.end()) {
++        error = label + " references a callback outside the creator list";
++        return false;
++    }
++    encoder.PushI32(found->second);
++    return true;
++}
++
++bool EncodeMapCreatorOverlay(
++    const C4MCOverlay &overlay,
++    LandscapeStateEncoder &encoder,
++    const std::unordered_map<const C4MCCallbackArray *, int32_t> &callback_ordinals,
++    const std::string &label,
++    std::string &error) {
++    for (int32_t value : {
++             overlay.Seed,
++             overlay.FixedSeed,
++             overlay.X,
++             overlay.Y,
++             overlay.Wdt,
++             overlay.Hgt,
++             overlay.OffX,
++             overlay.OffY,
++         }) {
++        encoder.PushI32(value);
++    }
++    PushMapCreatorIntBool(encoder, overlay.RX);
++    PushMapCreatorIntBool(encoder, overlay.RY);
++    PushMapCreatorIntBool(encoder, overlay.RWdt);
++    PushMapCreatorIntBool(encoder, overlay.RHgt);
++    PushMapCreatorIntBool(encoder, overlay.ROffX);
++    PushMapCreatorIntBool(encoder, overlay.ROffY);
++    encoder.PushI32(overlay.Material);
++    encoder.PushBool(overlay.Sub);
++    if (!encoder.PushCString(
++            overlay.Texture,
++            sizeof(overlay.Texture),
++            label + " texture",
++            error)) {
++        return false;
++    }
++    encoder.PushU8(overlay.MatClr);
++    uint8_t operation = 0;
++    if (!MapCreatorOperationTag(overlay.Op, operation, error)) {
++        error = label + ": " + error;
++        return false;
++    }
++    encoder.PushU8(operation);
++    uint8_t algorithm = 0;
++    if (!MapCreatorAlgorithmTag(overlay.Algorithm, algorithm, error)) {
++        error = label + ": " + error;
++        return false;
++    }
++    encoder.PushU8(algorithm);
++    encoder.PushI32(overlay.Turbulence);
++    encoder.PushI32(overlay.Lambda);
++    encoder.PushI32(overlay.Rotate);
++    PushMapCreatorIntBool(encoder, overlay.Alpha);
++    PushMapCreatorIntBool(encoder, overlay.Beta);
++    encoder.PushI32(overlay.ZoomX);
++    encoder.PushI32(overlay.ZoomY);
++    encoder.PushBool(overlay.Invert);
++    encoder.PushBool(overlay.LooseBounds);
++    encoder.PushBool(overlay.Group);
++    encoder.PushBool(overlay.Mask);
++    if (!PushMapCreatorCallbackOrdinal(
++            encoder,
++            overlay.pEvaluateFunc,
++            callback_ordinals,
++            label + " evalFn",
++            error)) {
++        return false;
++    }
++    return PushMapCreatorCallbackOrdinal(
++        encoder,
++        overlay.pDrawFunc,
++        callback_ordinals,
++        label + " drawFn",
++        error);
++}
++
++bool EncodeMapCreatorPoint(
++    const C4MCPoint &point,
++    LandscapeStateEncoder &encoder) {
++    encoder.PushI32(point.X);
++    encoder.PushI32(point.Y);
++    encoder.PushBool(point.RustEngineValidationRXSet);
++    if (point.RustEngineValidationRXSet) {
++        PushMapCreatorIntBool(encoder, point.RX);
++    }
++    encoder.PushBool(point.RustEngineValidationRYSet);
++    if (point.RustEngineValidationRYSet) {
++        PushMapCreatorIntBool(encoder, point.RY);
++    }
++    return true;
++}
++
++bool ValidateDetachedMapCreatorTemplate(
++    const C4MCNode &node,
++    const C4MapCreatorS2 &creator,
++    C4MCNodeType expected_type,
++    const std::string &label,
++    std::string &error) {
++    if (node.Owner || node.Child0 || node.ChildL || node.Prev || node.Next) {
++        error = label + " has unexpected tree links";
++        return false;
++    }
++    if (node.MapCreator != &creator) {
++        error = label + " has the wrong owning creator";
++        return false;
++    }
++    if (const_cast<C4MCNode &>(node).Type() != expected_type) {
++        error = label + " has the wrong node type";
++        return false;
++    }
++    return true;
++}
++
++template<typename IntBool>
++bool MapCreatorIntBoolEquals(
++    const IntBool &value,
++    int32_t expected_value,
++    bool expected_percent) {
++    return RustEngineLandscapeValidationAccess::IntBoolValue(value) ==
++            expected_value &&
++        RustEngineLandscapeValidationAccess::IntBoolPercent(value) ==
++            expected_percent;
++}
++
++bool ValidateCanonicalMapCreatorDefaults(
++    const C4MCOverlay &overlay,
++    const C4MCPoint &point,
++    std::string &error) {
++    if (overlay.Name[0] != '\0' || overlay.Seed != 0 ||
++        overlay.FixedSeed != 0 || overlay.X != 0 || overlay.Y != 0 ||
++        overlay.Wdt != C4MC_SizeRes || overlay.Hgt != C4MC_SizeRes ||
++        overlay.OffX != 0 || overlay.OffY != 0 ||
++        !MapCreatorIntBoolEquals(overlay.RX, 0, true) ||
++        !MapCreatorIntBoolEquals(overlay.RY, 0, true) ||
++        !MapCreatorIntBoolEquals(overlay.RWdt, C4MC_SizeRes, true) ||
++        !MapCreatorIntBoolEquals(overlay.RHgt, C4MC_SizeRes, true) ||
++        !MapCreatorIntBoolEquals(overlay.ROffX, 0, true) ||
++        !MapCreatorIntBoolEquals(overlay.ROffY, 0, true) ||
++        overlay.Material != MNone || !overlay.Sub || overlay.Texture[0] != '\0' ||
++        overlay.MatClr != 0 || overlay.Op != MCT_NONE ||
++        overlay.Algorithm != &C4MCAlgoMap[0] || overlay.Turbulence != 0 ||
++        overlay.Lambda != 0 || overlay.Rotate != 0 ||
++        !MapCreatorIntBoolEquals(overlay.Alpha, 0, false) ||
++        !MapCreatorIntBoolEquals(overlay.Beta, 0, false) ||
++        overlay.ZoomX != C4MC_ZoomRes || overlay.ZoomY != C4MC_ZoomRes ||
++        overlay.Invert || overlay.LooseBounds || overlay.Group || overlay.Mask ||
++        overlay.pEvaluateFunc || overlay.pDrawFunc) {
++        error = "map creator default overlay is not canonical";
++        return false;
++    }
++    // DefaultPoint::Default resets only evaluated X/Y. RX/RY are written by
++    // every parsed point field and are intentionally not read while detached.
++    if (point.Name[0] != '\0' || point.X != 0 || point.Y != 0 ||
++        point.RustEngineValidationRXSet || point.RustEngineValidationRYSet) {
++        error = "map creator default point is not canonical";
++        return false;
++    }
++    return true;
++}
++
++struct MapCreatorEncodingContext {
++    C4MapCreatorS2 &creator;
++    LandscapeStateEncoder &encoder;
++    const std::unordered_map<const C4MCCallbackArray *, int32_t> &callback_ordinals;
++    std::unordered_set<const C4MCNode *> visited;
++    std::string &error;
++};
++
++bool EncodeMapCreatorNode(
++    C4MCNode &node,
++    C4MCNode *expected_owner,
++    MapCreatorEncodingContext &context) {
++    if (!context.visited.insert(&node).second) {
++        context.error = std::format(
++            "map creator node \"{}\" is referenced more than once",
++            node.Name);
++        return false;
++    }
++    if (node.Owner != expected_owner) {
++        context.error = std::format(
++            "map creator node \"{}\" has an inconsistent owner",
++            node.Name);
++        return false;
++    }
++    if (node.MapCreator != &context.creator) {
++        context.error = std::format(
++            "map creator node \"{}\" has the wrong creator",
++            node.Name);
++        return false;
++    }
++
++    const C4MCNodeType type = node.Type();
++    uint8_t tag = 0;
++    switch (type) {
++    case MCN_Node:
++        if (&node != static_cast<C4MCNode *>(&context.creator)) {
++            context.error = "map creator tree contains an extra root node";
++            return false;
++        }
++        tag = 0;
++        break;
++    case MCN_Overlay: tag = 1; break;
++    case MCN_Point: tag = 2; break;
++    case MCN_Map:
++        if (expected_owner != static_cast<C4MCNode *>(&context.creator)) {
++            context.error = std::format(
++                "map creator map node \"{}\" is not global",
++                node.Name);
++            return false;
++        }
++        tag = 3;
++        break;
++    default:
++        context.error = std::format(
++            "map creator node \"{}\" has invalid type {}",
++            node.Name,
++            static_cast<int>(type));
++        return false;
++    }
++    context.encoder.PushU8(tag);
++    if (!context.encoder.PushCString(
++            node.Name,
++            sizeof(node.Name),
++            "map creator node name",
++            context.error)) {
++        return false;
++    }
++    if ((type == MCN_Overlay || type == MCN_Map) &&
++        !EncodeMapCreatorOverlay(
++            static_cast<C4MCOverlay &>(node),
++            context.encoder,
++            context.callback_ordinals,
++            std::format("map creator node \"{}\"", node.Name),
++            context.error)) {
++        return false;
++    }
++    if (type == MCN_Point) {
++        EncodeMapCreatorPoint(static_cast<C4MCPoint &>(node), context.encoder);
++    }
++
++    std::vector<C4MCNode *> children;
++    std::unordered_set<const C4MCNode *> sibling_seen;
++    C4MCNode *previous = nullptr;
++    for (C4MCNode *child = node.Child0; child; child = child->Next) {
++        if (!sibling_seen.insert(child).second) {
++            context.error = std::format(
++                "map creator node \"{}\" has a cyclic child list",
++                node.Name);
++            return false;
++        }
++        if (child->Prev != previous) {
++            context.error = std::format(
++                "map creator child \"{}\" has an inconsistent Prev link",
++                child->Name);
++            return false;
++        }
++        children.push_back(child);
++        previous = child;
++    }
++    if (node.ChildL != previous || (node.Child0 == nullptr) != (node.ChildL == nullptr)) {
++        context.error = std::format(
++            "map creator node \"{}\" has inconsistent first/last child links",
++            node.Name);
++        return false;
++    }
++    if (!context.encoder.PushLength(
++            children.size(),
++            "map creator child count",
++            context.error)) {
++        return false;
++    }
++    for (C4MCNode *child : children) {
++        if (!EncodeMapCreatorNode(*child, &node, context)) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool EncodeMapCreatorState(
++    C4Game &game,
++    C4MapCreatorS2 &creator,
++    std::vector<uint8_t> &bytes,
++    std::string &error) {
++    if (RustEngineLandscapeValidationAccess::CreatorLandscape(creator) !=
++            &game.C4S.Landscape ||
++        RustEngineLandscapeValidationAccess::CreatorTexMap(creator) !=
++            &game.TextureMap ||
++        RustEngineLandscapeValidationAccess::CreatorMatMap(creator) !=
++            &game.Material) {
++        error = "map creator retains foreign landscape/material/texture inputs";
++        return false;
++    }
++    if (RustEngineLandscapeValidationAccess::CreatorCurrentMap(creator)) {
++        error = "map creator still has a current render target at the frame boundary";
++        return false;
++    }
++    if (creator.Owner || creator.Prev || creator.Next) {
++        error = "map creator root has unexpected outer links";
++        return false;
++    }
++    if (creator.MapCreator != &creator || creator.Type() != MCN_Node) {
++        error = "map creator root has invalid ownership or type";
++        return false;
++    }
++
++    const C4MCMap &default_map =
++        RustEngineLandscapeValidationAccess::CreatorDefaultMap(creator);
++    const C4MCOverlay &default_overlay =
++        RustEngineLandscapeValidationAccess::CreatorDefaultOverlay(creator);
++    const C4MCPoint &default_point =
++        RustEngineLandscapeValidationAccess::CreatorDefaultPoint(creator);
++    if (!ValidateDetachedMapCreatorTemplate(
++            default_map, creator, MCN_Map, "map creator default map", error) ||
++        !ValidateDetachedMapCreatorTemplate(
++            default_overlay,
++            creator,
++            MCN_Overlay,
++            "map creator default overlay",
++            error) ||
++        !ValidateDetachedMapCreatorTemplate(
++            default_point,
++            creator,
++            MCN_Point,
++            "map creator default point",
++            error) ||
++        !ValidateCanonicalMapCreatorDefaults(default_overlay, default_point, error)) {
++        return false;
++    }
++
++    std::vector<const C4MCCallbackArray *> callbacks;
++    std::unordered_set<const C4MCCallbackArray *> callback_seen;
++    for (const C4MCCallbackArray *callback =
++             RustEngineLandscapeValidationAccess::CreatorFirstCallback(creator);
++         callback;
++         callback = RustEngineLandscapeValidationAccess::CallbackNext(*callback)) {
++        if (!callback_seen.insert(callback).second) {
++            error = "map creator callback list is cyclic";
++            return false;
++        }
++        if (RustEngineLandscapeValidationAccess::CallbackCreator(*callback) != &creator) {
++            error = "map creator callback has the wrong owning creator";
++            return false;
++        }
++        if (!RustEngineLandscapeValidationAccess::CallbackFunction(*callback)) {
++            error = "map creator callback has no script function";
++            return false;
++        }
++        if (callbacks.size() >= static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
++            error = "map creator callback count exceeds i32";
++            return false;
++        }
++        callbacks.push_back(callback);
++    }
++    std::unordered_map<const C4MCCallbackArray *, int32_t> callback_ordinals;
++    callback_ordinals.reserve(callbacks.size());
++    for (size_t index = 0; index < callbacks.size(); ++index) {
++        callback_ordinals.emplace(callbacks[index], static_cast<int32_t>(index));
++    }
++
++    bytes.clear();
++    LandscapeStateEncoder encoder(bytes);
++    encoder.AppendRaw(reinterpret_cast<const uint8_t *>("LCMC"), 4);
++    encoder.PushU32(1);
++    encoder.PushU8(3);
++    if (!EncodeMapCreatorOverlay(
++            default_map,
++            encoder,
++            callback_ordinals,
++            "map creator default map",
++            error)) {
++        return false;
++    }
++
++    MapCreatorEncodingContext context{
++        creator,
++        encoder,
++        callback_ordinals,
++        {},
++        error,
++    };
++    if (!EncodeMapCreatorNode(creator, nullptr, context)) {
++        return false;
++    }
++
++    if (!encoder.PushLength(callbacks.size(), "map creator callback count", error)) {
++        return false;
++    }
++    for (size_t index = 0; index < callbacks.size(); ++index) {
++        const C4MCCallbackArray &callback = *callbacks[index];
++        const C4AulFunc *function =
++            RustEngineLandscapeValidationAccess::CallbackFunction(callback);
++        if (!encoder.PushCString(
++                function->Name,
++                sizeof(function->Name),
++                std::format("map creator callback {} function", index),
++                error)) {
++            return false;
++        }
++        const uint8_t *bitmap =
++            RustEngineLandscapeValidationAccess::CallbackMap(callback);
++        if (!bitmap) {
++            encoder.PushU8(0);
++            continue;
++        }
++        const int32_t width =
++            RustEngineLandscapeValidationAccess::CallbackWidth(callback);
++        const int32_t height =
++            RustEngineLandscapeValidationAccess::CallbackHeight(callback);
++        if (width <= 0 || height <= 0) {
++            error = std::format(
++                "map creator callback {} has allocated bits with dimensions {}x{}",
++                index,
++                width,
++                height);
++            return false;
++        }
++        size_t pixel_count = 0;
++        if (!CheckedProduct(
++                static_cast<size_t>(width),
++                static_cast<size_t>(height),
++                pixel_count) ||
++            pixel_count > std::numeric_limits<size_t>::max() - 7) {
++            error = std::format("map creator callback {} dimensions overflow", index);
++            return false;
++        }
++        const size_t bitmap_length = (pixel_count + 7) / 8;
++        const size_t used_last_bits = pixel_count % 8;
++        if (used_last_bits != 0 &&
++            (bitmap[bitmap_length - 1] &
++             static_cast<uint8_t>(~((uint8_t{1} << used_last_bits) - 1))) != 0) {
++            error = std::format(
++                "map creator callback {} has set bitmap padding bits",
++                index);
++            return false;
++        }
++        encoder.PushU8(1);
++        encoder.PushI32(width);
++        encoder.PushI32(height);
++        if (!encoder.PushLength(
++                bitmap_length,
++                std::format("map creator callback {} bitmap length", index),
++                error)) {
++            return false;
++        }
++        encoder.AppendRaw(bitmap, bitmap_length);
++    }
++    return true;
++}
++
++uint8_t FoldC4NameByte(uint8_t value) {
++    if (value >= static_cast<uint8_t>('A') && value <= static_cast<uint8_t>('Z')) {
++        return static_cast<uint8_t>(value + ('a' - 'A'));
++    }
++    switch (value) {
++    case 0xc4:
++    case 0xe4: return 0xe4;
++    case 0xd6:
++    case 0xf6: return 0xf6;
++    case 0xdc:
++    case 0xfc: return 0xfc;
++    default: return value;
++    }
++}
++
++bool EncodeTextureInventory(
++    const C4TextureMap &texture_map,
++    std::vector<uint8_t> &bytes,
++    std::string &error) {
++    std::vector<std::vector<uint8_t>> names;
++    std::unordered_set<const C4Texture *> seen;
++    for (const C4Texture *texture =
++             RustEngineLandscapeValidationAccess::FirstTexture(texture_map);
++         texture;
++         texture = RustEngineLandscapeValidationAccess::NextTexture(*texture)) {
++        if (!seen.insert(texture).second) {
++            error = "texture inventory list is cyclic";
++            return false;
++        }
++        std::vector<uint8_t> name;
++        if (!BoundedCStringBytes(
++                RustEngineLandscapeValidationAccess::TextureName(*texture),
++                C4M_MaxName + 1,
++                name,
++                "texture inventory name",
++                error)) {
++            return false;
++        }
++        std::transform(name.begin(), name.end(), name.begin(), FoldC4NameByte);
++        names.push_back(std::move(name));
++    }
++    std::sort(names.begin(), names.end());
++    names.erase(std::unique(names.begin(), names.end()), names.end());
++
++    bytes.clear();
++    LandscapeStateEncoder encoder(bytes);
++    encoder.AppendRaw(reinterpret_cast<const uint8_t *>("LCTX"), 4);
++    encoder.PushU32(1);
++    if (!encoder.PushLength(names.size(), "texture inventory count", error)) {
++        return false;
++    }
++    for (const auto &name : names) {
++        if (!encoder.PushLength(name.size(), "texture inventory name length", error)) {
++            return false;
++        }
++        encoder.AppendRaw(name.data(), name.size());
++    }
++    return true;
++}
++
++bool MaterialReactionKind(
++    const C4MaterialReaction &reaction,
++    uint8_t &kind,
++    std::string &error) {
++    if (reaction.pFunc == &C4MaterialReaction::NoReaction) {
++        kind = 0;
++    } else if (reaction.pFunc == &C4MaterialMap::mrfConvert) {
++        kind = 1;
++    } else if (reaction.pFunc == &C4MaterialMap::mrfPoof) {
++        kind = 2;
++    } else if (reaction.pFunc == &C4MaterialMap::mrfCorrode) {
++        kind = 3;
++    } else if (reaction.pFunc == &C4MaterialMap::mrfIncinerate) {
++        kind = 4;
++    } else if (reaction.pFunc == &C4MaterialMap::mrfInsert) {
++        kind = 5;
++    } else if (reaction.pFunc == &C4MaterialMap::mrfScript) {
++        kind = 6;
++    } else {
++        error = "material reaction table contains an unknown function pointer";
++        return false;
++    }
++    return true;
++}
++
++bool EncodeMaterialReactionState(
++    const C4MaterialMap &materials,
++    std::vector<uint8_t> &bytes,
++    std::string &error) {
++    if (materials.Num < 0 ||
++        materials.Num > static_cast<int32_t>(LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY)) {
++        error = std::format(
++            "material reaction map count {} is outside 0..{}",
++            materials.Num,
++            LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY);
++        return false;
++    }
++    if (materials.Num != 0 && !materials.Map) {
++        error = "material reaction map has a nonzero count but no material array";
++        return false;
++    }
++    if (!materials.ppReactionMap) {
++        error = "material reaction map has not been cross-mapped";
++        return false;
++    }
++
++    bytes.clear();
++    LandscapeStateEncoder encoder(bytes);
++    encoder.AppendRaw(reinterpret_cast<const uint8_t *>("LCMR"), 4);
++    encoder.PushU32(1);
++    encoder.PushU32(static_cast<uint32_t>(materials.Num));
++    const size_t width = static_cast<size_t>(materials.Num) + 1;
++    for (uint32_t event = 0; event < 3; ++event) {
++        for (int32_t landscape_material = -1;
++             landscape_material < materials.Num;
++             ++landscape_material) {
++            for (int32_t pxs_material = -1;
++                 pxs_material < materials.Num;
++                 ++pxs_material) {
++                const size_t index =
++                    static_cast<size_t>(landscape_material + 1) * width +
++                    static_cast<size_t>(pxs_material + 1);
++                const C4MaterialReaction *reaction = materials.ppReactionMap[index];
++                if (!reaction) {
++                    encoder.PushU8(0);
++                    encoder.PushBool(false);
++                    encoder.PushBool(true);
++                    continue;
++                }
++
++                const bool event_enabled =
++                    (reaction->iExecMask & (uint32_t{1} << event)) != 0;
++                if (reaction->fUserDefined && !event_enabled) {
++                    encoder.PushU8(0);
++                    encoder.PushBool(true);
++                    encoder.PushBool(false);
++                    continue;
++                }
++
++                uint8_t kind = 0;
++                if (!MaterialReactionKind(*reaction, kind, error)) {
++                    error = std::format(
++                        "{} at event {}, PXS material {}, landscape material {}",
++                        error,
++                        event,
++                        pxs_material,
++                        landscape_material);
++                    return false;
++                }
++                encoder.PushU8(kind);
++                encoder.PushBool(reaction->fUserDefined);
++                encoder.PushBool(reaction->fInsertionCheck);
++                switch (kind) {
++                case 1: {
++                    if (!reaction->fUserDefined && pxs_material < 0) {
++                        error = "builtin convert reaction has no PXS material";
++                        return false;
++                    }
++                    const int32_t target = reaction->fUserDefined
++                        ? reaction->iConvertMat
++                        : materials.Map[pxs_material].InMatConvertTo;
++                    const int32_t depth = reaction->fUserDefined
++                        ? reaction->iDepth
++                        : materials.Map[pxs_material].InMatConvertDepth;
++                    encoder.PushI32(target);
++                    encoder.PushI32(depth);
++                    break;
++                }
++                case 3:
++                    if (reaction->fUserDefined) {
++                        encoder.PushI32(reaction->iCorrosionRate);
++                        encoder.PushI32(100);
++                        encoder.PushBool(true);
++                        encoder.PushI32(reaction->iCorrosionRate);
++                    } else {
++                        if (pxs_material < 0 || landscape_material < 0) {
++                            error = "builtin corrode reaction has a sky material operand";
++                            return false;
++                        }
++                        encoder.PushI32(materials.Map[pxs_material].Corrosive);
++                        encoder.PushI32(materials.Map[landscape_material].Corrode);
++                        encoder.PushBool(false);
++                        encoder.PushI32(0);
++                    }
++                    break;
++                case 6: {
++                    if (!reaction->fUserDefined) {
++                        error = "script material reaction is not marked user-defined";
++                        return false;
++                    }
++                    const char *function = reaction->ScriptFunc.getData();
++                    const size_t function_length = reaction->ScriptFunc.getLength();
++                    if (!encoder.PushBytes(
++                            reinterpret_cast<const uint8_t *>(function),
++                            function_length,
++                            "material reaction script function",
++                            error)) {
++                        return false;
++                    }
++                    encoder.PushBool(reaction->pScriptFunc != nullptr);
++                    break;
++                }
++                default: break;
++                }
++            }
++        }
++    }
++    return true;
++}
++
++bool CollectSurface8State(
++    const C4Landscape &landscape,
++    LandscapeSnapshotBuffer &buffer,
++    std::string &error) {
++    auto &snapshot = buffer.snapshot;
++    std::fill_n(snapshot.pix2mat, 256, -1);
++    snapshot.width = landscape.Width;
++    snapshot.height = landscape.Height;
++    if (landscape.Width < 0 || landscape.Height < 0) {
++        error = std::format(
++            "landscape dimensions are {}x{}",
++            landscape.Width,
++            landscape.Height);
++        return false;
++    }
++
++    const CSurface8 *surface =
++        RustEngineLandscapeValidationAccess::Surface8(landscape);
++    if (surface) {
++        if (surface->Wdt <= 0 || surface->Hgt <= 0) {
++            error = std::format(
++                "landscape Surface8 has invalid dimensions {}x{}",
++                surface->Wdt,
++                surface->Hgt);
++            return false;
++        }
++        if (surface->Pitch < surface->Wdt) {
++            error = std::format(
++                "landscape Surface8 pitch {} is smaller than width {}",
++                surface->Pitch,
++                surface->Wdt);
++            return false;
++        }
++        if (!surface->Bits) {
++            error = "landscape Surface8 has dimensions but no pixel storage";
++            return false;
++        }
++        size_t storage_length = 0;
++        if (!CheckedProduct(
++                static_cast<size_t>(surface->Pitch),
++                static_cast<size_t>(surface->Hgt),
++                storage_length)) {
++            error = "landscape Surface8 storage dimensions overflow";
++            return false;
++        }
++        buffer.surface8.assign(surface->Bits, surface->Bits + storage_length);
++        snapshot.surface_width = surface->Wdt;
++        snapshot.surface_height = surface->Hgt;
++        snapshot.pitch = surface->Pitch;
++        snapshot.surface_clip_x = surface->ClipX;
++        snapshot.surface_clip_y = surface->ClipY;
++        snapshot.surface_clip_x2 = surface->ClipX2;
++        snapshot.surface_clip_y2 = surface->ClipY2;
++
++        // Pix2* is not initialized by C4Landscape::Default. It becomes live
++        // together with Surface8 during landscape initialization.
++        std::copy_n(
++            RustEngineLandscapeValidationAccess::Pix2Mat(landscape),
++            256,
++            snapshot.pix2mat);
++        std::copy_n(
++            RustEngineLandscapeValidationAccess::Pix2Dens(landscape),
++            256,
++            snapshot.pix2dens);
++        std::copy_n(
++            RustEngineLandscapeValidationAccess::Pix2Place(landscape),
++            256,
++            snapshot.pix2place);
++        std::copy_n(landscape.MatCount, C4MaxMaterial, snapshot.mat_count);
++        std::copy_n(
++            landscape.EffectiveMatCount,
++            C4MaxMaterial,
++            snapshot.effective_mat_count);
++    }
++
++    snapshot.map_width = landscape.MapWidth;
++    snapshot.map_height = landscape.MapHeight;
++    if (landscape.MapWidth < 0 || landscape.MapHeight < 0) {
++        error = std::format(
++            "landscape retained Map dimensions are {}x{}",
++            landscape.MapWidth,
++            landscape.MapHeight);
++        return false;
++    }
++    if (landscape.Map) {
++        if (landscape.Map->Wdt <= 0 || landscape.Map->Hgt <= 0) {
++            error = std::format(
++                "landscape Map surface has invalid dimensions {}x{}",
++                landscape.Map->Wdt,
++                landscape.Map->Hgt);
++            return false;
++        }
++        if (landscape.Map->Pitch < landscape.Map->Wdt) {
++            error = std::format(
++                "landscape Map pitch {} is smaller than width {}",
++                landscape.Map->Pitch,
++                landscape.Map->Wdt);
++            return false;
++        }
++        if (!landscape.Map->Bits) {
++            error = "landscape Map has dimensions but no pixel storage";
++            return false;
++        }
++        size_t storage_length = 0;
++        if (!CheckedProduct(
++                static_cast<size_t>(landscape.Map->Pitch),
++                static_cast<size_t>(landscape.Map->Hgt),
++                storage_length)) {
++            error = "landscape Map storage dimensions overflow";
++            return false;
++        }
++        buffer.map.assign(
++            landscape.Map->Bits,
++            landscape.Map->Bits + storage_length);
++        snapshot.map_surface_width = landscape.Map->Wdt;
++        snapshot.map_surface_height = landscape.Map->Hgt;
++        snapshot.map_pitch = landscape.Map->Pitch;
++        snapshot.map_clip_x = landscape.Map->ClipX;
++        snapshot.map_clip_y = landscape.Map->ClipY;
++        snapshot.map_clip_x2 = landscape.Map->ClipX2;
++        snapshot.map_clip_y2 = landscape.Map->ClipY2;
++    }
++
++    snapshot.pix_cnt_pitch =
++        RustEngineLandscapeValidationAccess::PixCntPitch(landscape);
++    const uint8_t *pix_cnt =
++        RustEngineLandscapeValidationAccess::PixCnt(landscape);
++    if (!pix_cnt) {
++        if (snapshot.pix_cnt_pitch != 0) {
++            error = std::format(
++                "landscape PixCnt is null with pitch {}",
++                snapshot.pix_cnt_pitch);
++            return false;
++        }
++    } else {
++        const int32_t expected_pitch = (landscape.Height + 14) / 15;
++        if (snapshot.pix_cnt_pitch != expected_pitch || expected_pitch <= 0) {
++            error = std::format(
++                "landscape PixCnt pitch {} does not match height-derived {}",
++                snapshot.pix_cnt_pitch,
++                expected_pitch);
++            return false;
++        }
++        const size_t columns =
++            (static_cast<size_t>(landscape.Width) + 16) / 17;
++        size_t pix_cnt_length = 0;
++        if (!CheckedProduct(
++                columns,
++                static_cast<size_t>(snapshot.pix_cnt_pitch),
++                pix_cnt_length)) {
++            error = "landscape PixCnt dimensions overflow";
++            return false;
++        }
++        buffer.pix_cnt.assign(pix_cnt, pix_cnt + pix_cnt_length);
++    }
++    return true;
++}
++
++bool AppendMaterialCrossmapEntry(
++    std::vector<uint8_t> &entries,
++    int32_t value,
++    int32_t material,
++    const char *field,
++    std::string &error) {
++    if (value < 0 || value > std::numeric_limits<uint8_t>::max()) {
++        error = std::format(
++            "material {} {} cross-map value {} is outside u8",
++            material,
++            field,
++            value);
++        return false;
++    }
++    entries.push_back(static_cast<uint8_t>(value));
++    return true;
++}
++
++bool CollectMaterialAndTextureState(
++    C4Game &game,
++    LandscapeSnapshotBuffer &buffer,
++    std::string &error) {
++    auto &snapshot = buffer.snapshot;
++    std::fill_n(
++        snapshot.in_mat_convert_to,
++        LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY,
++        -1);
++    for (auto &entry : snapshot.texmap) {
++        entry.material_index = -1;
++    }
++
++    if (game.Material.Num < 0 ||
++        game.Material.Num >
++            static_cast<int32_t>(LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY)) {
++        error = std::format(
++            "material count {} is outside 0..{}",
++            game.Material.Num,
++            LC_ENGINE_RUNTIME_LANDSCAPE_MATERIAL_CAPACITY);
++        return false;
++    }
++    if (game.Material.Num != 0 && !game.Material.Map) {
++        error = "material map has a nonzero count but no entries";
++        return false;
++    }
++    snapshot.material_count = game.Material.Num;
++    buffer.default_mat_tex.reserve(static_cast<size_t>(game.Material.Num));
++    for (int32_t index = 0; index < game.Material.Num; ++index) {
++        const C4Material &material = game.Material.Map[index];
++        snapshot.in_mat_convert_to[index] = material.InMatConvertTo;
++        if (material.InMatConvertTo < -1 ||
++            material.InMatConvertTo >= game.Material.Num) {
++            error = std::format(
++                "material {} InMatConvertTo {} is outside -1..{}",
++                index,
++                material.InMatConvertTo,
++                game.Material.Num - 1);
++            return false;
++        }
++        if (material.DefaultMatTex < 0 ||
++            material.DefaultMatTex > std::numeric_limits<uint8_t>::max()) {
++            error = std::format(
++                "material {} DefaultMatTex {} is outside u8",
++                index,
++                material.DefaultMatTex);
++            return false;
++        }
++        buffer.default_mat_tex.push_back(
++            static_cast<uint8_t>(material.DefaultMatTex));
++        if (material.sBlastShiftTo.getLength() &&
++            !AppendMaterialCrossmapEntry(
++                buffer.material_crossmap,
++                material.BlastShiftTo,
++                index,
++                "BlastShiftTo",
++                error)) {
++            return false;
++        }
++        if (material.sBelowTempConvertTo.getLength() &&
++            !AppendMaterialCrossmapEntry(
++                buffer.material_crossmap,
++                material.BelowTempConvertTo,
++                index,
++                "BelowTempConvertTo",
++                error)) {
++            return false;
++        }
++        if (material.sAboveTempConvertTo.getLength() &&
++            !AppendMaterialCrossmapEntry(
++                buffer.material_crossmap,
++                material.AboveTempConvertTo,
++                index,
++                "AboveTempConvertTo",
++                error)) {
++            return false;
++        }
++    }
++
++    if (!EncodeMaterialBehaviorState(
++            game.Material,
++            buffer.material_behavior_state,
++            error) ||
++        !EncodeMaterialReactionState(
++            game.Material,
++            buffer.material_reaction_state,
++            error)) {
++        return false;
++    }
++
++    snapshot.texmap_initialized =
++        RustEngineLandscapeValidationAccess::TexMapInitialized(game.TextureMap)
++        ? 1u
++        : 0u;
++    snapshot.texmap_entries_added = game.TextureMap.fEntriesAdded ? 1u : 0u;
++    snapshot.texmap_overload_materials =
++        RustEngineLandscapeValidationAccess::TexMapOverloadMaterials(game.TextureMap)
++        ? 1u
++        : 0u;
++    snapshot.texmap_overload_textures =
++        RustEngineLandscapeValidationAccess::TexMapOverloadTextures(game.TextureMap)
++        ? 1u
++        : 0u;
++    for (int32_t index = 0; index < C4M_MaxTexIndex; ++index) {
++        const C4TexMapEntry *entry = game.TextureMap.GetEntry(index);
++        if (!entry || entry->isNull()) {
++            continue;
++        }
++        auto &raw = snapshot.texmap[index];
++        raw.present = 1;
++        raw.material_index = entry->GetMaterialIndex();
++        if (!BoundedCStringBytes(
++                entry->GetMaterialName(),
++                C4M_MaxName + 1,
++                buffer.texmap_material_names[index],
++                std::format("texture-map entry {} material", index),
++                error)) {
++            return false;
++        }
++        if (const char *texture_name = entry->GetTextureName()) {
++            raw.texture_name_present = 1;
++            if (!BoundedCStringBytes(
++                    texture_name,
++                    C4M_MaxName + 1,
++                    buffer.texmap_texture_names[index],
++                    std::format("texture-map entry {} texture", index),
++                    error)) {
++                return false;
++            }
++        }
++    }
++
++    return EncodeTextureInventory(
++        game.TextureMap,
++        buffer.texture_inventory,
++        error);
++}
++
++bool CollectSolidMaskState(
++    LandscapeSnapshotBuffer &buffer,
++    std::string &error) {
++    std::vector<const C4SolidMask *> masks;
++    std::unordered_set<const C4SolidMask *> seen;
++    const C4SolidMask *previous = nullptr;
++    for (const C4SolidMask *mask = C4SolidMask::First; mask; mask = mask->Next) {
++        if (!seen.insert(mask).second) {
++            error = "solid-mask global list is cyclic";
++            return false;
++        }
++        if (mask->Prev != previous) {
++            error = "solid-mask global list has an inconsistent Prev link";
++            return false;
++        }
++        masks.push_back(mask);
++        previous = mask;
++    }
++    if (previous != C4SolidMask::Last ||
++        (C4SolidMask::First == nullptr) != (C4SolidMask::Last == nullptr)) {
++        error = "solid-mask global list has inconsistent first/last links";
++        return false;
++    }
++
++    std::unordered_set<int32_t> owner_numbers;
++    buffer.solid_mask_backing.reserve(masks.size());
++    buffer.solid_masks.reserve(masks.size());
++    for (size_t index = 0; index < masks.size(); ++index) {
++        const C4SolidMask &mask = *masks[index];
++        const C4Object *owner =
++            RustEngineLandscapeValidationAccess::SolidMaskOwner(mask);
++        if (!owner) {
++            error = std::format("solid mask {} has no owner", index);
++            return false;
++        }
++        if (owner->Number <= 0) {
++            error = std::format(
++                "solid mask {} owner has invalid object number {}",
++                index,
++                owner->Number);
++            return false;
++        }
++        if (!owner_numbers.insert(owner->Number).second) {
++            error = std::format(
++                "more than one solid mask is owned by object {}",
++                owner->Number);
++            return false;
++        }
++        if (owner->SolidMask.Wdt <= 0 || owner->SolidMask.Hgt <= 0) {
++            error = std::format(
++                "solid mask {} owner {} has source dimensions {}x{}",
++                index,
++                owner->Number,
++                owner->SolidMask.Wdt,
++                owner->SolidMask.Hgt);
++            return false;
++        }
++        size_t alpha_length = 0;
++        if (!CheckedProduct(
++                static_cast<size_t>(owner->SolidMask.Wdt),
++                static_cast<size_t>(owner->SolidMask.Hgt),
++                alpha_length)) {
++            error = std::format(
++                "solid mask {} owner {} source dimensions overflow",
++                index,
++                owner->Number);
++            return false;
++        }
++        const uint8_t *alpha =
++            RustEngineLandscapeValidationAccess::SolidMaskAlpha(mask);
++        if (!alpha) {
++            error = std::format(
++                "solid mask {} owner {} has no frozen alpha plane",
++                index,
++                owner->Number);
++            return false;
++        }
++        const int32_t pitch =
++            RustEngineLandscapeValidationAccess::SolidMaskPitch(mask);
++        if (pitch <= 0) {
++            error = std::format(
++                "solid mask {} owner {} has invalid MatBuffPitch {}",
++                index,
++                owner->Number,
++                pitch);
++            return false;
++        }
++        const int32_t attachment_count =
++            RustEngineLandscapeValidationAccess::SolidMaskAttachmentCount(mask);
++        if (attachment_count != 0) {
++            error = std::format(
++                "solid mask {} owner {} has {} pending attachments at the frame boundary",
++                index,
++                owner->Number,
++                attachment_count);
++            return false;
++        }
++
++        buffer.solid_mask_backing.emplace_back();
++        auto &backing = buffer.solid_mask_backing.back();
++        backing.alpha.assign(alpha, alpha + alpha_length);
++        if (const auto invalid = std::find_if(
++                backing.alpha.begin(),
++                backing.alpha.end(),
++                [](uint8_t value) { return value != 0x00 && value != 0xff; });
++            invalid != backing.alpha.end()) {
++            const size_t pixel =
++                static_cast<size_t>(invalid - backing.alpha.begin());
++            error = std::format(
++                "solid mask {} owner {} alpha ({}, {}) is {}, expected 0 or 255",
++                index,
++                owner->Number,
++                pixel % static_cast<size_t>(owner->SolidMask.Wdt),
++                pixel / static_cast<size_t>(owner->SolidMask.Wdt),
++                *invalid);
++            return false;
++        }
++
++        LcEngineRuntimeLandscapeSolidMaskSnapshot raw{};
++        raw.owner_id = static_cast<uint64_t>(owner->Number);
++        raw.source_x = owner->SolidMask.x;
++        raw.source_y = owner->SolidMask.y;
++        raw.source_width = owner->SolidMask.Wdt;
++        raw.source_height = owner->SolidMask.Hgt;
++        raw.source_target_x = owner->SolidMask.tx;
++        raw.source_target_y = owner->SolidMask.ty;
++        raw.mat_buff_pitch = pitch;
++        raw.attachment_count = 0;
++        raw.mask_put =
++            RustEngineLandscapeValidationAccess::SolidMaskPut(mask) ? 1u : 0u;
++        if (raw.mask_put) {
++            const C4TargetRect &put =
++                RustEngineLandscapeValidationAccess::SolidMaskPutRect(mask);
++            raw.put_x = put.x;
++            raw.put_y = put.y;
++            raw.put_width = put.Wdt;
++            raw.put_height = put.Hgt;
++            raw.put_target_x = put.tx;
++            raw.put_target_y = put.ty;
++            raw.put_rotation =
++                RustEngineLandscapeValidationAccess::SolidMaskPutRotation(mask);
++            if (put.Wdt > 0 && put.Hgt > 0) {
++                if (put.tx < 0 || put.ty < 0 ||
++                    static_cast<int64_t>(put.tx) + put.Wdt > pitch ||
++                    static_cast<int64_t>(put.ty) + put.Hgt > pitch) {
++                    error = std::format(
++                        "solid mask {} owner {} put window [{},{},{}x{}] exceeds MatBuffPitch {}",
++                        index,
++                        owner->Number,
++                        put.tx,
++                        put.ty,
++                        put.Wdt,
++                        put.Hgt,
++                        pitch);
++                    return false;
++                }
++                const uint8_t *background =
++                    RustEngineLandscapeValidationAccess::SolidMaskBackground(mask);
++                if (!background) {
++                    error = std::format(
++                        "solid mask {} owner {} is put but has no background plane",
++                        index,
++                        owner->Number);
++                    return false;
++                }
++                size_t background_length = 0;
++                if (!CheckedProduct(
++                        static_cast<size_t>(put.Wdt),
++                        static_cast<size_t>(put.Hgt),
++                        background_length)) {
++                    error = std::format(
++                        "solid mask {} owner {} put dimensions overflow",
++                        index,
++                        owner->Number);
++                    return false;
++                }
++                backing.background.reserve(background_length);
++                for (int32_t y = 0; y < put.Hgt; ++y) {
++                    const size_t offset =
++                        static_cast<size_t>(put.ty + y) *
++                            static_cast<size_t>(pitch) +
++                        static_cast<size_t>(put.tx);
++                    backing.background.insert(
++                        backing.background.end(),
++                        background + offset,
++                        background + offset + put.Wdt);
++                }
++            }
++        }
++        buffer.solid_masks.push_back(raw);
++    }
++    return true;
++}
++
++const uint8_t *DataOrNull(const std::vector<uint8_t> &bytes) {
++    return bytes.empty() ? nullptr : bytes.data();
++}
++
++void WireLandscapeSnapshot(LandscapeSnapshotBuffer &buffer) {
++    auto &snapshot = buffer.snapshot;
++    snapshot.surface8 = DataOrNull(buffer.surface8);
++    snapshot.surface8_len = buffer.surface8.size();
++    snapshot.map = DataOrNull(buffer.map);
++    snapshot.map_len = buffer.map.size();
++    snapshot.default_mat_tex = DataOrNull(buffer.default_mat_tex);
++    snapshot.default_mat_tex_len = buffer.default_mat_tex.size();
++    snapshot.material_crossmap = DataOrNull(buffer.material_crossmap);
++    snapshot.material_crossmap_len = buffer.material_crossmap.size();
++    snapshot.texture_inventory = DataOrNull(buffer.texture_inventory);
++    snapshot.texture_inventory_len = buffer.texture_inventory.size();
++    snapshot.map_creator_state = DataOrNull(buffer.map_creator_state);
++    snapshot.map_creator_state_len = buffer.map_creator_state.size();
++    snapshot.material_reaction_state = DataOrNull(buffer.material_reaction_state);
++    snapshot.material_reaction_state_len = buffer.material_reaction_state.size();
++    snapshot.material_behavior_state = DataOrNull(buffer.material_behavior_state);
++    snapshot.material_behavior_state_len = buffer.material_behavior_state.size();
++    snapshot.pxs_state = DataOrNull(buffer.pxs_state);
++    snapshot.pxs_state_len = buffer.pxs_state.size();
++    snapshot.mass_mover_state = DataOrNull(buffer.mass_mover_state);
++    snapshot.mass_mover_state_len = buffer.mass_mover_state.size();
++    snapshot.pix_cnt = DataOrNull(buffer.pix_cnt);
++    snapshot.pix_cnt_len = buffer.pix_cnt.size();
++
++    for (size_t index = 0; index < buffer.solid_masks.size(); ++index) {
++        auto &raw = buffer.solid_masks[index];
++        const auto &backing = buffer.solid_mask_backing[index];
++        raw.alpha = DataOrNull(backing.alpha);
++        raw.alpha_len = backing.alpha.size();
++        raw.background = DataOrNull(backing.background);
++        raw.background_len = backing.background.size();
++    }
++    snapshot.solid_masks = buffer.solid_masks.empty()
++        ? nullptr
++        : buffer.solid_masks.data();
++    snapshot.solid_mask_count = buffer.solid_masks.size();
++
++    for (size_t index = 0;
++         index < LC_ENGINE_RUNTIME_LANDSCAPE_TEXMAP_CAPACITY;
++         ++index) {
++        auto &entry = snapshot.texmap[index];
++        if (!entry.present) {
++            continue;
++        }
++        entry.material_name = DataOrNull(buffer.texmap_material_names[index]);
++        entry.material_name_len = buffer.texmap_material_names[index].size();
++        if (entry.texture_name_present) {
++            entry.texture_name = DataOrNull(buffer.texmap_texture_names[index]);
++            entry.texture_name_len = buffer.texmap_texture_names[index].size();
++        }
++    }
++}
++
++bool ApplyLandscapeFaultInjection(
++    LandscapeSnapshotBuffer &buffer,
++    std::string &error) {
++    const char *fault =
++        std::getenv("LC_RUST_ENGINE_RUNTIME_LANDSCAPE_FAULT");
++    if (!fault || std::strcmp(fault, "surface8") != 0) {
++        return true;
++    }
++    if (buffer.surface8.empty()) {
++        error =
++            "landscape fault surface8 requested but the copied Surface8 payload is absent";
++        return false;
++    }
++    buffer.surface8[0] ^= 1u;
++    return true;
++}
++
++bool CollectLandscapeSnapshot(
++    C4Game &game,
++    LandscapeSnapshotBuffer &buffer,
++    std::string &error) {
++    auto &snapshot = buffer.snapshot;
++    snapshot.abi_version = LC_ENGINE_RUNTIME_LANDSCAPE_ABI_VERSION;
++    snapshot.struct_size = sizeof(snapshot);
++
++    if (!CollectSurface8State(game.Landscape, buffer, error) ||
++        !CollectMaterialAndTextureState(game, buffer, error) ||
++        !CollectSolidMaskState(buffer, error) ||
++        !EncodePxsState(game.PXS, buffer.pxs_state, error) ||
++        !EncodeMassMoverState(
++            game.MassMover,
++            buffer.mass_mover_state,
++            error)) {
++        return false;
++    }
++
++    snapshot.mode = game.Landscape.Mode;
++    snapshot.map_seed = game.Landscape.MapSeed;
++    snapshot.map_zoom = game.Landscape.MapZoom;
++    snapshot.scan_x = game.Landscape.ScanX;
++    snapshot.scan_speed = game.Landscape.ScanSpeed;
++    snapshot.left_open = game.Landscape.LeftOpen;
++    snapshot.right_open = game.Landscape.RightOpen;
++    snapshot.gravity_raw = game.Landscape.Gravity.val;
++    snapshot.modulation = game.Landscape.Modulation;
++    snapshot.vehicle_material = MVehic;
++    snapshot.tunnel_material = MTunnel;
++    snapshot.water_material = MWater;
++    snapshot.snow_material = MSnow;
++    snapshot.granite_material = MGranite;
++    snapshot.vehicle_pixel = MCVehic;
++    snapshot.no_scan = game.Landscape.NoScan ? 1u : 0u;
++    snapshot.top_open = game.Landscape.TopOpen ? 1u : 0u;
++    snapshot.bottom_open = game.Landscape.BottomOpen ? 1u : 0u;
++    snapshot.shade_materials = game.Landscape.ShadeMaterials ? 1u : 0u;
++    snapshot.map_changed = game.Landscape.fMapChanged ? 1u : 0u;
++
++    if (game.Landscape.pMapCreator &&
++        !EncodeMapCreatorState(
++            game,
++            *game.Landscape.pMapCreator,
++            buffer.map_creator_state,
++            error)) {
++        return false;
++    }
++    if (!ApplyLandscapeFaultInjection(buffer, error)) {
++        return false;
++    }
++    WireLandscapeSnapshot(buffer);
++    return true;
++}
++
 +static_assert(
 +    sizeof(LcEngineRuntimeWeatherSnapshot) == 240,
 +    "LcEngineRuntimeWeatherSnapshot ABI must remain 240 bytes");
@@ -144,7 +2504,7 @@ index f76f6934e..1f65fd0d0 100644
  std::mutex g_mutex;
  uint64_t g_last_missing_warning_frame = std::numeric_limits<uint64_t>::max();
  uint64_t g_last_container_warning_frame = std::numeric_limits<uint64_t>::max();
-@@ -2123,8 +2194,15 @@ void OnFrame(C4Game &game) {
+@@ -2123,8 +4310,31 @@ void OnFrame(C4Game &game) {
                  ApplyAuthoritativeRuntimeState(game);
              }
          } else {
@@ -152,12 +2512,47 @@ index f76f6934e..1f65fd0d0 100644
 +            ApplyWeatherFaultInjection(weather);
              char *error_message = nullptr;
 -            if (!lc_engine_runtime_compare_snapshot(
-+            if (!lc_engine_runtime_supply_weather_snapshot(
++            std::string native_collection_error;
++            bool parity_ok = lc_engine_runtime_supply_weather_snapshot(
++                g_runtime.get(),
++                frame,
++                &weather,
++                &error_message);
++            LandscapeSnapshotBuffer landscape;
++            if (parity_ok) {
++                parity_ok = CollectLandscapeSnapshot(
++                    game,
++                    landscape,
++                    native_collection_error);
++            }
++            if (parity_ok) {
++                parity_ok = lc_engine_runtime_supply_landscape_snapshot(
 +                    g_runtime.get(),
 +                    frame,
-+                    &weather,
-+                    &error_message) ||
-+                !lc_engine_runtime_compare_snapshot(
++                    &landscape.snapshot,
++                    &error_message);
++            }
++            if (parity_ok) {
++                parity_ok = lc_engine_runtime_compare_snapshot(
                      g_runtime.get(),
                      frame,
                      object_data,
+@@ -2151,9 +4361,16 @@ void OnFrame(C4Game &game) {
+                     control_count,
+                     RandomHold,
+                     RandomCount,
+-                    &error_message)) {
++                    &error_message);
++            }
++            if (!parity_ok) {
+                 RustStringPtr error = MakeString(error_message);
+-                if (error) {
++                if (!native_collection_error.empty()) {
++                    LogError(std::format(
++                        "Rust runtime landscape capture failed on frame {}: {}",
++                        frame,
++                        native_collection_error));
++                } else if (error) {
+                     LogError(std::string("Rust runtime parity mismatch: ") + error.get());
+                 } else {
+                     LogError("Rust runtime parity mismatch (no detail)");

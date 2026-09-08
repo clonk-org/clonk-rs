@@ -9044,6 +9044,21 @@ pub struct SolidMaskBake {
     rotated: Option<RotatedBake>,
 }
 
+/// A logically put C4SolidMask whose clipped raster window has no pixels.
+/// Native retains the exact MaskPutRect and constructor-time MatBuffPitch;
+/// both remain part of overlap/list behavior despite the empty raster loop.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SolidMaskEmptyPut {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    tx: i32,
+    ty: i32,
+    rotation: i32,
+    mat_buff_pitch: i32,
+}
+
 /// Objects resting on a moving solid mask at removal time. C++ stores this
 /// beside the mask until `Put(..., fRestoreAttachment=true)` can translate
 /// them by the mask owner's movement delta (C4SolidMask.cpp:178-195,

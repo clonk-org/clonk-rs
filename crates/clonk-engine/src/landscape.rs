@@ -984,6 +984,10 @@ impl PixelGrid {
         &self.material_names
     }
 
+    pub(crate) fn material_id_for_slot(&self, slot: usize) -> Option<MaterialId> {
+        self.materials.get(slot).copied().flatten()
+    }
+
     /// Identity of the texmap name tables, or zero for a grid that came from a
     /// save and has not recomputed one. Two grids with nonzero identities
     /// share them exactly when their `material_names` and `texture_names` are
@@ -1274,6 +1278,10 @@ impl PixelGrid {
             .unwrap_or(0)
     }
 
+    pub(crate) fn runtime_material_counts(&self) -> &[u32] {
+        &self.material_counts
+    }
+
     /// C4Landscape::UpdateMatCnt subtracts the old contents of a change
     /// rectangle in PrepareChange and adds the new contents in FinishChange.
     /// Keep the same bounded work for bulk Surface8 writers instead of
@@ -1319,6 +1327,11 @@ impl PixelGrid {
     /// The maintained `PixCnt` table, built from the plane on first use.
     fn pix_cnt_cells(&self) -> &[u8] {
         self.pix_cnt.0.get_or_init(|| self.recount_pix_cnt_cells())
+    }
+
+    pub(crate) fn runtime_pix_cnt(&self) -> (usize, &[u8]) {
+        let (_, pitch) = self.pix_cnt_dimensions();
+        (pitch, self.pix_cnt_cells())
     }
 
     /// `_SetPix`'s count maintenance (C4Landscape.cpp:788-798): a pixel joins
@@ -2850,6 +2863,16 @@ impl LandscapeRasterState {
         )
     }
 
+    pub(crate) fn runtime_map(&self) -> Option<(u32, u32, &[u8])> {
+        let expected = (self.map_width as usize).checked_mul(self.map_height as usize)?;
+        (self.map_width > 0 && self.map_height > 0 && self.map_indices.len() == expected)
+            .then_some((self.map_width, self.map_height, self.map_indices.as_slice()))
+    }
+
+    pub(crate) fn runtime_map_dimensions(&self) -> (u32, u32) {
+        (self.map_width, self.map_height)
+    }
+
     fn has_map(&self) -> bool {
         let Some(expected) = (self.map_width as usize).checked_mul(self.map_height as usize) else {
             return false;
@@ -3779,6 +3802,10 @@ impl Landscape {
 
     pub fn scan_x(&self) -> u32 {
         self.scan_x
+    }
+
+    pub(crate) fn no_scan(&self) -> bool {
+        self.no_scan
     }
 
     pub fn set_no_scan(&mut self, no_scan: bool) {
@@ -4835,7 +4862,7 @@ impl Landscape {
         material_texture: &str,
         source_material: MaterialId,
         materials: &MaterialSet,
-        fallback_material: MaterialId,
+        fallback_material: Option<MaterialId>,
     ) -> Option<u8> {
         match self.raster_state.as_ref() {
             Some(state) => {
@@ -4845,10 +4872,11 @@ impl Landscape {
                     .unwrap_or_else(|| state.texmap().resolved_index_mat_tex(material_texture));
                 (byte != 0).then_some(byte)
             }
-            None => self
-                .pixels
-                .as_ref()
-                .and_then(|grid| grid.byte_for_material(fallback_material)),
+            None => fallback_material.and_then(|fallback_material| {
+                self.pixels
+                    .as_ref()
+                    .and_then(|grid| grid.byte_for_material(fallback_material))
+            }),
         }
     }
 
@@ -5493,7 +5521,7 @@ impl Landscape {
                     &outcome.target_spec,
                     material,
                     materials,
-                    target,
+                    Some(target),
                 )?;
                 (target, target_byte)
             }
@@ -5839,6 +5867,10 @@ impl Landscape {
     /// `MVehic` resolution (C4Game::InitMaterialTexture, C4Game.cpp:1669).
     pub fn set_vehicle_material(&mut self, material: Option<MaterialId>) {
         self.vehicle_material = material;
+    }
+
+    pub(crate) fn vehicle_material(&self) -> Option<MaterialId> {
+        self.vehicle_material
     }
 
     /// C4Landscape::ScanSideOpen (C4Landscape.cpp:231-238): LeftOpen /
@@ -10939,7 +10971,7 @@ func TransactionThenRaw()
             .solid_mask_instance_sequence
             .expect("eligible offscreen instance was constructed");
         assert!(engine.objects[index].solid_mask_bake.is_none());
-        assert!(engine.objects[index].solid_mask_empty_put);
+        assert!(engine.objects[index].solid_mask_empty_put.is_some());
 
         engine.objects[index].set_position(Vector2::new(1, 1));
         engine.update_solid_mask(index);
@@ -10947,7 +10979,7 @@ func TransactionThenRaw()
             mask_bake(&engine, index).instance_sequence,
             offscreen_sequence
         );
-        assert!(!engine.objects[index].solid_mask_empty_put);
+        assert!(engine.objects[index].solid_mask_empty_put.is_none());
 
         engine.objects[index].state.container = Some(crate::ObjectId::new(999));
         engine.update_solid_mask(index);

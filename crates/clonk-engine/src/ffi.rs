@@ -354,6 +354,9 @@ pub struct LcEngineRuntimeEnvironmentState {
 }
 
 const RUNTIME_WEATHER_ABI_VERSION: u32 = 1;
+const RUNTIME_LANDSCAPE_ABI_VERSION: u32 = 1;
+const RUNTIME_LANDSCAPE_TEXMAP_CAPACITY: usize = 127;
+const RUNTIME_LANDSCAPE_MATERIAL_CAPACITY: usize = 125;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -401,6 +404,1034 @@ pub struct LcEngineRuntimeWeatherSnapshot {
     pub initial_rain_gate_valid: u8,
     pub precipitation_material_len: u8,
     pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LcEngineRuntimeLandscapeTexMapEntrySnapshot {
+    pub material_name: *const u8,
+    pub material_name_len: usize,
+    pub texture_name: *const u8,
+    pub texture_name_len: usize,
+    pub material_index: i32,
+    pub present: u8,
+    pub texture_name_present: u8,
+    pub reserved: [u8; 2],
+}
+
+impl Default for LcEngineRuntimeLandscapeTexMapEntrySnapshot {
+    fn default() -> Self {
+        Self {
+            material_name: ptr::null(),
+            material_name_len: 0,
+            texture_name: ptr::null(),
+            texture_name_len: 0,
+            material_index: -1,
+            present: 0,
+            texture_name_present: 0,
+            reserved: [0; 2],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LcEngineRuntimeLandscapeSolidMaskSnapshot {
+    pub owner_id: u64,
+    pub source_x: i32,
+    pub source_y: i32,
+    pub source_width: i32,
+    pub source_height: i32,
+    pub source_target_x: i32,
+    pub source_target_y: i32,
+    pub put_x: i32,
+    pub put_y: i32,
+    pub put_width: i32,
+    pub put_height: i32,
+    pub put_target_x: i32,
+    pub put_target_y: i32,
+    pub put_rotation: i32,
+    pub mat_buff_pitch: i32,
+    pub alpha: *const u8,
+    pub alpha_len: usize,
+    pub background: *const u8,
+    pub background_len: usize,
+    pub attachment_count: usize,
+    pub mask_put: u8,
+    pub reserved: [u8; 7],
+}
+
+impl Default for LcEngineRuntimeLandscapeSolidMaskSnapshot {
+    fn default() -> Self {
+        Self {
+            owner_id: 0,
+            source_x: 0,
+            source_y: 0,
+            source_width: 0,
+            source_height: 0,
+            source_target_x: 0,
+            source_target_y: 0,
+            put_x: 0,
+            put_y: 0,
+            put_width: 0,
+            put_height: 0,
+            put_target_x: 0,
+            put_target_y: 0,
+            put_rotation: 0,
+            mat_buff_pitch: 0,
+            alpha: ptr::null(),
+            alpha_len: 0,
+            background: ptr::null(),
+            background_len: 0,
+            attachment_count: 0,
+            mask_put: 0,
+            reserved: [0; 7],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LcEngineRuntimeLandscapeSnapshot {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub width: i32,
+    pub height: i32,
+    pub surface_width: i32,
+    pub surface_height: i32,
+    pub pitch: i32,
+    pub surface_clip_x: i32,
+    pub surface_clip_y: i32,
+    pub surface_clip_x2: i32,
+    pub surface_clip_y2: i32,
+    pub surface8: *const u8,
+    pub surface8_len: usize,
+    pub map_width: i32,
+    pub map_height: i32,
+    pub map_surface_width: i32,
+    pub map_surface_height: i32,
+    pub map_pitch: i32,
+    pub map_clip_x: i32,
+    pub map_clip_y: i32,
+    pub map_clip_x2: i32,
+    pub map_clip_y2: i32,
+    pub map: *const u8,
+    pub map_len: usize,
+    pub default_mat_tex: *const u8,
+    pub default_mat_tex_len: usize,
+    pub material_crossmap: *const u8,
+    pub material_crossmap_len: usize,
+    pub texture_inventory: *const u8,
+    pub texture_inventory_len: usize,
+    pub map_creator_state: *const u8,
+    pub map_creator_state_len: usize,
+    pub material_reaction_state: *const u8,
+    pub material_reaction_state_len: usize,
+    pub material_behavior_state: *const u8,
+    pub material_behavior_state_len: usize,
+    pub pxs_state: *const u8,
+    pub pxs_state_len: usize,
+    pub mass_mover_state: *const u8,
+    pub mass_mover_state_len: usize,
+    pub material_count: i32,
+    pub in_mat_convert_to: [i32; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+    pub pix2mat: [i32; 256],
+    pub pix2dens: [i32; 256],
+    pub pix2place: [i32; 256],
+    pub mat_count: [u32; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+    pub effective_mat_count: [u32; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+    pub pix_cnt_pitch: i32,
+    pub pix_cnt: *const u8,
+    pub pix_cnt_len: usize,
+    pub mode: i32,
+    pub map_seed: i32,
+    pub map_zoom: i32,
+    pub scan_x: i32,
+    pub scan_speed: i32,
+    pub left_open: i32,
+    pub right_open: i32,
+    pub gravity_raw: i32,
+    pub modulation: u32,
+    pub vehicle_material: i32,
+    pub tunnel_material: i32,
+    pub water_material: i32,
+    pub snow_material: i32,
+    pub granite_material: i32,
+    pub vehicle_pixel: u8,
+    pub no_scan: u8,
+    pub top_open: u8,
+    pub bottom_open: u8,
+    pub shade_materials: u8,
+    pub map_changed: u8,
+    pub texmap_initialized: u8,
+    pub texmap_entries_added: u8,
+    pub texmap_overload_materials: u8,
+    pub texmap_overload_textures: u8,
+    pub reserved: [u8; 6],
+    pub solid_masks: *const LcEngineRuntimeLandscapeSolidMaskSnapshot,
+    pub solid_mask_count: usize,
+    pub texmap: [LcEngineRuntimeLandscapeTexMapEntrySnapshot; RUNTIME_LANDSCAPE_TEXMAP_CAPACITY],
+}
+
+impl Default for LcEngineRuntimeLandscapeSnapshot {
+    fn default() -> Self {
+        Self {
+            abi_version: 0,
+            struct_size: 0,
+            width: 0,
+            height: 0,
+            surface_width: 0,
+            surface_height: 0,
+            pitch: 0,
+            surface_clip_x: 0,
+            surface_clip_y: 0,
+            surface_clip_x2: 0,
+            surface_clip_y2: 0,
+            surface8: ptr::null(),
+            surface8_len: 0,
+            map_width: 0,
+            map_height: 0,
+            map_surface_width: 0,
+            map_surface_height: 0,
+            map_pitch: 0,
+            map_clip_x: 0,
+            map_clip_y: 0,
+            map_clip_x2: 0,
+            map_clip_y2: 0,
+            map: ptr::null(),
+            map_len: 0,
+            default_mat_tex: ptr::null(),
+            default_mat_tex_len: 0,
+            material_crossmap: ptr::null(),
+            material_crossmap_len: 0,
+            texture_inventory: ptr::null(),
+            texture_inventory_len: 0,
+            map_creator_state: ptr::null(),
+            map_creator_state_len: 0,
+            material_reaction_state: ptr::null(),
+            material_reaction_state_len: 0,
+            material_behavior_state: ptr::null(),
+            material_behavior_state_len: 0,
+            pxs_state: ptr::null(),
+            pxs_state_len: 0,
+            mass_mover_state: ptr::null(),
+            mass_mover_state_len: 0,
+            material_count: 0,
+            in_mat_convert_to: [-1; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+            pix2mat: [-1; 256],
+            pix2dens: [0; 256],
+            pix2place: [0; 256],
+            mat_count: [0; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+            effective_mat_count: [0; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+            pix_cnt_pitch: 0,
+            pix_cnt: ptr::null(),
+            pix_cnt_len: 0,
+            mode: 0,
+            map_seed: 0,
+            map_zoom: 0,
+            scan_x: 0,
+            scan_speed: 2,
+            left_open: 0,
+            right_open: 0,
+            gravity_raw: 131,
+            modulation: 0,
+            vehicle_material: -1,
+            tunnel_material: -1,
+            water_material: -1,
+            snow_material: -1,
+            granite_material: -1,
+            vehicle_pixel: 0,
+            no_scan: 0,
+            top_open: 1,
+            bottom_open: 0,
+            shade_materials: 1,
+            map_changed: 0,
+            texmap_initialized: 0,
+            texmap_entries_added: 0,
+            texmap_overload_materials: 0,
+            texmap_overload_textures: 0,
+            reserved: [0; 6],
+            solid_masks: ptr::null(),
+            solid_mask_count: 0,
+            texmap: [LcEngineRuntimeLandscapeTexMapEntrySnapshot::default();
+                RUNTIME_LANDSCAPE_TEXMAP_CAPACITY],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeLandscapeTexMapEntry {
+    material_name: Option<Vec<u8>>,
+    texture_name: Option<Vec<u8>>,
+    material_index: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeLandscapeMap {
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeLandscapeSolidMaskPut {
+    rect: [i32; 6],
+    rotation: i32,
+    background: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeLandscapeSolidMask {
+    owner_id: u64,
+    source: [i32; 6],
+    /// `None` canonically represents an all-solid rectangle.
+    alpha: Option<Vec<u8>>,
+    mat_buff_pitch: i32,
+    put: Option<RuntimeLandscapeSolidMaskPut>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeLandscapeSnapshot {
+    width: u32,
+    height: u32,
+    surface_width: u32,
+    surface_height: u32,
+    surface_clip: [i32; 4],
+    surface8: Option<Vec<u8>>,
+    map_width: u32,
+    map_height: u32,
+    map_surface_width: u32,
+    map_surface_height: u32,
+    map_clip: [i32; 4],
+    retained_map: Option<RuntimeLandscapeMap>,
+    default_mat_tex: Vec<u8>,
+    material_crossmap: Vec<u8>,
+    texture_inventory: Vec<u8>,
+    map_creator_state: Option<Vec<u8>>,
+    material_reaction_state: Vec<u8>,
+    material_behavior_state: Vec<u8>,
+    pxs_state: Vec<u8>,
+    mass_mover_state: Vec<u8>,
+    material_count: u32,
+    in_mat_convert_to: [i32; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+    pix2mat: [i32; 256],
+    pix2dens: [i32; 256],
+    pix2place: [i32; 256],
+    mat_count: [u32; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+    effective_mat_count: [u32; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+    pix_cnt_pitch: u32,
+    pix_cnt: Option<Vec<u8>>,
+    mode: i32,
+    map_seed: i32,
+    map_zoom: i32,
+    scan_x: i32,
+    scan_speed: i32,
+    left_open: i32,
+    right_open: i32,
+    gravity_raw: i32,
+    modulation: u32,
+    vehicle_material: i32,
+    tunnel_material: i32,
+    water_material: i32,
+    snow_material: i32,
+    granite_material: i32,
+    vehicle_pixel: u8,
+    no_scan: bool,
+    top_open: bool,
+    bottom_open: bool,
+    shade_materials: bool,
+    map_changed: bool,
+    texmap_initialized: bool,
+    texmap_entries_added: bool,
+    texmap_overload_materials: bool,
+    texmap_overload_textures: bool,
+    texmap: Vec<Option<RuntimeLandscapeTexMapEntry>>,
+    solid_masks: Vec<RuntimeLandscapeSolidMask>,
+}
+
+impl Default for RuntimeLandscapeSnapshot {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            surface_width: 0,
+            surface_height: 0,
+            surface_clip: [0; 4],
+            surface8: None,
+            map_width: 0,
+            map_height: 0,
+            map_surface_width: 0,
+            map_surface_height: 0,
+            map_clip: [0; 4],
+            retained_map: None,
+            default_mat_tex: Vec::new(),
+            material_crossmap: Vec::new(),
+            texture_inventory: Vec::new(),
+            map_creator_state: None,
+            material_reaction_state: Vec::new(),
+            material_behavior_state: Vec::new(),
+            pxs_state: Vec::new(),
+            mass_mover_state: Vec::new(),
+            material_count: 0,
+            in_mat_convert_to: [-1; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+            pix2mat: [-1; 256],
+            pix2dens: [0; 256],
+            pix2place: [0; 256],
+            mat_count: [0; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+            effective_mat_count: [0; RUNTIME_LANDSCAPE_MATERIAL_CAPACITY],
+            pix_cnt_pitch: 0,
+            pix_cnt: None,
+            mode: 0,
+            map_seed: 0,
+            map_zoom: 0,
+            scan_x: 0,
+            scan_speed: 2,
+            left_open: 0,
+            right_open: 0,
+            gravity_raw: 131,
+            modulation: 0,
+            vehicle_material: -1,
+            tunnel_material: -1,
+            water_material: -1,
+            snow_material: -1,
+            granite_material: -1,
+            vehicle_pixel: 0,
+            no_scan: false,
+            top_open: true,
+            bottom_open: false,
+            shade_materials: true,
+            map_changed: false,
+            texmap_initialized: false,
+            texmap_entries_added: false,
+            texmap_overload_materials: false,
+            texmap_overload_textures: false,
+            texmap: vec![None; RUNTIME_LANDSCAPE_TEXMAP_CAPACITY],
+            solid_masks: Vec::new(),
+        }
+    }
+}
+
+unsafe fn copy_runtime_landscape_snapshot(
+    source: &LcEngineRuntimeLandscapeSnapshot,
+) -> Result<RuntimeLandscapeSnapshot, String> {
+    if source.abi_version != RUNTIME_LANDSCAPE_ABI_VERSION {
+        return Err(format!(
+            "native landscape ABI version {} does not match {}",
+            source.abi_version, RUNTIME_LANDSCAPE_ABI_VERSION
+        ));
+    }
+    let expected_size = std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32;
+    if source.struct_size != expected_size {
+        return Err(format!(
+            "native landscape snapshot size {} does not match {}",
+            source.struct_size, expected_size
+        ));
+    }
+    if source.reserved != [0; 6] {
+        return Err("native landscape reserved bytes are nonzero".into());
+    }
+
+    let bool_field = |name: &str, value: u8| match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(format!(
+            "native landscape {name} flag {value} is not boolean"
+        )),
+    };
+    let no_scan = bool_field("NoScan", source.no_scan)?;
+    let top_open = bool_field("TopOpen", source.top_open)?;
+    let bottom_open = bool_field("BottomOpen", source.bottom_open)?;
+    let shade_materials = bool_field("ShadeMaterials", source.shade_materials)?;
+    let map_changed = bool_field("fMapChanged", source.map_changed)?;
+    let texmap_initialized = bool_field("texmap fInitialized", source.texmap_initialized)?;
+    let texmap_entries_added = bool_field("texmap fEntriesAdded", source.texmap_entries_added)?;
+    let texmap_overload_materials = bool_field(
+        "texmap fOverloadMaterials",
+        source.texmap_overload_materials,
+    )?;
+    let texmap_overload_textures =
+        bool_field("texmap fOverloadTextures", source.texmap_overload_textures)?;
+
+    let width = u32::try_from(source.width)
+        .map_err(|_| format!("native landscape width {} is negative", source.width))?;
+    let height = u32::try_from(source.height)
+        .map_err(|_| format!("native landscape height {} is negative", source.height))?;
+    let surface_width = u32::try_from(source.surface_width).map_err(|_| {
+        format!(
+            "native landscape Surface8 width {} is negative",
+            source.surface_width
+        )
+    })?;
+    let surface_height = u32::try_from(source.surface_height).map_err(|_| {
+        format!(
+            "native landscape Surface8 height {} is negative",
+            source.surface_height
+        )
+    })?;
+    let pitch = usize::try_from(source.pitch).map_err(|_| {
+        format!(
+            "native landscape Surface8 pitch {} is negative",
+            source.pitch
+        )
+    })?;
+    let surface8 = if source.surface8.is_null() {
+        if surface_width != 0 || surface_height != 0 || pitch != 0 || source.surface8_len != 0 {
+            return Err("native landscape Surface8 is null with nonzero storage metadata".into());
+        }
+        None
+    } else {
+        let width_usize = surface_width as usize;
+        let height_usize = surface_height as usize;
+        if width_usize == 0 || height_usize == 0 {
+            return Err("native landscape Surface8 is present with zero dimensions".into());
+        }
+        if pitch < width_usize {
+            return Err(format!(
+                "native landscape Surface8 pitch {pitch} is smaller than width {width_usize}"
+            ));
+        }
+        let extent = (height_usize - 1)
+            .checked_mul(pitch)
+            .and_then(|offset| offset.checked_add(width_usize))
+            .ok_or_else(|| "native landscape Surface8 extent overflows usize".to_owned())?;
+        if extent > source.surface8_len {
+            return Err(format!(
+                "native landscape Surface8 extent {extent} exceeds supplied length {}",
+                source.surface8_len
+            ));
+        }
+        if extent > isize::MAX as usize {
+            return Err(format!(
+                "native landscape Surface8 extent {extent} exceeds isize::MAX"
+            ));
+        }
+        let packed_len = width_usize
+            .checked_mul(height_usize)
+            .ok_or_else(|| "native landscape packed Surface8 length overflows usize".to_owned())?;
+        let mut packed = Vec::with_capacity(packed_len);
+        for y in 0..height_usize {
+            let offset = y * pitch;
+            let row = unsafe { slice::from_raw_parts(source.surface8.add(offset), width_usize) };
+            packed.extend_from_slice(row);
+        }
+        Some(packed)
+    };
+
+    let map_width = u32::try_from(source.map_width).map_err(|_| {
+        format!(
+            "native landscape Map width {} is negative",
+            source.map_width
+        )
+    })?;
+    let map_height = u32::try_from(source.map_height).map_err(|_| {
+        format!(
+            "native landscape Map height {} is negative",
+            source.map_height
+        )
+    })?;
+    let map_surface_width = u32::try_from(source.map_surface_width).map_err(|_| {
+        format!(
+            "native landscape Map surface width {} is negative",
+            source.map_surface_width
+        )
+    })?;
+    let map_surface_height = u32::try_from(source.map_surface_height).map_err(|_| {
+        format!(
+            "native landscape Map surface height {} is negative",
+            source.map_surface_height
+        )
+    })?;
+    let map_pitch = usize::try_from(source.map_pitch).map_err(|_| {
+        format!(
+            "native landscape Map pitch {} is negative",
+            source.map_pitch
+        )
+    })?;
+    let retained_map = if source.map.is_null() {
+        if map_surface_width != 0
+            || map_surface_height != 0
+            || map_pitch != 0
+            || source.map_len != 0
+        {
+            return Err("native landscape Map is null with nonzero storage metadata".into());
+        }
+        None
+    } else {
+        let width = map_surface_width as usize;
+        let height = map_surface_height as usize;
+        if width == 0 || height == 0 {
+            return Err("native landscape Map is present with zero dimensions".into());
+        }
+        if map_pitch < width {
+            return Err(format!(
+                "native landscape Map pitch {map_pitch} is smaller than width {width}"
+            ));
+        }
+        let extent = (height - 1)
+            .checked_mul(map_pitch)
+            .and_then(|offset| offset.checked_add(width))
+            .ok_or_else(|| "native landscape Map extent overflows usize".to_owned())?;
+        if extent > source.map_len {
+            return Err(format!(
+                "native landscape Map extent {extent} exceeds supplied length {}",
+                source.map_len
+            ));
+        }
+        if extent > isize::MAX as usize {
+            return Err(format!(
+                "native landscape Map extent {extent} exceeds isize::MAX"
+            ));
+        }
+        let packed_len = width
+            .checked_mul(height)
+            .ok_or_else(|| "native landscape packed Map length overflows usize".to_owned())?;
+        let mut bytes = Vec::with_capacity(packed_len);
+        for y in 0..height {
+            let offset = y * map_pitch;
+            let row = unsafe { slice::from_raw_parts(source.map.add(offset), width) };
+            bytes.extend_from_slice(row);
+        }
+        Some(RuntimeLandscapeMap {
+            width: map_surface_width,
+            height: map_surface_height,
+            bytes,
+        })
+    };
+
+    let pix_cnt_pitch = u32::try_from(source.pix_cnt_pitch).map_err(|_| {
+        format!(
+            "native landscape PixCnt pitch {} is negative",
+            source.pix_cnt_pitch
+        )
+    })?;
+    let pix_cnt = if source.pix_cnt.is_null() {
+        if pix_cnt_pitch != 0 || source.pix_cnt_len != 0 {
+            return Err("native landscape PixCnt is null with nonzero metadata".into());
+        }
+        None
+    } else {
+        let expected_pitch = height.div_ceil(15);
+        if pix_cnt_pitch != expected_pitch {
+            return Err(format!(
+                "native landscape PixCnt pitch {pix_cnt_pitch} does not match {expected_pitch}"
+            ));
+        }
+        let expected_len = (width as usize)
+            .div_ceil(17)
+            .checked_mul(pix_cnt_pitch as usize)
+            .ok_or_else(|| "native landscape PixCnt length overflows usize".to_owned())?;
+        if source.pix_cnt_len != expected_len {
+            return Err(format!(
+                "native landscape PixCnt length {} does not match {expected_len}",
+                source.pix_cnt_len
+            ));
+        }
+        if expected_len > isize::MAX as usize {
+            return Err(format!(
+                "native landscape PixCnt length {expected_len} exceeds isize::MAX"
+            ));
+        }
+        Some(unsafe { slice::from_raw_parts(source.pix_cnt, expected_len) }.to_vec())
+    };
+
+    unsafe fn copy_name(pointer: *const u8, length: usize) -> Result<Vec<u8>, String> {
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        if pointer.is_null() {
+            return Err("pointer is null with a nonzero length".into());
+        }
+        if length > isize::MAX as usize {
+            return Err(format!("length {length} exceeds isize::MAX"));
+        }
+        Ok(unsafe { slice::from_raw_parts(pointer, length) }.to_vec())
+    }
+
+    let default_mat_tex = unsafe { copy_name(source.default_mat_tex, source.default_mat_tex_len) }
+        .map_err(|detail| format!("native landscape DefaultMatTex {detail}"))?;
+    let material_crossmap =
+        unsafe { copy_name(source.material_crossmap, source.material_crossmap_len) }
+            .map_err(|detail| format!("native landscape material crossmap {detail}"))?;
+    let texture_inventory =
+        unsafe { copy_name(source.texture_inventory, source.texture_inventory_len) }
+            .map_err(|detail| format!("native landscape texture inventory {detail}"))?;
+    let map_creator_state = if source.map_creator_state.is_null() {
+        if source.map_creator_state_len != 0 {
+            return Err(
+                "native landscape map-creator pointer is null with a nonzero length".into(),
+            );
+        }
+        None
+    } else {
+        if source.map_creator_state_len == 0 {
+            return Err("native landscape map-creator pointer is nonnull with zero length".into());
+        }
+        Some(
+            unsafe { copy_name(source.map_creator_state, source.map_creator_state_len) }
+                .map_err(|detail| format!("native landscape map-creator state {detail}"))?,
+        )
+    };
+    let material_reaction_state = unsafe {
+        copy_name(
+            source.material_reaction_state,
+            source.material_reaction_state_len,
+        )
+    }
+    .map_err(|detail| format!("native landscape material reaction state {detail}"))?;
+    let material_behavior_state = unsafe {
+        copy_name(
+            source.material_behavior_state,
+            source.material_behavior_state_len,
+        )
+    }
+    .map_err(|detail| format!("native landscape material behavior state {detail}"))?;
+    let pxs_state = unsafe { copy_name(source.pxs_state, source.pxs_state_len) }
+        .map_err(|detail| format!("native landscape PXS state {detail}"))?;
+    let mass_mover_state =
+        unsafe { copy_name(source.mass_mover_state, source.mass_mover_state_len) }
+            .map_err(|detail| format!("native landscape mass-mover state {detail}"))?;
+    let material_count = u32::try_from(source.material_count).map_err(|_| {
+        format!(
+            "native landscape material count {} is negative",
+            source.material_count
+        )
+    })?;
+    if material_count as usize > RUNTIME_LANDSCAPE_MATERIAL_CAPACITY {
+        return Err(format!(
+            "native landscape material count {material_count} exceeds {RUNTIME_LANDSCAPE_MATERIAL_CAPACITY}"
+        ));
+    }
+    for (index, &target) in source
+        .in_mat_convert_to
+        .iter()
+        .take(material_count as usize)
+        .enumerate()
+    {
+        if target < -1 || target >= source.material_count {
+            return Err(format!(
+                "native landscape InMatConvertTo {index} target {target} is outside -1..{}",
+                source.material_count - 1
+            ));
+        }
+    }
+    if let Some((index, target)) = source
+        .in_mat_convert_to
+        .iter()
+        .enumerate()
+        .skip(material_count as usize)
+        .find(|(_, target)| **target != -1)
+    {
+        return Err(format!(
+            "native landscape unused InMatConvertTo {index} is {target}, expected -1"
+        ));
+    }
+
+    let raw_solid_masks = if source.solid_mask_count == 0 {
+        if !source.solid_masks.is_null() {
+            return Err("native landscape solid-mask pointer is nonnull with a zero count".into());
+        }
+        &[][..]
+    } else {
+        if source.solid_masks.is_null() {
+            return Err("native landscape solid-mask pointer is null with a nonzero count".into());
+        }
+        let extent = source
+            .solid_mask_count
+            .checked_mul(std::mem::size_of::<LcEngineRuntimeLandscapeSolidMaskSnapshot>())
+            .ok_or_else(|| "native landscape solid-mask extent overflows usize".to_owned())?;
+        if extent > isize::MAX as usize {
+            return Err(format!(
+                "native landscape solid-mask extent {extent} exceeds isize::MAX"
+            ));
+        }
+        unsafe { slice::from_raw_parts(source.solid_masks, source.solid_mask_count) }
+    };
+    let mut solid_masks = Vec::with_capacity(raw_solid_masks.len());
+    for (index, mask) in raw_solid_masks.iter().enumerate() {
+        if mask.reserved != [0; 7] {
+            return Err(format!(
+                "native landscape solid mask {index} reserved bytes are nonzero"
+            ));
+        }
+        if mask.owner_id > i32::MAX as u64 {
+            return Err(format!(
+                "native landscape solid mask {index} owner {} exceeds C4Object::Number",
+                mask.owner_id
+            ));
+        }
+        if mask.attachment_count != 0 {
+            return Err(format!(
+                "native landscape solid mask {index} has {} pending attachments at the frame boundary",
+                mask.attachment_count
+            ));
+        }
+        let mask_put = bool_field(&format!("solid mask {index} MaskPut"), mask.mask_put)?;
+        let alpha_width = usize::try_from(mask.source_width).map_err(|_| {
+            format!(
+                "native landscape solid mask {index} source width {} is negative",
+                mask.source_width
+            )
+        })?;
+        let alpha_height = usize::try_from(mask.source_height).map_err(|_| {
+            format!(
+                "native landscape solid mask {index} source height {} is negative",
+                mask.source_height
+            )
+        })?;
+        let expected_alpha_len = alpha_width.checked_mul(alpha_height).ok_or_else(|| {
+            format!("native landscape solid mask {index} alpha length overflows usize")
+        })?;
+        if expected_alpha_len == 0 {
+            return Err(format!(
+                "native landscape solid mask {index} has an empty source"
+            ));
+        }
+        if mask.mat_buff_pitch <= 0 {
+            return Err(format!(
+                "native landscape solid mask {index} MatBuffPitch {} is not positive",
+                mask.mat_buff_pitch
+            ));
+        }
+        if mask.alpha_len != expected_alpha_len {
+            return Err(format!(
+                "native landscape solid mask {index} alpha length {} does not match {expected_alpha_len}",
+                mask.alpha_len
+            ));
+        }
+        let mut alpha = unsafe { copy_name(mask.alpha, mask.alpha_len) }
+            .map_err(|detail| format!("native landscape solid mask {index} alpha {detail}"))?;
+        for (pixel_index, pixel) in alpha.iter_mut().enumerate() {
+            *pixel = match *pixel {
+                0x00 => 0,
+                0xff => 1,
+                value => {
+                    return Err(format!(
+                        "native landscape solid mask {index} alpha {pixel_index} is {value}, expected 0 or 255"
+                    ));
+                }
+            };
+        }
+        let alpha = (!alpha.iter().all(|pixel| *pixel == 1)).then_some(alpha);
+
+        let put = if !mask_put {
+            if !mask.background.is_null() || mask.background_len != 0 {
+                return Err(format!(
+                    "native landscape solid mask {index} is not put but has background bytes"
+                ));
+            }
+            None
+        } else {
+            let has_pixels = mask.put_width > 0 && mask.put_height > 0;
+            if has_pixels {
+                let put_width = usize::try_from(mask.put_width).map_err(|_| {
+                    format!("native landscape solid mask {index} put width is negative")
+                })?;
+                let put_height = usize::try_from(mask.put_height).map_err(|_| {
+                    format!("native landscape solid mask {index} put height is negative")
+                })?;
+                let expected_background_len =
+                    put_width.checked_mul(put_height).ok_or_else(|| {
+                        format!(
+                            "native landscape solid mask {index} background length overflows usize"
+                        )
+                    })?;
+                if mask.background_len != expected_background_len {
+                    return Err(format!(
+                        "native landscape solid mask {index} background length {} does not match {expected_background_len}",
+                        mask.background_len
+                    ));
+                }
+                if mask.put_target_x < 0
+                    || mask.put_target_y < 0
+                    || i64::from(mask.put_target_x) + i64::from(mask.put_width)
+                        > i64::from(mask.mat_buff_pitch)
+                    || i64::from(mask.put_target_y) + i64::from(mask.put_height)
+                        > i64::from(mask.mat_buff_pitch)
+                {
+                    return Err(format!(
+                        "native landscape solid mask {index} put window exceeds MatBuffPitch {}",
+                        mask.mat_buff_pitch
+                    ));
+                }
+                if mask.put_x < 0
+                    || mask.put_y < 0
+                    || i64::from(mask.put_x) + i64::from(mask.put_width) > i64::from(width)
+                    || i64::from(mask.put_y) + i64::from(mask.put_height) > i64::from(height)
+                {
+                    return Err(format!(
+                        "native landscape solid mask {index} put window exceeds Surface8 {}x{}",
+                        width, height
+                    ));
+                }
+                let background = unsafe { copy_name(mask.background, mask.background_len) }
+                    .map_err(|detail| {
+                        format!("native landscape solid mask {index} background {detail}")
+                    })?;
+                Some(RuntimeLandscapeSolidMaskPut {
+                    rect: [
+                        mask.put_x,
+                        mask.put_y,
+                        mask.put_width,
+                        mask.put_height,
+                        mask.put_target_x,
+                        mask.put_target_y,
+                    ],
+                    rotation: mask.put_rotation,
+                    background,
+                })
+            } else {
+                if !mask.background.is_null() || mask.background_len != 0 {
+                    return Err(format!(
+                        "native landscape solid mask {index} has an empty put window with background bytes"
+                    ));
+                }
+                Some(RuntimeLandscapeSolidMaskPut {
+                    rect: [
+                        mask.put_x,
+                        mask.put_y,
+                        mask.put_width,
+                        mask.put_height,
+                        mask.put_target_x,
+                        mask.put_target_y,
+                    ],
+                    rotation: mask.put_rotation,
+                    background: Vec::new(),
+                })
+            }
+        };
+        solid_masks.push(RuntimeLandscapeSolidMask {
+            owner_id: mask.owner_id,
+            source: [
+                mask.source_x,
+                mask.source_y,
+                mask.source_width,
+                mask.source_height,
+                mask.source_target_x,
+                mask.source_target_y,
+            ],
+            alpha,
+            mat_buff_pitch: mask.mat_buff_pitch,
+            put,
+        });
+    }
+
+    let mut texmap = Vec::with_capacity(source.texmap.len());
+    for (index, entry) in source.texmap.iter().enumerate() {
+        if entry.reserved != [0; 2] {
+            return Err(format!(
+                "native landscape texmap {index} reserved bytes are nonzero"
+            ));
+        }
+        if entry.present > 1 || entry.texture_name_present > 1 {
+            return Err(format!(
+                "native landscape texmap {index} has invalid presence flags"
+            ));
+        }
+        if entry.present == 0 {
+            if entry.texture_name_present != 0
+                || entry.material_name_len != 0
+                || entry.texture_name_len != 0
+                || !entry.material_name.is_null()
+                || !entry.texture_name.is_null()
+                || entry.material_index != -1
+            {
+                return Err(format!(
+                    "native landscape texmap {index} is absent with populated fields"
+                ));
+            }
+            texmap.push(None);
+            continue;
+        }
+        let material_name = unsafe { copy_name(entry.material_name, entry.material_name_len) }
+            .map_err(|detail| format!("native landscape texmap {index} material name {detail}"))?;
+        let texture_name = if entry.texture_name_present != 0 {
+            Some(
+                unsafe { copy_name(entry.texture_name, entry.texture_name_len) }.map_err(
+                    |detail| format!("native landscape texmap {index} texture name {detail}"),
+                )?,
+            )
+        } else {
+            if entry.texture_name_len != 0 || !entry.texture_name.is_null() {
+                return Err(format!(
+                    "native landscape texmap {index} texture is absent with populated storage"
+                ));
+            }
+            None
+        };
+        texmap.push(Some(RuntimeLandscapeTexMapEntry {
+            material_name: Some(material_name),
+            texture_name,
+            material_index: entry.material_index,
+        }));
+    }
+
+    Ok(RuntimeLandscapeSnapshot {
+        width,
+        height,
+        surface_width,
+        surface_height,
+        surface_clip: [
+            source.surface_clip_x,
+            source.surface_clip_y,
+            source.surface_clip_x2,
+            source.surface_clip_y2,
+        ],
+        surface8,
+        map_width,
+        map_height,
+        map_surface_width,
+        map_surface_height,
+        map_clip: [
+            source.map_clip_x,
+            source.map_clip_y,
+            source.map_clip_x2,
+            source.map_clip_y2,
+        ],
+        retained_map,
+        default_mat_tex,
+        material_crossmap,
+        texture_inventory,
+        map_creator_state,
+        material_reaction_state,
+        material_behavior_state,
+        pxs_state,
+        mass_mover_state,
+        material_count,
+        in_mat_convert_to: source.in_mat_convert_to,
+        pix2mat: source.pix2mat,
+        pix2dens: source.pix2dens,
+        pix2place: source.pix2place,
+        mat_count: source.mat_count,
+        effective_mat_count: source.effective_mat_count,
+        pix_cnt_pitch,
+        pix_cnt,
+        mode: source.mode,
+        map_seed: source.map_seed,
+        map_zoom: source.map_zoom,
+        scan_x: source.scan_x,
+        scan_speed: source.scan_speed,
+        left_open: source.left_open,
+        right_open: source.right_open,
+        gravity_raw: source.gravity_raw,
+        modulation: source.modulation,
+        vehicle_material: source.vehicle_material,
+        tunnel_material: source.tunnel_material,
+        water_material: source.water_material,
+        snow_material: source.snow_material,
+        granite_material: source.granite_material,
+        vehicle_pixel: source.vehicle_pixel,
+        no_scan,
+        top_open,
+        bottom_open,
+        shade_materials,
+        map_changed,
+        texmap_initialized,
+        texmap_entries_added,
+        texmap_overload_materials,
+        texmap_overload_textures,
+        texmap,
+        solid_masks,
+    })
 }
 
 #[repr(C)]
@@ -454,6 +1485,30 @@ pub struct PlaybackHandle {
     playback: Playback,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RuntimeLandscapeFault {
+    #[default]
+    None,
+    Surface8,
+}
+
+impl RuntimeLandscapeFault {
+    fn from_environment() -> Self {
+        match std::env::var("LC_RUST_ENGINE_RUNTIME_LANDSCAPE_RUST_FAULT").as_deref() {
+            Ok("surface8") => Self::Surface8,
+            _ => Self::None,
+        }
+    }
+
+    fn surface8_pixel(self, value: u8, x: usize, y: usize) -> u8 {
+        if self == Self::Surface8 && x == 0 && y == 0 {
+            value.wrapping_add(1)
+        } else {
+            value
+        }
+    }
+}
+
 pub struct RuntimeHandle {
     engine: Engine,
     scenario_path: Option<PathBuf>,
@@ -484,6 +1539,12 @@ pub struct RuntimeHandle {
     /// snapshot comparison. Consuming this per frame makes omitted bridge
     /// instrumentation fail closed.
     pending_weather: Option<(u64, LcEngineRuntimeWeatherSnapshot)>,
+    /// Deep-copied C++ landscape state awaiting the matching live comparison.
+    /// Native Surface8 and string pointers are never retained past supply.
+    pending_landscape: Option<(u64, RuntimeLandscapeSnapshot)>,
+    /// Compare-only Rust landscape perturbation selected when the live handle
+    /// is created. It is deliberately outside serialized simulation state.
+    landscape_fault: RuntimeLandscapeFault,
 }
 
 impl RecorderHandle {
@@ -521,6 +1582,8 @@ impl RuntimeHandle {
             control_clients: ControlClientRegistry::default(),
             rng_mismatch_reported: false,
             pending_weather: None,
+            pending_landscape: None,
+            landscape_fault: RuntimeLandscapeFault::None,
         }
     }
 
@@ -2440,6 +3503,1123 @@ fn runtime_weather_mismatch(
     None
 }
 
+fn runtime_solid_mask_mat_buff_pitch(width: i32, height: i32) -> Option<i32> {
+    let width = i64::from(width);
+    let height = i64::from(height);
+    let squared = width
+        .checked_mul(width)?
+        .checked_add(height.checked_mul(height)?)?;
+    i32::try_from((squared as f64).sqrt() as i64 + 1).ok()
+}
+
+fn runtime_engine_solid_masks(engine: &Engine) -> Result<Vec<RuntimeLandscapeSolidMask>, String> {
+    if engine.solid_mask_staging.defer_solid_mask_updates
+        || !engine
+            .solid_mask_staging
+            .deferred_solid_mask_operations
+            .is_empty()
+        || engine
+            .solid_mask_staging
+            .deferred_host_raster_preview
+            .is_some()
+    {
+        return Err("deferred solid-mask operations remain at the frame boundary".into());
+    }
+
+    if let Some(object) = engine.objects.iter().find(|object| {
+        object.solid_mask_instance_sequence.is_none()
+            && (object.solid_mask_bake.is_some() || object.solid_mask_empty_put.is_some())
+    }) {
+        return Err(format!(
+            "solid mask owner {} has put state without an instance sequence",
+            object.id
+        ));
+    }
+
+    let mut ordered: Vec<_> = engine
+        .objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, object)| {
+            object
+                .solid_mask_instance_sequence
+                .map(|sequence| (sequence, index, object))
+        })
+        .collect();
+    ordered.sort_unstable_by_key(|(sequence, _, _)| *sequence);
+    if let Some(pair) = ordered.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+        return Err(format!(
+            "solid mask owners {} and {} share instance sequence {}",
+            pair[0].2.id, pair[1].2.id, pair[0].0
+        ));
+    }
+
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (sequence, index, object))| {
+            let spec = engine.solid_mask_validation_spec(index).ok_or_else(|| {
+                format!(
+                    "solid mask {ordinal} owner {} has no source spec",
+                    object.id
+                )
+            })?;
+            let width = usize::try_from(spec.mask.width).map_err(|_| {
+                format!(
+                    "solid mask {ordinal} owner {} has negative source width {}",
+                    object.id, spec.mask.width
+                )
+            })?;
+            let height = usize::try_from(spec.mask.height).map_err(|_| {
+                format!(
+                    "solid mask {ordinal} owner {} has negative source height {}",
+                    object.id, spec.mask.height
+                )
+            })?;
+            let alpha_len = width.checked_mul(height).ok_or_else(|| {
+                format!(
+                    "solid mask {ordinal} owner {} source dimensions overflow",
+                    object.id
+                )
+            })?;
+            if alpha_len == 0 {
+                return Err(format!(
+                    "solid mask {ordinal} owner {} has an empty source",
+                    object.id
+                ));
+            }
+            let mat_buff_pitch = runtime_solid_mask_mat_buff_pitch(
+                spec.mask.width,
+                spec.mask.height,
+            )
+            .ok_or_else(|| {
+                format!(
+                    "solid mask {ordinal} owner {} MatBuffPitch overflows",
+                    object.id
+                )
+            })?;
+            let source = [
+                spec.mask.x,
+                spec.mask.y,
+                spec.mask.width,
+                spec.mask.height,
+                spec.mask.target_x,
+                spec.mask.target_y,
+            ];
+            let frozen_pixels = match object.solid_mask_bake.as_ref() {
+                Some(bake) => bake.pixels.as_ref(),
+                None => spec.pixels.as_ref(),
+            };
+            let alpha = match frozen_pixels {
+                None => None,
+                Some(pixels)
+                    if pixels.len() == alpha_len && pixels.iter().all(|pixel| *pixel <= 1) =>
+                {
+                    (!pixels.iter().all(|pixel| *pixel != 0)).then(|| pixels.as_ref().clone())
+                }
+                Some(pixels) => {
+                    return Err(format!(
+                        "solid mask {ordinal} owner {} alpha shape/bytes are invalid (length {}, expected {alpha_len})",
+                        object.id,
+                        pixels.len()
+                    ));
+                }
+            };
+
+            let put = match (&object.solid_mask_bake, object.solid_mask_empty_put) {
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "solid mask {ordinal} owner {} is both baked and empty-put",
+                        object.id
+                    ));
+                }
+                (Some(bake), None) => {
+                    if bake.instance_sequence != sequence {
+                        return Err(format!(
+                            "solid mask {ordinal} owner {} sequence {sequence} disagrees with bake {}",
+                            object.id, bake.instance_sequence
+                        ));
+                    }
+                    if bake.mask_width != spec.mask.width {
+                        return Err(format!(
+                            "solid mask {ordinal} owner {} source width {} disagrees with bake {}",
+                            object.id, spec.mask.width, bake.mask_width
+                        ));
+                    }
+                    let rotation = bake.rotated.map_or(0, |rotated| rotated.rotation);
+                    if bake
+                        .rotated
+                        .is_some_and(|rotated| rotated.mat_buff_pitch != mat_buff_pitch)
+                    {
+                        return Err(format!(
+                            "solid mask {ordinal} owner {} MatBuffPitch {mat_buff_pitch} disagrees with rotated bake",
+                            object.id
+                        ));
+                    }
+                    if bake
+                        .rotated
+                        .is_some_and(|rotated| rotated.mask_height != spec.mask.height)
+                    {
+                        return Err(format!(
+                            "solid mask {ordinal} owner {} source height {} disagrees with rotated bake",
+                            object.id, spec.mask.height
+                        ));
+                    }
+                    Some(RuntimeLandscapeSolidMaskPut {
+                        rect: [bake.x, bake.y, bake.width, bake.height, bake.tx, bake.ty],
+                        rotation,
+                        background: bake.buffer.clone(),
+                    })
+                }
+                (None, Some(empty)) => {
+                    if empty.mat_buff_pitch != mat_buff_pitch {
+                        return Err(format!(
+                            "solid mask {ordinal} owner {} MatBuffPitch {mat_buff_pitch} disagrees with empty put {}",
+                            object.id, empty.mat_buff_pitch
+                        ));
+                    }
+                    Some(RuntimeLandscapeSolidMaskPut {
+                        rect: [
+                            empty.x,
+                            empty.y,
+                            empty.width,
+                            empty.height,
+                            empty.tx,
+                            empty.ty,
+                        ],
+                        rotation: empty.rotation,
+                        background: Vec::new(),
+                    })
+                }
+                (None, None) => None,
+            };
+
+            Ok(RuntimeLandscapeSolidMask {
+                owner_id: object.id.as_u64(),
+                source,
+                alpha,
+                mat_buff_pitch,
+                put,
+            })
+        })
+        .collect()
+}
+
+fn runtime_solid_mask_mismatch(
+    expected: &Engine,
+    actual: &[RuntimeLandscapeSolidMask],
+) -> Option<String> {
+    let expected = match runtime_engine_solid_masks(expected) {
+        Ok(expected) => expected,
+        Err(detail) => return Some(format!("landscape solid mask rust state invalid: {detail}")),
+    };
+    if expected.len() != actual.len() {
+        return Some(format!(
+            "landscape solid mask count rust {}, cpp {}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+
+    let source_names = ["x", "y", "Wdt", "Hgt", "tx", "ty"];
+    for (ordinal, (rust, cpp)) in expected.iter().zip(actual).enumerate() {
+        if rust.owner_id != cpp.owner_id {
+            return Some(format!(
+                "landscape solid mask {ordinal} owner rust {}, cpp {}",
+                rust.owner_id, cpp.owner_id
+            ));
+        }
+        for (field, (&rust_value, &cpp_value)) in
+            source_names.iter().zip(rust.source.iter().zip(&cpp.source))
+        {
+            if rust_value != cpp_value {
+                return Some(format!(
+                    "landscape solid mask {ordinal} source {field} rust {rust_value}, cpp {cpp_value}"
+                ));
+            }
+        }
+        if rust.mat_buff_pitch != cpp.mat_buff_pitch {
+            return Some(format!(
+                "landscape solid mask {ordinal} MatBuffPitch rust {}, cpp {}",
+                rust.mat_buff_pitch, cpp.mat_buff_pitch
+            ));
+        }
+        let alpha_len = usize::try_from(rust.source[2])
+            .ok()
+            .and_then(|width| {
+                usize::try_from(rust.source[3])
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .unwrap_or(0);
+        let alpha_at = |alpha: &Option<Vec<u8>>, index: usize| {
+            alpha
+                .as_ref()
+                .and_then(|pixels| pixels.get(index))
+                .copied()
+                .unwrap_or(1)
+        };
+        if let Some(index) = (0..alpha_len)
+            .find(|&index| alpha_at(&rust.alpha, index) != alpha_at(&cpp.alpha, index))
+        {
+            let width = usize::try_from(rust.source[2]).unwrap_or(1).max(1);
+            return Some(format!(
+                "landscape solid mask {ordinal} alpha ({}, {}) rust {}, cpp {}",
+                index % width,
+                index / width,
+                alpha_at(&rust.alpha, index),
+                alpha_at(&cpp.alpha, index)
+            ));
+        }
+        match (&rust.put, &cpp.put) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Some(format!(
+                    "landscape solid mask {ordinal} put rust false, cpp true"
+                ));
+            }
+            (Some(_), None) => {
+                return Some(format!(
+                    "landscape solid mask {ordinal} put rust true, cpp false"
+                ));
+            }
+            (
+                Some(RuntimeLandscapeSolidMaskPut {
+                    rect: rust_rect,
+                    rotation: rust_rotation,
+                    background: rust_background,
+                }),
+                Some(RuntimeLandscapeSolidMaskPut {
+                    rect: cpp_rect,
+                    rotation: cpp_rotation,
+                    background: cpp_background,
+                }),
+            ) => {
+                for (field, (&rust_value, &cpp_value)) in
+                    source_names.iter().zip(rust_rect.iter().zip(cpp_rect))
+                {
+                    if rust_value != cpp_value {
+                        return Some(format!(
+                            "landscape solid mask {ordinal} put {field} rust {rust_value}, cpp {cpp_value}"
+                        ));
+                    }
+                }
+                if rust_rotation != cpp_rotation {
+                    return Some(format!(
+                        "landscape solid mask {ordinal} put rotation rust {rust_rotation}, cpp {cpp_rotation}"
+                    ));
+                }
+                if rust_background.len() != cpp_background.len() {
+                    return Some(format!(
+                        "landscape solid mask {ordinal} background length rust {}, cpp {}",
+                        rust_background.len(),
+                        cpp_background.len()
+                    ));
+                }
+                if let Some(index) = rust_background
+                    .iter()
+                    .zip(cpp_background)
+                    .position(|(rust, cpp)| rust != cpp)
+                {
+                    let width = usize::try_from(rust_rect[2]).unwrap_or(1).max(1);
+                    return Some(format!(
+                        "landscape solid mask {ordinal} background ({}, {}) rust {}, cpp {}",
+                        index % width,
+                        index / width,
+                        rust_background[index],
+                        cpp_background[index]
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn runtime_texture_inventory_state(
+    texmap: Option<&crate::landscape::RuntimeTexMapState>,
+) -> Result<Vec<u8>, String> {
+    let Some(texmap) = texmap else {
+        return Ok(Vec::new());
+    };
+    let mut names = texmap
+        .texture_inventory
+        .iter()
+        .map(|name| {
+            let folded = clonk_resources::material::c4_name_key(name);
+            let bytes = clonk_script::c4_string_bytes_cow(&folded).into_owned();
+            if bytes.len() > clonk_resources::material::C4M_MAX_NAME_BYTES {
+                return Err(format!(
+                    "texture inventory name has {} bytes, maximum is {}",
+                    bytes.len(),
+                    clonk_resources::material::C4M_MAX_NAME_BYTES
+                ));
+            }
+            if bytes.contains(&0) {
+                return Err("texture inventory name contains an embedded NUL".into());
+            }
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    names.sort_unstable();
+    names.dedup();
+
+    let mut state = Vec::new();
+    state.extend_from_slice(b"LCTX");
+    state.extend_from_slice(&1_u32.to_le_bytes());
+    state.extend_from_slice(
+        &u32::try_from(names.len())
+            .map_err(|_| "texture inventory count exceeds u32".to_owned())?
+            .to_le_bytes(),
+    );
+    for name in names {
+        state.extend_from_slice(
+            &u32::try_from(name.len())
+                .map_err(|_| "texture inventory name length exceeds u32".to_owned())?
+                .to_le_bytes(),
+        );
+        state.extend_from_slice(&name);
+    }
+    Ok(state)
+}
+
+fn runtime_material_reaction_state(expected: &Engine) -> Result<Vec<u8>, String> {
+    expected
+        .materials()
+        .runtime_validation_state(|function| expected.material_reaction_script_resolves(function))
+}
+
+fn runtime_landscape_byte_state_mismatch(
+    name: &str,
+    expected: Result<Vec<u8>, String>,
+    actual: &[u8],
+) -> Option<String> {
+    let expected = match expected {
+        Ok(state) => state,
+        Err(detail) => {
+            return Some(format!("landscape {name} rust state invalid: {detail}"));
+        }
+    };
+    if expected.len() != actual.len() {
+        return Some(format!(
+            "landscape {name} state length rust {}, cpp {}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    expected
+        .iter()
+        .zip(actual)
+        .position(|(rust, cpp)| rust != cpp)
+        .map(|index| {
+            format!(
+                "landscape {name} state byte {index} rust {}, cpp {}",
+                expected[index], actual[index]
+            )
+        })
+}
+
+fn runtime_landscape_mismatch(
+    expected: &Engine,
+    actual: &RuntimeLandscapeSnapshot,
+) -> Option<String> {
+    runtime_landscape_mismatch_with_fault(expected, actual, RuntimeLandscapeFault::None)
+}
+
+fn runtime_landscape_mismatch_with_fault(
+    expected: &Engine,
+    actual: &RuntimeLandscapeSnapshot,
+    fault: RuntimeLandscapeFault,
+) -> Option<String> {
+    if actual.surface8.is_some()
+        && (actual.surface_width, actual.surface_height) != (actual.width, actual.height)
+    {
+        return Some(format!(
+            "landscape cpp state invalid: Surface8 dimensions {}x{} disagree with Landscape {}x{}",
+            actual.surface_width, actual.surface_height, actual.width, actual.height
+        ));
+    }
+    if actual.retained_map.is_some()
+        && (actual.map_surface_width, actual.map_surface_height)
+            != (actual.map_width, actual.map_height)
+    {
+        return Some(format!(
+            "landscape cpp state invalid: Map surface dimensions {}x{} disagree with MapWidth/MapHeight {}x{}",
+            actual.map_surface_width,
+            actual.map_surface_height,
+            actual.map_width,
+            actual.map_height
+        ));
+    }
+    let expected_landscape = expected.landscape();
+    let expected_grid = expected_landscape.and_then(Landscape::pixel_grid);
+    if fault == RuntimeLandscapeFault::Surface8
+        && expected_grid.is_none_or(|grid| grid.bytes().is_empty())
+    {
+        return Some("landscape rust fault target Surface8 is absent or empty".into());
+    }
+    match (expected_grid, actual.surface8.as_deref()) {
+        (None, None) => {}
+        (None, Some(_)) => return Some("landscape Surface8 rust absent, cpp present".into()),
+        (Some(_), None) => return Some("landscape Surface8 rust present, cpp absent".into()),
+        (Some(_), Some(_)) => {}
+    }
+    let Some(expected_landscape) = expected_landscape else {
+        let canonical = RuntimeLandscapeSnapshot::default();
+        macro_rules! compare_absent_field {
+            ($name:expr, $actual:expr, $canonical:expr) => {
+                if $actual != $canonical {
+                    return Some(format!(
+                        "landscape {} rust {}, cpp {}",
+                        $name, $canonical, $actual
+                    ));
+                }
+            };
+        }
+        compare_absent_field!("Mode", actual.mode, canonical.mode);
+        compare_absent_field!("Width", actual.width, canonical.width);
+        compare_absent_field!("Height", actual.height, canonical.height);
+        compare_absent_field!("MapWidth", actual.map_width, canonical.map_width);
+        compare_absent_field!("MapHeight", actual.map_height, canonical.map_height);
+        compare_absent_field!("MapSeed", actual.map_seed, canonical.map_seed);
+        compare_absent_field!("MapZoom", actual.map_zoom, canonical.map_zoom);
+        compare_absent_field!("ScanX", actual.scan_x, canonical.scan_x);
+        compare_absent_field!("ScanSpeed", actual.scan_speed, canonical.scan_speed);
+        compare_absent_field!("NoScan", actual.no_scan, canonical.no_scan);
+        compare_absent_field!("LeftOpen", actual.left_open, canonical.left_open);
+        compare_absent_field!("RightOpen", actual.right_open, canonical.right_open);
+        compare_absent_field!("TopOpen", actual.top_open, canonical.top_open);
+        compare_absent_field!("BottomOpen", actual.bottom_open, canonical.bottom_open);
+        compare_absent_field!("Gravity", actual.gravity_raw, canonical.gravity_raw);
+        compare_absent_field!("Modulation", actual.modulation, canonical.modulation);
+        compare_absent_field!(
+            "ShadeMaterials",
+            actual.shade_materials,
+            canonical.shade_materials
+        );
+        compare_absent_field!("fMapChanged", actual.map_changed, canonical.map_changed);
+        let mut native_without_masks = actual.clone();
+        native_without_masks.solid_masks.clear();
+        if native_without_masks != canonical {
+            return Some("landscape auxiliary state differs while rust landscape is absent".into());
+        }
+        return runtime_solid_mask_mismatch(expected, &actual.solid_masks);
+    };
+    let rust_width = expected_landscape.width();
+    let rust_height = u32::try_from(expected_landscape.estimated_height()).unwrap_or(0);
+    if rust_width != actual.width || rust_height != actual.height {
+        return Some(format!(
+            "landscape dimensions rust {rust_width}x{rust_height}, cpp {}x{}",
+            actual.width, actual.height
+        ));
+    }
+    if let Some(expected_grid) = expected_grid {
+        if expected_grid.width() != rust_width || expected_grid.height() != rust_height {
+            return Some(format!(
+                "landscape rust state invalid: Surface8 dimensions {}x{} disagree with landscape {rust_width}x{rust_height}",
+                expected_grid.width(),
+                expected_grid.height()
+            ));
+        }
+        let width = usize::try_from(expected_grid.width()).ok()?;
+        let height = usize::try_from(expected_grid.height()).ok()?;
+        if (expected_grid.width(), expected_grid.height())
+            != (actual.surface_width, actual.surface_height)
+        {
+            return Some(format!(
+                "landscape Surface8 dimensions rust {}x{}, cpp {}x{}",
+                expected_grid.width(),
+                expected_grid.height(),
+                actual.surface_width,
+                actual.surface_height
+            ));
+        }
+        let Some(expected_pixel_len) = width.checked_mul(height) else {
+            return Some("landscape rust state invalid: Surface8 dimensions overflow".into());
+        };
+        if expected_grid.bytes().len() != expected_pixel_len {
+            return Some(format!(
+                "landscape rust state invalid: Surface8 byte length {} does not match {expected_pixel_len}",
+                expected_grid.bytes().len()
+            ));
+        }
+        let cpp_pixels = actual.surface8.as_deref()?;
+        if cpp_pixels.len() != expected_pixel_len {
+            return Some(format!(
+                "landscape Surface8 byte length rust {expected_pixel_len}, cpp {}",
+                cpp_pixels.len()
+            ));
+        }
+        for (y, rust_row) in expected_grid.bytes().chunks_exact(width).enumerate() {
+            let cpp_row = &cpp_pixels[y * width..(y + 1) * width];
+            if let Some(x) = rust_row
+                .iter()
+                .zip(cpp_row)
+                .enumerate()
+                .position(|(x, (rust, cpp))| fault.surface8_pixel(*rust, x, y) != *cpp)
+            {
+                let rust = fault.surface8_pixel(rust_row[x], x, y);
+                return Some(format!(
+                    "landscape pixel ({x}, {y}) rust {}, cpp {}",
+                    rust, cpp_row[x]
+                ));
+            }
+        }
+        let rust_clip = [
+            0,
+            0,
+            i32::try_from(expected_grid.width()).ok()?.checked_sub(1)?,
+            i32::try_from(expected_grid.height()).ok()?.checked_sub(1)?,
+        ];
+        if rust_clip != actual.surface_clip {
+            return Some(format!(
+                "landscape Surface8 clip rust {rust_clip:?}, cpp {:?}",
+                actual.surface_clip
+            ));
+        }
+
+        for (index, &cpp_material) in actual.pix2mat.iter().enumerate() {
+            let rust_material = expected_grid
+                .material_id_for_slot(index & 0x7f)
+                .map(|material| material.index() as i32)
+                .unwrap_or(-1);
+            if rust_material != cpp_material {
+                return Some(format!(
+                    "landscape Pix2Mat {index} rust {rust_material}, cpp {cpp_material}"
+                ));
+            }
+        }
+
+        for (index, &cpp_density) in actual.pix2dens.iter().enumerate() {
+            let rust_density = expected_grid.density_of_byte(index as u8);
+            if rust_density != cpp_density {
+                return Some(format!(
+                    "landscape Pix2Dens {index} rust {rust_density}, cpp {cpp_density}"
+                ));
+            }
+        }
+
+        for (index, &cpp_placement) in actual.pix2place.iter().enumerate() {
+            let rust_placement = if index == 0 {
+                0
+            } else {
+                expected_grid
+                    .material_id_for_slot(index & 0x7f)
+                    .and_then(|material| expected.materials().get_by_id(material))
+                    .map_or(0, crate::Material::placement)
+            };
+            if rust_placement != cpp_placement {
+                return Some(format!(
+                    "landscape Pix2Place {index} rust {rust_placement}, cpp {cpp_placement}"
+                ));
+            }
+        }
+
+        let rust_mat_count = expected_grid.runtime_material_counts();
+        for (index, &cpp_count) in actual.mat_count.iter().enumerate() {
+            let rust_count = rust_mat_count.get(index).copied().unwrap_or(0);
+            if rust_count != cpp_count {
+                return Some(format!(
+                    "landscape MatCount {index} rust {rust_count}, cpp {cpp_count}"
+                ));
+            }
+        }
+        for (index, &cpp_count) in actual.effective_mat_count.iter().enumerate() {
+            let rust_count = crate::MaterialId::new(index)
+                .and_then(|material| {
+                    expected
+                        .materials()
+                        .get_by_id(material)
+                        .map(|entry| (material, entry.min_height_count()))
+                })
+                .filter(|(_, minimum_height)| *minimum_height != 0)
+                .map_or(0, |(material, minimum_height)| {
+                    expected_landscape.material_pixel_count(material, Some(minimum_height))
+                });
+            if rust_count != cpp_count {
+                return Some(format!(
+                    "landscape EffectiveMatCount {index} rust {rust_count}, cpp {cpp_count}"
+                ));
+            }
+        }
+        let (rust_pix_cnt_pitch, rust_pix_cnt) = expected_grid.runtime_pix_cnt();
+        if rust_pix_cnt_pitch as u32 != actual.pix_cnt_pitch {
+            return Some(format!(
+                "landscape PixCntPitch rust {rust_pix_cnt_pitch}, cpp {}",
+                actual.pix_cnt_pitch
+            ));
+        }
+        let Some(cpp_pix_cnt) = actual.pix_cnt.as_deref() else {
+            return Some("landscape PixCnt rust present, cpp absent".into());
+        };
+        if let Some(index) = rust_pix_cnt
+            .iter()
+            .zip(cpp_pix_cnt)
+            .position(|(rust, cpp)| rust != cpp)
+        {
+            return Some(format!(
+                "landscape PixCnt {index} rust {}, cpp {}",
+                rust_pix_cnt[index], cpp_pix_cnt[index]
+            ));
+        }
+    } else {
+        if actual.surface_clip != [0; 4] {
+            return Some(format!(
+                "landscape Surface8 clip rust {:?}, cpp {:?}",
+                [0; 4], actual.surface_clip
+            ));
+        }
+        for (index, &cpp_material) in actual.pix2mat.iter().enumerate() {
+            if cpp_material != -1 {
+                return Some(format!(
+                    "landscape Pix2Mat {index} rust -1, cpp {cpp_material}"
+                ));
+            }
+        }
+        for (index, &cpp_density) in actual.pix2dens.iter().enumerate() {
+            if cpp_density != 0 {
+                return Some(format!(
+                    "landscape Pix2Dens {index} rust 0, cpp {cpp_density}"
+                ));
+            }
+        }
+        for (index, &cpp_placement) in actual.pix2place.iter().enumerate() {
+            if cpp_placement != 0 {
+                return Some(format!(
+                    "landscape Pix2Place {index} rust 0, cpp {cpp_placement}"
+                ));
+            }
+        }
+        for (index, &cpp_count) in actual.mat_count.iter().enumerate() {
+            if cpp_count != 0 {
+                return Some(format!(
+                    "landscape MatCount {index} rust 0, cpp {cpp_count}"
+                ));
+            }
+        }
+        for (index, &cpp_count) in actual.effective_mat_count.iter().enumerate() {
+            if cpp_count != 0 {
+                return Some(format!(
+                    "landscape EffectiveMatCount {index} rust 0, cpp {cpp_count}"
+                ));
+            }
+        }
+        if actual.pix_cnt_pitch != 0 {
+            return Some(format!(
+                "landscape PixCntPitch rust 0, cpp {}",
+                actual.pix_cnt_pitch
+            ));
+        }
+        if actual.pix_cnt.is_some() {
+            return Some("landscape PixCnt rust absent, cpp present".into());
+        }
+    }
+
+    macro_rules! compare_field {
+        ($name:expr, $rust:expr, $cpp:expr) => {
+            if $rust != $cpp {
+                return Some(format!("landscape {} rust {}, cpp {}", $name, $rust, $cpp));
+            }
+        };
+    }
+    let raster = expected_landscape.raster_state();
+    let rust_material_count = expected.materials().len();
+    if rust_material_count != actual.material_count as usize {
+        return Some(format!(
+            "landscape material count rust {rust_material_count}, cpp {}",
+            actual.material_count
+        ));
+    }
+    if rust_material_count > RUNTIME_LANDSCAPE_MATERIAL_CAPACITY {
+        return Some(format!(
+            "landscape rust state invalid: material count {rust_material_count} exceeds {RUNTIME_LANDSCAPE_MATERIAL_CAPACITY}"
+        ));
+    }
+    for (index, (material, &cpp_target)) in expected
+        .materials()
+        .iter()
+        .zip(&actual.in_mat_convert_to)
+        .enumerate()
+    {
+        let rust_target = material
+            .in_mat_convert_target()
+            .map_or(-1, |target| target.index() as i32);
+        if rust_target != cpp_target {
+            return Some(format!(
+                "landscape InMatConvertTo {index} rust {rust_target}, cpp {cpp_target}"
+            ));
+        }
+    }
+    compare_field!("Mode", expected_landscape.mode(), actual.mode);
+    compare_field!("MapSeed", expected_landscape.map_seed(), actual.map_seed);
+    compare_field!(
+        "MapZoom",
+        raster.map_or(0, crate::landscape::LandscapeRasterState::map_zoom),
+        actual.map_zoom
+    );
+    compare_field!("ScanX", expected_landscape.scan_x() as i32, actual.scan_x);
+    compare_field!(
+        "ScanSpeed",
+        expected_grid.map_or(2, |grid| ((grid.width() as i32) / 500).clamp(2, 15)),
+        actual.scan_speed
+    );
+    compare_field!("NoScan", expected_landscape.no_scan(), actual.no_scan);
+    compare_field!("LeftOpen", expected_landscape.left_open(), actual.left_open);
+    compare_field!(
+        "RightOpen",
+        expected_landscape.right_open(),
+        actual.right_open
+    );
+    compare_field!("TopOpen", expected_landscape.top_open(), actual.top_open);
+    compare_field!(
+        "BottomOpen",
+        expected_landscape.bottom_open(),
+        actual.bottom_open
+    );
+    compare_field!(
+        "Gravity",
+        expected.physics().gravity_raw(),
+        actual.gravity_raw
+    );
+    compare_field!(
+        "Modulation",
+        expected_landscape.modulation(),
+        actual.modulation
+    );
+    compare_field!(
+        "ShadeMaterials",
+        expected_landscape.shade_materials(),
+        actual.shade_materials
+    );
+    compare_field!(
+        "MVehic",
+        expected_landscape
+            .vehicle_material()
+            .map_or(-1, |material| material.index() as i32),
+        actual.vehicle_material
+    );
+    for (name, cpp_material) in [
+        ("MTunnel", actual.tunnel_material),
+        ("MWater", actual.water_material),
+        ("MSnow", actual.snow_material),
+        ("MGranite", actual.granite_material),
+    ] {
+        let rust_material = expected
+            .materials()
+            .id_of(&name[1..])
+            .map_or(-1, |material| material.index() as i32);
+        compare_field!(name, rust_material, cpp_material);
+    }
+    compare_field!(
+        "MCVehic",
+        expected_landscape.grid_vehicle_byte().unwrap_or(0),
+        actual.vehicle_pixel
+    );
+    compare_field!(
+        "fMapChanged",
+        expected_landscape.map_changed(),
+        actual.map_changed
+    );
+
+    let (rust_map_width, rust_map_height) = raster
+        .map(crate::landscape::LandscapeRasterState::runtime_map_dimensions)
+        .unwrap_or_default();
+    if (rust_map_width, rust_map_height) != (actual.map_width, actual.map_height) {
+        return Some(format!(
+            "landscape Map dimensions rust {rust_map_width}x{rust_map_height}, cpp {}x{}",
+            actual.map_width, actual.map_height
+        ));
+    }
+    let rust_map = raster.and_then(crate::landscape::LandscapeRasterState::runtime_map);
+    match (rust_map, actual.retained_map.as_ref()) {
+        (None, None) => {}
+        (None, Some(_)) => {
+            return Some("landscape retained Map rust absent, cpp present".into());
+        }
+        (Some(_), None) => {
+            return Some("landscape retained Map rust present, cpp absent".into());
+        }
+        (Some((rust_width, rust_height, rust_bytes)), Some(cpp)) => {
+            if rust_width != cpp.width || rust_height != cpp.height {
+                return Some(format!(
+                    "landscape retained Map dimensions rust {rust_width}x{rust_height}, cpp {}x{}",
+                    cpp.width, cpp.height
+                ));
+            }
+            if let Some(index) = rust_bytes
+                .iter()
+                .zip(&cpp.bytes)
+                .position(|(rust, cpp)| rust != cpp)
+            {
+                let x = index % rust_width as usize;
+                let y = index / rust_width as usize;
+                return Some(format!(
+                    "landscape retained Map pixel ({x}, {y}) rust {}, cpp {}",
+                    rust_bytes[index], cpp.bytes[index]
+                ));
+            }
+            let rust_clip = [0, 0, rust_width as i32 - 1, rust_height as i32 - 1];
+            if rust_clip != actual.map_clip {
+                return Some(format!(
+                    "landscape Map clip rust {rust_clip:?}, cpp {:?}",
+                    actual.map_clip
+                ));
+            }
+        }
+    }
+
+    let rust_map_creator = match raster.and_then(|state| state.map_creator()) {
+        None => None,
+        Some(creator) => match creator.runtime_validation_state(expected.materials()) {
+            Ok(state) => Some(state),
+            Err(detail) => {
+                return Some(format!(
+                    "landscape map creator rust state invalid: {detail}"
+                ));
+            }
+        },
+    };
+    match (
+        rust_map_creator.as_deref(),
+        actual.map_creator_state.as_deref(),
+    ) {
+        (None, None) => {}
+        (None, Some(_)) => {
+            return Some("landscape pMapCreator rust absent, cpp present".into());
+        }
+        (Some(_), None) => {
+            return Some("landscape pMapCreator rust present, cpp absent".into());
+        }
+        (Some(rust), Some(cpp)) => {
+            if rust.len() != cpp.len() {
+                return Some(format!(
+                    "landscape pMapCreator state length rust {}, cpp {}",
+                    rust.len(),
+                    cpp.len()
+                ));
+            }
+            if let Some(index) = rust.iter().zip(cpp).position(|(rust, cpp)| rust != cpp) {
+                return Some(format!(
+                    "landscape pMapCreator state byte {index} rust {}, cpp {}",
+                    rust[index], cpp[index]
+                ));
+            }
+        }
+    }
+
+    let rust_default_mat_tex = raster
+        .map(crate::landscape::LandscapeRasterState::texmap)
+        .map_or(&[][..], |texmap| texmap.default_material_entries.as_slice());
+    if rust_default_mat_tex.len() != actual.default_mat_tex.len() {
+        return Some(format!(
+            "landscape DefaultMatTex length rust {}, cpp {}",
+            rust_default_mat_tex.len(),
+            actual.default_mat_tex.len()
+        ));
+    }
+    for (index, ((_, rust_slot), cpp_slot)) in rust_default_mat_tex
+        .iter()
+        .zip(&actual.default_mat_tex)
+        .enumerate()
+    {
+        if rust_slot != cpp_slot {
+            return Some(format!(
+                "landscape DefaultMatTex {index} rust {rust_slot}, cpp {cpp_slot}"
+            ));
+        }
+    }
+    let rust_material_crossmap = raster
+        .map(crate::landscape::LandscapeRasterState::texmap)
+        .map_or(&[][..], |texmap| {
+            texmap.material_crossmap_entries.as_slice()
+        });
+    if rust_material_crossmap.len() != actual.material_crossmap.len() {
+        return Some(format!(
+            "landscape material crossmap length rust {}, cpp {}",
+            rust_material_crossmap.len(),
+            actual.material_crossmap.len()
+        ));
+    }
+    if let Some(index) = rust_material_crossmap
+        .iter()
+        .zip(&actual.material_crossmap)
+        .position(|(rust, cpp)| rust != cpp)
+    {
+        return Some(format!(
+            "landscape material crossmap {index} rust {}, cpp {}",
+            rust_material_crossmap[index], actual.material_crossmap[index]
+        ));
+    }
+    let rust_material_reactions = match runtime_material_reaction_state(expected) {
+        Ok(state) => state,
+        Err(detail) => {
+            return Some(format!(
+                "landscape material reaction rust state invalid: {detail}"
+            ));
+        }
+    };
+    if rust_material_reactions.len() != actual.material_reaction_state.len() {
+        return Some(format!(
+            "landscape material reaction state length rust {}, cpp {}",
+            rust_material_reactions.len(),
+            actual.material_reaction_state.len()
+        ));
+    }
+    if let Some(index) = rust_material_reactions
+        .iter()
+        .zip(&actual.material_reaction_state)
+        .position(|(rust, cpp)| rust != cpp)
+    {
+        return Some(format!(
+            "landscape material reaction state byte {index} rust {}, cpp {}",
+            rust_material_reactions[index], actual.material_reaction_state[index]
+        ));
+    }
+
+    // These states can change the next landscape write while all current
+    // planes remain byte-identical (C4Material.cpp:170-226;
+    // C4PXS.cpp:181-240; C4MassMover.cpp:50-94).
+    if let Some(detail) = runtime_landscape_byte_state_mismatch(
+        "material behavior",
+        expected.materials().runtime_behavior_validation_state(),
+        &actual.material_behavior_state,
+    ) {
+        return Some(detail);
+    }
+    if let Some(detail) = runtime_landscape_byte_state_mismatch(
+        "PXS",
+        expected.pxs_system.runtime_validation_state(),
+        &actual.pxs_state,
+    ) {
+        return Some(detail);
+    }
+    if let Some(detail) = runtime_landscape_byte_state_mismatch(
+        "mass-mover",
+        expected.mass_movers.runtime_validation_state(),
+        &actual.mass_mover_state,
+    ) {
+        return Some(detail);
+    }
+
+    let rust_texture_inventory = match runtime_texture_inventory_state(
+        raster.map(crate::landscape::LandscapeRasterState::texmap),
+    ) {
+        Ok(state) => state,
+        Err(detail) => {
+            return Some(format!(
+                "landscape texture inventory rust state invalid: {detail}"
+            ));
+        }
+    };
+    if rust_texture_inventory.len() != actual.texture_inventory.len() {
+        return Some(format!(
+            "landscape texture inventory length rust {}, cpp {}",
+            rust_texture_inventory.len(),
+            actual.texture_inventory.len()
+        ));
+    }
+    if let Some(index) = rust_texture_inventory
+        .iter()
+        .zip(&actual.texture_inventory)
+        .position(|(rust, cpp)| rust != cpp)
+    {
+        return Some(format!(
+            "landscape texture inventory byte {index} rust {}, cpp {}",
+            rust_texture_inventory[index], actual.texture_inventory[index]
+        ));
+    }
+
+    let display_name = |bytes: &[u8]| {
+        if bytes.is_empty() {
+            "<none>".into()
+        } else {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+    };
+    let rust_texmap = raster.map(crate::landscape::LandscapeRasterState::texmap);
+    compare_field!(
+        "texmap fInitialized",
+        rust_texmap.is_some(),
+        actual.texmap_initialized
+    );
+    compare_field!(
+        "texmap fEntriesAdded",
+        rust_texmap.is_some_and(|texmap| texmap.entries_added),
+        actual.texmap_entries_added
+    );
+    compare_field!(
+        "texmap fOverloadMaterials",
+        rust_texmap.is_some_and(|texmap| texmap.overload_materials),
+        actual.texmap_overload_materials
+    );
+    compare_field!(
+        "texmap fOverloadTextures",
+        rust_texmap.is_some_and(|texmap| texmap.overload_textures),
+        actual.texmap_overload_textures
+    );
+    for (index, entry) in actual.texmap.iter().enumerate() {
+        let rust_material = rust_texmap
+            .and_then(|texmap| texmap.material_names.get(index))
+            .and_then(Option::as_ref);
+        let cpp_present = entry.is_some();
+        if rust_material.is_some() != cpp_present {
+            return Some(format!(
+                "landscape texmap {index} presence rust {}, cpp {}",
+                rust_material.is_some(),
+                cpp_present
+            ));
+        }
+        if !cpp_present {
+            continue;
+        }
+        let entry = entry.as_ref()?;
+        let cpp_material = entry.material_name.as_deref().unwrap_or_default();
+        let rust_material_bytes = rust_material
+            .map(|name| clonk_script::c4_string_bytes_cow(name))
+            .unwrap_or_default();
+        if rust_material_bytes.as_ref() != cpp_material {
+            return Some(format!(
+                "landscape texmap {index} material rust {}, cpp {}",
+                rust_material.map_or("<none>", String::as_str),
+                display_name(cpp_material)
+            ));
+        }
+        let rust_material_index = rust_material
+            .and_then(|name| expected.materials().id_of(name))
+            .map(|material| material.index() as i32)
+            .unwrap_or(-1);
+        if rust_material_index != entry.material_index {
+            return Some(format!(
+                "landscape texmap {index} material index rust {rust_material_index}, cpp {}",
+                entry.material_index
+            ));
+        }
+        let rust_texture = rust_texmap
+            .and_then(|texmap| texmap.match_texture_names.get(index))
+            .and_then(Option::as_ref);
+        let cpp_texture_present = entry.texture_name.is_some();
+        if rust_texture.is_some() != cpp_texture_present {
+            return Some(format!(
+                "landscape texmap {index} texture presence rust {}, cpp {}",
+                rust_texture.is_some(),
+                cpp_texture_present
+            ));
+        }
+        let cpp_texture = entry.texture_name.as_deref().unwrap_or_default();
+        let rust_texture_bytes = rust_texture
+            .map(|name| clonk_script::c4_string_bytes_cow(name))
+            .unwrap_or_default();
+        if rust_texture_bytes.as_ref() != cpp_texture {
+            return Some(format!(
+                "landscape texmap {index} texture rust {}, cpp {}",
+                rust_texture.map_or("<none>", String::as_str),
+                display_name(cpp_texture)
+            ));
+        }
+    }
+    runtime_solid_mask_mismatch(expected, &actual.solid_masks)
+}
+
 fn runtime_snapshot_mismatch(
     expected: &SimulationSnapshot,
     actual: &SimulationSnapshot,
@@ -2862,7 +5042,9 @@ fn init_runtime_tracing() {
 #[no_mangle]
 pub extern "C" fn lc_engine_runtime_new() -> *mut RuntimeHandle {
     init_runtime_tracing();
-    Box::into_raw(Box::new(RuntimeHandle::new()))
+    let mut runtime = RuntimeHandle::new();
+    runtime.landscape_fault = RuntimeLandscapeFault::from_environment();
+    Box::into_raw(Box::new(runtime))
 }
 
 #[no_mangle]
@@ -3193,6 +5375,7 @@ fn load_scenario_into_runtime(
     }
     runtime.rng_mismatch_reported = false;
     runtime.pending_weather = None;
+    runtime.pending_landscape = None;
     Ok(())
 }
 
@@ -3361,6 +5544,7 @@ pub extern "C" fn lc_engine_runtime_reset(
         return false;
     };
     runtime.pending_weather = None;
+    runtime.pending_landscape = None;
 
     let Some(path) = runtime.scenario_path.clone() else {
         runtime.engine = Engine::with_seed(runtime.seed);
@@ -3672,6 +5856,7 @@ fn compare_prepared_frame(
     frame: u64,
     snapshot: &SimulationSnapshot,
     weather: &LcEngineRuntimeWeatherSnapshot,
+    landscape: &RuntimeLandscapeSnapshot,
     rng_hold: u32,
     rng_count: i32,
 ) -> Option<String> {
@@ -3690,6 +5875,13 @@ fn compare_prepared_frame(
                 initial_rain_gate,
                 frame,
                 weather,
+            )
+        })
+        .or_else(|| {
+            runtime_landscape_mismatch_with_fault(
+                &runtime.engine,
+                landscape,
+                runtime.landscape_fault,
             )
         })
         .or_else(|| runtime_snapshot_mismatch(&expected, snapshot))
@@ -3751,6 +5943,45 @@ pub extern "C" fn lc_engine_runtime_supply_weather_snapshot(
 }
 
 #[no_mangle]
+pub extern "C" fn lc_engine_runtime_supply_landscape_snapshot(
+    handle: *mut RuntimeHandle,
+    frame: u64,
+    snapshot: *const LcEngineRuntimeLandscapeSnapshot,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+    let Some(snapshot) = (unsafe { snapshot.as_ref() }) else {
+        set_error(error_out, "native landscape snapshot is null".into());
+        return false;
+    };
+    if let Some((pending_frame, _)) = runtime.pending_landscape.as_ref() {
+        set_error(
+            error_out,
+            format!("native landscape snapshot already pending for frame {pending_frame}"),
+        );
+        return false;
+    }
+    let snapshot = match unsafe { copy_runtime_landscape_snapshot(snapshot) } {
+        Ok(snapshot) => snapshot,
+        Err(detail) => {
+            set_error(error_out, detail);
+            return false;
+        }
+    };
+    runtime.pending_landscape = Some((frame, snapshot));
+    true
+}
+
+#[no_mangle]
 pub extern "C" fn lc_engine_runtime_compare_snapshot(
     handle: *mut RuntimeHandle,
     frame: u64,
@@ -3791,7 +6022,9 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
         return false;
     };
 
-    let Some((weather_frame, weather)) = runtime.pending_weather.take() else {
+    let weather = runtime.pending_weather.take();
+    let landscape = runtime.pending_landscape.take();
+    let Some((weather_frame, weather)) = weather else {
         set_error(
             error_out,
             format!("frame {frame}: native weather snapshot missing"),
@@ -3802,6 +6035,21 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
         set_error(
             error_out,
             format!("frame {frame}: native weather snapshot is for frame {weather_frame}"),
+        );
+        return false;
+    }
+
+    let Some((landscape_frame, landscape)) = landscape else {
+        set_error(
+            error_out,
+            format!("frame {frame}: native landscape snapshot missing"),
+        );
+        return false;
+    };
+    if landscape_frame != frame {
+        set_error(
+            error_out,
+            format!("frame {frame}: native landscape snapshot is for frame {landscape_frame}"),
         );
         return false;
     }
@@ -3848,9 +6096,9 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             );
             return false;
         }
-        if let Some(detail) =
-            compare_prepared_frame(runtime, frame, &snapshot, &weather, rng_hold, rng_count)
-        {
+        if let Some(detail) = compare_prepared_frame(
+            runtime, frame, &snapshot, &weather, &landscape, rng_hold, rng_count,
+        ) {
             set_error(error_out, detail);
             return false;
         }
@@ -3881,9 +6129,9 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     // registers are required to agree. Checking only frame 0 left the ledger
     // silent for the whole run, so a slip surfaced later as an unexplained
     // state difference instead of naming the frame it happened on.
-    if let Some(detail) =
-        compare_prepared_frame(runtime, frame, &snapshot, &weather, rng_hold, rng_count)
-    {
+    if let Some(detail) = compare_prepared_frame(
+        runtime, frame, &snapshot, &weather, &landscape, rng_hold, rng_count,
+    ) {
         set_error(error_out, detail);
         return false;
     }
@@ -4046,6 +6294,7 @@ pub extern "C" fn lc_engine_runtime_import_state_json(
     // world-state import, exactly as the C++ game does.
     runtime.rng_mismatch_reported = false;
     runtime.pending_weather = None;
+    runtime.pending_landscape = None;
     runtime.engine.weather_initial_rain_gate = None;
 
     true
@@ -5766,6 +8015,7 @@ global func Step(state, frame, random)
             0,
             &snapshot,
             &LcEngineRuntimeWeatherSnapshot::default(),
+            &RuntimeLandscapeSnapshot::default(),
             rng.hold,
             rng.count + 23,
         )
@@ -6544,6 +8794,1230 @@ global func Step(state, frame, random)
         );
     }
 
+    fn simple_runtime_landscape_pair() -> (Engine, RuntimeLandscapeSnapshot) {
+        let library =
+            clonk_resources::MaterialLibrary::parse("[Material Earth]\nName=Earth\nDensity=50\n")
+                .expect("material library parses");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(crate::MaterialSet::from_resource_library(&library));
+        let mut landscape = Landscape::new(1, vec![1]).expect("landscape constructs");
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 50],
+            vec![None, Some("Earth".into())],
+            vec![None, Some("Rough".into())],
+        ));
+        engine.set_landscape(landscape);
+
+        let mut native = RuntimeLandscapeSnapshot {
+            width: 1,
+            height: 1,
+            surface_width: 1,
+            surface_height: 1,
+            surface_clip: [0, 0, 0, 0],
+            surface8: Some(vec![1]),
+            material_count: 1,
+            ..RuntimeLandscapeSnapshot::default()
+        };
+        for index in [1, 129] {
+            native.pix2mat[index] = 0;
+            native.pix2dens[index] = 50;
+            native.pix2place[index] = 70;
+        }
+        native.mat_count[0] = 1;
+        native.pix_cnt_pitch = 1;
+        native.pix_cnt = Some(vec![1]);
+        native.material_reaction_state =
+            runtime_material_reaction_state(&engine).expect("reaction state encodes");
+        native.material_behavior_state = engine
+            .materials()
+            .runtime_behavior_validation_state()
+            .expect("material behavior state encodes");
+        native.pxs_state = engine
+            .pxs_system
+            .runtime_validation_state()
+            .expect("PXS state encodes");
+        native.mass_mover_state = engine
+            .mass_movers
+            .runtime_validation_state()
+            .expect("mass-mover state encodes");
+        (engine, native)
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_reports_the_first_surface8_pixel() {
+        // C4Landscape.h:134-165 makes the raw Surface8 byte the material,
+        // texture and IFT truth; RustEngineBridge.cpp:2127-2164 compares at
+        // the end-of-frame boundary before a later object can expose a slip.
+        let mut rust = Landscape::new(2, vec![2; 2]).expect("landscape constructs");
+        rust.set_world_height(2);
+        rust.set_pixel_grid(crate::landscape::PixelGrid::new(
+            2,
+            2,
+            vec![1, 2, 3, 4],
+            vec![0; 5],
+            vec![None; 5],
+            vec![None; 5],
+        ));
+        let cpp_pixels = [1, 2, 0xee, 0xee, 9, 4, 0xee, 0xee];
+        let cpp = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            width: 2,
+            height: 2,
+            surface_width: 2,
+            surface_height: 2,
+            pitch: 4,
+            surface8: cpp_pixels.as_ptr(),
+            surface8_len: cpp_pixels.len(),
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        let cpp = unsafe { copy_runtime_landscape_snapshot(&cpp) }
+            .expect("native landscape snapshot copies");
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(rust);
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape pixel (0, 1) rust 3, cpp 9".into())
+        );
+    }
+
+    #[test]
+    fn runtime_comparison_detects_a_rust_landscape_fault_before_object_state() {
+        // C4Game.cpp:832-870 finishes landscape execution before the bridge's
+        // end-of-frame observation; a plane fault must therefore be reported
+        // even when there is no C4Object available to observe that pixel.
+        let (engine, landscape) = simple_runtime_landscape_pair();
+        let mut runtime = RuntimeHandle::new();
+        runtime.engine = engine;
+        let drivers = runtime.engine.legacy_weather_init();
+        let mut environment = runtime.engine.environment();
+        apply_legacy_weather_metadata(&mut environment, &drivers, None, 0);
+        runtime.engine.set_environment(environment);
+        runtime.landscape_fault = RuntimeLandscapeFault::Surface8;
+        let weather = matching_native_weather(&environment, &drivers, 0);
+        let snapshot = runtime.engine.snapshot();
+        assert!(snapshot.objects.is_empty());
+        let rng = runtime.engine.debug_rng_clone();
+
+        assert_eq!(
+            compare_prepared_frame(
+                &mut runtime,
+                0,
+                &snapshot,
+                &weather,
+                &landscape,
+                rng.hold,
+                rng.count,
+            ),
+            Some("frame 0: landscape pixel (0, 0) rust 2, cpp 1".into())
+        );
+    }
+
+    #[test]
+    fn runtime_comparison_detects_a_native_landscape_fault_before_object_state() {
+        // RustEngineBridge::OnFrame supplies the copied native Surface8 before
+        // the ordinary object snapshot (RustEngineBridge.cpp:4303-4355), so a
+        // C++-side byte fault is diagnosed even with an empty object list.
+        let (engine, mut landscape) = simple_runtime_landscape_pair();
+        landscape
+            .surface8
+            .as_mut()
+            .expect("native Surface8 is present")[0] += 1;
+        let mut runtime = RuntimeHandle::new();
+        runtime.engine = engine;
+        let drivers = runtime.engine.legacy_weather_init();
+        let mut environment = runtime.engine.environment();
+        apply_legacy_weather_metadata(&mut environment, &drivers, None, 0);
+        runtime.engine.set_environment(environment);
+        let weather = matching_native_weather(&environment, &drivers, 0);
+        let snapshot = runtime.engine.snapshot();
+        assert!(snapshot.objects.is_empty());
+        let rng = runtime.engine.debug_rng_clone();
+
+        assert_eq!(
+            compare_prepared_frame(
+                &mut runtime,
+                0,
+                &snapshot,
+                &weather,
+                &landscape,
+                rng.hold,
+                rng.count,
+            ),
+            Some("frame 0: landscape pixel (0, 0) rust 1, cpp 2".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_fault_fails_closed_when_surface8_is_absent() {
+        let engine = Engine::with_seed(0);
+
+        assert_eq!(
+            runtime_landscape_mismatch_with_fault(
+                &engine,
+                &RuntimeLandscapeSnapshot::default(),
+                RuntimeLandscapeFault::Surface8,
+            ),
+            Some("landscape rust fault target Surface8 is absent or empty".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_a_short_surface8_extent() {
+        // CSurface8 exposes both Pitch and Bits (StdSurface8.h:34-36,59-62),
+        // so the bridge must prove every addressed row is inside the supplied
+        // backing allocation before copying independently collected bytes.
+        let cpp_pixels = [1, 2, 0, 0];
+        let cpp = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            width: 2,
+            height: 2,
+            surface_width: 2,
+            surface_height: 2,
+            pitch: 2,
+            surface8: cpp_pixels.as_ptr(),
+            surface8_len: 2,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+
+        assert_eq!(
+            unsafe { copy_runtime_landscape_snapshot(&cpp) },
+            Err("native landscape Surface8 extent 4 exceeds supplied length 2".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_missing_auxiliary_stream_storage() {
+        let cases: &[(fn(&mut LcEngineRuntimeLandscapeSnapshot), &str)] = &[
+            (
+                |snapshot| snapshot.material_behavior_state_len = 1,
+                "native landscape material behavior state pointer is null with a nonzero length",
+            ),
+            (
+                |snapshot| snapshot.pxs_state_len = 1,
+                "native landscape PXS state pointer is null with a nonzero length",
+            ),
+            (
+                |snapshot| snapshot.mass_mover_state_len = 1,
+                "native landscape mass-mover state pointer is null with a nonzero length",
+            ),
+        ];
+
+        for &(mutate, expected) in cases {
+            let mut snapshot = LcEngineRuntimeLandscapeSnapshot {
+                abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+                struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+                ..LcEngineRuntimeLandscapeSnapshot::default()
+            };
+            mutate(&mut snapshot);
+            assert_eq!(
+                unsafe { copy_runtime_landscape_snapshot(&snapshot) },
+                Err(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_distinguishes_equal_bytes_with_different_pix2mat() {
+        // C4Landscape.cpp:2819-2825 caches Pix2Mat separately from the live
+        // texture map, and C4Wrappers.h:120-129 resolves every Surface8 byte
+        // through that cache; equal byte planes can behave differently.
+        let library =
+            clonk_resources::MaterialLibrary::parse("[Material Earth]\nName=Earth\nDensity=50\n")
+                .expect("material library parses");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(crate::MaterialSet::from_resource_library(&library));
+        let mut rust = Landscape::new(1, vec![1]).expect("landscape constructs");
+        rust.set_world_height(1);
+        rust.set_pixel_grid(crate::landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 50],
+            vec![None, Some("Earth".into())],
+            vec![None, Some("Rough".into())],
+        ));
+        engine.set_landscape(rust);
+        let cpp_pixels = [1];
+        let mut cpp = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            width: 1,
+            height: 1,
+            surface_width: 1,
+            surface_height: 1,
+            pitch: 1,
+            surface8: cpp_pixels.as_ptr(),
+            surface8_len: cpp_pixels.len(),
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        cpp.pix2mat[1] = 1;
+        let cpp = unsafe { copy_runtime_landscape_snapshot(&cpp) }
+            .expect("native landscape snapshot copies");
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape Pix2Mat 1 rust 0, cpp 1".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_distinguishes_equal_bytes_with_different_pix2dens() {
+        // UpdatePixMaps stores Pix2Dens independently (C4Landscape.cpp:
+        // 2822-2825), and both collision and PixCnt maintenance read that
+        // cache directly (C4Landscape.h:168-180; C4Landscape.cpp:791-797).
+        let library =
+            clonk_resources::MaterialLibrary::parse("[Material Earth]\nName=Earth\nDensity=50\n")
+                .expect("material library parses");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(crate::MaterialSet::from_resource_library(&library));
+        let mut rust = Landscape::new(1, vec![1]).expect("landscape constructs");
+        rust.set_world_height(1);
+        rust.set_pixel_grid(crate::landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 50],
+            vec![None, Some("Earth".into())],
+            vec![None, Some("Rough".into())],
+        ));
+        engine.set_landscape(rust);
+        let cpp_pixels = [1];
+        let mut cpp = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            width: 1,
+            height: 1,
+            surface_width: 1,
+            surface_height: 1,
+            pitch: 1,
+            surface8: cpp_pixels.as_ptr(),
+            surface8_len: cpp_pixels.len(),
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        cpp.pix2mat[1] = 0;
+        cpp.pix2mat[129] = 0;
+        cpp.pix2dens[1] = 49;
+        cpp.pix2dens[129] = 50;
+        let cpp = unsafe { copy_runtime_landscape_snapshot(&cpp) }
+            .expect("native landscape snapshot copies");
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape Pix2Dens 1 rust 50, cpp 49".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_distinguishes_equal_bytes_with_different_pix2place() {
+        // UpdatePixMaps caches material Placement for every raw byte
+        // (C4Landscape.cpp:2822-2825), and MapToSurface shading reads that
+        // Pix2Place cache (C4Landscape.h:183-185; C4Landscape.cpp:2541-2571).
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=50\nPlacement=7\n",
+        )
+        .expect("material library parses");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(crate::MaterialSet::from_resource_library(&library));
+        let mut rust = Landscape::new(1, vec![1]).expect("landscape constructs");
+        rust.set_world_height(1);
+        rust.set_pixel_grid(crate::landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 50],
+            vec![None, Some("Earth".into())],
+            vec![None, Some("Rough".into())],
+        ));
+        engine.set_landscape(rust);
+        let cpp_pixels = [1];
+        let mut cpp = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            width: 1,
+            height: 1,
+            surface_width: 1,
+            surface_height: 1,
+            pitch: 1,
+            surface8: cpp_pixels.as_ptr(),
+            surface8_len: cpp_pixels.len(),
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        for index in [1, 129] {
+            cpp.pix2mat[index] = 0;
+            cpp.pix2dens[index] = 50;
+            cpp.pix2place[index] = 7;
+        }
+        cpp.pix2place[1] = 6;
+        let cpp = unsafe { copy_runtime_landscape_snapshot(&cpp) }
+            .expect("native landscape snapshot copies");
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape Pix2Place 1 rust 7, cpp 6".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_keeps_live_texmap_separate_from_pix2_cache() {
+        // C4TextureMap::MoveIndex changes the live Entry array without
+        // HandleTexMapUpdate (C4Texture.cpp:313-317), so C4Landscape's Pix2*
+        // cache may intentionally retain an older material for the same slot.
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=50\n\n\
+             [Material Water]\nName=Water\nDensity=50\n",
+        )
+        .expect("material library parses");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(crate::MaterialSet::from_resource_library(&library));
+        let mut landscape = Landscape::new(1, vec![1]).expect("landscape constructs");
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 50],
+            vec![None, Some("Earth".into())],
+            vec![None, Some("Rough".into())],
+        ));
+        let mut live_texmap = crate::landscape::RuntimeTexMapState::default();
+        live_texmap.material_names[1] = Some("Water".into());
+        live_texmap.texture_names[1] = Some("Rough".into());
+        live_texmap.match_texture_names[1] = Some("Rough".into());
+        live_texmap.densities[1] = 50;
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(
+            1,
+            0,
+            live_texmap,
+        ));
+        engine.set_landscape(landscape);
+        let cpp_pixels = [1];
+        let cpp_pix_cnt = [1];
+        let texture_inventory = *b"LCTX\x01\0\0\0\0\0\0\0";
+        let mut cpp = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            width: 1,
+            height: 1,
+            surface_width: 1,
+            surface_height: 1,
+            pitch: 1,
+            surface8: cpp_pixels.as_ptr(),
+            surface8_len: cpp_pixels.len(),
+            pix_cnt_pitch: 1,
+            pix_cnt: cpp_pix_cnt.as_ptr(),
+            pix_cnt_len: cpp_pix_cnt.len(),
+            texture_inventory: texture_inventory.as_ptr(),
+            texture_inventory_len: texture_inventory.len(),
+            material_count: 2,
+            map_zoom: 1,
+            water_material: 1,
+            texmap_initialized: 1,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        cpp.pix2mat[1] = 0;
+        cpp.pix2mat[129] = 0;
+        cpp.pix2dens[1] = 50;
+        cpp.pix2dens[129] = 50;
+        cpp.pix2place[1] = 70;
+        cpp.pix2place[129] = 70;
+        cpp.mat_count[0] = 1;
+        let material_name = b"Water";
+        let texture_name = b"Rough";
+        cpp.texmap[1] = LcEngineRuntimeLandscapeTexMapEntrySnapshot {
+            material_name: material_name.as_ptr(),
+            material_name_len: material_name.len(),
+            texture_name: texture_name.as_ptr(),
+            texture_name_len: texture_name.len(),
+            material_index: 1,
+            present: 1,
+            texture_name_present: 1,
+            reserved: [0; 2],
+        };
+        let mut cpp = unsafe { copy_runtime_landscape_snapshot(&cpp) }
+            .expect("native landscape snapshot copies");
+        cpp.material_reaction_state =
+            runtime_material_reaction_state(&engine).expect("reaction state encodes");
+        cpp.material_behavior_state = engine
+            .materials()
+            .runtime_behavior_validation_state()
+            .expect("material behavior state encodes");
+        cpp.pxs_state = engine
+            .pxs_system
+            .runtime_validation_state()
+            .expect("PXS state encodes");
+        cpp.mass_mover_state = engine
+            .mass_movers
+            .runtime_validation_state()
+            .expect("mass-mover state encodes");
+
+        assert_eq!(runtime_landscape_mismatch(&engine, &cpp), None);
+
+        let mut changed = cpp;
+        changed.texmap[1]
+            .as_mut()
+            .expect("live entry present")
+            .material_name = Some(b"water".to_vec());
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &changed),
+            Some("landscape texmap 1 material rust Water, cpp water".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_supply_owns_pointer_backed_bytes() {
+        // The landscape supply call returns to RustEngineBridge::OnFrame
+        // before compare. Surface8 and StdStrBuf storage remain native-owned,
+        // so the one-shot latch must deep-copy them synchronously.
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=50\n\n\
+             [Material Water]\nName=Water\nDensity=50\n",
+        )
+        .expect("material library parses");
+        let mut runtime = RuntimeHandle::new();
+        runtime
+            .engine
+            .set_materials(crate::MaterialSet::from_resource_library(&library));
+        let mut landscape = Landscape::new(1, vec![1]).expect("landscape constructs");
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 50],
+            vec![None, Some("Earth".into())],
+            vec![None, Some("Rough".into())],
+        ));
+        let mut live_texmap = crate::landscape::RuntimeTexMapState::default();
+        live_texmap.material_names[1] = Some("Water".into());
+        live_texmap.texture_names[1] = Some("Rough".into());
+        live_texmap.match_texture_names[1] = Some("Rough".into());
+        live_texmap.densities[1] = 50;
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(
+            1,
+            0,
+            live_texmap,
+        ));
+        runtime.engine.set_landscape(landscape);
+
+        let mut pixels = [1];
+        let pix_cnt = [1];
+        let mut material_name = *b"Water";
+        let mut texture_name = *b"Rough";
+        let mut texture_inventory = *b"LCTX\x01\0\0\0\0\0\0\0";
+        let mut material_reaction_state =
+            runtime_material_reaction_state(&runtime.engine).expect("reaction state encodes");
+        let mut material_behavior_state = runtime
+            .engine
+            .materials()
+            .runtime_behavior_validation_state()
+            .expect("material behavior state encodes");
+        let mut pxs_state = runtime
+            .engine
+            .pxs_system
+            .runtime_validation_state()
+            .expect("PXS state encodes");
+        let mut mass_mover_state = runtime
+            .engine
+            .mass_movers
+            .runtime_validation_state()
+            .expect("mass-mover state encodes");
+        let mut cpp = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            width: 1,
+            height: 1,
+            surface_width: 1,
+            surface_height: 1,
+            pitch: 1,
+            surface8: pixels.as_ptr(),
+            surface8_len: pixels.len(),
+            pix_cnt_pitch: 1,
+            pix_cnt: pix_cnt.as_ptr(),
+            pix_cnt_len: pix_cnt.len(),
+            texture_inventory: texture_inventory.as_ptr(),
+            texture_inventory_len: texture_inventory.len(),
+            material_reaction_state: material_reaction_state.as_ptr(),
+            material_reaction_state_len: material_reaction_state.len(),
+            material_behavior_state: material_behavior_state.as_ptr(),
+            material_behavior_state_len: material_behavior_state.len(),
+            pxs_state: pxs_state.as_ptr(),
+            pxs_state_len: pxs_state.len(),
+            mass_mover_state: mass_mover_state.as_ptr(),
+            mass_mover_state_len: mass_mover_state.len(),
+            material_count: 2,
+            map_zoom: 1,
+            water_material: 1,
+            texmap_initialized: 1,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        for index in [1, 129] {
+            cpp.pix2mat[index] = 0;
+            cpp.pix2dens[index] = 50;
+            cpp.pix2place[index] = 70;
+        }
+        cpp.mat_count[0] = 1;
+        cpp.texmap[1] = LcEngineRuntimeLandscapeTexMapEntrySnapshot {
+            material_name: material_name.as_ptr(),
+            material_name_len: material_name.len(),
+            texture_name: texture_name.as_ptr(),
+            texture_name_len: texture_name.len(),
+            material_index: 1,
+            present: 1,
+            texture_name_present: 1,
+            reserved: [0; 2],
+        };
+        let mut error_ptr = ptr::null_mut();
+
+        assert!(lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            7,
+            &cpp,
+            &mut error_ptr,
+        ));
+        pixels[0] = 9;
+        material_name[0] = b'X';
+        texture_name[0] = b'X';
+        texture_inventory[0] = b'X';
+        material_reaction_state[0] = b'X';
+        material_behavior_state[0] = b'X';
+        pxs_state[0] = b'X';
+        mass_mover_state[0] = b'X';
+        assert_eq!(
+            (
+                pixels[0],
+                material_name[0],
+                texture_name[0],
+                texture_inventory[0],
+                material_reaction_state[0],
+                material_behavior_state[0],
+                pxs_state[0],
+                mass_mover_state[0]
+            ),
+            (9, b'X', b'X', b'X', b'X', b'X', b'X', b'X')
+        );
+        let (_, supplied) = runtime
+            .pending_landscape
+            .as_ref()
+            .expect("snapshot remains pending");
+        assert_eq!(runtime_landscape_mismatch(&runtime.engine, supplied), None);
+        assert!(error_ptr.is_null());
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_distinguishes_equal_planes_with_different_scan_cursor() {
+        // ExecuteScan resumes at ScanX and advances only ScanSpeed columns
+        // (C4Landscape.h:62-63; C4Landscape.cpp:89-134), so equal planes with
+        // different cursors can run different reactions on the next frame.
+        let (engine, mut cpp) = simple_runtime_landscape_pair();
+        cpp.scan_x = 1;
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape ScanX rust 0, cpp 1".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_future_driving_scalar_state() {
+        // These values are synchronized beside Surface8 (C4Landscape.h:
+        // 53-71). ExecuteScan, border reads, map rasterization, movement, and
+        // script-visible GetMatAdjust can diverge after equal current bytes.
+        let (engine, matching) = simple_runtime_landscape_pair();
+        let mutations: &[(&str, fn(&mut RuntimeLandscapeSnapshot))] = &[
+            ("Mode", |state| state.mode += 1),
+            ("MapSeed", |state| state.map_seed += 1),
+            ("MapZoom", |state| state.map_zoom += 1),
+            ("ScanX", |state| state.scan_x += 1),
+            ("ScanSpeed", |state| state.scan_speed += 1),
+            ("NoScan", |state| state.no_scan = !state.no_scan),
+            ("LeftOpen", |state| state.left_open += 1),
+            ("RightOpen", |state| state.right_open += 1),
+            ("TopOpen", |state| state.top_open = !state.top_open),
+            ("BottomOpen", |state| state.bottom_open = !state.bottom_open),
+            ("Gravity", |state| state.gravity_raw += 1),
+            ("Modulation", |state| state.modulation += 1),
+            ("ShadeMaterials", |state| {
+                state.shade_materials = !state.shade_materials
+            }),
+            ("MVehic", |state| state.vehicle_material += 1),
+            ("MCVehic", |state| state.vehicle_pixel ^= 1),
+            ("fMapChanged", |state| {
+                state.map_changed = !state.map_changed
+            }),
+        ];
+
+        for &(field, mutate) in mutations {
+            let mut cpp = matching.clone();
+            mutate(&mut cpp);
+            let detail = runtime_landscape_mismatch(&engine, &cpp)
+                .unwrap_or_else(|| panic!("{field} mismatch must fail"));
+            assert!(
+                detail.starts_with(&format!("landscape {field} rust ")),
+                "unexpected {field} diagnostic: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_hidden_raster_drivers() {
+        // Surface clips change later SetPix writes (StdSurface8.h:45-50), the
+        // presearched material globals drive landscape operations
+        // (C4Landscape.cpp:48-49), and retained map-creator/texmap flags alter
+        // later DrawDefMap and AddEntry calls (C4Landscape.cpp:2650-2687;
+        // C4Texture.cpp:116-136).
+        let (engine, matching) = simple_runtime_landscape_pair();
+        let mutations: &[(&str, fn(&mut RuntimeLandscapeSnapshot))] = &[
+            ("Surface8 clip", |state| state.surface_clip[2] -= 1),
+            ("Map dimensions", |state| state.map_width += 1),
+            ("MTunnel", |state| state.tunnel_material += 1),
+            ("MWater", |state| state.water_material += 1),
+            ("MSnow", |state| state.snow_material += 1),
+            ("MGranite", |state| state.granite_material += 1),
+            ("pMapCreator", |state| {
+                state.map_creator_state = Some(vec![1])
+            }),
+            ("texmap fInitialized", |state| {
+                state.texmap_initialized = !state.texmap_initialized
+            }),
+            ("texmap fEntriesAdded", |state| {
+                state.texmap_entries_added = !state.texmap_entries_added
+            }),
+            ("texmap fOverloadMaterials", |state| {
+                state.texmap_overload_materials = !state.texmap_overload_materials
+            }),
+            ("texmap fOverloadTextures", |state| {
+                state.texmap_overload_textures = !state.texmap_overload_textures
+            }),
+        ];
+
+        for &(field, mutate) in mutations {
+            let mut cpp = matching.clone();
+            mutate(&mut cpp);
+            let detail = runtime_landscape_mismatch(&engine, &cpp)
+                .unwrap_or_else(|| panic!("{field} mismatch must fail"));
+            assert!(
+                detail.starts_with(&format!("landscape {field}")),
+                "unexpected {field} diagnostic: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_retained_map_creator_state() {
+        // DrawDefMap mutates and re-evaluates a retained creator before its
+        // next render (C4Landscape.cpp:2672-2696;
+        // C4MapCreatorS2.cpp:676-681,239-246). Presence alone cannot catch
+        // equal-current-plane, different-next-render state.
+        let (mut engine, mut cpp) = simple_runtime_landscape_pair();
+        let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(
+            crate::landscape::RuntimeTexMapState::default(),
+        );
+        let mut rng = crate::LcgRng::seed_from_u64(1);
+        let creator = crate::map_creator_s2::create_s2_map_with_state_and_functions(
+            "map Main { };",
+            &mut classifier,
+            crate::scenario::LegacyC4SVal::new(1, 0, 1, 1),
+            crate::scenario::LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+            &std::collections::HashSet::new(),
+        )
+        .creator;
+        let creator_state = creator
+            .runtime_validation_state(engine.materials())
+            .expect("creator state encodes");
+        let texmap = classifier.into_runtime_state();
+        let texture_inventory =
+            runtime_texture_inventory_state(Some(&texmap)).expect("texture inventory encodes");
+        let mut landscape = engine.landscape().expect("landscape exists").clone();
+        let mut raster = crate::landscape::LandscapeRasterState::new(1, 0, texmap);
+        raster.set_map_creator(Some(creator));
+        landscape.set_raster_state(raster);
+        engine.set_landscape(landscape);
+        cpp.map_zoom = 1;
+        cpp.texmap_initialized = true;
+        cpp.texture_inventory = texture_inventory;
+        cpp.map_creator_state = Some(creator_state);
+        assert_eq!(runtime_landscape_mismatch(&engine, &cpp), None);
+
+        let byte = cpp
+            .map_creator_state
+            .as_mut()
+            .and_then(|state| state.last_mut())
+            .expect("creator state is nonempty");
+        *byte ^= 1;
+        assert!(runtime_landscape_mismatch(&engine, &cpp)
+            .is_some_and(|detail| detail.starts_with("landscape pMapCreator state byte ")));
+    }
+
+    #[test]
+    fn runtime_landscape_texture_inventory_is_a_c4_case_folded_set() {
+        // GetTexture/CheckTexture observe only case-insensitive membership
+        // (C4Texture.cpp:371-397). Native prepends loaded nodes while Rust
+        // retains admission order, so transport must discard order and
+        // duplicates without using Unicode case folding.
+        let mut left = crate::landscape::RuntimeTexMapState::default();
+        left.texture_inventory = vec!["Rough".into(), "Smooth".into(), "rough".into()];
+        let mut right = crate::landscape::RuntimeTexMapState::default();
+        right.texture_inventory = vec!["SMOOTH".into(), "ROUGH".into()];
+
+        assert_eq!(
+            runtime_texture_inventory_state(Some(&left)),
+            runtime_texture_inventory_state(Some(&right))
+        );
+        right.texture_inventory.pop();
+        assert_ne!(
+            runtime_texture_inventory_state(Some(&left)),
+            runtime_texture_inventory_state(Some(&right))
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_frozen_in_mat_conversion_targets() {
+        // CrossMapMaterials freezes InMatConvertTo as a signed material index
+        // (C4Material.cpp:474-484). The next PXS/material reaction reads that
+        // index even if the current landscape plane is unchanged
+        // (C4Material.cpp:626-650).
+        let (mut engine, mut cpp) = simple_runtime_landscape_pair();
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=50\nInMatConvert=Water\nInMatConvertTo=Water\n\n\
+             [Material Water]\nName=Water\nDensity=25\n",
+        )
+        .expect("material library parses");
+        engine.set_materials(crate::MaterialSet::from_resource_library(&library));
+        cpp.material_count = 2;
+        cpp.in_mat_convert_to[0] = 1;
+        cpp.water_material = 1;
+        cpp.material_reaction_state =
+            runtime_material_reaction_state(&engine).expect("reaction state encodes");
+        cpp.material_behavior_state = engine
+            .materials()
+            .runtime_behavior_validation_state()
+            .expect("material behavior state encodes");
+        assert_eq!(runtime_landscape_mismatch(&engine, &cpp), None);
+
+        cpp.in_mat_convert_to[0] = -1;
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape InMatConvertTo 0 rust 1, cpp -1".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_effective_material_reactions() {
+        // CrossMapMaterials freezes the ordered reaction table, whose next
+        // PXS or mass-mover dispatch can mutate the landscape and RNG before
+        // any object observes it (C4Material.cpp:311-345,386-493,612-625).
+        let (engine, mut cpp) = simple_runtime_landscape_pair();
+        assert_eq!(runtime_landscape_mismatch(&engine, &cpp), None);
+
+        cpp.material_reaction_state[12] ^= 1;
+        assert!(runtime_landscape_mismatch(&engine, &cpp)
+            .is_some_and(|detail| detail.starts_with("landscape material reaction state byte ")));
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_material_pxs_and_mass_mover_state() {
+        // Equal landscape planes can still evolve differently when compiled
+        // material values, PXS allocation/order, or mass-mover allocation/order
+        // differ (C4Material.cpp:170-226; C4PXS.cpp:181-240;
+        // C4MassMover.cpp:50-94).
+        let (engine, matching) = simple_runtime_landscape_pair();
+        let mutations: &[(&str, fn(&mut RuntimeLandscapeSnapshot))] = &[
+            ("material behavior", |state| {
+                state.material_behavior_state[0] ^= 1
+            }),
+            ("PXS", |state| state.pxs_state[0] ^= 1),
+            ("mass-mover", |state| state.mass_mover_state[0] ^= 1),
+        ];
+
+        for &(name, mutate) in mutations {
+            let mut cpp = matching.clone();
+            mutate(&mut cpp);
+            let detail = runtime_landscape_mismatch(&engine, &cpp)
+                .unwrap_or_else(|| panic!("{name} mismatch must fail"));
+            assert!(
+                detail.starts_with(&format!("landscape {name} state byte 0 rust ")),
+                "unexpected {name} diagnostic: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_the_retained_editor_map() {
+        // Static editor calls rasterize the retained C4Landscape::Map rather
+        // than the already-expanded Surface8 (C4Landscape.h:55-57;
+        // C4Landscape.cpp:2266-2417), so equal live planes are insufficient.
+        let (engine, mut cpp) = simple_runtime_landscape_pair();
+        cpp.retained_map = Some(RuntimeLandscapeMap {
+            width: 1,
+            height: 1,
+            bytes: vec![1],
+        });
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape retained Map rust absent, cpp present".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_material_and_path_caches() {
+        // MatCount gates ExecuteScan, EffectiveMatCount is synchronized game
+        // state, and _PathFree reads exact PixCnt bytes (C4Landscape.h:59-63,
+        // 80-81; C4Landscape.cpp:89-104,891-896). Recounting would hide a
+        // stale cache whose next incremental write produces a desync.
+        let (engine, matching) = simple_runtime_landscape_pair();
+        let mutations: &[(&str, fn(&mut RuntimeLandscapeSnapshot))] = &[
+            ("MatCount 0", |state| state.mat_count[0] += 1),
+            ("EffectiveMatCount 0", |state| {
+                state.effective_mat_count[0] += 1
+            }),
+            ("PixCntPitch", |state| state.pix_cnt_pitch += 1),
+            ("PixCnt 0", |state| {
+                state.pix_cnt.as_mut().expect("PixCnt present")[0] += 1
+            }),
+        ];
+
+        for &(field, mutate) in mutations {
+            let mut cpp = matching.clone();
+            mutate(&mut cpp);
+            let detail = runtime_landscape_mismatch(&engine, &cpp)
+                .unwrap_or_else(|| panic!("{field} mismatch must fail"));
+            assert!(
+                detail.starts_with(&format!("landscape {field} rust ")),
+                "unexpected {field} diagnostic: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_covers_frozen_material_texture_mappings() {
+        // CrossMapMaterials freezes DefaultMatTex and blast/temperature
+        // destinations before runtime texmap edits (C4Material.cpp:474-485).
+        // Equal live names can therefore still drive different future writes.
+        let (engine, matching) = simple_runtime_landscape_pair();
+
+        let mut cpp = matching.clone();
+        cpp.default_mat_tex.push(1);
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape DefaultMatTex length rust 0, cpp 1".into())
+        );
+
+        let mut cpp = matching;
+        cpp.material_crossmap.push(1);
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape material crossmap length rust 0, cpp 1".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_includes_every_live_solid_mask() {
+        // C4SolidMask constructors append to the global First->Next list and
+        // Remove overlap repair walks its inverse order (C4SolidMask.cpp:
+        // 387-400,263-274), so an unobserved instance can change later pixels.
+        let (engine, mut cpp) = simple_runtime_landscape_pair();
+        cpp.solid_masks.push(RuntimeLandscapeSolidMask {
+            owner_id: 42,
+            source: [0, 0, 1, 1, 0, 0],
+            alpha: None,
+            mat_buff_pitch: 2,
+            put: None,
+        });
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape solid mask count rust 0, cpp 1".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_copies_and_normalizes_solid_mask_alpha() {
+        // C4SolidMask freezes the source bitmap as exact 0x00/0xff bytes at
+        // construction (C4SolidMask.cpp:401-417); Rust stores the same mask as
+        // 0/1 and must own it after the synchronous supplier returns.
+        let alpha = [0xff];
+        let masks = [LcEngineRuntimeLandscapeSolidMaskSnapshot {
+            owner_id: 42,
+            source_width: 1,
+            source_height: 1,
+            mat_buff_pitch: 2,
+            alpha: alpha.as_ptr(),
+            alpha_len: alpha.len(),
+            ..LcEngineRuntimeLandscapeSolidMaskSnapshot::default()
+        }];
+        let raw = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            solid_masks: masks.as_ptr(),
+            solid_mask_count: masks.len(),
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+
+        let copied = unsafe { copy_runtime_landscape_snapshot(&raw) }
+            .expect("native landscape snapshot copies");
+        assert_eq!(
+            copied.solid_masks,
+            vec![RuntimeLandscapeSolidMask {
+                owner_id: 42,
+                source: [0, 0, 1, 1, 0, 0],
+                alpha: None,
+                mat_buff_pitch: 2,
+                put: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_nonbinary_solid_mask_alpha() {
+        // C4SolidMask's constructor records source pixels as exact zero/255
+        // alpha (C4SolidMask.cpp:401-417). Any third value means the native
+        // collector and Rust's boolean mask semantics do not share a plane.
+        let alpha = [0x7f];
+        let masks = [LcEngineRuntimeLandscapeSolidMaskSnapshot {
+            source_width: 1,
+            source_height: 1,
+            mat_buff_pitch: 2,
+            alpha: alpha.as_ptr(),
+            alpha_len: alpha.len(),
+            ..LcEngineRuntimeLandscapeSolidMaskSnapshot::default()
+        }];
+        let raw = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            solid_masks: masks.as_ptr(),
+            solid_mask_count: masks.len(),
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+
+        assert_eq!(
+            unsafe { copy_runtime_landscape_snapshot(&raw) },
+            Err("native landscape solid mask 0 alpha 0 is 127, expected 0 or 255".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_populated_absent_texmap_entries() {
+        // C4TexMapEntry::isNull is defined by its material name; an absent
+        // slot has no material index or borrowed name storage to carry across
+        // the validation ABI (C4Texture.h:48-63).
+        let mut raw = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        raw.texmap[3].material_index = 0;
+
+        assert_eq!(
+            unsafe { copy_runtime_landscape_snapshot(&raw) },
+            Err("native landscape texmap 3 is absent with populated fields".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_nonzero_reserved_transport_bytes() {
+        // Reserved bytes are part of the versioned bridge contract, not
+        // simulation state. Rejecting them keeps a newer native payload from
+        // being silently misread by this ABI version.
+        let mut raw = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        raw.reserved[0] = 1;
+
+        assert_eq!(
+            unsafe { copy_runtime_landscape_snapshot(&raw) },
+            Err("native landscape reserved bytes are nonzero".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_nonzero_texmap_reserved_bytes() {
+        let mut raw = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        raw.texmap[3].reserved[1] = 1;
+
+        assert_eq!(
+            unsafe { copy_runtime_landscape_snapshot(&raw) },
+            Err("native landscape texmap 3 reserved bytes are nonzero".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_nonzero_solid_mask_reserved_bytes() {
+        let masks = [LcEngineRuntimeLandscapeSolidMaskSnapshot {
+            source_width: 1,
+            source_height: 1,
+            mat_buff_pitch: 2,
+            reserved: [0, 0, 0, 1, 0, 0, 0],
+            ..LcEngineRuntimeLandscapeSolidMaskSnapshot::default()
+        }];
+        let raw = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            solid_masks: masks.as_ptr(),
+            solid_mask_count: masks.len(),
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+
+        assert_eq!(
+            unsafe { copy_runtime_landscape_snapshot(&raw) },
+            Err("native landscape solid mask 0 reserved bytes are nonzero".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_rejects_nonnull_empty_solid_mask_storage() {
+        // Empty C arrays use null in the bridge contract. Rejecting alternate
+        // sentinels keeps Rust from constructing a slice from a foreign
+        // pointer whose provenance cannot be established even at length zero.
+        let raw = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            solid_masks: std::ptr::NonNull::dangling().as_ptr(),
+            solid_mask_count: 0,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+
+        assert_eq!(
+            unsafe { copy_runtime_landscape_snapshot(&raw) },
+            Err("native landscape solid-mask pointer is nonnull with a zero count".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_checks_auxiliary_state_without_surface8() {
+        // C4Landscape keeps Mode and the retained editor Map independently of
+        // Surface8 (C4Landscape.h:53-57), including during section teardown
+        // and reconstruction; absence of the plane must not short-circuit it.
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::new(1, vec![1]).expect("landscape constructs"));
+        let mut cpp = RuntimeLandscapeSnapshot {
+            width: 1,
+            height: 1,
+            ..RuntimeLandscapeSnapshot::default()
+        };
+        cpp.mode = 1;
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape Mode rust 0, cpp 1".into())
+        );
+
+        cpp.mode = 0;
+        cpp.pix2mat[1] = 0;
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape Pix2Mat 1 rust -1, cpp 0".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_comparison_rejects_native_state_when_rust_landscape_is_absent() {
+        // C4Landscape::Clear can leave scalar dimensions and future-driving
+        // fields after deleting Surface8 (C4Landscape.cpp:241-259); absence
+        // of Rust's landscape may not turn those native values invisible.
+        let engine = Engine::with_seed(0);
+        let mut cpp = RuntimeLandscapeSnapshot::default();
+        cpp.mode = 1;
+
+        assert_eq!(
+            runtime_landscape_mismatch(&engine, &cpp),
+            Some("landscape Mode rust 0, cpp 1".into())
+        );
+    }
+
+    #[test]
+    fn runtime_landscape_snapshot_has_a_fixed_c_layout() {
+        assert_eq!(
+            std::mem::size_of::<LcEngineRuntimeLandscapeTexMapEntrySnapshot>(),
+            40
+        );
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeLandscapeTexMapEntrySnapshot, material_index),
+            32
+        );
+        assert_eq!(
+            std::mem::size_of::<LcEngineRuntimeLandscapeSolidMaskSnapshot>(),
+            112
+        );
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeLandscapeSolidMaskSnapshot, alpha),
+            64
+        );
+        assert_eq!(
+            std::mem::offset_of!(LcEngineRuntimeLandscapeSolidMaskSnapshot, mask_put),
+            104
+        );
+        assert_eq!(
+            std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>(),
+            10_016
+        );
+        for (actual, expected) in [
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, surface8),
+                48,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, map),
+                104,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, map_creator_state),
+                168,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, material_reaction_state),
+                184,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, material_behavior_state),
+                200,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, pxs_state),
+                216,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, mass_mover_state),
+                232,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, in_mat_convert_to),
+                252,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, pix_cnt),
+                4_832,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, solid_masks),
+                4_920,
+            ),
+            (
+                std::mem::offset_of!(LcEngineRuntimeLandscapeSnapshot, texmap),
+                4_936,
+            ),
+        ] {
+            assert_eq!(actual, expected);
+        }
+    }
+
     #[test]
     fn runtime_weather_snapshot_has_a_fixed_width_c_layout() {
         // C4Constants.h:60 fixes material names at 15 bytes plus NUL; the
@@ -6904,6 +10378,26 @@ global func Step(state, frame, random)
         rng_count: i32,
         error_out: *mut *mut c_char,
     ) -> bool {
+        let landscape = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        if !lc_engine_runtime_supply_landscape_snapshot(runtime, frame, &landscape, error_out) {
+            return false;
+        }
+        compare_empty_runtime_frame_without_landscape_with_rng(
+            runtime, frame, rng_hold, rng_count, error_out,
+        )
+    }
+
+    fn compare_empty_runtime_frame_without_landscape_with_rng(
+        runtime: &mut RuntimeHandle,
+        frame: u64,
+        rng_hold: u32,
+        rng_count: i32,
+        error_out: *mut *mut c_char,
+    ) -> bool {
         lc_engine_runtime_compare_snapshot(
             runtime,
             frame,
@@ -6942,10 +10436,13 @@ global func Step(state, frame, random)
         let mut runtime = RuntimeHandle::new();
         let mut error_ptr = ptr::null_mut();
 
-        assert!(!compare_empty_runtime_frame(
+        let rng = runtime.engine.debug_rng_clone();
+        assert!(!compare_empty_runtime_frame_without_landscape_with_rng(
             &mut runtime,
             0,
-            &mut error_ptr
+            rng.hold,
+            rng.count,
+            &mut error_ptr,
         ));
         assert!(!error_ptr.is_null());
         let detail = unsafe { CStr::from_ptr(error_ptr) }
@@ -6953,6 +10450,71 @@ global func Step(state, frame, random)
             .into_owned();
         lc_engine_string_free(error_ptr);
         assert_eq!(detail, "frame 0: native weather snapshot missing");
+    }
+
+    #[test]
+    fn runtime_comparison_consumes_landscape_when_same_frame_weather_is_missing() {
+        // Weather and landscape are one end-of-frame observation envelope.
+        // A failed compare must consume both halves so a retry cannot pair a
+        // stale native plane with a later weather sample.
+        let mut runtime = RuntimeHandle::new();
+        let landscape = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            0,
+            &landscape,
+            &mut error_ptr,
+        ));
+
+        let rng = runtime.engine.debug_rng_clone();
+        assert!(!compare_empty_runtime_frame_without_landscape_with_rng(
+            &mut runtime,
+            0,
+            rng.hold,
+            rng.count,
+            &mut error_ptr,
+        ));
+        lc_engine_string_free(error_ptr);
+        assert!(runtime.pending_landscape.is_none());
+    }
+
+    #[test]
+    fn runtime_comparison_fails_closed_without_same_frame_landscape() {
+        // RustEngineBridge::OnFrame is the sole ordinary post-simulation
+        // boundary (C4Game.cpp:832-870); omitting its independently collected
+        // landscape must never degrade into an object-only comparison.
+        let mut runtime = RuntimeHandle::new();
+        let mut environment = runtime.engine.environment();
+        let drivers = runtime.engine.legacy_weather_init();
+        apply_legacy_weather_metadata(&mut environment, &drivers, None, 0);
+        runtime.engine.set_environment(environment);
+        let weather = matching_native_weather(&environment, &drivers, 0);
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+
+        let rng = runtime.engine.debug_rng_clone();
+        assert!(!compare_empty_runtime_frame_without_landscape_with_rng(
+            &mut runtime,
+            0,
+            rng.hold,
+            rng.count,
+            &mut error_ptr,
+        ));
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(detail, "frame 0: native landscape snapshot missing");
     }
 
     #[test]
@@ -6979,6 +10541,48 @@ global func Step(state, frame, random)
         assert!(compare_empty_runtime_frame(&mut runtime, 0, &mut error_ptr));
         assert!(error_ptr.is_null());
         assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_comparison_consumes_supplied_same_frame_landscape() {
+        // RustEngineBridge::OnFrame observes the completed frame once
+        // (C4Game.cpp:832-870), so its independently collected landscape is a
+        // same-frame one-shot payload rather than reusable bridge state.
+        let mut runtime = RuntimeHandle::new();
+        let drivers = runtime.engine.legacy_weather_init();
+        let mut environment = runtime.engine.environment();
+        apply_legacy_weather_metadata(&mut environment, &drivers, None, 0);
+        runtime.engine.set_environment(environment);
+        let weather = matching_native_weather(&environment, &drivers, 0);
+        let landscape = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            0,
+            &landscape,
+            &mut error_ptr,
+        ));
+        let rng = runtime.engine.debug_rng_clone();
+
+        assert!(compare_empty_runtime_frame_without_landscape_with_rng(
+            &mut runtime,
+            0,
+            rng.hold,
+            rng.count,
+            &mut error_ptr,
+        ));
+        assert!(error_ptr.is_null());
+        assert!(runtime.pending_landscape.is_none());
     }
 
     #[test]
@@ -7053,6 +10657,47 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn runtime_landscape_supply_rejects_a_duplicate_before_reading_nested_buffers() {
+        // RustEngineBridge submits one borrowed snapshot immediately before
+        // comparison. A duplicate is a protocol error, so none of its nested
+        // C++ buffers may be inspected after a snapshot is already latched.
+        let mut runtime = RuntimeHandle::new();
+        let valid = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        let invalid_nested = LcEngineRuntimeLandscapeSnapshot {
+            width: 1,
+            height: 1,
+            pitch: 1,
+            ..valid
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            7,
+            &valid,
+            &mut error_ptr,
+        ));
+
+        assert!(!lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            8,
+            &invalid_nested,
+            &mut error_ptr,
+        ));
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(
+            detail,
+            "native landscape snapshot already pending for frame 7"
+        );
+    }
+
+    #[test]
     fn runtime_weather_supply_rejects_wrong_abi_and_size() {
         let expected_size = std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32;
         let cases = [
@@ -7100,6 +10745,53 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn runtime_landscape_supply_rejects_wrong_abi_and_size() {
+        let expected_size = std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32;
+        let cases = [
+            (
+                LcEngineRuntimeLandscapeSnapshot {
+                    abi_version: RUNTIME_LANDSCAPE_ABI_VERSION + 1,
+                    struct_size: expected_size,
+                    ..LcEngineRuntimeLandscapeSnapshot::default()
+                },
+                format!(
+                    "native landscape ABI version {} does not match {}",
+                    RUNTIME_LANDSCAPE_ABI_VERSION + 1,
+                    RUNTIME_LANDSCAPE_ABI_VERSION
+                ),
+            ),
+            (
+                LcEngineRuntimeLandscapeSnapshot {
+                    abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+                    struct_size: expected_size - 1,
+                    ..LcEngineRuntimeLandscapeSnapshot::default()
+                },
+                format!(
+                    "native landscape snapshot size {} does not match {expected_size}",
+                    expected_size - 1
+                ),
+            ),
+        ];
+
+        for (landscape, expected) in cases {
+            let mut runtime = RuntimeHandle::new();
+            let mut error_ptr = ptr::null_mut();
+            assert!(!lc_engine_runtime_supply_landscape_snapshot(
+                &mut runtime,
+                0,
+                &landscape,
+                &mut error_ptr,
+            ));
+            let detail = unsafe { CStr::from_ptr(error_ptr) }
+                .to_string_lossy()
+                .into_owned();
+            lc_engine_string_free(error_ptr);
+            assert_eq!(detail, expected);
+            assert!(runtime.pending_landscape.is_none());
+        }
+    }
+
+    #[test]
     fn runtime_comparison_rejects_a_weather_snapshot_for_another_frame() {
         let mut runtime = RuntimeHandle::new();
         let weather = LcEngineRuntimeWeatherSnapshot {
@@ -7126,6 +10818,49 @@ global func Step(state, frame, random)
         lc_engine_string_free(error_ptr);
         assert_eq!(detail, "frame 0: native weather snapshot is for frame 1");
         assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_comparison_rejects_a_landscape_snapshot_for_another_frame() {
+        let mut runtime = RuntimeHandle::new();
+        let weather = LcEngineRuntimeWeatherSnapshot {
+            abi_version: RUNTIME_WEATHER_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeWeatherSnapshot>() as u32,
+            ..LcEngineRuntimeWeatherSnapshot::default()
+        };
+        let landscape = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_weather_snapshot(
+            &mut runtime,
+            0,
+            &weather,
+            &mut error_ptr,
+        ));
+        assert!(lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            1,
+            &landscape,
+            &mut error_ptr,
+        ));
+
+        let rng = runtime.engine.debug_rng_clone();
+        assert!(!compare_empty_runtime_frame_without_landscape_with_rng(
+            &mut runtime,
+            0,
+            rng.hold,
+            rng.count,
+            &mut error_ptr,
+        ));
+        let detail = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        lc_engine_string_free(error_ptr);
+        assert_eq!(detail, "frame 0: native landscape snapshot is for frame 1");
+        assert!(runtime.pending_landscape.is_none());
     }
 
     #[test]
@@ -7161,6 +10896,38 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn runtime_state_import_clears_a_pending_landscape_snapshot() {
+        // C4Landscape is restored with the imported world; an observation
+        // collected before that boundary cannot be paired with the new state.
+        let mut runtime = RuntimeHandle::new();
+        let mut error_ptr = ptr::null_mut();
+        let state_ptr = lc_engine_runtime_export_state_json(&mut runtime, &mut error_ptr);
+        assert!(!state_ptr.is_null());
+        let state = unsafe { CStr::from_ptr(state_ptr) }.to_owned();
+        lc_engine_string_free(state_ptr);
+
+        let landscape = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        assert!(lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            0,
+            &landscape,
+            &mut error_ptr,
+        ));
+        assert!(runtime.pending_landscape.is_some());
+
+        assert!(lc_engine_runtime_import_state_json(
+            &mut runtime,
+            state.as_ptr(),
+            &mut error_ptr,
+        ));
+        assert!(runtime.pending_landscape.is_none());
+    }
+
+    #[test]
     fn runtime_reset_clears_a_pending_weather_snapshot() {
         let mut runtime = RuntimeHandle::new();
         let weather = LcEngineRuntimeWeatherSnapshot {
@@ -7180,6 +10947,30 @@ global func Step(state, frame, random)
         assert!(lc_engine_runtime_reset(&mut runtime, &mut error_ptr));
         assert!(error_ptr.is_null());
         assert!(runtime.pending_weather.is_none());
+    }
+
+    #[test]
+    fn runtime_reset_clears_a_pending_landscape_snapshot() {
+        // C4Landscape::Clear/ScenarioInit replace every plane and cache; a
+        // pre-reset native observation cannot be compared after that boundary.
+        let mut runtime = RuntimeHandle::new();
+        let landscape = LcEngineRuntimeLandscapeSnapshot {
+            abi_version: RUNTIME_LANDSCAPE_ABI_VERSION,
+            struct_size: std::mem::size_of::<LcEngineRuntimeLandscapeSnapshot>() as u32,
+            ..LcEngineRuntimeLandscapeSnapshot::default()
+        };
+        let mut error_ptr = ptr::null_mut();
+        assert!(lc_engine_runtime_supply_landscape_snapshot(
+            &mut runtime,
+            0,
+            &landscape,
+            &mut error_ptr,
+        ));
+        assert!(runtime.pending_landscape.is_some());
+
+        assert!(lc_engine_runtime_reset(&mut runtime, &mut error_ptr));
+        assert!(error_ptr.is_null());
+        assert!(runtime.pending_landscape.is_none());
     }
 
     #[test]

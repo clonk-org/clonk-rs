@@ -599,6 +599,65 @@ impl PxsSystem {
             })
     }
 
+    /// Pointer-free, byte-stable state for the native end-of-frame shadow
+    /// comparison. Unlike `iter_slots`, this preserves absolute chunk indices
+    /// and allocated-but-empty chunks: both affect the next `New`/`Execute`
+    /// traversal (`C4PXS.cpp:181-240`).
+    ///
+    /// Layout, all integers little-endian:
+    /// `LCPX`, version u32, Count i32, allocation-mask u32, twenty chunk-count
+    /// i32s, live-slot-count u32, then ascending `(chunk u32, slot u32, Mat
+    /// i32, x/y/xdir/ydir raw i32)` records.
+    pub(crate) fn runtime_validation_state(&self) -> Result<Vec<u8>, String> {
+        const FORMAT_VERSION: u32 = 1;
+
+        let execute_count = i32::try_from(self.execute_count)
+            .map_err(|_| "PXS Count exceeds native i32".to_owned())?;
+        let slot_count = u32::try_from(self.iter().count())
+            .map_err(|_| "PXS live-slot count exceeds u32".to_owned())?;
+        let mut allocation_mask = 0_u32;
+        let mut bytes =
+            Vec::with_capacity(4 + 4 + 4 + 4 + PXS_MAX_CHUNK * 4 + 4 + slot_count as usize * 28);
+        bytes.extend_from_slice(b"LCPX");
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&execute_count.to_le_bytes());
+        for chunk in 0..PXS_MAX_CHUNK {
+            if self.chunk_allocated(chunk) {
+                allocation_mask |= 1_u32 << chunk;
+            }
+        }
+        bytes.extend_from_slice(&allocation_mask.to_le_bytes());
+        for chunk in 0..PXS_MAX_CHUNK {
+            let count = self.chunk_counts.get(chunk).copied().unwrap_or(0);
+            let count = i32::try_from(count)
+                .map_err(|_| format!("PXS chunk {chunk} count exceeds native i32"))?;
+            bytes.extend_from_slice(&count.to_le_bytes());
+        }
+        bytes.extend_from_slice(&slot_count.to_le_bytes());
+        for (chunk, slots) in self.chunks.iter().enumerate().take(PXS_MAX_CHUNK) {
+            let Some(slots) = slots else { continue };
+            if slots.len() != PXS_CHUNK_SIZE {
+                return Err(format!(
+                    "PXS chunk {chunk} has {} slots, expected {PXS_CHUNK_SIZE}",
+                    slots.len()
+                ));
+            }
+            for (slot, pxs) in slots
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, pxs)| pxs.as_ref().map(|pxs| (slot, pxs)))
+            {
+                bytes.extend_from_slice(&(chunk as u32).to_le_bytes());
+                bytes.extend_from_slice(&(slot as u32).to_le_bytes());
+                bytes.extend_from_slice(&pxs.mat.raw().to_le_bytes());
+                for value in [pxs.x, pxs.y, pxs.xdir, pxs.ydir] {
+                    bytes.extend_from_slice(&value.val().to_le_bytes());
+                }
+            }
+        }
+        Ok(bytes)
+    }
+
     /// Place a loaded PXS at its saved slot (`C4PXSSystem::Load` reads
     /// chunks verbatim and counts pixels in place, C4PXS.cpp:383-397).
     pub fn create_at(&mut self, chunk: usize, slot: usize, pxs: Pxs) -> bool {
@@ -768,6 +827,61 @@ mod tests {
 
     fn fixed(v: i32) -> C4Fixed {
         itofix(v)
+    }
+
+    #[test]
+    fn runtime_validation_state_preserves_absolute_topology_and_raw_fixed_fields() {
+        // The pinned system owns 20 independently allocated chunks plus one
+        // live-count ledger per absolute chunk (oracle-src-pinned
+        // src/C4PXS.h:40-54). Execute visits those chunks and their 500 slots
+        // in absolute ascending order (src/C4PXS.cpp:218-240), so compacting a
+        // gap would change the next frame even when the live pixels match.
+        let mut system = PxsSystem::default();
+        let first = Pxs {
+            mat: PxsMaterial::from_raw(-7),
+            x: C4Fixed::from_raw(i32::MIN + 1),
+            y: C4Fixed::from_raw(-2),
+            xdir: C4Fixed::from_raw(3),
+            ydir: C4Fixed::from_raw(i32::MAX),
+        };
+        let second = Pxs {
+            mat: PxsMaterial::from_raw(70_000),
+            x: C4Fixed::from_raw(11),
+            y: C4Fixed::from_raw(12),
+            xdir: C4Fixed::from_raw(-13),
+            ydir: C4Fixed::from_raw(-14),
+        };
+        assert!(system.create_at(2, 499, first));
+        assert!(system.create_at(5, 1, first));
+        system.clear_slot(5, 1); // allocated-but-empty topology is authoritative
+        assert!(system.create_at(7, 3, second));
+        system.set_execute_count(9);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"LCPX");
+        expected.extend_from_slice(&1_u32.to_le_bytes());
+        expected.extend_from_slice(&9_i32.to_le_bytes());
+        expected.extend_from_slice(&((1_u32 << 2) | (1 << 5) | (1 << 7)).to_le_bytes());
+        for chunk in 0..PXS_MAX_CHUNK {
+            let count = i32::from(matches!(chunk, 2 | 7));
+            expected.extend_from_slice(&count.to_le_bytes());
+        }
+        expected.extend_from_slice(&2_u32.to_le_bytes());
+        for (chunk, slot, pxs) in [(2_u32, 499_u32, first), (7, 3, second)] {
+            expected.extend_from_slice(&chunk.to_le_bytes());
+            expected.extend_from_slice(&slot.to_le_bytes());
+            expected.extend_from_slice(&pxs.mat.raw().to_le_bytes());
+            for value in [pxs.x, pxs.y, pxs.xdir, pxs.ydir] {
+                expected.extend_from_slice(&value.val().to_le_bytes());
+            }
+        }
+
+        assert_eq!(
+            system
+                .runtime_validation_state()
+                .expect("valid PXS state encodes"),
+            expected
+        );
     }
 
     #[test]

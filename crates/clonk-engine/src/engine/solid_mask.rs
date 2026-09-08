@@ -10,6 +10,10 @@ thread_local! {
     static SOLID_MASK_MOVEMENT_CANDIDATE_VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
+fn solid_mask_mat_buff_pitch(width: i32, height: i32) -> i32 {
+    f64::from(width * width + height * height).sqrt() as i32 + 1
+}
+
 impl Engine {
     fn solid_mask_pixels_for_object(
         &self,
@@ -41,6 +45,15 @@ impl Engine {
         self.solid_mask_spec_for_object(object)
     }
 
+    /// The current script-mutable mask source state, independent of whether
+    /// `C4Object::UpdateSolidMask` would keep the instance put right now.
+    /// Native retains the `C4SolidMask` allocation while an owner is inactive,
+    /// so runtime validation must still compare its frozen source pixels.
+    pub(crate) fn solid_mask_validation_spec(&self, index: usize) -> Option<SolidMaskSpec> {
+        let object = self.objects.get(index)?;
+        self.solid_mask_source_spec_for_object(object)
+    }
+
     fn solid_mask_spec_for_object(&self, object: &Object) -> Option<SolidMaskSpec> {
         if object.destroyed
             || matches!(object.state.status, ObjectStatus::Deleted)
@@ -55,6 +68,12 @@ impl Engine {
         if object.state.rotation != 0 && !definition.rotated_solid_masks() {
             return None;
         }
+
+        self.solid_mask_source_spec_for_object(object)
+    }
+
+    fn solid_mask_source_spec_for_object(&self, object: &Object) -> Option<SolidMaskSpec> {
+        let definition = self.definitions.get(&object.definition_id)?;
         let mask = match object.state.solid_mask_override {
             Some(rect) if rect.width <= 0 || rect.height <= 0 => return None,
             Some(rect) => rect,
@@ -84,7 +103,7 @@ impl Engine {
         }
         if index >= self.objects.len()
             || self.objects[index].solid_mask_bake.is_some()
-            || self.objects[index].solid_mask_empty_put
+            || self.objects[index].solid_mask_empty_put.is_some()
         {
             return;
         }
@@ -135,7 +154,7 @@ impl Engine {
         self.note_solid_mask_host_state_changed();
         if index >= self.objects.len()
             || self.objects[index].solid_mask_bake.is_some()
-            || self.objects[index].solid_mask_empty_put
+            || self.objects[index].solid_mask_empty_put.is_some()
         {
             return;
         }
@@ -173,6 +192,7 @@ impl Engine {
         } = spec;
         let ox = position.x + shape_x + mask.target_x;
         let oy = position.y + shape_y + mask.target_y;
+        let mat_buff_pitch = solid_mask_mat_buff_pitch(mask.width, mask.height);
         let mut rect_x = ox;
         let mut tx = 0;
         if rect_x < 0 {
@@ -191,7 +211,16 @@ impl Engine {
             // Native stores MaskPut=true even when Wdt/Hgt are zero or
             // negative; the raster loops are empty, but attachment restore
             // still belongs to this successful regular Put.
-            self.objects[index].solid_mask_empty_put = true;
+            self.objects[index].solid_mask_empty_put = Some(SolidMaskEmptyPut {
+                x: rect_x,
+                y: rect_y,
+                width,
+                height,
+                tx,
+                ty,
+                rotation: 0,
+                mat_buff_pitch,
+            });
             return;
         }
         let mut bake = SolidMaskBake {
@@ -255,8 +284,7 @@ impl Engine {
         // C4SolidMask.cpp:415): f64 sqrt of an exact integer is correctly
         // rounded on both sides, and `as i32` truncates like the C++
         // static_cast.
-        let mat_buff_pitch =
-            f64::from(mask.width * mask.width + mask.height * mask.height).sqrt() as i32 + 1;
+        let mat_buff_pitch = solid_mask_mat_buff_pitch(mask.width, mask.height);
         // Rotation matrix for -MaskPutRotation (C4SolidMask.cpp:111-112).
         let negated = itofix(-rotation);
         let ma1 = negated.cos_deg();
@@ -288,7 +316,16 @@ impl Engine {
         let width = (xstart + mat_buff_pitch).min(grid_width) - rect_x;
         let height = (ystart + mat_buff_pitch).min(grid_height) - rect_y;
         if width <= 0 || height <= 0 {
-            self.objects[index].solid_mask_empty_put = true;
+            self.objects[index].solid_mask_empty_put = Some(SolidMaskEmptyPut {
+                x: rect_x,
+                y: rect_y,
+                width,
+                height,
+                tx,
+                ty,
+                rotation,
+                mat_buff_pitch,
+            });
             return;
         }
         let mut bake = SolidMaskBake {
@@ -390,14 +427,14 @@ impl Engine {
             return None;
         }
         if self.objects[index].solid_mask_bake.is_some()
-            || self.objects[index].solid_mask_empty_put
+            || self.objects[index].solid_mask_empty_put.is_some()
             || self.objects[index].solid_mask_instance_sequence.is_some()
         {
             self.note_solid_mask_host_state_changed();
         }
         let Some(landscape) = self.landscape.as_mut() else {
             self.objects[index].solid_mask_bake.take();
-            self.objects[index].solid_mask_empty_put = false;
+            self.objects[index].solid_mask_empty_put = None;
             return None;
         };
         let definitions = &self.definitions;
@@ -440,10 +477,12 @@ impl Engine {
         let instance_sequence = mover.solid_mask_instance_sequence;
         let empty_put = std::mem::take(&mut mover.solid_mask_empty_put);
         let Some(bake) = mover.solid_mask_bake.take() else {
-            return (empty_put && backup_attachments).then(|| SolidMaskAttachmentBackup {
-                instance_sequence,
-                removal_position: mover.state.position,
-                object_ids: Vec::new(),
+            return (empty_put.is_some() && backup_attachments).then(|| {
+                SolidMaskAttachmentBackup {
+                    instance_sequence,
+                    removal_position: mover.state.position,
+                    object_ids: Vec::new(),
+                }
             });
         };
         let vehicle = landscape.grid_vehicle_byte()?;
@@ -602,7 +641,7 @@ impl Engine {
                 continue;
             }
             if self.objects[index].solid_mask_bake.is_some()
-                || self.objects[index].solid_mask_empty_put
+                || self.objects[index].solid_mask_empty_put.is_some()
             {
                 self.remove_solid_mask_impl(index, false, false);
             }
@@ -719,7 +758,7 @@ impl Engine {
         // C++ restores only from Put; a removed/ineligible mover clears the
         // backup without translating anything. A fully clipped regular Put
         // still sets MaskPut despite having no raster bake.
-        if mover.solid_mask_bake.is_none() && !mover.solid_mask_empty_put {
+        if mover.solid_mask_bake.is_none() && mover.solid_mask_empty_put.is_none() {
             return;
         }
         let dx = mover.state.position.x - backup.removal_position.x;
@@ -767,7 +806,7 @@ impl Engine {
         }
         if self.objects.get(index).is_some_and(|object| {
             object.solid_mask_bake.is_some()
-                || object.solid_mask_empty_put
+                || object.solid_mask_empty_put.is_some()
                 || object.solid_mask_instance_sequence.is_some()
         }) || self.solid_mask_spec(index).is_some()
         {
@@ -914,7 +953,7 @@ impl Engine {
     pub(crate) fn stage_materialized_spawn_solid_mask(&mut self, index: usize) {
         if !self.solid_mask_staging.defer_solid_mask_updates
             || self.objects[index].solid_mask_bake.is_some()
-            || self.objects[index].solid_mask_empty_put
+            || self.objects[index].solid_mask_empty_put.is_some()
             || self
                 .solid_mask_staging
                 .deferred_solid_mask_operations
