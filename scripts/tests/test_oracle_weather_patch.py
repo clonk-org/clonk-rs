@@ -85,10 +85,15 @@ class OracleWeatherPatchTests(unittest.TestCase):
                 bridge.mkdir(parents=True)
                 shutil.copy2(BUILD_SCRIPT, bridge / BUILD_SCRIPT.name)
                 shutil.copy2(PATCH, bridge / PATCH.name)
-                shutil.copy2(
-                    REPOSITORY / "parity" / "bridge" / "lc_engine_ffi.h",
-                    bridge / "lc_engine_ffi.h",
-                )
+                for header in (
+                    "lc_engine_ffi.h",
+                    "lc_config_ffi.h",
+                    "lc_group_ffi.h",
+                    "lc_platform_ffi.h",
+                ):
+                    shutil.copy2(
+                        REPOSITORY / "parity" / "bridge" / header, bridge / header
+                    )
 
                 fake_bin = root / "bin"
                 fake_bin.mkdir()
