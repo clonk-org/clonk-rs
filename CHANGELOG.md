@@ -4,6 +4,68 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-09-08
+
+### Bug fixes
+
+- Build a zero-height font at the one pixel FreeType clamps to like CStdFont::Init (#1549)
+- Spawn the ready-check notification backend listener (#1539)
+- Let arrow LocalN and Local calls name an explicit object like FnLocalN (#1547)
+
+### Features
+
+- Restore the pinned Rust config bridge and its differential (#1598)
+- Add the device-loss recovery probe to the shipped event loop (#1596)
+- Add the native Windows stack-memory dump to crash reports (#1595)
+
+### Performance
+
+- Attribute AST fallbacks and their time to sole blockers (#1582)
+- Lower break and continue in compiled C4Script loops (#1575)
+- Cache snapshot definition metadata (#1571)
+- Measure AST execution time on shipped content (#1570)
+- Avoid allocations and linear lookups in particle execution (#1568)
+- Avoid snapshot sort scratch buffers for unique object ids (#1567)
+- Stop recomposing the software sky and HUD boards every frame (#1561)
+- Merge adjacent line fragments of one colour into solid-rect spans (#1548)
+
+### Refactoring
+
+- Give the two-area menu, loader and startup methods explicit inputs (#1593)
+- Move the group-only startup helpers onto their state types (#1591)
+- Move the key latch and mouse caption advance onto the input state (#1590)
+- Move the in-game menu and message dialog queries onto their state (#1589)
+- Move the runtime music toggle onto the sound state (#1588)
+- Move the ownerless viewport state onto the viewport state (#1587)
+- Move the background save submit onto the save state (#1586)
+- Fold the message board, input history and log timestamps into the chat state (#1585)
+- Group the app-side network session behind one type (#1584)
+- Group the lobby state behind one type (#1583)
+- Move the scenario discovery cancel onto the selector state (#1581)
+- Fold the player info registry, profile paths and big icons into the player state (#1580)
+- Group the app-side scenario lifecycle state behind one type (#1579)
+- Move the record preparations onto the recording state behind explicit inputs (#1577)
+- Split the record stop into two recording state phases (#1576)
+- Move the recording session lifecycle and console queries onto their state (#1574)
+- Group the console session latches behind one type (#1573)
+- Group the developer console and toolbox state behind one type (#1572)
+- Group the console editor cursor and viewport state behind two types (#1569)
+- Complete the app configuration state behind ConfigState (#1566)
+- Move the per-dialog latches next to the dialogs they guard (#1564)
+- Group the app loader screen state behind one type (#1563)
+- Group the app startup network dialog state behind one type (#1562)
+- Group the app keyboard and gamepad routing behind one type (#1560)
+- Group the app in-game mouse state behind one type (#1559)
+- Fold the pending dialogs and message-dialog latches into RuntimeDialogState (#1558)
+- Group the app in-game menu state behind one type (#1557)
+- Group the app context-menu state behind one type (#1556)
+- Move the sound-state-only audio methods onto SoundState (#1555)
+- Move the application tick out of the sound module (#1554)
+- Move the group-only viewport and display helpers onto their state types (#1553)
+- Group the app rendering resources behind one type (#1552)
+- Group the app viewport state behind one type (#1551)
+- Group the app presentation pacing state behind one type (#1550)
+
 ## [0.24.0] - 2026-09-07
 
 ### Bug fixes
