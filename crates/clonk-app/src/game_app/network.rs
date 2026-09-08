@@ -3775,7 +3775,8 @@ impl GameApp {
             return;
         };
         let projected = clonk_script::c4_string_from_bytes(value);
-        self.persist_game_option_text("Network", "Comment", &projected);
+        self.config
+            .persist_game_option_text("Network", "Comment", &projected);
         self.scenario_game_options.set_comment(projected);
         let password_needed = self
             .advertised_game_reference
@@ -3828,7 +3829,8 @@ impl GameApp {
         match self.change_runtime_network_status(status) {
             Ok(()) => {
                 self.runtime_network_control_mode = Some(mode);
-                self.persist_game_option_value("Network", "ControlMode", mode.to_string());
+                self.config
+                    .persist_game_option_value("Network", "ControlMode", mode.to_string());
                 self.publish_running_host_reference();
             }
             Err(error) => tracing::error!(%error, mode, "failed to change chat control mode"),
@@ -9644,7 +9646,7 @@ impl GameApp {
         };
         self.scenario_game_options
             .apply_lobby_internet_result(effective);
-        self.persist_game_option_value(
+        self.config.persist_game_option_value(
             "Network",
             "MasterServerSignUp",
             i32::from(effective).to_string(),
@@ -9667,7 +9669,7 @@ impl GameApp {
         let previous_enabled = pending.previous_enabled();
         self.scenario_game_options
             .apply_lobby_internet_result(previous_enabled);
-        self.persist_game_option_value(
+        self.config.persist_game_option_value(
             "Network",
             "MasterServerSignUp",
             i32::from(previous_enabled).to_string(),

@@ -5419,8 +5419,8 @@ fn a_dedicated_server_writes_its_runtime_config_on_a_clean_quit() {
     let mut app = new_state_only_menu_app(320, 200);
     app.app_paths = Some(paths.clone());
     app.headless = true;
-    app.persist_game_option_value("Network", "ControlRate", "7".to_string());
-    app.persist_game_option_text("Network", "Comment", "Weekend server");
+    app.config.persist_game_option_value("Network", "ControlRate", "7".to_string());
+    app.config.persist_game_option_text("Network", "Comment", "Weekend server");
 
     app.finish_console_shutdown();
 

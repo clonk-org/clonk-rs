@@ -866,7 +866,7 @@ impl GameApp {
                     {
                         prepared.set_runtime_join_allowed(allowed);
                     }
-                    self.persist_game_option_value(
+                    self.config.persist_game_option_value(
                         "Network",
                         "NoRuntimeJoin",
                         if allowed { "0" } else { "1" }.to_string(),
@@ -1408,7 +1408,7 @@ impl GameApp {
         ] {
             self.config.deferred.clear(section, key);
         }
-        self.clear_deferred_display_toggles();
+        self.config.clear_deferred_display_toggles();
         let paths = self.app_paths.as_ref();
         let is_fullscreen = self.rendering.display_flags.is_fullscreen;
         self.rendering.display_flags = load_display_flags(paths);
@@ -2253,41 +2253,6 @@ impl GameApp {
         values
     }
 
-    /// A scenario-selector or lobby game option, which C++ keeps in its
-    /// process-wide `Config` until the shutdown save.
-    ///
-    /// None of the sites behind these keys writes the file: the runtime-join
-    /// toggle is `Config.Network.NoRuntimeJoin = !fAllowed`
-    /// (`C4GameOptions.cpp:169`), the league checkbox and remembered password
-    /// are plain assignments (`C4Network2Dialogs.cpp:676-686,748`), the control
-    /// rate and mode are written from the control layer
-    /// (`C4Control.cpp:141`; `C4Network2.cpp:853`), and internet signup and
-    /// recording are the `OnBtnInternet`/`OnBtnRecord` toggles already cited on
-    /// `deferred_config` (`C4StartupNetDlg.cpp:840-850`). The whole C++ tree
-    /// holds seven `Config.Save()` calls and not one of them is a game-option
-    /// surface, so an eager write here would keep a change a crash should have
-    /// discarded.
-    pub(crate) fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
-        self.config.deferred.set(section, key, value);
-    }
-
-    /// The escaped-string form of [`Self::persist_game_option_value`], for a
-    /// `CFG_MaxString` field whose flush needs C++'s quoting rather than a raw
-    /// scalar (`C4Config.cpp:379`).
-    pub(crate) fn persist_game_option_text(&mut self, section: &str, key: &str, value: &str) {
-        let Some(native) = clonk_resources::encode_legacy_script_text(value) else {
-            tracing::warn!(
-                section,
-                key,
-                "game option text is not representable in the classic Windows-1252 config"
-            );
-            return;
-        };
-        self.config
-            .deferred
-            .set_escaped(section, key, value, native);
-    }
-
     /// Saves a complete config while carrying the five in-game Display values
     /// that are still held in the process-local state. C++ mutates its global
     /// `Config` before every complete save, so `Config.Save()` at the
@@ -2414,18 +2379,6 @@ impl GameApp {
         );
     }
 
-    pub(crate) fn clear_deferred_display_toggles(&mut self) {
-        for (section, key) in [
-            ("Graphics", "ShowCrewNames"),
-            ("Graphics", "ShowCrewCNames"),
-            ("Graphics", "ShowClock"),
-            ("General", "FPS"),
-            ("Graphics", "UpperBoard"),
-        ] {
-            self.config.deferred.clear(section, key);
-        }
-    }
-
     pub(crate) fn process_game_option_actions(
         &mut self,
         actions: Vec<GameOptionAction>,
@@ -2436,14 +2389,14 @@ impl GameApp {
                     self.advance_scensel_dialog_focus(backwards);
                 }
                 GameOptionAction::InternetSignupChanged { enabled, .. } => {
-                    self.persist_game_option_value(
+                    self.config.persist_game_option_value(
                         "Network",
                         "MasterServerSignUp",
                         i32::from(enabled).to_string(),
                     );
                 }
                 GameOptionAction::LeagueSignupChanged(enabled) => {
-                    self.persist_game_option_value(
+                    self.config.persist_game_option_value(
                         "Network",
                         "LeagueServerSignUp",
                         i32::from(enabled).to_string(),
@@ -2457,11 +2410,13 @@ impl GameApp {
                     ..
                 } => {
                     if let Some(password) = remember_for_next_round {
-                        self.persist_game_option_text("Network", "LastPassword", &password);
+                        self.config
+                            .persist_game_option_text("Network", "LastPassword", &password);
                     }
                 }
                 GameOptionAction::CommentChanged(comment) => {
-                    self.persist_game_option_text("Network", "Comment", &comment);
+                    self.config
+                        .persist_game_option_text("Network", "Comment", &comment);
                     tracing::info!(
                         "{}",
                         clonk_frontend::game_option_buttons::COMMENT_CHANGED_LOG
@@ -2475,7 +2430,7 @@ impl GameApp {
                     // (src/C4Network2Dialogs.cpp:704-710,713-715). The
                     // serialized key is `NoCrew`, not `FairCrew`
                     // (src/C4Config.cpp:384).
-                    self.persist_game_option_value(
+                    self.config.persist_game_option_value(
                         "General",
                         "NoCrew",
                         if enabled { "true" } else { "false" }.to_string(),
@@ -2484,7 +2439,7 @@ impl GameApp {
                 GameOptionAction::RecordPreferenceChanged(enabled) => {
                     self.startup.view_flags.record = enabled;
                     self.records.enabled = enabled && self.records.directory.is_some();
-                    self.persist_game_option_value(
+                    self.config.persist_game_option_value(
                         "General",
                         "Record",
                         i32::from(enabled).to_string(),

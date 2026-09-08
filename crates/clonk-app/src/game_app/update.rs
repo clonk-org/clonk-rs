@@ -125,7 +125,7 @@ impl GameApp {
                     // The complete save now contains the current Display
                     // fields, so the shutdown flush must not rewrite stale
                     // deferred entries after it.
-                    self.clear_deferred_display_toggles();
+                    self.config.clear_deferred_display_toggles();
                 }
             }
             Err(error) => {

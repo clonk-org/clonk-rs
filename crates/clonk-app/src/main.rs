@@ -7142,7 +7142,7 @@ impl GameApp {
                     host_snapshot_changed = true;
                 }
                 if matches!(runtime_network_role, RuntimeNetworkRole::Host) {
-                    self.persist_game_option_value(
+                    self.config.persist_game_option_value(
                         "Network",
                         "ControlRate",
                         control_rate.to_string(),

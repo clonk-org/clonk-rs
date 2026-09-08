@@ -910,6 +910,51 @@ pub(crate) struct DefinitionSelectionState {
     pub(crate) last_click: Option<(usize, Instant)>,
 }
 
+impl ConfigState {
+    /// A scenario-selector or lobby game option, which C++ keeps in its
+    /// process-wide `Config` until the shutdown save.
+    ///
+    /// None of the sites behind these keys writes the file: the runtime-join
+    /// toggle is `Config.Network.NoRuntimeJoin = !fAllowed`
+    /// (`C4GameOptions.cpp:169`), the league checkbox and remembered password
+    /// are plain assignments (`C4Network2Dialogs.cpp:676-686,748`), the control
+    /// rate and mode are written from the control layer
+    /// (`C4Control.cpp:141`; `C4Network2.cpp:853`), and internet signup and
+    /// recording are the `OnBtnInternet`/`OnBtnRecord` toggles already cited on
+    /// `deferred_config` (`C4StartupNetDlg.cpp:840-850`). The whole C++ tree
+    /// holds seven `Config.Save()` calls and not one of them is a game-option
+    /// surface, so an eager write here would keep a change a crash should have
+    /// discarded.
+    pub(crate) fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
+        self.deferred.set(section, key, value);
+    }
+    /// The escaped-string form of [`Self::persist_game_option_value`], for a
+    /// `CFG_MaxString` field whose flush needs C++'s quoting rather than a raw
+    /// scalar (`C4Config.cpp:379`).
+    pub(crate) fn persist_game_option_text(&mut self, section: &str, key: &str, value: &str) {
+        let Some(native) = clonk_resources::encode_legacy_script_text(value) else {
+            tracing::warn!(
+                section,
+                key,
+                "game option text is not representable in the classic Windows-1252 config"
+            );
+            return;
+        };
+        self.deferred.set_escaped(section, key, value, native);
+    }
+    pub(crate) fn clear_deferred_display_toggles(&mut self) {
+        for (section, key) in [
+            ("Graphics", "ShowCrewNames"),
+            ("Graphics", "ShowCrewCNames"),
+            ("Graphics", "ShowClock"),
+            ("General", "FPS"),
+            ("Graphics", "UpperBoard"),
+        ] {
+            self.deferred.clear(section, key);
+        }
+    }
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
