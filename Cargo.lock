@@ -952,6 +952,7 @@ dependencies = [
  "chrono",
  "clonk-core",
  "clonk-engine-core",
+ "clonk-platform",
  "clonk-resources",
  "clonk-script",
  "criterion",
