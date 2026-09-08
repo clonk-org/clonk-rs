@@ -16,7 +16,10 @@ autotests = false
 # as clonk-engine's former built-in unit harness.
 default = []
 bench = []
-ffi = []
+# clonk-engine's `ffi` pulls the config, group-validation and platform-path
+# bridge surfaces in and names them from its ffi module (clonk-org/clonk-rs#1264),
+# so compiling that module here needs the same features on the same crates.
+ffi = ["clonk-core/ffi", "clonk-resources/ffi", "clonk-platform/ffi"]
 presentation-capture = []
 test-graph = []
 
@@ -46,6 +49,7 @@ clonk-core = { path = "../clonk-core" }
 # focused engine-then-app runs two separate optimized clonk-engine artifacts.
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 clonk-engine-core = { path = "../clonk-engine-core" }
+clonk-platform = { path = "../clonk-platform" }
 clonk-resources = { path = "../clonk-resources" }
 clonk-script = { path = "../clonk-script" }
 # Resolver-v2 feature anchors used by the complete workspace graph. Test code

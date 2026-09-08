@@ -23,24 +23,33 @@ use anyhow::{bail, Context, Result};
 /// `clonk-script` surfaces for the bridges this repository has not restored
 /// yet.
 const FFI_CRATES: &[FfiCrate] = &[
+    // The engine archive carries every bridge surface (its `ffi` feature pulls
+    // the config, group and platform ones in), and is copied to the names the
+    // pinned CMake imports for `USE_RUST_CONFIG` (clonk-org/clonk-rs#1264),
+    // `USE_RUST_GROUP_VALIDATION` (#1265) and `USE_RUST_PLATFORM_PATHS`
+    // (#1267). The pin never carried a `cargo xtask ffi`, so those imports
+    // were never satisfiable there; and they cannot be separate archives,
+    // because two Rust static archives in one executable duplicate the
+    // standard library.
     FfiCrate {
         name: "clonk-engine",
         feature: Some("ffi"),
+        import_stems: &["lc_core", "lc_resources", "lc_platform"],
     },
-    // `USE_RUST_CONFIG` (clonk-org/clonk-rs#1264).
     FfiCrate {
         name: "clonk-core",
         feature: Some("ffi"),
+        import_stems: &[],
     },
-    // `USE_RUST_GROUP` (clonk-org/clonk-rs#1265).
     FfiCrate {
         name: "clonk-resources",
         feature: Some("ffi"),
+        import_stems: &[],
     },
-    // `USE_RUST_PLATFORM_PATHS` (clonk-org/clonk-rs#1267).
     FfiCrate {
         name: "clonk-platform",
         feature: Some("ffi"),
+        import_stems: &[],
     },
 ];
 
@@ -48,6 +57,10 @@ const FFI_CRATES: &[FfiCrate] = &[
 struct FfiCrate {
     name: &'static str,
     feature: Option<&'static str>,
+    /// Further stems this crate's artifacts are copied to after the build,
+    /// where the pinned CMake imports a surface under another name
+    /// (`CMakeLists.txt:71-79` at the pin).
+    import_stems: &'static [&'static str],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,12 +195,34 @@ fn build(krate: &FfiCrate, profile: BuildProfile, workspace: &Path) -> Result<()
             directory.display()
         );
     }
+    for import_stem in krate.import_stems {
+        for (built, imported) in import_names(&stem, import_stem) {
+            let source = directory.join(&built);
+            let target = directory.join(&imported);
+            std::fs::copy(&source, &target).with_context(|| {
+                format!(
+                    "failed to copy {} to the name CMake imports, {}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
     println!(
         "{} FFI artifacts ready in {}",
         krate.name,
         directory.display()
     );
     Ok(())
+}
+
+/// The (cargo-emitted, CMake-imported) file-name pairs for a crate whose
+/// import stem differs from its own.
+fn import_names(stem: &str, import_stem: &str) -> Vec<(String, String)> {
+    artifact_names(stem)
+        .into_iter()
+        .zip(artifact_names(import_stem))
+        .collect()
 }
 
 /// The file names `cargo rustc --crate-type staticlib,cdylib` produces, which
@@ -211,6 +246,33 @@ fn artifact_names(stem: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CMakeLists.txt:71-79` at the pin imports `liblc_core.a` and
+    /// `liblc_core.dylib`; cargo emits `libclonk_core.*`. The pairs are what the
+    /// post-build copy walks, one per crate type.
+    #[test]
+    fn the_engine_archive_is_copied_to_the_names_cmake_imports() {
+        let pairs = import_names("clonk_engine", "lc_core");
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(
+            |(built, imported)| built.contains("clonk_engine") && imported.contains("lc_core")
+        ));
+        assert!(pairs
+            .iter()
+            .any(|(built, _)| built.ends_with(".a") || built.ends_with(".lib")));
+        let engine = FFI_CRATES
+            .iter()
+            .find(|krate| krate.name == "clonk-engine")
+            .expect("the engine is an FFI crate");
+        assert_eq!(
+            engine.import_stems,
+            &["lc_core", "lc_resources", "lc_platform"]
+        );
+        assert!(FFI_CRATES
+            .iter()
+            .filter(|krate| krate.name != "clonk-engine")
+            .all(|krate| krate.import_stems.is_empty()));
+    }
 
     /// The header is the oracle's contract; `ffi.rs` is what satisfies it. If
     /// the two drift apart the failure is a link error inside a C++ build

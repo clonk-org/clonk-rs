@@ -60,6 +60,8 @@ _deps/
 *.rej
 *.patch
 !parity/oracle/presentation_capture.patch
+!parity/bridge/oracle-weather.patch
+!parity/bridge/oracle-config-bridge.patch
 # Unix core dumps land at the working-directory root and are named `core` or
 # `core.<pid>`. Anchoring and digit-matching keeps the rule from swallowing
 # Rust modules named `core` (an unanchored `core.*` silently excluded

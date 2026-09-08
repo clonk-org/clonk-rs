@@ -221,13 +221,71 @@ own contract in
 ### Separate oracle validation bridges
 
 The pinned oracle also defines validation bridges that this engine-state ABI
-does not exercise. Their Rust implementations are not present in the current
-tree, so an engine shadow-diff result must not be treated as evidence for them:
+does not exercise. An engine shadow-diff result is never evidence for them;
+each has to be built and run on its own:
 
-- `USE_RUST_CONFIG`: clonk-org/clonk-rs#1264
+- `USE_RUST_CONFIG`: restored, see [The config bridge](#the-config-bridge).
 - `USE_RUST_GROUP_VALIDATION`: clonk-org/clonk-rs#1265
 - `USE_RUST_GUI_VALIDATION`: clonk-org/clonk-rs#1266
 - `USE_RUST_PLATFORM_PATHS`: clonk-org/clonk-rs#1267
+
+#### The config bridge
+
+`build-oracle-validation.sh --with-config` builds the oracle with
+`USE_RUST_CONFIG=ON` against this tree. Three things had to be true for that:
+
+- The pinned CMake imports `liblc_core.a`, `liblc_resources.a` and
+  `liblc_platform.a` as separate archives, but two Rust staticlibs in one
+  executable duplicate the standard library and fail to link. `cargo xtask ffi`
+  therefore builds one engine archive whose `ffi` feature pulls in the
+  `clonk-core`, `clonk-resources` and `clonk-platform` FFI surfaces, and copies
+  it to every name CMake imports. An unreferenced optional dependency is not
+  bundled, so `clonk-engine`'s `ffi` module names each of them.
+- The bridge's C++ never compiled at the pin (two assigners in `C4Config.cpp`
+  take the wrong types), and its diagnostics could never be seen:
+  `C4Config::Load` runs before `LogSystem.OpenLog`, so every `DebugLog` in the
+  compare block was dropped, and the bridge's file-scope mutex was destroyed
+  before `C4Config`'s static destructor locked it, which aborted every exit.
+  `oracle-config-bridge.patch` is layered on the pin only when the option is
+  requested: it fixes the compile, writes the report to stderr, leaks the
+  mutex, and says when parity held or the compare never ran.
+  `scripts/tests/test_oracle_config_patch.py` pins the patch to the exact pin.
+- `lc_config_ffi.h`, `lc_group_ffi.h` and `lc_platform_ffi.h` are the pin's
+  bytes; the builder refuses a vendored copy that drifted.
+
+`run-config-differential.sh` then runs fixtures through that oracle and checks
+what the bridge reports. It first proves what was linked: the archive in the
+link line must resolve under this tree's `target/`, and the binary must export
+the whole pinned config surface, so an oracle built without the option, from
+another tree, or from an engine archive that dropped `clonk-core`'s FFI fails
+before any fixture runs. The fixtures:
+
+| fixture | what the bridge reports | after the run |
+|---|---|---|
+| absent file | loader failed, dump unavailable | the oracle writes its defaults, the seed |
+| the seed | parity verified, overrides active | the Rust writer saves the seed byte for byte |
+| known keys edited | parity verified | the edits survive `replace_from_text` and `save` |
+| an unknown key | `Missing in legacy`, entry count differs | the C++ writer drops the key |
+| known keys deleted | `Missing in rust` for each, with the C++ default | the C++ writer restores them |
+| malformed input | see below | the oracle survives and writes a file |
+
+The per-key `Rust config missing value for …` lines that follow a report are
+the pinned diagnostic asking Rust for keys the C++ writer never emitted (fields
+at their defaults); the dump comparison above them is the differential.
+
+With a bridge-less oracle beside it (the default `build-validation`), the
+script also compares the file the Rust writer saved with the file the C++
+writer saves for the same input; only `LogPath`, which names each binary's
+directory, may differ. `--leaks` runs the fixtures under `leaks --atExit` and
+fails on any leak whose stack reaches the bridge or a Rust frame, which is how
+the returned strings and the handle are shown to be freed.
+
+The malformed fixture pins how the two parsers differ on garbage, and those
+differences are real: `StdCompilerINIRead` skips a line that does not start
+with a letter and takes the first section of a repeated name
+(`StdCompiler.cpp`, the name tree and `Name()`), while `clonk-core` keeps an
+empty key and merges a repeated section. They are tracked as
+clonk-org/clonk-rs#1597 rather than hidden by the expectations.
 
 No required gate runs the live bridge: it needs a separately built oracle
 checkout and is intentionally an opt-in investigation tool. `cargo xtask parity

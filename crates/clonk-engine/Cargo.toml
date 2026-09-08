@@ -25,14 +25,25 @@ test-graph = ["dep:proptest"]
 presentation-capture = []
 # The C ABI the pinned oracle's USE_RUST_ENGINE_VALIDATION bridge links against
 # (clonk-org/clonk-rs#585). Off by default: it is a diagnostic surface, not part
-# of the shipped engine.
-ffi = ["dep:tracing-subscriber"]
+# of the shipped engine. It also carries the config, group-validation and
+# platform-path bridge surfaces (clonk-org/clonk-rs#1264, #1265, #1267): the
+# oracle links every bridge it enables into one executable, and two Rust
+# static archives in one image duplicate the standard library, so there is
+# one archive and `cargo xtask ffi` copies it to every name CMake imports.
+ffi = [
+    "dep:tracing-subscriber",
+    "clonk-core/ffi",
+    "clonk-resources/ffi",
+    "dep:clonk-platform",
+    "clonk-platform/ffi",
+]
 
 [dependencies]
 clonk-core = { path = "../clonk-core" }
 clonk-engine-core = { path = "../clonk-engine-core" }
 clonk-script = { path = "../clonk-script" }
 clonk-resources = { path = "../clonk-resources" }
+clonk-platform = { path = "../clonk-platform", optional = true }
 # Fixed-seed hashing for the per-frame lookup tables. `RandomState` reseeds per
 # process, so nothing in the simulation may read HashMap iteration order today;
 # a seedless hasher is strictly more reproducible and skips SipHash per probe.

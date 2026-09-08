@@ -15,6 +15,18 @@
 //! so the lint is silenced module-wide and the contract documented here instead.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+// The config, group and platform bridge surfaces travel in this archive (the
+// `ffi` feature in Cargo.toml pulls their crates' `ffi` modules in). Naming
+// each one here keeps its crate linked into the staticlib even where nothing
+// else in the engine uses it: an unreferenced optional dependency is not part
+// of the crate graph, and its `#[no_mangle]` exports would silently be absent.
+#[allow(unused_imports)]
+use clonk_core::ffi as _;
+#[allow(unused_imports)]
+use clonk_platform::ffi as _;
+#[allow(unused_imports)]
+use clonk_resources::ffi as _;
+
 use crate::pathfinder::Path;
 use crate::rng::LcgRng;
 use crate::{

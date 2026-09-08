@@ -1,0 +1,264 @@
+diff --git a/src/C4Config.cpp b/src/C4Config.cpp
+index 089e273e5..e172bcaef 100644
+--- a/src/C4Config.cpp
++++ b/src/C4Config.cpp
+@@ -34,8 +34,17 @@
+ #endif
+ 
+ #include <StdFile.h>
++// Only the engine links RustConfigBridge.cpp and the Rust archive, but the
++// c4group tool compiles this file with the same option and then fails to link
++// (and, before that, to compile: Graphics, Sound, Network and the sync are
++// engine-only). The option is meaningful in the engine alone.
++#if defined(USE_RUST_CONFIG) && !defined(C4ENGINE)
++#undef USE_RUST_CONFIG
++#endif
+ #ifdef USE_RUST_CONFIG
+ #include "rust/RustConfigBridge.h"
++#include <cstdio>
++#include <format>
+ #endif
+ #ifdef USE_RUST_PLATFORM_PATHS
+ #include "rust/RustPlatformBridge.h"
+@@ -76,6 +85,16 @@ bool isGermanSystem()
+ #ifdef USE_RUST_CONFIG
+ namespace
+ {
++	// C4Config::Load runs before LogSystem.OpenLog (C4Application.cpp), so
++	// DebugLog output from the bridge compare is lost. The differential goes
++	// straight to stderr instead.
++	template <typename... Args>
++	void RustConfigLog(std::format_string<Args...> fmt, Args &&...args)
++	{
++		std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), stderr);
++		std::fputc('\n', stderr);
++	}
++
+ 	std::optional<std::string> GetRustConfigValue(const char *section, const char *key)
+ 	{
+ 		return section ? RustConfigBridge::GetValueIn(section, key) : RustConfigBridge::GetValue(key);
+@@ -191,12 +210,12 @@ namespace
+ 			}
+ 		};
+ 
+-		auto assign_display_mode = [&](C4ConfigGraphics::DisplayMode &mode, const char *section, const char *key) {
++		auto assign_display_mode = [&](DisplayMode &mode, const char *section, const char *key) {
+ 			if (auto value = GetRustConfigValue(section, key))
+ 			{
+ 				if (auto parsed = ParseInt32String(*value))
+ 				{
+-					mode = static_cast<C4ConfigGraphics::DisplayMode>(*parsed);
++					mode = static_cast<DisplayMode>(*parsed);
+ 				}
+ 			}
+ 		};
+@@ -281,7 +300,7 @@ namespace
+ 		assign_int(config.Graphics.Monitor, "Graphics", "Monitor");
+ 		assign_int(config.Graphics.TexIndent, "Graphics", "TexIndent");
+ 		assign_int(config.Graphics.BlitOffset, "Graphics", "BlitOffset");
+-		assign_int(config.Graphics.AllowedBlitModes, "Graphics", "AllowedBlitModes");
++		assign_uint32(config.Graphics.AllowedBlitModes, "Graphics", "AllowedBlitModes");
+ 		assign_bool(config.Graphics.ShowCrewNames, "Graphics", "ShowCrewNames");
+ 		assign_bool(config.Graphics.ShowCrewCNames, "Graphics", "ShowCrewCNames");
+ 		assign_int(config.Graphics.Gamma1, "Graphics", "Gamma1");
+@@ -802,7 +821,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 					if (!RustConfigBridge::LoadConfig(configPath))
+ 					{
+ #ifdef C4ENGINE
+-						DebugLog(spdlog::level::warn, "Rust config loader failed for {}", configPath);
++						RustConfigLog("Rust config loader failed for {}", configPath);
+ #endif
+ 					}
+ 				}
+@@ -837,12 +856,18 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 				legacyWriter.Decompile(*this);
+ 				const std::string legacyDump{legacyWriter.getOutput()};
+ 				const std::optional<std::string> rustDump = RustConfigBridge::Dump();
++#ifdef C4ENGINE
++				if (!rustDump)
++				{
++					RustConfigLog("Rust config dump unavailable; parity not checked");
++				}
++#endif
+ 				if (rustDump)
+ 				{
+ 					const std::optional<std::string> diffReport = RustConfigBridge::CompareWithLegacyDump(legacyDump);
+ 					const bool textMismatch = (*rustDump != legacyDump);
+ 					rustParityOk = !diffReport && !textMismatch;
+-#if defined(C4ENGINE) && !defined(NDEBUG)
++#if defined(C4ENGINE) // differential output is wanted from release oracles too
+ 					if (diffReport)
+ 					{
+ 						std::istringstream stream(*diffReport);
+@@ -851,7 +876,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 						{
+ 							if (!line.empty())
+ 							{
+-								DebugLog(spdlog::level::warn, "Rust config diff: {}", line);
++								RustConfigLog("Rust config diff: {}", line);
+ 							}
+ 						}
+ 					}
+@@ -882,9 +907,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 						};
+ 						const std::string legacySnippet = makeSnippet(legacyDump);
+ 						const std::string rustSnippetText = makeSnippet(*rustDump);
+-						DebugLog(
+-							spdlog::level::warn,
+-							"Rust config mismatch at offset {} (legacy hash {}, rust hash {}, legacy segment '{}', rust segment '{}')",
++						RustConfigLog("Rust config mismatch at offset {} (legacy hash {}, rust hash {}, legacy segment '{}', rust segment '{}')",
+ 							mismatchIndex,
+ 							legacyHash,
+ 							rustHash,
+@@ -900,9 +923,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 							{
+ 								if (*rust != legacy)
+ 								{
+-									DebugLog(
+-										spdlog::level::warn,
+-										"Rust config mismatch for {} (legacy='{}', rust='{}')",
++									RustConfigLog("Rust config mismatch for {} (legacy='{}', rust='{}')",
+ 										label,
+ 										legacy,
+ 										rust->c_str());
+@@ -910,7 +931,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 							}
+ 							else
+ 							{
+-								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
++								RustConfigLog("Rust config missing value for {}", label);
+ 							}
+ 						};
+ 
+@@ -921,9 +942,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 								{
+ 									if (*parsed != legacy)
+ 									{
+-										DebugLog(
+-											spdlog::level::warn,
+-											"Rust config mismatch for {} (legacy={}, rust={})",
++										RustConfigLog("Rust config mismatch for {} (legacy={}, rust={})",
+ 											label,
+ 											legacy,
+ 											*parsed);
+@@ -931,12 +950,12 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 								}
+ 								else
+ 								{
+-									DebugLog(spdlog::level::warn, "Rust config has non-boolean value '{}' for {}", rust->c_str(), label);
++									RustConfigLog("Rust config has non-boolean value '{}' for {}", rust->c_str(), label);
+ 								}
+ 							}
+ 							else
+ 							{
+-								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
++								RustConfigLog("Rust config missing value for {}", label);
+ 							}
+ 						};
+ 
+@@ -947,9 +966,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 								{
+ 									if (*parsed != legacy)
+ 									{
+-										DebugLog(
+-											spdlog::level::warn,
+-											"Rust config mismatch for {} (legacy={}, rust={})",
++										RustConfigLog("Rust config mismatch for {} (legacy={}, rust={})",
+ 											label,
+ 											legacy,
+ 											*parsed);
+@@ -957,12 +974,12 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 								}
+ 								else
+ 								{
+-									DebugLog(spdlog::level::warn, "Rust config has non-integer value '{}' for {}", rust->c_str(), label);
++									RustConfigLog("Rust config has non-integer value '{}' for {}", rust->c_str(), label);
+ 								}
+ 							}
+ 							else
+ 							{
+-								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
++								RustConfigLog("Rust config missing value for {}", label);
+ 							}
+ 						};
+ 
+@@ -973,9 +990,7 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 								{
+ 									if (*parsed != legacy)
+ 									{
+-									DebugLog(
+-										spdlog::level::warn,
+-										"Rust config mismatch for {} (legacy={}, rust={})",
++									RustConfigLog("Rust config mismatch for {} (legacy={}, rust={})",
+ 										label,
+ 										static_cast<unsigned long long>(legacy),
+ 										static_cast<unsigned long long>(*parsed));
+@@ -983,28 +998,28 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ 								}
+ 								else
+ 								{
+-									DebugLog(spdlog::level::warn, "Rust config has non-integer value '{}' for {}", rust->c_str(), label);
++									RustConfigLog("Rust config has non-integer value '{}' for {}", rust->c_str(), label);
+ 								}
+ 							}
+ 							else
+ 							{
+-								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
++								RustConfigLog("Rust config missing value for {}", label);
+ 							}
+ 						};
+ 
+-						log_string_mismatch("General.Name", nullptr, "Name", General.Name);
+-						log_string_mismatch("General.Language", nullptr, "Language", General.Language);
+-						log_string_mismatch("General.LanguageEx", nullptr, "LanguageEx", General.LanguageEx);
+-						log_string_mismatch("General.Definitions", nullptr, "Definitions", General.Definitions);
+-						log_string_mismatch("General.FontName", nullptr, "FontName", General.RXFontName);
+-						log_int_mismatch("General.FontSize", General.RXFontSize, nullptr, "FontSize");
+-						log_int_mismatch("General.MouseAScroll", General.MouseAScroll, nullptr, "MouseAScroll");
+-						log_bool_mismatch("General.Preloading", General.Preloading, nullptr, "Preloading");
+-						log_bool_mismatch("General.FPS", General.FPS, nullptr, "FPS");
+-						log_int_mismatch("General.ScrollSmooth", General.ScrollSmooth, nullptr, "ScrollSmooth");
+-						log_int_mismatch("General.FairCrewStrength", General.FairCrewStrength, nullptr, "DefCrewStrength");
++						log_string_mismatch("General.Name", "General", "Name", General.Name);
++						log_string_mismatch("General.Language", "General", "Language", General.Language);
++						log_string_mismatch("General.LanguageEx", "General", "LanguageEx", General.LanguageEx);
++						log_string_mismatch("General.Definitions", "General", "Definitions", General.Definitions);
++						log_string_mismatch("General.FontName", "General", "FontName", General.RXFontName);
++						log_int_mismatch("General.FontSize", General.RXFontSize, "General", "FontSize");
++						log_int_mismatch("General.MouseAScroll", General.MouseAScroll, "General", "MouseAScroll");
++						log_bool_mismatch("General.Preloading", General.Preloading, "General", "Preloading");
++						log_bool_mismatch("General.FPS", General.FPS, "General", "FPS");
++						log_int_mismatch("General.ScrollSmooth", General.ScrollSmooth, "General", "ScrollSmooth");
++						log_int_mismatch("General.FairCrewStrength", General.FairCrewStrength, "General", "DefCrewStrength");
+ #ifndef _WIN32
+-						log_int_mismatch("General.ThreadPoolThreadCount", static_cast<int32_t>(General.ThreadPoolThreadCount), nullptr, "ThreadPoolThreadCount");
++						log_int_mismatch("General.ThreadPoolThreadCount", static_cast<int32_t>(General.ThreadPoolThreadCount), "General", "ThreadPoolThreadCount");
+ #endif
+ 						log_bool_mismatch("Startup.HideMsgStartDedicated", Startup.HideMsgStartDedicated, "Startup", "HideMsgStartDedicated");
+ 						log_bool_mismatch("Startup.HideMsgPlrTakeOver", Startup.HideMsgPlrTakeOver, "Startup", "HideMsgPlrTakeOver");
+@@ -1092,6 +1107,9 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
+ #ifdef USE_RUST_CONFIG
+ 		if (rustParityOk)
+ 		{
++#ifdef C4ENGINE
++			RustConfigLog("Rust config parity verified; overrides active");
++#endif
+ 			ApplyRustConfigOverrides(*this);
+ 		}
+ 	rustConfigActive = rustParityOk;
+diff --git a/src/rust/RustConfigBridge.cpp b/src/rust/RustConfigBridge.cpp
+index 80082cff0..abf01705b 100644
+--- a/src/rust/RustConfigBridge.cpp
++++ b/src/rust/RustConfigBridge.cpp
+@@ -7,7 +7,10 @@
+ #include <string>
+ 
+ namespace {
+-std::mutex g_mutex;
++// Leaked on purpose: C4Config's static instance calls Unload() from its
++// destructor, which runs after this translation unit's statics are gone. A
++// destroyed std::mutex fails to lock and terminates the process at exit.
++std::mutex &g_mutex = *new std::mutex;
+ ConfigHandle *g_handle = nullptr;
+ }
+ 
