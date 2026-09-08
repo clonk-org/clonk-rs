@@ -476,6 +476,10 @@ pub struct Particle {
 pub struct ParticleSystem {
     /// Insertion-ordered def list (C++ keeps a linked list, pDef0..pDefL).
     defs: Vec<ParticleDef>,
+    // Preserve the name-based snapshot/API contract while resolving live defs
+    // independently of registry size. Mutable definitions can rename entries.
+    def_indices: HashMap<String, usize>,
+    def_indices_dirty: bool,
     def_names: RefCell<Rc<HashSet<String>>>,
     reloadable_def_names: RefCell<Rc<HashSet<String>>>,
     reloadable_def_io_success: RefCell<Rc<HashMap<String, bool>>>,
@@ -497,6 +501,8 @@ impl Default for ParticleSystem {
     fn default() -> Self {
         Self {
             defs: Vec::new(),
+            def_indices: HashMap::new(),
+            def_indices_dirty: false,
             def_names: RefCell::new(Rc::new(HashSet::new())),
             reloadable_def_names: RefCell::new(Rc::new(HashSet::new())),
             reloadable_def_io_success: RefCell::new(Rc::new(HashMap::new())),
@@ -551,6 +557,21 @@ pub struct ObjectFireEmission {
 }
 
 impl ParticleSystem {
+    fn refresh_def_indices_if_dirty(&mut self) {
+        if !self.def_indices_dirty {
+            return;
+        }
+        self.def_indices.clear();
+        for (index, def) in self.defs.iter().enumerate() {
+            // GetDef returns the first exact-case match, including duplicate
+            // names introduced through get_def_mut (C4Particles.cpp:465-473).
+            self.def_indices
+                .entry(def.core.name.clone())
+                .or_insert(index);
+        }
+        self.def_indices_dirty = false;
+    }
+
     fn refresh_def_name_caches(&self) {
         *self.def_names.borrow_mut() =
             Rc::new(self.defs.iter().map(|def| def.core.name.clone()).collect());
@@ -603,6 +624,7 @@ impl ParticleSystem {
         // invalidate both script-host snapshots. Their next reader rebuilds
         // from the live definition list after this mutable borrow ends.
         self.def_name_caches_dirty.set(true);
+        self.def_indices_dirty = true;
         self.defs.get_mut(index)
     }
 
@@ -687,6 +709,7 @@ impl ParticleSystem {
             count: 0,
         });
         self.refresh_def_name_caches();
+        self.def_indices_dirty = true;
         Ok(())
     }
 
@@ -765,6 +788,7 @@ impl ParticleSystem {
         if index < self.defs.len() {
             let last = self.defs.len() - 1;
             self.defs[index..=last].rotate_right(1);
+            self.def_indices_dirty = true;
         }
     }
 
@@ -779,6 +803,7 @@ impl ParticleSystem {
         self.defs.retain(|def| def.core.name != name);
         let removed = self.defs.len() != before;
         if removed {
+            self.def_indices_dirty = true;
             self.refresh_def_name_caches();
         }
         removed
@@ -934,7 +959,8 @@ impl ParticleSystem {
         layer: ParticleLayer,
         attach_origin: Option<(i32, i32)>,
     ) -> bool {
-        let Some(def_index) = self.defs.iter().position(|def| def.core.name == def_name) else {
+        self.refresh_def_indices_if_dirty();
+        let Some(&def_index) = self.def_indices.get(def_name) else {
             return false;
         };
         // check count (C4Particles.cpp:389-394)
@@ -1217,26 +1243,27 @@ impl ParticleSystem {
         target: Option<ParticleTarget>,
         env: &ParticleEnv,
     ) {
+        self.refresh_def_indices_if_dirty();
         let mut index = self.particles.len();
         while index > 0 {
             index -= 1;
             if self.particles[index].layer != *layer {
                 continue;
             }
-            let def_index = self
-                .defs
-                .iter()
-                .position(|def| def.core.name == self.particles[index].def_name);
-            let Some(def_index) = def_index else {
+            let Some(&def_index) = self.def_indices.get(&self.particles[index].def_name) else {
                 // No def (legacy snapshot path): keep the particle untouched.
                 continue;
             };
-            let mut particle = self.particles[index].clone();
-            let exec_proc = self.defs[def_index].exec_proc;
-            let keep = self.run_exec_proc(exec_proc, def_index, &mut particle, target, env);
-            if keep {
-                self.particles[index] = particle;
-            } else {
+            let def = &self.defs[def_index];
+            let keep = Self::run_exec_proc(
+                def.exec_proc,
+                def,
+                &mut self.safe_rng,
+                &mut self.particles[index],
+                target,
+                env,
+            );
+            if !keep {
                 self.defs[def_index].count -= 1;
                 self.particles.remove(index);
             }
@@ -1247,16 +1274,16 @@ impl ParticleSystem {
     /// survives — C++ returns "whether particle died" inverted at call site;
     /// here true = keep, matching the call sites' use).
     fn run_exec_proc(
-        &mut self,
         proc: ParticleProc,
-        def_index: usize,
+        def: &ParticleDef,
+        safe_rng: &mut SafeRng,
         particle: &mut Particle,
         target: Option<ParticleTarget>,
         env: &ParticleEnv,
     ) -> bool {
         match proc {
-            ParticleProc::StdExec => self.fx_std_exec(def_index, particle, target, env),
-            ParticleProc::SmokeExec => self.fx_smoke_exec(def_index, particle, env),
+            ParticleProc::StdExec => Self::fx_std_exec(def, safe_rng, particle, target, env),
+            ParticleProc::SmokeExec => Self::fx_smoke_exec(safe_rng, particle, env),
             ParticleProc::Bounce => {
                 particle.xdir = -particle.xdir;
                 particle.ydir = -particle.ydir;
@@ -1279,13 +1306,12 @@ impl ParticleSystem {
 
     /// fxStdExec (C4Particles.cpp:614-697).
     fn fx_std_exec(
-        &mut self,
-        def_index: usize,
+        def: &ParticleDef,
+        safe_rng: &mut SafeRng,
         particle: &mut Particle,
         target: Option<ParticleTarget>,
         env: &ParticleEnv,
     ) -> bool {
-        let def = self.defs[def_index].clone();
         let mut dx = particle.x;
         let mut dy = particle.y;
         let mut dxdir = particle.xdir;
@@ -1309,7 +1335,7 @@ impl ParticleSystem {
             if vertex_hit {
                 // collision (C4Particles.cpp:632-634)
                 if let Some(collision_proc) = def.collision_proc {
-                    if !self.run_exec_proc(collision_proc, def_index, particle, target, env) {
+                    if !Self::run_exec_proc(collision_proc, def, safe_rng, particle, target, env) {
                         return false;
                     }
                 }
@@ -1382,12 +1408,7 @@ impl ParticleSystem {
     }
 
     /// fxSmokeExec (C4Particles.cpp:537-576).
-    fn fx_smoke_exec(
-        &mut self,
-        _def_index: usize,
-        particle: &mut Particle,
-        env: &ParticleEnv,
-    ) -> bool {
+    fn fx_smoke_exec(safe_rng: &mut SafeRng, particle: &mut Particle, env: &ParticleEnv) -> bool {
         // lifetime: pre-decrement, die at exactly 0 (C4Particles.cpp:540)
         particle.life -= 1;
         if particle.life == 0 {
@@ -1410,7 +1431,7 @@ impl ParticleSystem {
         if particle.b % 12 == 0 || building {
             particle.xdir = (0.025f32 * (env.wind)(particle.x as i32, particle.y as i32) as f32)
                 .clamp(-2.0, 2.0);
-            particle.xdir += 0.1 * self.safe_rng.random(41) as f32 - 2.0;
+            particle.xdir += 0.1 * safe_rng.random(41) as f32 - 2.0;
         }
         // float (C4Particles.cpp:563-570)
         if (env.solid)(particle.x as i32, (particle.y - particle.a) as i32) {

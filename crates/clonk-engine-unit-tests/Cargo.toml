@@ -28,6 +28,10 @@ path = "tests/unit/main.rs"
 name = "engine_inline"
 path = "../clonk-engine/src/lib.rs"
 
+[[test]]
+name = "particle_allocations"
+path = "tests/particle_allocations.rs"
+
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
