@@ -9966,7 +9966,7 @@ impl GameApp {
         // explicit command-line host has no startup generation to return to
         // and quits.
         self.status_text = message;
-        if !self.console_mode {
+        if !self.console_session.enabled {
             self.request_exit("a network game failed to start with no menu to return to");
         }
         Ok(())

@@ -2264,7 +2264,7 @@ fn a_console_opened_round_parks_the_server_for_the_next_open() {
     // supervise the process for every round.
     let mut server = running_browser_sandbox(ScenarioSelectorMode::Local);
     server.headless = true;
-    server.console_restored_startup_dialog = true;
+    server.console_session.restored_startup_dialog = true;
 
     server.handle_game_over().test_value();
 
@@ -4824,7 +4824,7 @@ fn console_scoreboard_owns_a_child_window_only_while_its_dialog_is_open() {
     main_assert!(!fullscreen.console_scoreboard_window_open());
 
     let mut console = new_scoreboard_test_app(script);
-    console.console_mode = true;
+    console.console_session.enabled = true;
     main_assert!(!console.console_scoreboard_window_open());
 
     call_scoreboard_function_and_update(&mut console, "ShowBoard");
@@ -4856,7 +4856,7 @@ fn console_scoreboard_tab_toggles_the_child_window_without_moving_the_refcount()
                        SetScoreboardData(1, 1, "Ada");
                    }"#,
     );
-    app.console_mode = true;
+    app.console_session.enabled = true;
     call_scoreboard_function_and_update(&mut app, "FillBoard");
     let refcount = app.snapshot.hud.scoreboard.show_count();
     main_assert!(!app.console_scoreboard_window_open());
@@ -4889,7 +4889,7 @@ fn console_scoreboard_window_takes_its_title_and_size_from_the_live_board() {
                        SetScoreboardData(2, 1, "Bert has a very long name indeed");
                    }"#,
     );
-    app.console_mode = true;
+    app.console_session.enabled = true;
     main_assert!(app.console_scoreboard_window_chrome().is_none());
 
     call_scoreboard_function_and_update(&mut app, "ShowBoard");

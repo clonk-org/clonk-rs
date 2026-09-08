@@ -4,7 +4,7 @@
 #[test]
 fn console_open_close_and_message_fallback_follow_app_state() {
     let mut startup = new_state_only_menu_app(320, 200);
-    startup.console_mode = true;
+    startup.console_session.enabled = true;
     let (boot_sender, boot_receiver) = mpsc::channel();
     startup.boot_loading = Some(BootLoadingState::new(boot_receiver));
     startup.mode = AppMode::Loading;

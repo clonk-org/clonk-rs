@@ -55,7 +55,7 @@ impl GameApp {
         {
             return false;
         }
-        self.console_mode
+        self.console_session.enabled
             || self.mode == AppMode::Menu
             || (self.dialogs.game_option_input.is_some()
                 && (self.running_chat_controller().is_none()
@@ -2745,7 +2745,7 @@ impl GameApp {
         // key is not a player control — so this guard does not affect the
         // shipped configuration.
         let pause_binding = self.runtime_keyboard_binding_matches(
-            if self.console_mode {
+            if self.console_session.enabled {
                 "ConsolePauseToggle"
             } else {
                 "FullscreenPauseToggle"
@@ -2773,7 +2773,8 @@ impl GameApp {
         // handler offers every key to `Game.DoKeyboardInput`
         // (`C4Viewport.cpp:89`).
         let tools_action = self
-            .console_mode
+            .console_session
+            .enabled
             .then(|| self.console_tools_key_action(key, c4_modifiers))
             .flatten()
             .filter(|_| !self.local_player_key_binding_in_scope(key));
@@ -3505,7 +3506,7 @@ impl GameApp {
         // The shell picks the scope's registration exactly as the keyboard
         // route does: `FullscreenPauseToggle` is KEYSCOPE_Fullscreen and
         // `ConsolePauseToggle` KEYSCOPE_Console.
-        if matches(if self.console_mode {
+        if matches(if self.console_session.enabled {
             "ConsolePauseToggle"
         } else {
             "FullscreenPauseToggle"
@@ -3515,7 +3516,7 @@ impl GameApp {
         // The console block registers immediately after the pause key
         // (C4Game.cpp:3432-3440) and only acts in console mode, which is
         // what its scope means.
-        if self.console_mode {
+        if self.console_session.enabled {
             if let Some(action) = self.console_tools_gamepad_action(&matches) {
                 return Some(RuntimeCustomGamepadAction::ConsoleTools(action));
             }
@@ -7968,7 +7969,7 @@ impl GameApp {
     }
 
     pub(crate) fn platform_cursor_visible(&self) -> bool {
-        self.console_mode
+        self.console_session.enabled
             || classic_platform_cursor_visible(
                 self.window_active,
                 self.input_routing.live.pointer_inside_window,

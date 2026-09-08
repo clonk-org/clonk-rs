@@ -1069,7 +1069,8 @@ impl GameApp {
         // start tracking `CStdApp::Active{false}` (StdApp.h:257) first: a
         // headless `GameApp` still defaults it to `true`, so C++ would decline
         // the screenshot where the port would take one.
-        let capture_title = self.engine.frame() != 0 && !self.console_mode && self.window_active;
+        let capture_title =
+            self.engine.frame() != 0 && !self.console_session.enabled && self.window_active;
         let title_png = if capture_title && !self.presentation.retained_gpu_presentation_active {
             let surface = self.rendering.graphics.surface();
             // C++ saves the back buffer with gamma resolved either way: with

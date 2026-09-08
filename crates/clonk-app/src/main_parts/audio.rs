@@ -2356,7 +2356,7 @@ pub(crate) fn handle_window_event(
     event: WindowEvent,
     event_loop: &winit::event_loop::ActiveEventLoop,
 ) -> Result<()> {
-    if app.console_mode {
+    if app.console_session.enabled {
         return handle_developer_console_window_event(
             window, app, pixels, presenter, event, event_loop,
         );

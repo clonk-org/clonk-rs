@@ -526,7 +526,7 @@ impl GameApp {
     /// dialog's — which is why the console runner reconciles against this
     /// rather than being commanded.
     pub(crate) fn console_scoreboard_window_open(&self) -> bool {
-        self.console_mode && self.dialogs.scoreboard.is_some()
+        self.console_session.enabled && self.dialogs.scoreboard.is_some()
     }
 
     /// Whether the chart wants a console child window.
@@ -536,7 +536,7 @@ impl GameApp {
     /// above (`C4GuiDialogs.cpp:659-661`) and its window lives exactly as long
     /// as the dialog does.
     pub(crate) fn console_network_chart_window_open(&self) -> bool {
-        self.console_mode && self.dialogs.chart.is_some()
+        self.console_session.enabled && self.dialogs.chart.is_some()
     }
 
     pub(crate) fn close_scoreboard_dialog(&mut self) -> bool {

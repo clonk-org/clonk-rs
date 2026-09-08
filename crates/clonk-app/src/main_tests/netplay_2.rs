@@ -4858,7 +4858,7 @@ fn synchronized_player_file_remote_gates_leave_profile_untouched() {
 #[test]
 fn developer_console_latches_no_input_and_reflects_pending_network_pause() {
     let mut app = new_state_only_running_sandbox_app();
-    app.console_mode = true;
+    app.console_session.enabled = true;
     app.records.playback =
         Some(ControlRecordPlayback::from_bytes(&[0, clonk_engine::RCT_END]).test_value());
     app.sync_developer_console_view();
@@ -15504,7 +15504,7 @@ fn console_network_chart_owns_a_child_window_only_while_its_dialog_is_open() {
     main_assert!(!fullscreen.console_network_chart_window_open());
 
     let mut console = new_running_sandbox_app();
-    console.console_mode = true;
+    console.console_session.enabled = true;
     main_assert!(!console.console_network_chart_window_open());
 
     console.toggle_network_chart();
@@ -15534,7 +15534,7 @@ fn console_network_chart_owns_a_child_window_only_while_its_dialog_is_open() {
 #[test]
 fn the_console_network_chart_paints_its_own_window_framebuffer() {
     let mut console = new_running_sandbox_app();
-    console.console_mode = true;
+    console.console_session.enabled = true;
     main_assert!(console.render_console_network_chart(400, 300).is_none());
 
     console.toggle_network_chart();

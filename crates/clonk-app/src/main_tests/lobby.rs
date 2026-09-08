@@ -7504,7 +7504,7 @@ fn headless_or_console_blocked_profile_preserves_lobby_transition_without_a_noti
             NetworkLobbyState::new(0, "Host".to_string(), true),
         );
         host.headless = headless;
-        host.console_mode = console_mode;
+        host.console_session.enabled = console_mode;
         host.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
 
         host.open_network_lobby();
