@@ -1239,29 +1239,8 @@ impl GameApp {
         &mut self,
         request: save_worker::NativeSlotSaveRequest,
     ) -> Result<()> {
-        self.submit_background_save_job(save_worker::native_slot_save_job(request))
-    }
-
-    pub(crate) fn submit_background_save_job(
-        &mut self,
-        job: save_worker::BackgroundSaveJob<save_worker::BackgroundSaveCompletion>,
-    ) -> Result<()> {
-        if self.saves.background_worker.is_none() {
-            self.saves.background_worker = Some(save_worker::new_app_save_worker()?);
-        }
-        let worker = self
-            .saves
-            .background_worker
-            .as_ref()
-            .context("background save worker is unavailable")?;
-        worker.try_submit(job).map_err(|error| match error {
-            save_worker::BackgroundSaveSubmitError::Full => {
-                anyhow!("too many saves are already pending")
-            }
-            save_worker::BackgroundSaveSubmitError::Disconnected => {
-                anyhow!("background save worker stopped unexpectedly")
-            }
-        })
+        self.saves
+            .submit_background_job(save_worker::native_slot_save_job(request))
     }
 
     pub(crate) fn poll_background_save_jobs(&mut self) {

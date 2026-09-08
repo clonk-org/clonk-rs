@@ -271,17 +271,18 @@ impl GameApp {
                 });
                 if self.netplay.manager.is_some() {
                     let preserve_folder_group = local_control && path.is_dir();
-                    self.submit_background_save_job(save_worker::player_file_save_job(
-                        save_worker::PreparedPlayerFileSave {
-                            player_number,
-                            info_id,
-                            group,
-                            path: path.clone(),
-                            preserve_folder_group,
-                            official_derivation,
-                            derivation,
-                        },
-                    ))?;
+                    self.saves
+                        .submit_background_job(save_worker::player_file_save_job(
+                            save_worker::PreparedPlayerFileSave {
+                                player_number,
+                                info_id,
+                                group,
+                                path: path.clone(),
+                                preserve_folder_group,
+                                official_derivation,
+                                derivation,
+                            },
+                        ))?;
                 } else {
                     persist_console_save_group(&group, &path, local_control && path.is_dir())
                         .with_context(|| format!("persist player profile {}", path.display()))?;
