@@ -2805,7 +2805,7 @@ impl GameApp {
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
             return None;
         }
-        let projection = *self.console_viewport_projections.get(&identity)?;
+        let projection = *self.console_viewports.projections.get(&identity)?;
         let (x, y) = projection
             .pointer_projection(scale)
             .world_position(local.0, local.1);
@@ -2817,8 +2817,8 @@ impl GameApp {
         let target = edit_target(shift, &selection, |after| hit_test.object_at(x, y, after));
 
         let press = edit_press(control, target, &selection);
-        self.edit_cursor_hold = press.hold;
-        self.edit_cursor_last_world = Some((x, y));
+        self.edit_cursor.hold = press.hold;
+        self.edit_cursor.last_world = Some((x, y));
         match press.selection {
             Some(SelectionEdit::Replace(object)) => self
                 .developer_selection
@@ -2829,7 +2829,7 @@ impl GameApp {
             Some(SelectionEdit::ClearAndDragFrame) => {
                 // `DragFrame = true; X2 = X; Y2 = Y` — the band is anchored at
                 // the press, in world coordinates.
-                self.edit_cursor_drag_frame = Some(((x, y), (x, y)));
+                self.edit_cursor.drag_frame = Some(((x, y), (x, y)));
                 self.developer_selection.clear(SelectionWriter::EditCursor)
             }
             // The bare clear is the right button's alone (`right_press`).
@@ -2908,7 +2908,7 @@ impl GameApp {
         if self.developer_console_edit_mode != ConsoleEditMode::Edit {
             return;
         }
-        let Some(projection) = self.console_viewport_projections.get(&identity).copied() else {
+        let Some(projection) = self.console_viewports.projections.get(&identity).copied() else {
             return;
         };
         let (x, y) = projection
@@ -2917,17 +2917,17 @@ impl GameApp {
 
         // `UpdateDropTarget` runs on every move, before the drag arms decide
         // anything (`C4EditCursor.cpp:653-670`).
-        self.edit_cursor_drop_target = self.console_drop_target(control, (x, y));
-        if let Some((_, corner)) = self.edit_cursor_drag_frame.as_mut() {
+        self.edit_cursor.drop_target = self.console_drop_target(control, (x, y));
+        if let Some((_, corner)) = self.edit_cursor.drag_frame.as_mut() {
             *corner = (x, y);
             return;
         }
         // `edit_move` decides between moving the selection and re-picking the
         // hovered target; the offset is the delta from the previous message.
-        let previous = self.edit_cursor_last_world.replace((x, y));
+        let previous = self.edit_cursor.last_world.replace((x, y));
         if let clonk_engine::developer_cursor::EditMove::MoveSelection { dx, dy } =
             clonk_engine::developer_cursor::edit_move(
-                self.edit_cursor_hold,
+                self.edit_cursor.hold,
                 false,
                 previous.map_or(0, |(px, _)| x - px),
                 previous.map_or(0, |(_, py)| y - py),
@@ -2970,10 +2970,10 @@ impl GameApp {
         }
         use clonk_engine::developer_selection::SelectionWriter;
 
-        let band = self.edit_cursor_drag_frame.take();
-        let drop_target = self.edit_cursor_drop_target.take();
-        self.edit_cursor_hold = false;
-        self.edit_cursor_last_world = None;
+        let band = self.edit_cursor.drag_frame.take();
+        let drop_target = self.edit_cursor.drop_target.take();
+        self.edit_cursor.hold = false;
+        self.edit_cursor.last_world = None;
         // `LeftButtonUp` dispatches its finish on the *current* mode but then
         // clears `Hold`, `DragFrame` and `DragLine` unconditionally
         // (`C4EditCursor.cpp:300-304`) — and C++ has one `Hold` for both arms.
@@ -3107,7 +3107,7 @@ impl GameApp {
     ) {
         use clonk_engine::developer_drop::{drop_file, drop_world_position, DropOutcome};
 
-        let Some(projection) = self.console_viewport_projections.get(&identity).copied() else {
+        let Some(projection) = self.console_viewports.projections.get(&identity).copied() else {
             return;
         };
         let editing = self.developer_console_editing();
@@ -3222,7 +3222,7 @@ impl GameApp {
             contents,
         );
         let labels = self.console_viewport_context_labels();
-        self.console_viewport_context_menu = Some((
+        self.console_viewports.context_menu = Some((
             identity,
             ViewportContextMenu::new(enablement, &labels, local),
         ));
@@ -3254,7 +3254,7 @@ impl GameApp {
         identity: u64,
         local: (i32, i32),
     ) -> bool {
-        let Some((open, menu)) = self.console_viewport_context_menu.as_mut() else {
+        let Some((open, menu)) = self.console_viewports.context_menu.as_mut() else {
             return false;
         };
         if *open != identity {
@@ -3278,7 +3278,8 @@ impl GameApp {
     /// and the release that follows a chosen item would run
     /// `LeftButtonUp` — clearing the very `Hold` Grab contents had just set.
     pub(crate) fn console_viewport_context_menu_owns_pointer(&self, identity: u64) -> bool {
-        self.console_viewport_context_menu
+        self.console_viewports
+            .context_menu
             .as_ref()
             .is_some_and(|(open, _)| *open == identity)
     }
@@ -3286,7 +3287,8 @@ impl GameApp {
     /// Consume the grab a swallowed press left behind, so exactly one release
     /// is swallowed with it.
     pub(crate) fn take_console_viewport_pointer_grab(&mut self, identity: u64) -> bool {
-        self.console_viewport_context_menu_grab
+        self.console_viewports
+            .context_menu_grab
             .take_if(|held| *held == identity)
             .is_some()
     }
@@ -3300,7 +3302,7 @@ impl GameApp {
     ) -> bool {
         use clonk_frontend::developer_context_menu::ViewportContextOutcome;
 
-        let Some((open, menu)) = self.console_viewport_context_menu.as_mut() else {
+        let Some((open, menu)) = self.console_viewports.context_menu.as_mut() else {
             return false;
         };
         if *open != identity {
@@ -3313,15 +3315,15 @@ impl GameApp {
         );
         // The release completing this click belongs to the menu too, whether
         // or not the menu is still up by the time it arrives.
-        self.console_viewport_context_menu_grab = Some(identity);
+        self.console_viewports.context_menu_grab = Some(identity);
         match outcome {
             ViewportContextOutcome::Activate(item) => {
-                self.console_viewport_context_menu = None;
+                self.console_viewports.context_menu = None;
                 self.activate_console_viewport_context_item(item);
             }
             // A greyed row or the separator: swallowed, and the menu stays.
             ViewportContextOutcome::Ignored => {}
-            ViewportContextOutcome::Dismiss => self.console_viewport_context_menu = None,
+            ViewportContextOutcome::Dismiss => self.console_viewports.context_menu = None,
         }
         true
     }
@@ -3329,18 +3331,19 @@ impl GameApp {
     /// Whether a detached viewport's console popup is open, which is what
     /// decides who owns Escape.
     pub(crate) fn console_viewport_context_menu_open(&self) -> bool {
-        self.console_viewport_context_menu.is_some()
+        self.console_viewports.context_menu.is_some()
     }
 
     /// Close the popup without running anything — the Escape key.
     pub(crate) fn dismiss_console_viewport_context_menu(&mut self) -> bool {
-        self.console_viewport_context_menu.take().is_some()
+        self.console_viewports.context_menu.take().is_some()
     }
 
     /// Close the popup only if it belongs to `identity`, so one viewport's
     /// window closing never takes a sibling's menu with it.
     pub(crate) fn dismiss_console_viewport_context_menu_for(&mut self, identity: u64) -> bool {
-        self.console_viewport_context_menu
+        self.console_viewports
+            .context_menu
             .take_if(|(open, _)| *open == identity)
             .is_some()
     }
@@ -4687,7 +4690,7 @@ impl GameApp {
         };
         self.developer_selection
             .select_frame(SelectionWriter::EditCursor, contents);
-        self.edit_cursor_hold = true;
+        self.edit_cursor.hold = true;
         self.submit_editor_selection_action(clonk_engine::EMMO_EXIT, "grab contents");
     }
 
@@ -4733,7 +4736,7 @@ impl GameApp {
         local: (i32, i32),
         scale: f32,
     ) -> Option<(i32, i32)> {
-        let projection = self.console_viewport_projections.get(&identity)?;
+        let projection = self.console_viewports.projections.get(&identity)?;
         Some(
             projection
                 .pointer_projection(scale)
@@ -4892,7 +4895,7 @@ impl GameApp {
             return false;
         };
         if press.part == ScrollBarPart::Thumb {
-            self.console_viewport_scroll_drag = Some((identity, press.axis));
+            self.console_viewports.scroll_drag = Some((identity, press.axis));
             return true;
         }
         let (dx, dy) = scroll_bar_step(press.axis, press.part, view);
@@ -4910,7 +4913,7 @@ impl GameApp {
     ) -> bool {
         use clonk_engine::developer_viewport::{scroll_bar_thumb_position, ScrollAxis};
 
-        let Some((held, axis)) = self.console_viewport_scroll_drag else {
+        let Some((held, axis)) = self.console_viewports.scroll_drag else {
             return false;
         };
         if held != identity {
@@ -4938,7 +4941,7 @@ impl GameApp {
 
     /// Release the thumb, whichever window holds it.
     pub(crate) fn console_viewport_scroll_release(&mut self) -> bool {
-        self.console_viewport_scroll_drag.take().is_some()
+        self.console_viewports.scroll_drag.take().is_some()
     }
 
     /// `C4EditCursor::AltDown`/`AltUp` (`C4EditCursor.cpp:773-792`).
@@ -5043,7 +5046,7 @@ impl GameApp {
         {
             return false;
         }
-        if self.edit_cursor_hold || self.developer_tools.holding() {
+        if self.edit_cursor.hold || self.developer_tools.holding() {
             return false;
         }
         let Some((x, y)) = self.console_viewport_world(identity, local, scale) else {
@@ -5251,16 +5254,16 @@ impl GameApp {
             self.console_draw_tools_tick();
             return;
         }
-        if edit_tick_move(mode, self.edit_cursor_hold).is_none() {
-            self.edit_cursor_tick_frame = None;
+        if edit_tick_move(mode, self.edit_cursor.hold).is_none() {
+            self.edit_cursor.tick_frame = None;
             return;
         }
         // Once per engine tick, not once per event-loop wake.
         let frame = self.engine.frame();
-        if self.edit_cursor_tick_frame == Some(frame) {
+        if self.edit_cursor.tick_frame == Some(frame) {
             return;
         }
-        self.edit_cursor_tick_frame = Some(frame);
+        self.edit_cursor.tick_frame = Some(frame);
         let objects = self
             .developer_selection
             .objects()
@@ -5287,16 +5290,16 @@ impl GameApp {
         let halted = self.runtime_halt_active();
         let editing = self.developer_console_editing();
         let Some(control) = self.developer_tools.execute_frame(halted, editing) else {
-            self.edit_cursor_tick_frame = None;
+            self.edit_cursor.tick_frame = None;
             return;
         };
         // Once per engine tick, not once per event-loop wake: `C4Console::
         // Execute` runs the edit cursor exactly once per application tick.
         let frame = self.engine.frame();
-        if self.edit_cursor_tick_frame == Some(frame) {
+        if self.edit_cursor.tick_frame == Some(frame) {
             return;
         }
-        self.edit_cursor_tick_frame = Some(frame);
+        self.edit_cursor.tick_frame = Some(frame);
         self.submit_editor_draw_tool(control);
     }
 
@@ -5420,7 +5423,7 @@ impl GameApp {
             snapshot,
             frame.projection,
             self.developer_selection.objects(),
-            self.edit_cursor_drag_frame,
+            self.edit_cursor.drag_frame,
         );
         // `ScrollBarsByViewPosition` is fed the view the frame was drawn with,
         // not a later one, so a bar can never describe a position the window
@@ -5445,13 +5448,14 @@ impl GameApp {
         }
         // The frame a window drew is what its pointer input must be converted
         // through; nothing else records this viewport's own ViewX/ViewY.
-        self.console_viewport_projections
+        self.console_viewports
+            .projections
             .insert(identity, frame.projection);
         // The context menu is *not* part of `C4Viewport::Draw`: C++ hands it to
         // the window system, which paints it above the window entirely. With no
         // OS popup to hand it to, the port paints it last, over everything the
         // viewport just drew.
-        if let Some((open, menu)) = self.console_viewport_context_menu.as_ref() {
+        if let Some((open, menu)) = self.console_viewports.context_menu.as_ref() {
             if *open == identity {
                 let font = self.assets.font_arc();
                 menu.render(&mut frame.surface, font.as_ref());
