@@ -445,7 +445,7 @@ impl GameApp {
             // restores the saved control and cancels this traversal.
             return Ok(false);
         }
-        let modifiers = self.live_input.modifiers
+        let modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if self.startup.view == StartupView::NetworkGame
             && (modifiers == ModifiersState::CONTROL
@@ -536,7 +536,7 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let modifiers = self.live_input.modifiers
+        let modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers != ModifiersState::ALT
             && modifiers != (ModifiersState::ALT | ModifiersState::SHIFT)
@@ -631,7 +631,7 @@ impl GameApp {
         if self.startup.view != StartupView::PlayerSelection || self.startup.crew_rename.is_none() {
             return Ok(false);
         }
-        let modifiers = self.live_input.modifiers
+        let modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if state == ElementState::Pressed
             && key == VirtualKeyCode::ContextMenu
@@ -5077,7 +5077,7 @@ impl GameApp {
         self.startup_tooltip.pointer_left();
         if view != StartupView::Options {
             self.startup.options_advanced_dialog = None;
-            self.live_input.gamepads.set_options_open_slot(None);
+            self.input_routing.live.gamepads.set_options_open_slot(None);
         }
         if view != StartupView::ScenarioBrowser {
             self.cancel_scenario_selector_discovery();

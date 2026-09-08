@@ -2203,7 +2203,7 @@ impl GameApp {
         {
             return;
         }
-        let Some(point) = self.live_input.running_pointer else {
+        let Some(point) = self.input_routing.live.running_pointer else {
             if let Some(dialog) = self.dialogs.client_list.as_mut() {
                 dialog.pointer_left();
             }

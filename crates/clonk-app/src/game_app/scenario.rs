@@ -2283,19 +2283,19 @@ impl GameApp {
         self.film_view_player = None;
         self.clear_physical_viewport_states();
         self.viewports.physical_viewports_authoritative = false;
-        self.input = InputDispatcher::new();
+        self.input_routing.dispatcher = InputDispatcher::new();
         if offline_savegame.is_none() {
             self.install_local_controls(LocalControlRegistry::default());
         }
-        self.live_input.pressed_engine_keys.clear();
-        self.scoreboard_tab_raw_pressed = false;
-        self.live_input.ingame_gui_pointer = None;
-        self.live_input.ingame_pointer = None;
-        self.live_input.ingame_mouse_init_centered = false;
-        self.live_input.ingame_viewport_mouse = None;
-        self.live_input.ingame_edge_scroll = None;
-        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.live_input.ingame_mouse_target = None;
+        self.input_routing.live.pressed_engine_keys.clear();
+        self.input_routing.scoreboard_tab_raw_pressed = false;
+        self.input_routing.live.ingame_gui_pointer = None;
+        self.input_routing.live.ingame_pointer = None;
+        self.input_routing.live.ingame_mouse_init_centered = false;
+        self.input_routing.live.ingame_viewport_mouse = None;
+        self.input_routing.live.ingame_edge_scroll = None;
+        self.input_routing.live.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.input_routing.live.ingame_mouse_target = None;
         self.ingame_mouse.left = None;
         self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;
@@ -2724,17 +2724,17 @@ impl GameApp {
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         self.apply_material_library();
-        self.input = InputDispatcher::new();
+        self.input_routing.dispatcher = InputDispatcher::new();
         self.install_local_controls(LocalControlRegistry::default());
-        self.live_input.pressed_engine_keys.clear();
-        self.scoreboard_tab_raw_pressed = false;
-        self.live_input.ingame_gui_pointer = None;
-        self.live_input.ingame_pointer = None;
-        self.live_input.ingame_mouse_init_centered = false;
-        self.live_input.ingame_viewport_mouse = None;
-        self.live_input.ingame_edge_scroll = None;
-        self.live_input.ingame_mouse_caption = IngameMouseCaptionState::default();
-        self.live_input.ingame_mouse_target = None;
+        self.input_routing.live.pressed_engine_keys.clear();
+        self.input_routing.scoreboard_tab_raw_pressed = false;
+        self.input_routing.live.ingame_gui_pointer = None;
+        self.input_routing.live.ingame_pointer = None;
+        self.input_routing.live.ingame_mouse_init_centered = false;
+        self.input_routing.live.ingame_viewport_mouse = None;
+        self.input_routing.live.ingame_edge_scroll = None;
+        self.input_routing.live.ingame_mouse_caption = IngameMouseCaptionState::default();
+        self.input_routing.live.ingame_mouse_target = None;
         self.ingame_mouse.left = None;
         self.ingame_mouse.right = None;
         self.ingame_menus.construction_drag = None;

@@ -765,6 +765,39 @@ pub(crate) struct IngameMouse {
     pub(crate) help_caption: Option<IngameMouseHelpCaption>,
 }
 
+/// The keyboard and gamepad half of the app: the binding dispatcher and the
+/// live device state it routes from, the gamepad bindings and poll count,
+/// the latches `C4Game::DoKeyboardInput` resolves once per event, the raw
+/// Tab state tracked ahead of scope lookup, and the once-per-game
+/// KeyConfig ownership. `GameApp` composes it as `input_routing`.
+pub(crate) struct InputRouting {
+    pub(crate) dispatcher: InputDispatcher,
+    /// Live keyboard and pointer state. Distinct from `input`, which is
+    /// the binding dispatcher: this is what the devices last reported.
+    pub(crate) live: InputState,
+    pub(crate) gamepad_bindings: GamepadBindings,
+    pub(crate) gamepad_poll_count: usize,
+    /// `fRepeated` for the physical key event currently being routed.
+    ///
+    /// `C4Game::DoKeyboardInput` derives it from `PressedKeys` as its very
+    /// first statement — before keyboard scope is computed and before any
+    /// dialog can claim the event (`C4Game.cpp:2143-2155`) — then carries it
+    /// down as a parameter. `GameApp::handle_key` resolves it once at the same
+    /// point so every early-returning handler leaves the same latch behind.
+    pub(crate) engine_key_repeated: bool,
+    /// Whether the physical-key route consumed this event before winit's
+    /// paired `KeyEvent::text` is considered. Push-to-talk keys use this to
+    /// avoid also typing into a focused game-shell edit control.
+    pub(crate) key_event_suppresses_text: bool,
+    /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
+    /// Keep that ownership check separate from the process-global language
+    /// table so a new round cannot reuse a stale accept/refusal.
+    pub(crate) runtime_key_config_cache: OnceLock<std::result::Result<RuntimeKeyConfig, String>>,
+    /// Raw Tab state is tracked before modifier/dialog scope lookup because a
+    /// held key can cross into or out of a PRIO_PlrControl binding.
+    pub(crate) scoreboard_tab_raw_pressed: bool,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -806,25 +839,8 @@ pub(crate) struct GameApp {
     /// Process-local `Config.General.AllowScriptingInReplays`; native reads
     /// this from its already-loaded configuration while replay controls run.
     pub(crate) allow_scripting_in_replays: bool,
-    pub(crate) input: InputDispatcher,
     pub(crate) bindings: KeyboardBindings,
-    pub(crate) gamepad_bindings: GamepadBindings,
     pub(crate) local_controls: LocalControlRegistry,
-    /// `fRepeated` for the physical key event currently being routed.
-    ///
-    /// `C4Game::DoKeyboardInput` derives it from `PressedKeys` as its very
-    /// first statement — before keyboard scope is computed and before any
-    /// dialog can claim the event (`C4Game.cpp:2143-2155`) — then carries it
-    /// down as a parameter. `GameApp::handle_key` resolves it once at the same
-    /// point so every early-returning handler leaves the same latch behind.
-    pub(crate) engine_key_repeated: bool,
-    /// Whether the physical-key route consumed this event before winit's
-    /// paired `KeyEvent::text` is considered. Push-to-talk keys use this to
-    /// avoid also typing into a focused game-shell edit control.
-    pub(crate) key_event_suppresses_text: bool,
-    /// Raw Tab state is tracked before modifier/dialog scope lookup because a
-    /// held key can cross into or out of a PRIO_PlrControl binding.
-    pub(crate) scoreboard_tab_raw_pressed: bool,
     pub(crate) pending_screenshots: VecDeque<ScreenshotRequest>,
     pub(crate) pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
     /// Presentation pacing and capture state: the port-only frame counters
@@ -856,8 +872,12 @@ pub(crate) struct GameApp {
     /// is on and allowed, both button states, the retained object
     /// selection and the Help-mode caption (clonk-org/clonk-rs#1237).
     pub(crate) ingame_mouse: IngameMouse,
+    /// Keyboard and gamepad routing: the binding dispatcher, what the devices
+    /// last reported, the gamepad bindings and poll count, the per-event
+    /// key-route latches and the per-game KeyConfig ownership
+    /// (clonk-org/clonk-rs#1237).
+    pub(crate) input_routing: InputRouting,
     #[cfg(test)]
-    pub(crate) gamepad_poll_count: usize,
     #[cfg(test)]
     pub(crate) sec1_timer_call_count: usize,
     pub(crate) snapshot: SimulationSnapshot,
@@ -1430,9 +1450,6 @@ pub(crate) struct GameApp {
     /// case. A test covering the boot path sets it explicitly. The manual
     /// command-line check is not gated by it.
     pub(crate) automatic_update_check_allowed: bool,
-    /// Live keyboard and pointer state. Distinct from `input`, which is
-    /// the binding dispatcher: this is what the devices last reported.
-    pub(crate) live_input: InputState,
     /// C4GraphicsSystem::FreeScroll's process-presentation velocity and
     /// MostRecentScrolling clock. Repeated bare arrows carry the complete
     /// prior vector for 100ms without mutating deterministic player state.
@@ -1461,10 +1478,6 @@ pub(crate) struct GameApp {
     pub(crate) configuration_reset_requested: bool,
     pub(crate) game_over_handled: bool,
     pub(crate) pending_league_end: Option<PendingLeagueEnd>,
-    /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
-    /// Keep that ownership check separate from the process-global language
-    /// table so a new round cannot reuse a stale accept/refusal.
-    pub(crate) runtime_key_config_cache: OnceLock<std::result::Result<RuntimeKeyConfig, String>>,
     /// Process-start localization/encoding metadata needed by live flash
     /// producers. The active message itself is runtime-only, survives a
     /// GraphicsSystem resize, and is reset by Game::Default/new-game.

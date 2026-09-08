@@ -104,7 +104,7 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let modifiers = self.live_input.modifiers
+        let modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let route = if modifiers.is_empty() {
             Some((false, false))
@@ -153,7 +153,7 @@ impl GameApp {
         // C4KeyCodeEx matches the exact Alt/Ctrl/Shift mask for the Options
         // dialog bindings. Logo is not part of that mask, so Logo-only input
         // intentionally remains equivalent to the bare key.
-        let modifiers = self.live_input.modifiers
+        let modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if modifiers == ModifiersState::ALT
             && matches!(key, VirtualKeyCode::ArrowDown | VirtualKeyCode::Space)
@@ -198,10 +198,10 @@ impl GameApp {
             return Ok(true);
         };
         let modifiers = InputDialogKeyModifiers {
-            shift: self.live_input.modifiers.shift_key(),
-            control: self.live_input.modifiers.control_key(),
+            shift: self.input_routing.live.modifiers.shift_key(),
+            control: self.input_routing.live.modifiers.control_key(),
         };
-        let c4_modifiers = self.live_input.modifiers
+        let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         let hotkey_modifiers = c4_modifiers == ModifiersState::ALT
             || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
@@ -382,7 +382,7 @@ impl GameApp {
         let release_latched =
             state == ElementState::Released && self.game_option_consumed_keys.remove(&key);
         let hotkey = context_menu_hotkey(key);
-        let c4_modifiers = self.live_input.modifiers
+        let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if c4_modifiers.alt_key()
             && !c4_modifiers.control_key()
@@ -415,13 +415,13 @@ impl GameApp {
                     .scenario_game_options
                     .handle_key_down_with_tab_direction(
                         KeyCode::Tab,
-                        self.live_input.modifiers.shift_key(),
+                        self.input_routing.live.modifiers.shift_key(),
                     );
                 self.finish_game_option_input(outcome.actions)?;
                 self.game_option_consumed_keys.insert(key);
                 return Ok(true);
             }
-            self.advance_scensel_dialog_focus(self.live_input.modifiers.shift_key());
+            self.advance_scensel_dialog_focus(self.input_routing.live.modifiers.shift_key());
             self.game_option_consumed_keys.insert(key);
             return Ok(true);
         }
@@ -442,7 +442,8 @@ impl GameApp {
     }
 
     pub(crate) fn runtime_key_config(&self) -> Result<&RuntimeKeyConfig> {
-        self.runtime_key_config_cache
+        self.input_routing
+            .runtime_key_config_cache
             .get_or_init(|| {
                 load_runtime_global_key_config(self.app_paths.as_ref())
                     .map_err(|error| format!("{error:#}"))
@@ -481,7 +482,7 @@ impl GameApp {
                 self.dialogs.message_consumed_keys.insert(key);
             }
         }
-        let c4_modifiers = self.live_input.modifiers
+        let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !c4_modifiers.is_empty() {
             return Ok(true);
@@ -909,7 +910,8 @@ impl GameApp {
                 && self.config.gamepads_enabled)
                 .then(|| dialog.controls().selected_set(ControlDevice::Gamepad))
         });
-        self.live_input
+        self.input_routing
+            .live
             .gamepads
             .set_options_open_slot(selected.and_then(GamepadSlot::from_index));
     }
@@ -1084,7 +1086,8 @@ impl GameApp {
                                 )
                         });
                     if valid_selection {
-                        self.live_input
+                        self.input_routing
+                            .live
                             .gamepads
                             .set_options_open_slot(GamepadSlot::from_index(set));
                     }
@@ -1446,10 +1449,11 @@ impl GameApp {
         self.engine
             .set_mission_access_store(self.config.mission_access.clone());
         self.bindings = KeyboardBindings::load(paths);
-        self.gamepad_bindings = GamepadBindings::load(paths);
-        self.live_input
+        self.input_routing.gamepad_bindings = GamepadBindings::load(paths);
+        self.input_routing
+            .live
             .gamepads
-            .set_axis_calibrations(self.gamepad_bindings.axis_calibrations());
+            .set_axis_calibrations(self.input_routing.gamepad_bindings.axis_calibrations());
         self.config.gamepads_enabled = load_gamepads_enabled(paths);
         self.config.gamepad_gui_control = load_gamepad_gui_control(paths);
         self.engine
@@ -1710,7 +1714,7 @@ impl GameApp {
                 self.dialogs.message_consumed_keys.insert(key);
             }
         }
-        let c4_modifiers = self.live_input.modifiers
+        let c4_modifiers = self.input_routing.live.modifiers
             & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
         if !c4_modifiers.is_empty() {
             return Ok(true);
@@ -1740,10 +1744,11 @@ impl GameApp {
                 self.bindings.reset_all();
             }
             clonk_frontend::startup_options_controls::ControlDevice::Gamepad => {
-                self.gamepad_bindings.reset_all();
-                self.live_input
+                self.input_routing.gamepad_bindings.reset_all();
+                self.input_routing
+                    .live
                     .gamepads
-                    .set_axis_calibrations(self.gamepad_bindings.axis_calibrations());
+                    .set_axis_calibrations(self.input_routing.gamepad_bindings.axis_calibrations());
             }
         }
         self.refresh_options_control_labels(device);
@@ -1770,9 +1775,10 @@ impl GameApp {
                         .key_for_set(set, id)
                         .map(format_key_label)
                         .unwrap_or_default(),
-                    clonk_frontend::startup_options_controls::ControlDevice::Gamepad => {
-                        self.gamepad_bindings.key_label_for_set(set, id)
-                    }
+                    clonk_frontend::startup_options_controls::ControlDevice::Gamepad => self
+                        .input_routing
+                        .gamepad_bindings
+                        .key_label_for_set(set, id),
                 };
                 dialog.controls_mut().set_label(
                     ControlCaptureTarget {
@@ -1890,7 +1896,7 @@ impl GameApp {
         self.startup.options_advanced_dialog = None;
         // Recreating the dialog destroys its ControlConfigArea before the
         // replacement starts on the Program sheet.
-        self.live_input.gamepads.set_options_open_slot(None);
+        self.input_routing.live.gamepads.set_options_open_slot(None);
         let audio = borrow_audio_context(self.sound.context.as_ref());
         let mut dialog = clonk_frontend::startup_options_dlg::OptionsDlgState::with_all(
             load_options_program_state(
@@ -1901,8 +1907,8 @@ impl GameApp {
             load_options_graphics_state(self.app_paths.as_ref()),
             load_options_control_state(
                 &self.bindings,
-                &self.gamepad_bindings,
-                self.live_input.gamepads.connected_count(),
+                &self.input_routing.gamepad_bindings,
+                self.input_routing.live.gamepads.connected_count(),
                 self.config.gamepad_gui_control,
             ),
             load_options_network_state(self.app_paths.as_ref()),
@@ -2015,7 +2021,7 @@ impl GameApp {
             dialog.graphics(),
             dialog.network(),
             &self.bindings,
-            &self.gamepad_bindings,
+            &self.input_routing.gamepad_bindings,
             self.config.gamepad_gui_control,
         ))
     }
@@ -2030,7 +2036,7 @@ impl GameApp {
             dialog.graphics(),
             dialog.network(),
             &self.bindings,
-            &self.gamepad_bindings,
+            &self.input_routing.gamepad_bindings,
             self.config.gamepad_gui_control,
         );
         Some(())
@@ -2541,7 +2547,8 @@ impl GameApp {
             || self.running_shared_gui_has_keyboard_focus()
             || self.game_option_input_pointer_capture.is_some()
             || self
-                .live_input
+                .input_routing
+                .live
                 .running_pointer
                 .zip(self.game_option_input_layout().as_ref())
                 .is_some_and(|(point, layout)| Self::point_in_input_dialog_bounds(point, layout))
@@ -2562,7 +2569,7 @@ impl GameApp {
     }
 
     pub(crate) fn stop_game_option_input_pointer_drag_at_current_position(&mut self) {
-        let point = self.live_input.running_pointer;
+        let point = self.input_routing.live.running_pointer;
         let layout = self.game_option_input_layout();
         let fonts = self.assets.clonk_fonts.clone();
         if let Some(((point, layout), fonts)) = point.zip(layout).zip(fonts.as_deref()) {

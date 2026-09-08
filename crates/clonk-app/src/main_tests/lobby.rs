@@ -2681,16 +2681,16 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
     );
     click_network_lobby(&mut app, roster_point);
     main_assert_eq!(app_lobby(&app).controller.focus() => LobbyControl::Roster,);
-    app.live_input.modifiers = ModifiersState::ALT;
+    app.input_routing.live.modifiers = ModifiersState::ALT;
     app.test_key(VirtualKeyCode::KeyT, ElementState::Pressed);
     main_assert_eq!(app_lobby(&app).controller.focus() => LobbyControl::ChatInput,);
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     click_network_lobby(&mut app, roster_point);
-    app.live_input.modifiers = ModifiersState::CONTROL;
+    app.input_routing.live.modifiers = ModifiersState::CONTROL;
     main_assert!(!app
         .handle_network_lobby_chat_key(VirtualKeyCode::KeyA, ElementState::Pressed)
         .expect("unfocused joined edit rejects Ctrl+A"));
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     main_assert_eq!(app_lobby(&app).chat_edit.text => "alpha ",);
     {
         let lobby = app_lobby_mut(&mut app.network_lobby);
@@ -2721,11 +2721,11 @@ fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
         ),
         (ModifiersState::CONTROL, VirtualKeyCode::ArrowUp),
     ] {
-        app.live_input.modifiers = modifiers;
+        app.input_routing.live.modifiers = modifiers;
         app.test_key(key, ElementState::Pressed);
         main_assert_eq!(app_lobby(&app).chat_edit => exact_modifier_view,);
     }
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
 
     let log_point = GuiPoint::new(
         (layout.chat_log_client.x + 2) as f32,
@@ -3664,7 +3664,7 @@ fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
     main_assert!(escape.sound.ui_log.is_empty(), "Escape is silent");
 
     let mut hotkey = joined_app();
-    hotkey.live_input.modifiers = ModifiersState::ALT;
+    hotkey.input_routing.live.modifiers = ModifiersState::ALT;
     hotkey.sound.ui_log.clear();
     hotkey.test_key(VirtualKeyCode::KeyX, ElementState::Pressed);
     main_assert_eq!(hotkey.startup.view => StartupView::MainMenu);
@@ -3880,7 +3880,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     for modifiers in [ModifiersState::empty(), ModifiersState::SHIFT] {
         app_lobby_mut(&mut app.network_lobby).chat_edit = LobbyChatEditView::default();
         app.joined_lobby_layouts().test_value();
-        app.live_input.modifiers = modifiers;
+        app.input_routing.live.modifiers = modifiers;
         // Dialog::CharIn refocuses the default edit for unprocessed
         // characters EXCEPT space, which buttons consume on key-up
         // (src/C4GuiDialogs.cpp:552-567); the focused listbox binds no
@@ -3893,7 +3893,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         main_assert_eq!(lobby.chat_edit.text => "");
         main_assert_eq!(lobby.controller.selected_roster_id() => Some(&LobbyRosterId::Player(50)));
     }
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
 
     app_lobby_mut(&mut app.network_lobby).chat_edit = LobbyChatEditView {
         text: "draft".into(),
@@ -3902,10 +3902,10 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         ..LobbyChatEditView::default()
     };
     app.joined_lobby_layouts().test_value();
-    app.live_input.modifiers = ModifiersState::CONTROL;
+    app.input_routing.live.modifiers = ModifiersState::CONTROL;
     tap_test_key(&mut app, VirtualKeyCode::KeyC);
     main_assert_eq!(app_lobby(&app).controller.focus() => LobbyControl::Roster);
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     tap_test_key(&mut app, VirtualKeyCode::Enter);
     main_assert!(commands.take_submitted_messages().is_empty());
     main_assert_eq!(app_lobby(&app).controller.focus() => LobbyControl::Roster);
@@ -3997,11 +3997,11 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     app.test_key(VirtualKeyCode::ContextMenu, ElementState::Released);
     click_network_lobby(&mut app, free_point);
 
-    app.live_input.modifiers = ModifiersState::SHIFT;
+    app.input_routing.live.modifiers = ModifiersState::SHIFT;
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert_eq!(app_lobby(&app).controller.focus() => LobbyControl::ScenarioTab);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
 
     let client_point = joined_lobby_row_point(&mut app, LobbyRosterId::Client(7));
     click_network_lobby(&mut app, client_point);
@@ -4012,11 +4012,11 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert_eq!(app_lobby(&app).controller.focus() => LobbyControl::Exit);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    app.live_input.modifiers = ModifiersState::SHIFT;
+    app.input_routing.live.modifiers = ModifiersState::SHIFT;
     app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
     main_assert_eq!(app_lobby(&app).controller.focus() => LobbyControl::RosterAddPlayer);
     app.test_key(VirtualKeyCode::Tab, ElementState::Released);
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     main_assert!(app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Pressed)
         .expect("latch joined Add Player key"));
@@ -4085,7 +4085,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         ],
         "joined team combo submits one full packet without optimistic mutation"
     );
-    app.live_input.modifiers = ModifiersState::SHIFT;
+    app.input_routing.live.modifiers = ModifiersState::SHIFT;
     main_assert!(app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Tab, ElementState::Pressed)
         .expect("reverse focus to roster"));
@@ -4093,7 +4093,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert!(!app
         .handle_joined_lobby_roster_key(VirtualKeyCode::Tab, ElementState::Released)
         .expect("release reverse roster focus key"));
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     some_mut(&mut app.pending_network_join_data)
         .parameters
         .teams
@@ -4503,7 +4503,7 @@ fn joined_lobby_game_option_strip_routes_input() {
     for locked in [GameOptionButton::League, GameOptionButton::FairCrew] {
         app.test_cursor(joined_option_center(&app, locked));
         app.sound.ui_log.clear();
-        app.live_input.last_left_press = None;
+        app.input_routing.live.last_left_press = None;
         app.test_left_button(ElementState::Pressed);
         app.test_left_button(ElementState::Released);
         main_assert!(app.sound.ui_log.is_empty(), "{locked:?} is silent");
@@ -4533,7 +4533,7 @@ fn joined_lobby_game_option_strip_routes_input() {
     // native ArrowHit and releases without an activation.
     app.test_cursor(joined_option_center(&app, GameOptionButton::Record));
     app.sound.ui_log.clear();
-    app.live_input.last_left_press = None;
+    app.input_routing.live.last_left_press = None;
     app.test_left_button(ElementState::Pressed);
     app.test_cursor(joined_option_center(&app, GameOptionButton::FairCrew));
     app.test_left_button(ElementState::Released);
@@ -4578,26 +4578,26 @@ fn joined_lobby_game_option_strip_routes_input() {
     main_assert_eq!(app_lobby(&app).chat_edit.text => "y");
 
     // Alt hotkeys reach enabled controls silently and skip locked ones.
-    app.live_input.modifiers = ModifiersState::ALT;
+    app.input_routing.live.modifiers = ModifiersState::ALT;
     app.sound.ui_log.clear();
     tap_test_key(&mut app, VirtualKeyCode::KeyR);
     main_assert!(app.scenario_game_options.values().record);
     main_assert!(app.sound.ui_log.is_empty(), "dialog hotkeys are silent");
     tap_test_key(&mut app, VirtualKeyCode::KeyL);
     main_assert!(!app.scenario_game_options.values().lobby_is_league);
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
 
     // Touch mirrors the pointer path.
     let record_point = joined_option_point(&app, GameOptionButton::Record);
     app.sound.ui_log.clear();
-    app.live_input.last_left_press = None;
+    app.input_routing.live.last_left_press = None;
     app.test_touch(TouchPhase::Started, record_point);
     app.test_touch(TouchPhase::Ended, record_point);
     main_assert_eq!(app.sound.ui_log => ["ArrowHit".to_string(), "Click".to_string()]);
     main_assert!(!app.scenario_game_options.values().record);
     let league_point = joined_option_point(&app, GameOptionButton::League);
     app.sound.ui_log.clear();
-    app.live_input.last_left_press = None;
+    app.input_routing.live.last_left_press = None;
     app.test_touch(TouchPhase::Started, league_point);
     app.test_touch(TouchPhase::Ended, league_point);
     main_assert!(app.sound.ui_log.is_empty());
@@ -4665,12 +4665,12 @@ fn joined_lobby_game_option_strip_routes_input() {
     let record_before = app.scenario_game_options.values().record;
     app.test_cursor(joined_option_center(&app, GameOptionButton::Record));
     app.sound.ui_log.clear();
-    app.live_input.last_left_press = None;
+    app.input_routing.live.last_left_press = None;
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
-    app.live_input.modifiers = ModifiersState::ALT;
+    app.input_routing.live.modifiers = ModifiersState::ALT;
     tap_test_key(&mut app, VirtualKeyCode::KeyR);
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
     main_assert_eq!(app.scenario_game_options.values().record => record_before);
     main_assert!(app.sound.ui_log.is_empty());
 }
@@ -4815,7 +4815,7 @@ fn lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
         .test_value();
     main_assert!(app.dialogs.client_list.is_some());
     main_assert!(app_lobby(&app).chat_edit.text.is_empty());
-    app.live_input.running_pointer = Some(GuiPoint::new(0.0, 0.0));
+    app.input_routing.live.running_pointer = Some(GuiPoint::new(0.0, 0.0));
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.client_list.is_some());
@@ -5472,10 +5472,10 @@ fn focused_lobby_team_combo_opens_from_cpp_keyboard_bindings_and_escape_closes()
     main_assert!(app.context_menus.open.is_some());
     app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
 
-    app.live_input.modifiers = ModifiersState::ALT;
+    app.input_routing.live.modifiers = ModifiersState::ALT;
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     main_assert!(app.context_menus.open.is_some());
-    app.live_input.modifiers = ModifiersState::empty();
+    app.input_routing.live.modifiers = ModifiersState::empty();
 }
 
 #[test]

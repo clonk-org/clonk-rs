@@ -412,26 +412,27 @@ impl GameApp {
                 let moving_drag_before_move = self.ingame_moving_drag_active();
                 let selection_drag_before_move = self.ingame_selection_drag_active();
                 let mut repeated_mouse_move = false;
-                let player_view_scroll_owner = if self.live_input.ingame_edge_scroll.is_some() {
-                    repeated_mouse_move = true;
-                    self.advance_ingame_mouse_caption_lifetime();
-                    self.apply_ingame_edge_scroll()?
-                } else if self.engine.frame().is_multiple_of(5) {
-                    if self.initialize_ingame_mouse_center()? {
-                        None
-                    } else {
+                let player_view_scroll_owner =
+                    if self.input_routing.live.ingame_edge_scroll.is_some() {
                         repeated_mouse_move = true;
                         self.advance_ingame_mouse_caption_lifetime();
-                        self.refresh_ingame_edge_scroll_tick5()?
-                    }
-                } else {
-                    None
-                };
+                        self.apply_ingame_edge_scroll()?
+                    } else if self.engine.frame().is_multiple_of(5) {
+                        if self.initialize_ingame_mouse_center()? {
+                            None
+                        } else {
+                            repeated_mouse_move = true;
+                            self.advance_ingame_mouse_caption_lifetime();
+                            self.refresh_ingame_edge_scroll_tick5()?
+                        }
+                    } else {
+                        None
+                    };
                 if let Some(owner) = player_view_scroll_owner {
                     self.refresh_snapshot_after_player_view_scroll(owner);
                 }
                 if repeated_mouse_move {
-                    if let Some(pointer) = self.live_input.ingame_pointer {
+                    if let Some(pointer) = self.input_routing.live.ingame_pointer {
                         self.advance_ingame_mouse_caption(
                             pointer,
                             moving_drag_before_move,

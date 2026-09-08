@@ -446,8 +446,8 @@ fn n2_join_runtime_player(app: &mut GameApp, player_path: &Path) {
 }
 
 fn n2_app_with_key_config(mut app: GameApp, config: &[u8], context: &str) -> GameApp {
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(config).expect(context)))
         .test_value();
     app
@@ -544,7 +544,7 @@ fn push_to_talk_opens_capture_in_a_network_lobby() {
     app.handle_key(VirtualKeyCode::Backquote, ElementState::Pressed)
         .test_value();
     main_assert!(app.voice_chat.capture_active());
-    main_assert!(app.key_event_suppresses_text);
+    main_assert!(app.input_routing.key_event_suppresses_text);
     app.update_voice_chat();
     let outbound = voice.try_recv_outbound().test_value();
     main_assert_eq!(outbound.player_id => crate::voice_chat::LOBBY_VOICE_PLAYER_ID);
@@ -799,7 +799,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     app.handle_key(VirtualKeyCode::Backquote, ElementState::Pressed)
         .test_value();
     main_assert!(app.voice_chat.capture_active());
-    main_assert!(app.key_event_suppresses_text);
+    main_assert!(app.input_routing.key_event_suppresses_text);
     app.update_voice_chat();
 
     let outbound = voice.try_recv_outbound().test_value();
@@ -5797,15 +5797,15 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
             caption.y.saturating_add(caption.h / 2) as f32,
         )
     };
-    app.live_input.running_pointer = Some(chart_point);
+    app.input_routing.live.running_pointer = Some(chart_point);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
     main_assert!(app.dialogs.chart_pointer_capture);
-    app.live_input.ingame_pointer = None;
-    app.live_input.ingame_edge_scroll = None;
+    app.input_routing.live.ingame_pointer = None;
+    app.input_routing.live.ingame_edge_scroll = None;
     app.test_cursor(PhysicalPosition::new(10_000.0, 10_000.0));
     main_assert!(app.dialogs.chart_pointer_capture);
-    main_assert!(app.live_input.ingame_pointer.is_none());
-    main_assert!(app.live_input.ingame_edge_scroll.is_none());
+    main_assert!(app.input_routing.live.ingame_pointer.is_none());
+    main_assert!(app.input_routing.live.ingame_edge_scroll.is_none());
     app.handle_mouse_button_classified(ElementState::Released, false)
         .test_value();
     main_assert!(!app.dialogs.chart_pointer_capture);
@@ -5823,9 +5823,9 @@ fn network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
 fn chart_toggle_respects_reachable_native_key_priorities() {
     let configured = |binding: &str| {
         let mut app = new_classic_running_sandbox_app();
-        app.runtime_key_config_cache = OnceLock::new();
+        app.input_routing.runtime_key_config_cache = OnceLock::new();
         let source = format!("[Keys]\nChartToggle={binding}\n");
-        app.runtime_key_config_cache
+        app.input_routing.runtime_key_config_cache
             .set(Ok(parse_runtime_key_config(source.as_bytes()).test_value()))
             .test_value();
         app
@@ -5861,7 +5861,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     ] {
         let mut chat = configured(binding);
         chat.start_running_chat(RunningChatMode::All);
-        chat.live_input.modifiers = modifiers;
+        chat.input_routing.live.modifiers = modifiers;
         main_assert!(!chat.handle_runtime_chart_toggle_key(key, ElementState::Pressed), "focused chat Edit owns {binding}");
         main_assert!(chat.dialogs.chart.is_none());
     }
@@ -5894,7 +5894,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
 
     let mut irc_unclaimed = configured("Alt+Z");
     irc_unclaimed.show_external_irc_dialog().test_value();
-    irc_unclaimed.live_input.modifiers = ModifiersState::ALT;
+    irc_unclaimed.input_routing.live.modifiers = ModifiersState::ALT;
     irc_unclaimed.test_key(VirtualKeyCode::KeyZ, ElementState::Pressed);
     main_assert!(irc_unclaimed.dialogs.chart.is_some());
 
@@ -5904,7 +5904,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         .chat.external_dialog
         .test_mut()
         .force_chat_mode_and_focus();
-    irc_edit.live_input.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    irc_edit.input_routing.live.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
     main_assert!(!irc_edit.handle_runtime_chart_toggle_key(VirtualKeyCode::ArrowLeft, ElementState::Pressed));
 
     let mut irc_connect = configured("Up");
@@ -5913,20 +5913,20 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
     main_assert!(irc_connect.dialogs.chart.is_some());
 
     let mut game_over = new_game_over_keyboard_app();
-    game_over.runtime_key_config_cache = OnceLock::new();
+    game_over.input_routing.runtime_key_config_cache = OnceLock::new();
     game_over
-        .runtime_key_config_cache
+        .input_routing.runtime_key_config_cache
         .set(Ok(
             parse_runtime_key_config(b"[Keys]\nChartToggle=Alt+E\n").test_value()
         ))
         .test_value();
-    game_over.live_input.modifiers = ModifiersState::ALT;
+    game_over.input_routing.live.modifiers = ModifiersState::ALT;
     main_assert!(!game_over.handle_runtime_chart_toggle_key(VirtualKeyCode::KeyE, ElementState::Pressed));
 
     let mut game_over_list = new_game_over_keyboard_app();
-    game_over_list.runtime_key_config_cache = OnceLock::new();
+    game_over_list.input_routing.runtime_key_config_cache = OnceLock::new();
     game_over_list
-        .runtime_key_config_cache
+        .input_routing.runtime_key_config_cache
         .set(Ok(
             parse_runtime_key_config(b"[Keys]\nChartToggle=Up\n").test_value()
         ))
@@ -5951,7 +5951,7 @@ fn chart_toggle_respects_reachable_native_key_priorities() {
         MessageDialogContinuation::LeagueSurrender,
     )
     .test_value();
-    vote.live_input.modifiers = ModifiersState::ALT;
+    vote.input_routing.live.modifiers = ModifiersState::ALT;
     main_assert!(!vote.handle_runtime_chart_toggle_key(VirtualKeyCode::KeyY, ElementState::Pressed));
 
     let mut player_escape = configured("F8");
@@ -5999,11 +5999,11 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
         (caption_rect.x + 8) as f32,
         (caption_rect.y + caption_rect.h / 2) as f32,
     );
-    app.live_input.running_pointer = Some(caption);
+    app.input_routing.live.running_pointer = Some(caption);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
     main_assert!(app.dialogs.chart_pointer_capture);
     let moved = GuiPoint::new(caption.x + 37.0, caption.y + 19.0);
-    app.live_input.running_pointer = Some(moved);
+    app.input_routing.live.running_pointer = Some(moved);
     main_assert!(app.handle_network_chart_pointer_move(moved));
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
     main_assert!(!app.dialogs.chart_pointer_capture);
@@ -6017,7 +6017,7 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
         (moved_layout.chart.x + moved_layout.chart.w / 2) as f32,
         (moved_layout.chart.y + moved_layout.chart.h / 2) as f32,
     );
-    app.live_input.running_pointer = Some(body);
+    app.input_routing.live.running_pointer = Some(body);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
     main_assert!(!app.dialogs.chart_pointer_capture, "chart body clicks are consumed without becoming a drag element");
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
@@ -6029,7 +6029,7 @@ fn chart_uses_native_placement_caption_drag_and_close_control() {
         (close_button.x + close_button.w / 2) as f32,
         (close_button.y + close_button.h / 2) as f32,
     );
-    app.live_input.running_pointer = Some(close);
+    app.input_routing.live.running_pointer = Some(close);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
     main_assert!(app.dialogs.chart_pointer_capture);
     main_assert!(app.handle_network_chart_pointer_button(ElementState::Released));
@@ -6108,7 +6108,7 @@ fn menu_touch_title_drag_uses_touch_coordinates_through_release() {
     let caption = layout.caption.test_value();
     let start = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
     let end = GuiPoint::new(start.x + 41.0, start.y + 27.0);
-    app.live_input.running_pointer = Some(GuiPoint::new(1.0, 1.0));
+    app.input_routing.live.running_pointer = Some(GuiPoint::new(1.0, 1.0));
 
     app.test_touch(TouchPhase::Started, start);
     main_assert!(app.dialogs.messages[0].state.has_positional_pointer_drag());
@@ -6238,7 +6238,7 @@ fn portrait_crew_label_decodes_native_info_name_for_presentation() {
         &app.snapshot,
         Some(crew),
         &app.bindings,
-        &app.gamepad_bindings,
+        &app.input_routing.gamepad_bindings,
     );
     app.rendering.display_flags.portraits = true;
     app.populate_crew_infos(&mut players);
@@ -13113,9 +13113,9 @@ fn debug_key_gates_remaps_and_native_priority_body() {
     main_assert_eq!(runtime_flash_text(&denied) => Some("Debug mode: not allowed"));
 
     let mut missing_resources = new_running_sandbox_app();
-    missing_resources.runtime_key_config_cache = OnceLock::new();
+    missing_resources.input_routing.runtime_key_config_cache = OnceLock::new();
     missing_resources
-        .runtime_key_config_cache
+        .input_routing.runtime_key_config_cache
         .set(Err("missing custom key list".to_string()))
         .test_value();
     missing_resources.runtime_flash_resources_cache = OnceLock::new();
@@ -13524,8 +13524,8 @@ fn net_stats_toggle_is_default_unbound_and_a_custom_chord_shows_the_overlay() {
     main_assert!(!app.rendering.graphics.debug_draw_flags().show_net_status);
 
     let parsed = parse_runtime_key_config(b"[Keys]\nNetStatsToggle=F8\n").test_value();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache.set(Ok(parsed)).test_value();
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache.set(Ok(parsed)).test_value();
 
     app.test_key(VirtualKeyCode::F8, ElementState::Pressed);
     main_assert!(app.rendering.graphics.debug_draw_flags().show_net_status);
@@ -13554,8 +13554,8 @@ fn net_stats_toggle_is_default_unbound_and_a_custom_chord_shows_the_overlay() {
 fn control_rate_keys_submit_native_relative_adjustments() {
     let mut app = new_classic_running_sandbox_app();
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(
             b"[Keys]\nCtrlRateDown=F8\nCtrlRateUp=F10\n",
         )
@@ -13592,8 +13592,8 @@ fn net_allow_join_toggle_key_toggles_the_live_host_gate() {
     let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.runtime_network_join_allowed = Some(false);
     let labels = app.classic_lobby_option_labels();
-    app.runtime_key_config_cache = OnceLock::new();
-    app.runtime_key_config_cache
+    app.input_routing.runtime_key_config_cache = OnceLock::new();
+    app.input_routing.runtime_key_config_cache
         .set(Ok(parse_runtime_key_config(
             b"[Keys]\nNetAllowJoinToggle=F10\n",
         )
@@ -13794,7 +13794,7 @@ fn f4_control_rate_dropdown_waits_for_authoritative_echo() {
         layout.option_rows[index].value
     };
     let point = GuiPoint::new((rate.x + 2) as f32, (rate.y + 2) as f32);
-    app.live_input.running_pointer = Some(point);
+    app.input_routing.live.running_pointer = Some(point);
     main_assert!(app.handle_runtime_client_list_pointer_button(ElementState::Pressed).expect("press control-rate combo"));
     main_assert!(app.handle_runtime_client_list_pointer_button(ElementState::Released).expect("open control-rate dropdown"));
     main_assert!(app.context_menus.open.is_some());
@@ -13908,14 +13908,14 @@ fn runtime_client_list_wheel_precedes_running_player_control() {
         .dialogs.client_list
         .test_ref()
         .layout(preferred, line_height);
-    app.live_input.running_pointer = Some(GuiPoint::new(
+    app.input_routing.live.running_pointer = Some(GuiPoint::new(
         (layout.list.x + 4) as f32,
         (layout.list.y + 4) as f32,
     ));
     app.test_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0);
     main_assert!(commands.take_submitted_local().is_empty());
 
-    app.live_input.running_pointer = Some(GuiPoint::new(0.0, 0.0));
+    app.input_routing.live.running_pointer = Some(GuiPoint::new(0.0, 0.0));
     app.test_mouse_wheel(
         MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -120.0)),
         2.0,
@@ -13966,7 +13966,7 @@ fn standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
         .as_ref()
         .and_then(|dialog| dialog.info_layout(preferred, line_height))
         .test_value();
-    app.live_input.running_pointer = Some(GuiPoint::new(
+    app.input_routing.live.running_pointer = Some(GuiPoint::new(
         (info.text.x + 2) as f32,
         (info.text.y + info.text.h / 2) as f32,
     ));
@@ -14086,7 +14086,7 @@ fn runtime_client_list_prevents_tick5_from_reviving_edge_scroll() {
     let rect = app.rendering.graphics.viewport_rect(owner).test_value();
     let edge = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
     app.test_cursor(PhysicalPosition::new(f64::from(edge.x), f64::from(edge.y)));
-    main_assert!(app.live_input.ingame_edge_scroll.is_some());
+    main_assert!(app.input_routing.live.ingame_edge_scroll.is_some());
 
     app.test_key(VirtualKeyCode::F4, ElementState::Pressed);
     let (preferred, line_height) = app.runtime_client_list_input_geometry().test_value();
@@ -14104,16 +14104,16 @@ fn runtime_client_list_prevents_tick5_from_reviving_edge_scroll() {
         f64::from(dialog_point.x),
         f64::from(dialog_point.y),
     ));
-    main_assert!(app.live_input.ingame_pointer.is_none());
-    main_assert!(app.live_input.ingame_edge_scroll.is_none());
-    main_assert!(app.live_input.ingame_viewport_mouse.is_some(), "native VpX/VpY remains retained for Tick5 reevaluation");
+    main_assert!(app.input_routing.live.ingame_pointer.is_none());
+    main_assert!(app.input_routing.live.ingame_edge_scroll.is_none());
+    main_assert!(app.input_routing.live.ingame_viewport_mouse.is_some(), "native VpX/VpY remains retained for Tick5 reevaluation");
 
     for _ in 0..2 {
         main_assert!(app.refresh_ingame_edge_scroll_tick5().expect("client-list Tick5 reevaluation").is_none());
     }
     main_assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center => stopped);
-    main_assert!(app.live_input.ingame_pointer.is_none());
-    main_assert!(app.live_input.ingame_edge_scroll.is_none());
+    main_assert!(app.input_routing.live.ingame_pointer.is_none());
+    main_assert!(app.input_routing.live.ingame_edge_scroll.is_none());
 }
 
 #[test]
@@ -14760,8 +14760,8 @@ fn focus_loss_does_not_submit_cpp_player_control() {
 
     main_assert!(commands.take_submitted_local().is_empty(), "focus loss must not submit a network player control");
     // The nonfatal UI/pointer cleanup still runs.
-    main_assert!(app.live_input.pressed_engine_keys.is_empty());
-    main_assert_eq!(app.live_input.ingame_pointer => None);
+    main_assert!(app.input_routing.live.pressed_engine_keys.is_empty());
+    main_assert_eq!(app.input_routing.live.ingame_pointer => None);
 }
 
 /// `Config.Network.MaxResSearchRecursion` defaults to 1 (C4Config.cpp:527-533)
