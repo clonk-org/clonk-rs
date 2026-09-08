@@ -83,8 +83,9 @@ fi
 # The validation bridges' C++ never built at the pin: the config bridge's two
 # assigners in src/C4Config.cpp take the wrong types (clonk-org/clonk-rs#1264)
 # and the group bridge moves an entry name before keying on it
-# (clonk-org/clonk-rs#1265); both log where nothing listens, and both leave the
-# c4group tool unlinkable. Each fix is layered the same way as the runtime
+# (clonk-org/clonk-rs#1265); both log where nothing listens, and they and the
+# platform-path bridge (clonk-org/clonk-rs#1267) leave the c4group tool
+# unlinkable. Each fix is layered the same way as the runtime
 # instrumentation, and only when the option that compiles that code is
 # requested. $1 = patch path, $2 = label, $3 = ON to apply.
 layer_bridge_patch() {
@@ -102,6 +103,7 @@ layer_bridge_patch() {
 }
 layer_bridge_patch "$REPO_ROOT/parity/bridge/oracle-config-bridge.patch" config-bridge "$USE_RUST_CONFIG"
 layer_bridge_patch "$REPO_ROOT/parity/bridge/oracle-group-bridge.patch" group-bridge "$USE_RUST_GROUP_VALIDATION"
+layer_bridge_patch "$REPO_ROOT/parity/bridge/oracle-platform-bridge.patch" platform-bridge "$USE_RUST_PLATFORM_PATHS"
 echo "==> oracle   $ORACLE_ROOT (at the pin)"
 echo "==> port     $REPO_ROOT"
 echo "==> profile  $PROFILE"
@@ -205,4 +207,13 @@ if [ "$USE_RUST_GROUP_VALIDATION" = ON ]; then
 
 		    parity/bridge/run-group-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
 	GROUP
+fi
+if [ "$USE_RUST_PLATFORM_PATHS" = ON ]; then
+	cat <<-PLATFORM
+
+		The platform-path bridge is linked. Run its differential (isolated
+		roots, defaults, directory creation, the incomplete-set fallback) with:
+
+		    parity/bridge/run-platform-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
+	PLATFORM
 fi
