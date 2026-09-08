@@ -5324,6 +5324,7 @@ impl<'a> Vm<'a> {
             0,
             0,
             direct_exec_context,
+            None,
         );
         match result {
             Ok(ControlFlow::Return(value)) => {
@@ -6114,12 +6115,20 @@ impl<'a> Vm<'a> {
                         value_stack.count,
                         0,
                         None,
+                        None,
                     )?
                 }
             }
         } else {
             #[cfg(any(test, feature = "execution-profile"))]
             crate::execution_profile::record_ast_without_plan(&compiled_cache.fallback_reasons);
+            #[cfg(any(test, feature = "execution-profile"))]
+            let sole_blocker = match compiled_cache.fallback_reasons.as_slice() {
+                [sole] => Some(*sole),
+                _ => None,
+            };
+            #[cfg(not(any(test, feature = "execution-profile")))]
+            let sole_blocker = None;
             self.execute_ast_with_continuation(
                 function,
                 &mut env,
@@ -6129,6 +6138,7 @@ impl<'a> Vm<'a> {
                 value_stack.count,
                 0,
                 None,
+                sole_blocker,
             )?
         };
         let value = match result {
@@ -6607,9 +6617,11 @@ impl<'a> Vm<'a> {
         frame_value_stack: usize,
         start_statement: usize,
         direct_exec_context: Option<DirectExecContinuationContext>,
+        sole_blocker: Option<crate::execution_profile::AstFallbackReason>,
     ) -> Result<ControlFlow, RuntimeError> {
-        #[cfg(feature = "execution-profile")]
-        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(true);
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(
+            crate::execution_profile::ExecutionKind::Ast(sole_blocker),
+        );
         let statements = Arc::new(function.body.clone());
         let state = AstMachineState {
             tasks: vec![AstTask::Statements {
@@ -6629,6 +6641,7 @@ impl<'a> Vm<'a> {
             function,
             caller,
             direct_exec_context.as_ref(),
+            sole_blocker,
         )
     }
 
@@ -6642,9 +6655,11 @@ impl<'a> Vm<'a> {
         function: &Function,
         caller: Option<ScriptCallerContext>,
         direct_exec_context: Option<&DirectExecContinuationContext>,
+        sole_blocker: Option<crate::execution_profile::AstFallbackReason>,
     ) -> Result<ControlFlow, RuntimeError> {
-        #[cfg(feature = "execution-profile")]
-        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(true);
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(
+            crate::execution_profile::ExecutionKind::Ast(sole_blocker),
+        );
         let mut diagnostic = direct_exec_context.map(|context| {
             ScriptDiagnosticGuard::enter_direct(context.frame.clone(), context.profile_on_error)
         });
@@ -18283,8 +18298,9 @@ impl CompiledFunction {
         compiled: Arc<CompiledFunction>,
         frame_value_stack: usize,
     ) -> Result<Option<ControlFlow>, RuntimeError> {
-        #[cfg(feature = "execution-profile")]
-        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(false);
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(
+            crate::execution_profile::ExecutionKind::Compiled,
+        );
         let Some(bindings) = self.bindings(env) else {
             return Ok(None);
         };
@@ -18342,8 +18358,9 @@ impl CompiledFunction {
         state: CompiledExecutionState,
         frame_value_stack: usize,
     ) -> Result<Option<ControlFlow>, RuntimeError> {
-        #[cfg(feature = "execution-profile")]
-        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(false);
+        let _execution_timer = crate::execution_profile::ExecutionTimer::enter(
+            crate::execution_profile::ExecutionKind::Compiled,
+        );
         let CompiledExecutionState {
             mut stack,
             mut registered_slots,
@@ -19118,6 +19135,7 @@ impl AstContinuationFrame {
             function.as_ref(),
             caller,
             direct_exec_context.as_ref(),
+            None,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -20306,6 +20324,43 @@ mod tests {
         check_eq!(profile.compiled => 1);
         check_eq!(profile.ast_without_plan => 1);
         check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 1);
+    }
+
+    #[test]
+    fn execution_profile_counts_a_lone_foreach_as_its_sole_blocker() {
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "func Ast(values) { var total = 0; for (var value in values) total += value; return total; }",
+            )
+            .expect("profile script loads");
+        crate::execution_profile::reset();
+
+        check_eq!(engine.call("Ast", &[Value::Array(vec![Value::Int(1), Value::Int(2)])]).expect("AST call succeeds") => Value::Int(3));
+        let profile = crate::execution_profile::snapshot();
+
+        check_eq!(profile.sole_blocker(crate::execution_profile::AstFallbackReason::Foreach) => 1);
+        check_eq!(profile.ranked_sole_blockers() => vec![(crate::execution_profile::AstFallbackReason::Foreach, 1)]);
+    }
+
+    #[cfg(feature = "execution-profile")]
+    #[test]
+    fn execution_timing_charges_a_lone_foreach_fallback_to_its_family() {
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "func Ast(values) { var total = 0; for (var value in values) total += value; return total; }",
+            )
+            .expect("profile script loads");
+        crate::execution_profile::reset();
+        crate::execution_profile::set_timing_enabled(true);
+
+        check_eq!(engine.call("Ast", &[Value::Array(vec![Value::Int(1), Value::Int(2)])]).expect("AST call succeeds") => Value::Int(3));
+        let timing = crate::execution_profile::timing_snapshot();
+        crate::execution_profile::set_timing_enabled(false);
+
+        assert!(timing.ast_ns > 0, "{timing:?}");
+        check_eq!(timing.ast_sole_blocker_ns(crate::execution_profile::AstFallbackReason::Foreach) => timing.ast_ns);
     }
 
     #[test]

@@ -56,6 +56,12 @@ fn ast_execution_materiality_on_shipped_content() {
                 );
                 if enabled {
                     eprintln!("{profile}");
+                    for (reason, ns) in timing.ranked_ast_sole_blocker_ns() {
+                        eprintln!(
+                            "sole {reason}: {ns} ns ({}% of ast_ns)",
+                            ns.saturating_mul(100) / timing.ast_ns.max(1)
+                        );
+                    }
                     assert!(timing.ast_ns > 0, "scenario must exercise AST execution");
                 }
             }
@@ -91,5 +97,7 @@ fn compiled_vs_ast_over_effect_heavy_shipped_content() {
         ast.saturating_mul(100) / profile.total_invocations().max(1),
         profile.total_invocations(),
     );
-    eprintln!("fallback reason counts overlap when one function has several blockers");
+    eprintln!(
+        "fallback reason counts overlap when one function has several blockers; the `sole` lines count invocations that one family alone kept on the AST VM"
+    );
 }
