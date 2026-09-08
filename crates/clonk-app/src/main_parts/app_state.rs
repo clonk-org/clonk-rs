@@ -727,6 +727,718 @@ impl RecordingState {
             sha1: Sha1::digest(&on_disk).into(),
         })
     }
+
+    /// `C4Record::Start`'s record group: the initial save projection and its
+    /// pointer denumeration, the league stream's first chunk, and the template
+    /// `start` later opens. The seed is what the caller derived from the
+    /// scenario and the join parameters.
+    pub(crate) fn prepare_for(
+        &mut self,
+        inputs: RecordingPreparation<'_>,
+        runtime_seed: RuntimeRecordingSeed,
+        scenario: &FrontendScenario,
+        scenario_data: &Scenario,
+        initial_source: Option<InitialRecordingSource<'_>>,
+    ) -> std::result::Result<(), String> {
+        let RecordingPreparation {
+            engine,
+            network,
+            app_paths,
+            maker_bytes,
+            records_title,
+            player_infos,
+        } = inputs;
+        self.live_save_seed = Some(runtime_seed.clone());
+        let RuntimeRecordingSeed {
+            scenario_path,
+            definition_modules,
+            description_definition_modules,
+            definition_executable_path,
+            definition_path,
+            scenario_origin,
+            parameters: recording_parameters,
+            scenario_defaults,
+            ..
+        } = runtime_seed.clone();
+        let scenario_path = scenario_path.as_path();
+        // Runtime recording still needs the seed above. The initial SaveData
+        // projection and its pointer denumeration, however, exist only when
+        // Config.General.Record (or league recording) actually starts a
+        // C4Record from InitControl.
+        let Some(initial_source) = initial_source else {
+            return Ok(());
+        };
+        let reconstruct_loaded_runtime =
+            matches!(initial_source, InitialRecordingSource::Loaded { .. });
+        let Some(dir) = self.directory.as_ref() else {
+            return Ok(());
+        };
+        prepare_recording_root(app_paths, records_title, dir).map_err(|error| error.to_string())?;
+        let index = next_recording_index(dir).map_err(|error| error.to_string())?;
+        let raw_base_name = scenario_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(scenario.identifier.as_str());
+        let output_path = dir.join(format!(
+            "{index:03}-{}.c4s",
+            sanitize_record_name(raw_base_name)
+        ));
+        let synchronized_title = native_bytes_as_legacy_text(recording_parameters.title.as_bytes());
+        let mut record_title = clonk_script::c4_string_bytes(&format!(
+            "{index:03} {synchronized_title} [{CLASSIC_ENGINE_BUILD}]"
+        ));
+        record_title.truncate(512);
+        let record_title = clonk_script::c4_string_from_bytes(&record_title);
+        let source =
+            open_group_path_for_folder_map(scenario_path).map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
+        let record_maker = maker_bytes.to_vec();
+        let parameters = match clonk_network::serialize_initial_network_parameters(
+            &recording_parameters,
+            &scenario_defaults,
+        ) {
+            Ok(parameters) => parameters,
+            Err(error) => {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Err(error) = group.add_file("Parameters.txt", parameters.clone()) {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                format!("write initial record Parameters.txt: {error}"),
+            ));
+        }
+        let scenario_core = if reconstruct_loaded_runtime {
+            engine.serialize_initial_record_scenario_from_runtime_savegame(
+                &record_title,
+                &definition_modules,
+                &definition_executable_path,
+                &definition_path,
+                &scenario_origin,
+            )
+        } else {
+            match scenario_data.serialize_initial_record_scenario(
+                &record_title,
+                &definition_modules,
+                &definition_executable_path,
+                &definition_path,
+                &scenario_origin,
+            ) {
+                Ok(scenario_core) => scenario_core,
+                Err(error) => {
+                    return Err(partial_recording_failure(
+                        &group,
+                        &output_path,
+                        &record_maker,
+                        error.to_string(),
+                    ));
+                }
+            }
+        };
+        let copied_material_group_is_file = matches!(
+            group.entry_kind("Material.c4g"),
+            Some(MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup)
+        );
+        let reconstructed_save = if let InitialRecordingSource::Loaded { music_enabled, .. } =
+            initial_source
+        {
+            // Native initial recording copies the currently loaded savegame
+            // group, whose exact runtime components already exist. Rust's
+            // JSON save points back to the original scenario, so reconstruct
+            // that copied image from the restored pre-Recreate state first.
+            // SaveData's enumeration and pointer-denumeration side effects
+            // deliberately remain live, just as they do in C++.
+            let landscape_is_static = engine
+                .landscape()
+                .is_some_and(|landscape| landscape.mode() == clonk_engine::LANDSCAPE_MODE_STATIC);
+            let reconstruction_target = output_path.to_string_lossy();
+            let save = match engine.serialize_live_c4_save_with_policy(
+                clonk_engine::LiveC4SaveSpec {
+                    title: &record_title,
+                    definition_modules: &definition_modules,
+                    definition_executable_path: &definition_executable_path,
+                    definition_path: &definition_path,
+                    origin: &scenario_origin,
+                    music_enabled,
+                    copied_material_group_is_file,
+                    title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                },
+                clonk_engine::LiveC4SavePolicy::Savegame {
+                    target_group_name: &reconstruction_target,
+                },
+            ) {
+                Ok(save) => save,
+                Err(error) => {
+                    let mut failure =
+                        format!("reconstruct loaded save for initial record: {error}");
+                    if let Some(partial) = error.pre_landscape_components() {
+                        let policy = clonk_engine::LiveC4SavePolicy::Savegame {
+                            target_group_name: &reconstruction_target,
+                        };
+                        if let Err(apply_error) =
+                            developer_console_save::apply_live_save_pre_landscape_to_group(
+                                &mut group, policy, partial,
+                            )
+                        {
+                            failure.push_str(&format!(
+                                "; additionally failed to apply partial loaded-save reconstruction: {apply_error}"
+                            ));
+                        }
+                    }
+                    return Err(partial_recording_failure(
+                        &group,
+                        &output_path,
+                        &record_maker,
+                        failure,
+                    ));
+                }
+            };
+            Some((save, landscape_is_static))
+        } else {
+            None
+        };
+
+        if let Some((save, landscape_is_static)) = reconstructed_save.as_ref() {
+            let reconstruction_target = output_path.to_string_lossy();
+            let reconstruction_policy = clonk_engine::LiveC4SavePolicy::Savegame {
+                target_group_name: &reconstruction_target,
+            };
+            let reconstruction_result = (|| -> std::result::Result<(), String> {
+                developer_console_save::apply_live_save_runtime_components_to_group(
+                    &mut group,
+                    reconstruction_policy,
+                    save,
+                    *landscape_is_static,
+                )
+                .map_err(|error| error.to_string())?;
+
+                // C4PlayerInfoList::Save deletes the old component before it
+                // compiles the replacement. Preserve that deletion if the
+                // legacy compiler rejects the fallback roster.
+                group.remove_entry("SavePlayerInfos.txt");
+                let persisted_restore_infos = match initial_source {
+                    InitialRecordingSource::Loaded {
+                        source_save_player_infos,
+                        ..
+                    } => source_save_player_infos,
+                    InitialRecordingSource::Fresh(_) => None,
+                };
+                let restore_infos = if let Some(bytes) = persisted_restore_infos {
+                    bytes.to_vec()
+                } else {
+                    // Backward compatibility for JSON saves written before
+                    // the source component was retained.
+                    let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+                        &recording_parameters.clients.clients,
+                        &recording_parameters.player_infos,
+                        network.is_some(),
+                        reconstruction_policy.player_policy(),
+                    );
+                    if restore_plan.restore_infos.clients.is_empty() {
+                        Vec::new()
+                    } else {
+                        clonk_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                            .map_err(|error| error.to_string())?
+                    }
+                };
+                if !restore_infos.is_empty() {
+                    developer_console_save::apply_live_save_player_infos_to_group(
+                        &mut group,
+                        &restore_infos,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = reconstruction_result {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    format!("apply loaded-save reconstruction: {error}"),
+                ));
+            }
+            if engine.frame() != 0 {
+                let source_title_png = match initial_source {
+                    InitialRecordingSource::Loaded {
+                        source_title_png, ..
+                    } => source_title_png,
+                    InitialRecordingSource::Fresh(_) => None,
+                };
+                if let Some(source_title_png) = source_title_png {
+                    if let Err(error) = group.add_file("Title.png", source_title_png.to_vec()) {
+                        tracing::warn!(%error, "failed to install loaded savegame title image");
+                    }
+                }
+            }
+        }
+
+        // C4GameSaveRecord::SaveCore writes Scenario after Parameters, then
+        // the base Save method removes stale player/title components before
+        // C4Game::SaveData writes Game.txt.
+        if let Err(error) = group.add_file("Scenario.txt", scenario_core.clone()) {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                format!("write initial record Scenario.txt: {error}"),
+            ));
+        }
+        clean_initial_record_group(&mut group);
+
+        let loaded_initial_game_data;
+        let initial_game_data = match initial_source {
+            InitialRecordingSource::Fresh(game_data) => game_data,
+            InitialRecordingSource::Loaded { music_enabled, .. } => {
+                // InitControl creates fInitial only after the copied savegame
+                // source has run EnumStrings and pointer enumeration.
+                loaded_initial_game_data =
+                    match engine.capture_initial_record_game_data(music_enabled) {
+                        Ok(game_data) => game_data,
+                        Err(error) => {
+                            return Err(partial_recording_failure(
+                                &group,
+                                &output_path,
+                                &record_maker,
+                                error.to_string(),
+                            ));
+                        }
+                    };
+                &loaded_initial_game_data
+            }
+        };
+        let original_game = source.read_file("Game.txt").ok();
+        let original_game = reconstructed_save
+            .as_ref()
+            .map(|(save, _)| save.game_txt.as_slice())
+            .or(original_game.as_deref());
+        let game =
+            match clonk_engine::serialize_initial_network_game(initial_game_data, original_game) {
+                Ok(game) => game,
+                Err(error) => {
+                    return Err(partial_recording_failure(
+                        &group,
+                        &output_path,
+                        &record_maker,
+                        error.to_string(),
+                    ));
+                }
+            };
+        if let Some(game) = game.as_ref() {
+            if let Err(error) = group.add_file("Game.txt", game.clone()) {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    format!("write initial record Game.txt: {error}"),
+                ));
+            }
+        } else {
+            group.remove_entry("Game.txt");
+        }
+        let player_info_snapshot = player_infos;
+        let player_infos = if player_info_snapshot.clients.is_empty() {
+            Ok(None)
+        } else {
+            clonk_network::encode_player_info_list_ini(&player_info_snapshot).map(Some)
+        };
+
+        // SaveComponents runs after the initial core/Game writes. It ignores
+        // both compiler and group-add failure, but always deletes a copied
+        // PlayerInfos.txt before installing the current roster.
+        group.remove_entry("PlayerInfos.txt");
+        match player_infos.as_ref() {
+            Ok(Some(player_infos)) => {
+                if let Err(error) = group.add_file("PlayerInfos.txt", player_infos.clone()) {
+                    tracing::warn!(%error, "failed to install initial record player infos");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "failed to serialize initial record player infos");
+            }
+        }
+
+        let initial_stream_chunk_result = (|| -> std::result::Result<Vec<u8>, String> {
+            if !network.is_some_and(NetworkManager::league_record_stream_available) {
+                return Ok(Vec::new());
+            }
+            // C4Record::StartStreaming saves a second, no-copy record group
+            // and inserts that packed image as the leading RCT_File. The
+            // original scenario is recovered from Scenario.Head.Origin.
+            let stream_group_name = output_path
+                .file_name()
+                .map(|name| path_to_legacy_bytes(Path::new(name)))
+                .unwrap_or_else(|| b"Record.c4s".to_vec());
+            let mut stream_initial_group = MutableGroup::new_bytes(stream_group_name);
+            if !maker_bytes.is_empty() {
+                stream_initial_group.set_maker_bytes(maker_bytes);
+            }
+            stream_initial_group
+                .add_file("Parameters.txt", parameters.clone())
+                .map_err(|error| error.to_string())?;
+            stream_initial_group
+                .add_file("Scenario.txt", scenario_core.clone())
+                .map_err(|error| error.to_string())?;
+            if let Some(game) = game.as_ref() {
+                stream_initial_group
+                    .add_file("Game.txt", game.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            match player_infos.as_ref() {
+                Ok(Some(player_infos)) => {
+                    if let Err(error) =
+                        stream_initial_group.add_file("PlayerInfos.txt", player_infos.clone())
+                    {
+                        tracing::warn!(%error, "failed to install initial streamed player infos");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    // C4GameSaveRecord::SaveComponents ignores the result of
+                    // C4PlayerInfoList::Save for an initial recording.
+                    tracing::warn!(%error, "failed to serialize initial streamed player infos");
+                }
+            }
+            let stream_initial_file = stream_initial_group
+                .pack()
+                .map_err(|error| error.to_string())?;
+            let stream_record_name = league_record_name(&output_path)
+                .ok_or_else(|| "record stream filename contains an interior NUL".to_string())?;
+            clonk_network::encode_league_stream_file_chunk(
+                &stream_record_name,
+                &stream_initial_file,
+            )
+            .map_err(|error| error.to_string())
+        })();
+        let initial_stream_chunk = match initial_stream_chunk_result {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    format!("prepare initial record stream: {error}"),
+                ));
+            }
+        };
+
+        // A source replay may already contain a stream. A fresh record owns
+        // a fresh binary CtrlRec, while native leaves copied CtrlRec.txt and
+        // RecPlayerInfos.txt alone until playback/Stop handles them.
+        group.remove_entry("CtrlRec.c4b");
+        self.template = Some(RecordingTemplate {
+            group,
+            output_path,
+            initial_stream_chunk,
+            runtime_seed: Some(runtime_seed),
+            description_title: recording_parameters.title.as_bytes().to_vec(),
+            description_definition_modules,
+        });
+        Ok(())
+    }
+
+    /// `C4GameControl::StartRecord` from a queued Synchronize: the non-initial
+    /// record image, built from the live seed and the runtime the engine has
+    /// now. The template it leaves is what `start` then opens.
+    pub(crate) fn prepare_runtime_at_synchronize(
+        &mut self,
+        inputs: RuntimeRecordingPreparation<'_>,
+    ) -> std::result::Result<(), String> {
+        let RuntimeRecordingPreparation {
+            base:
+                RecordingPreparation {
+                    engine,
+                    network,
+                    app_paths,
+                    maker_bytes,
+                    records_title,
+                    player_infos,
+                },
+            nonremoved_player_count,
+            auto_frame_skip,
+            client_registry,
+            music_enabled,
+            player_save_options,
+        } = inputs;
+        let Some(seed) = self.live_save_seed.clone().or_else(|| {
+            self.template
+                .as_ref()
+                .and_then(|template| template.runtime_seed.clone())
+        }) else {
+            // State-only tests and embedders may install an already-composed
+            // template. Production templates always retain this seed.
+            return Ok(());
+        };
+        let dir = self
+            .directory
+            .as_ref()
+            .ok_or_else(|| "runtime recording has no record directory".to_string())?;
+        prepare_recording_root(app_paths, records_title, dir).map_err(|error| error.to_string())?;
+        let index = next_recording_index(dir).map_err(|error| error.to_string())?;
+        let raw_base_name = seed
+            .scenario_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&seed.scenario_identifier);
+        let output_path = dir.join(format!(
+            "{index:03}-{}.c4s",
+            sanitize_record_name(raw_base_name)
+        ));
+
+        let scenario_title = native_bytes_as_legacy_text(seed.scenario_title.as_bytes());
+        let mut record_title = clonk_script::c4_string_bytes(&format!(
+            "{index:03} {scenario_title} [{CLASSIC_ENGINE_BUILD}]"
+        ));
+        record_title.truncate(512);
+        let record_title = clonk_script::c4_string_from_bytes(&record_title);
+        let source = open_group_path_for_folder_map(&seed.scenario_source_path)
+            .map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
+        let record_maker = maker_bytes.to_vec();
+        let mut parameters = seed.parameters;
+        parameters.random_seed = (engine.random_seed() as u32) as i32;
+        parameters.startup_player_count = engine
+            .startup_player_count()
+            .unwrap_or_else(|| i32::try_from(nonremoved_player_count).unwrap_or(i32::MAX));
+        parameters.max_players = engine
+            .max_players()
+            .unwrap_or(seed.scenario_defaults.max_players);
+        parameters.use_fair_crew = engine.use_fair_crew();
+        parameters.fair_crew_forced = engine.fair_crew_forced();
+        parameters.fair_crew_strength = engine.fair_crew_strength();
+        parameters.allow_debug = engine.allow_debug();
+        parameters.is_network_game = network.is_some();
+        parameters.control_rate = engine.control_rate();
+        parameters.auto_frame_skip = auto_frame_skip;
+        parameters.player_infos = player_infos;
+        parameters.clients = client_registry;
+        let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+            &parameters.clients.clients,
+            &parameters.player_infos,
+            network.is_some(),
+            clonk_engine::LiveC4SavePolicy::Record.player_policy(),
+        );
+        restore_plan
+            .validate_for_live_save(
+                clonk_engine::LiveC4SavePolicy::Record,
+                engine.players().map(|player| player.player_info_id()),
+            )
+            .map_err(|error| error.to_string())?;
+        let parameter_bytes = match clonk_network::serialize_initial_network_parameters(
+            &parameters,
+            &seed.scenario_defaults,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Err(error) = group.add_file("Parameters.txt", parameter_bytes) {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                format!("write runtime record Parameters.txt: {error}"),
+            ));
+        }
+
+        let landscape_is_static = engine
+            .landscape()
+            .is_some_and(|landscape| landscape.mode() == clonk_engine::LANDSCAPE_MODE_STATIC);
+        let copied_material_group_is_file = matches!(
+            group.entry_kind("Material.c4g"),
+            Some(MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup)
+        );
+        let save = match engine.serialize_live_c4_save_with_policy(
+            clonk_engine::LiveC4SaveSpec {
+                title: &record_title,
+                definition_modules: &seed.definition_modules,
+                definition_executable_path: &seed.definition_executable_path,
+                definition_path: &seed.definition_path,
+                origin: &seed.scenario_origin,
+                music_enabled,
+                copied_material_group_is_file,
+                title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+            },
+            clonk_engine::LiveC4SavePolicy::Record,
+        ) {
+            Ok(save) => save,
+            Err(error) => {
+                let mut failure = format!("serialize runtime record: {error}");
+                if let Some(partial) = error.pre_landscape_components() {
+                    if let Err(apply_error) =
+                        developer_console_save::apply_live_save_pre_landscape_to_group(
+                            &mut group,
+                            clonk_engine::LiveC4SavePolicy::Record,
+                            partial,
+                        )
+                    {
+                        failure.push_str(&format!(
+                            "; additionally failed to apply partial runtime record: {apply_error}"
+                        ));
+                    }
+                }
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    failure,
+                ));
+            }
+        };
+
+        let mutation_result = (|| -> std::result::Result<(), String> {
+            developer_console_save::apply_live_save_runtime_components_to_group(
+                &mut group,
+                clonk_engine::LiveC4SavePolicy::Record,
+                &save,
+                landscape_is_static,
+            )
+            .map_err(|error| error.to_string())?;
+
+            // SaveRuntimeData writes SavePlayerInfos before it begins walking
+            // live players. Keep both the delete-before-compile behavior and
+            // every already-added player child visible on a later failure.
+            group.remove_entry("SavePlayerInfos.txt");
+            if !restore_plan.restore_infos.clients.is_empty() {
+                let restore_info_bytes =
+                    clonk_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                        .map_err(|error| error.to_string())?;
+                developer_console_save::apply_live_save_player_infos_to_group(
+                    &mut group,
+                    &restore_info_bytes,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+
+            let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+                player_save_options;
+            let player_save_options = clonk_engine::LiveC4PlayerSaveOptions {
+                savegame: true,
+                store_tiny: false,
+                add_new_crew_portraits,
+                save_default_portraits,
+                player_rank_name_default: &player_rank_name_default,
+            };
+            let runtime_players = engine
+                .players()
+                .map(|player| (player.id(), player.player_info_id()))
+                .collect::<Vec<_>>();
+            let mut remaining_targets = restore_plan.player_groups;
+            for (game_number, player_info_id) in runtime_players {
+                let Some(target_index) = remaining_targets
+                    .iter()
+                    .position(|target| target.player_info_id == player_info_id)
+                else {
+                    continue;
+                };
+                let target = remaining_targets.remove(target_index);
+                let player_group =
+                    clonk_engine::serialize_live_c4_player_with_options_and_enumeration(
+                        &*engine,
+                        game_number,
+                        target.filename.as_bytes(),
+                        &record_maker,
+                        player_save_options,
+                        &save.value_enumeration,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "serialize runtime record player info {} (game player {}): {error}",
+                            target.player_info_id, game_number
+                        )
+                    })?;
+                developer_console_save::add_live_save_player_group(
+                    &mut group,
+                    runtime_join_save::SerializedRuntimeJoinPlayerGroup {
+                        filename: target.filename,
+                        group: player_group,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            // C4PlayerList::Save ignores stale restore rows without a live
+            // player. No later player can roll back an earlier child.
+            Ok(())
+        })();
+        if let Err(error) = mutation_result {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                error,
+            ));
+        }
+        group.remove_entry("CtrlRec.c4b");
+        self.template = Some(RecordingTemplate {
+            group,
+            output_path,
+            initial_stream_chunk: Vec::new(),
+            runtime_seed: None,
+            description_title: seed.scenario_title.as_bytes().to_vec(),
+            description_definition_modules: seed.description_definition_modules,
+        });
+        Ok(())
+    }
+}
+
+/// What `RecordingState::prepare_for` takes from the application: the engine
+/// whose runtime it serializes, the network whose league stream decides the
+/// initial chunk, the paths and group maker the record group is written with,
+/// the records folder title, and the player infos it copies in.
+pub(crate) struct RecordingPreparation<'a> {
+    pub(crate) engine: &'a mut Engine,
+    pub(crate) network: Option<&'a NetworkManager>,
+    pub(crate) app_paths: Option<&'a AppPaths>,
+    pub(crate) maker_bytes: &'a [u8],
+    pub(crate) records_title: &'a str,
+    pub(crate) player_infos: clonk_network::PlayerInfoListSnapshot,
+}
+
+/// `RecordingPreparation` plus what a runtime record image reads from the
+/// application on top: the player count and client registry the parameters
+/// are refreshed from, the frame-skip setting, whether music is on, and the
+/// player save options.
+pub(crate) struct RuntimeRecordingPreparation<'a> {
+    pub(crate) base: RecordingPreparation<'a>,
+    pub(crate) nonremoved_player_count: usize,
+    pub(crate) auto_frame_skip: bool,
+    pub(crate) client_registry: clonk_network::JoinClientRegistrySnapshot,
+    pub(crate) music_enabled: bool,
+    pub(crate) player_save_options: (bool, bool, String),
+}
+
+/// `C4Record::Start` prepares the configured record root through
+/// `CreateSaveFolder` (C4Record.cpp:118-145), which also writes the
+/// language-prefixed `Title.txt` naming the folder (C4Config.cpp:1397-1412).
+pub(crate) fn prepare_recording_root(
+    app_paths: Option<&AppPaths>,
+    records_title: &str,
+    directory: &std::path::Path,
+) -> std::io::Result<()> {
+    let language = classic_save_folder_language(app_paths);
+    crate::output_folders::create_save_folder(
+        directory,
+        records_title,
+        &String::from_utf8_lossy(&language),
+    )
 }
 
 /// Hand a league record stream delta to the network; nothing to do without a
