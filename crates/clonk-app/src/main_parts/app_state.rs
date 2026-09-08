@@ -955,6 +955,66 @@ impl ConfigState {
     }
 }
 
+/// The console's detached viewport windows: the scroll-thumb drag and the
+/// per-window projections, and the painted context-menu popup with the
+/// press it swallowed. `GameApp` composes it as `console_viewports`.
+pub(crate) struct ConsoleViewportState {
+    /// The viewport whose scroll thumb is being dragged, and on which axis.
+    ///
+    /// Per physical viewport: two detached windows can be dragged one after
+    /// the other without the first one's capture answering for the second.
+    pub(crate) scroll_drag: Option<(u64, clonk_engine::developer_viewport::ScrollAxis)>,
+    pub(crate) projections:
+        std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
+    /// `C4EditCursor::DoContextMenu`'s popup and the physical viewport whose
+    /// window it belongs to, in that window's surface coordinates.
+    ///
+    /// C++ hands the menu to the OS — `TrackPopupMenu` blocks until an item is
+    /// chosen (`C4EditCursor.cpp:597`) — and neither of its two bodies is
+    /// compiled on the reference build. A winit window cannot host an OS
+    /// popup, so the port draws it onto the viewport's own frame and keeps it
+    /// here until the next click resolves it.
+    pub(crate) context_menu: Option<(
+        u64,
+        clonk_frontend::developer_context_menu::ViewportContextMenu,
+    )>,
+    /// The viewport whose popup swallowed the last button press, so the
+    /// release that completes that click is swallowed with it.
+    ///
+    /// C++ needs no such latch: `TrackPopupMenu` blocks and the GTK menu holds
+    /// a pointer grab, so the whole click — press *and* release — happens
+    /// inside the menu and `C4EditCursor::LeftButtonUp` never sees it. A
+    /// painted popup gets the release afterwards, when it may already have
+    /// closed, and running the edit cursor's release then would clear the
+    /// `Hold` `GrabContents` sets (`C4EditCursor.cpp:649`).
+    pub(crate) context_menu_grab: Option<u64>,
+}
+
+/// The editor's `C4EditCursor` half of the app: the last world pointer for
+/// held-move deltas, the Ctrl-drag drop target, the frame the held move was
+/// last issued for, the `Hold` latch and the armed rubber band. `GameApp`
+/// composes it as `edit_cursor`.
+pub(crate) struct EditCursorState {
+    /// The last pointer position in world coordinates, so a held drag can
+    /// send `MoveSelection` the *delta* C++ computes from the previous
+    /// message's coordinates (`C4EditCursor.cpp:131-137`).
+    pub(crate) last_world: Option<(i32, i32)>,
+    /// `C4EditCursor::DropTarget` — the container a Ctrl-drag would put the
+    /// selection into, recomputed on every motion (`UpdateDropTarget`).
+    pub(crate) drop_target: Option<clonk_engine::ObjectId>,
+    /// The engine frame the held-move control was last issued for.
+    /// `C4Console::Execute` runs `EditCursor.Execute()` once per
+    /// application tick; the port's event loop wakes far more often than
+    /// that, and emitting per wake would flood the control queue.
+    pub(crate) tick_frame: Option<u64>,
+    /// `C4EditCursor::Hold` — set by a press, cleared by the release.
+    pub(crate) hold: bool,
+    /// `C4EditCursor::DragFrame` with its `(X, Y)` press anchor and live
+    /// `(X2, Y2)` corner, both in world coordinates. `Some` exactly while a
+    /// rubber band is armed.
+    pub(crate) drag_frame: Option<((i32, i32), (i32, i32))>,
+}
+
 pub(crate) struct GameApp {
     pub(crate) engine: Engine,
     /// System.c4g global script sources, loaded once at boot for every
@@ -1046,6 +1106,11 @@ pub(crate) struct GameApp {
     /// The modal C4DefinitionSelDlg and the latches it keeps while open
     /// (clonk-org/clonk-rs#1238).
     pub(crate) definition_selection: DefinitionSelectionState,
+    /// `C4EditCursor` state for the console editor (clonk-org/clonk-rs#1242).
+    pub(crate) edit_cursor: EditCursorState,
+    /// The console's viewport windows and their painted popup
+    /// (clonk-org/clonk-rs#1242).
+    pub(crate) console_viewports: ConsoleViewportState,
     #[cfg(test)]
     #[cfg(test)]
     pub(crate) sec1_timer_call_count: usize,
@@ -1235,58 +1300,10 @@ pub(crate) struct GameApp {
     /// The property pane's retained first visible line
     /// (`C4PropertyDlg.cpp:257-262`).
     pub(crate) developer_property_scroll: crate::developer_toolbox_view::LineScroll,
-    /// The viewport whose scroll thumb is being dragged, and on which axis.
-    ///
-    /// Per physical viewport: two detached windows can be dragged one after
-    /// the other without the first one's capture answering for the second.
-    pub(crate) console_viewport_scroll_drag:
-        Option<(u64, clonk_engine::developer_viewport::ScrollAxis)>,
-    pub(crate) console_viewport_projections:
-        std::collections::HashMap<u64, clonk_frontend::ActiveViewportProjection>,
-    /// The last pointer position in world coordinates, so a held drag can
-    /// send `MoveSelection` the *delta* C++ computes from the previous
-    /// message's coordinates (`C4EditCursor.cpp:131-137`).
-    pub(crate) edit_cursor_last_world: Option<(i32, i32)>,
-    /// `C4EditCursor::DropTarget` — the container a Ctrl-drag would put the
-    /// selection into, recomputed on every motion (`UpdateDropTarget`).
-    pub(crate) edit_cursor_drop_target: Option<clonk_engine::ObjectId>,
-    /// The engine frame the held-move control was last issued for.
-    /// `C4Console::Execute` runs `EditCursor.Execute()` once per
-    /// application tick; the port's event loop wakes far more often than
-    /// that, and emitting per wake would flood the control queue.
-    pub(crate) edit_cursor_tick_frame: Option<u64>,
     /// `C4Game::FileMonitor`. Armed once per game when
     /// `Developer.AutoFileReload` is set and the app is windowed
     /// (`C4Game.cpp:2413-2424`), started after definitions have loaded.
     pub(crate) file_monitor: Option<clonk_platform::file_monitor::DirectoryMonitor>,
-    /// `C4EditCursor::Hold` — set by a press, cleared by the release.
-    pub(crate) edit_cursor_hold: bool,
-    /// `C4EditCursor::DragFrame` with its `(X, Y)` press anchor and live
-    /// `(X2, Y2)` corner, both in world coordinates. `Some` exactly while a
-    /// rubber band is armed.
-    pub(crate) edit_cursor_drag_frame: Option<((i32, i32), (i32, i32))>,
-    /// `C4EditCursor::DoContextMenu`'s popup and the physical viewport whose
-    /// window it belongs to, in that window's surface coordinates.
-    ///
-    /// C++ hands the menu to the OS — `TrackPopupMenu` blocks until an item is
-    /// chosen (`C4EditCursor.cpp:597`) — and neither of its two bodies is
-    /// compiled on the reference build. A winit window cannot host an OS
-    /// popup, so the port draws it onto the viewport's own frame and keeps it
-    /// here until the next click resolves it.
-    pub(crate) console_viewport_context_menu: Option<(
-        u64,
-        clonk_frontend::developer_context_menu::ViewportContextMenu,
-    )>,
-    /// The viewport whose popup swallowed the last button press, so the
-    /// release that completes that click is swallowed with it.
-    ///
-    /// C++ needs no such latch: `TrackPopupMenu` blocks and the GTK menu holds
-    /// a pointer grab, so the whole click — press *and* release — happens
-    /// inside the menu and `C4EditCursor::LeftButtonUp` never sees it. A
-    /// painted popup gets the release afterwards, when it may already have
-    /// closed, and running the edit cursor's release then would clear the
-    /// `Hold` `GrabContents` sets (`C4EditCursor.cpp:649`).
-    pub(crate) console_viewport_context_menu_grab: Option<u64>,
     /// `C4Console::ToolsDlg` and `PropertyDlg`'s shared `C4DevmodeDlg`
     /// notebook. The model owns every decision about the window
     /// ([`crate::developer_toolbox`]); the runner owns the window itself, so

@@ -4997,7 +4997,7 @@ fn a_selected_object_draws_its_mark_into_the_viewport_frame() {
     let identity = open_local_test_console_viewport(&mut app);
 
     let unmarked = app.render_console_viewport(identity, 320, 200).test_value();
-    let projection = app.console_viewport_projections[&identity];
+    let projection = app.console_viewports.projections[&identity];
 
     // Select whatever sits under the view's own centre.
     let object = app
@@ -5123,7 +5123,7 @@ fn a_detached_viewport_middle_release_picks_only_when_nothing_is_held() {
     // The edit cursor's own hold gates it too: `MiddleButtonUp` reads the one
     // `Hold` both arms of the cursor share.
     app.developer_console_edit_mode = ConsoleEditMode::Edit;
-    app.edit_cursor_hold = true;
+    app.edit_cursor.hold = true;
     runtime_assert!(
         !app.console_viewport_middle_release(identity, local, 1.0),
         "a held edit-cursor gesture swallows it in the same way"
@@ -5210,7 +5210,7 @@ fn detached_play_mode_buttons_do_not_arm_the_edit_cursor() {
         "a Play-mode press edits no selection",
     );
     assert!(
-        !app.edit_cursor_hold,
+        !app.edit_cursor.hold,
         "and it must not take the edit cursor's hold"
     );
     assert!(
@@ -5351,7 +5351,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
     let identity = open_test_console_viewport(&mut app, None);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    let projection = app.console_viewport_projections[&identity];
+    let projection = app.console_viewports.projections[&identity];
 
     let subject = app.snapshot.objects.first().test_value();
     let (id, position) = (subject.id, subject.position);
@@ -5364,7 +5364,7 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
         app.console_viewport_press(identity, local, 1.0, false, false).expect("the click changed the selection").objects => vec![id],
         "a plain click selects the object under the cursor",
     );
-    assert!(app.edit_cursor_hold, "a press always holds");
+    assert!(app.edit_cursor.hold, "a press always holds");
 
     // A held drag over a selected object moves it: C4EditCursor::Move's
     // Edit arm sends MoveSelection(xoff, yoff), and MoveSelection is
@@ -5437,25 +5437,25 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
         .is_empty());
     // `DragFrame = true; X2 = X; Y2 = Y` — both corners start at the press.
     let world_empty = (projection.target_x + empty.0, projection.target_y + empty.1);
-    assert_eq!(app.edit_cursor_drag_frame, Some((world_empty, world_empty)));
+    assert_eq!(app.edit_cursor.drag_frame, Some((world_empty, world_empty)));
 
     // `C4EditCursor::Execute` re-issues a zero-offset EMMO_Move every
     // tick while Hold is set (C4EditCursor.cpp:65-69), so a stationary
     // held selection still produces control traffic — but once per engine
     // tick, not once per event-loop wake.
-    assert!(app.edit_cursor_hold);
+    assert!(app.edit_cursor.hold);
     app.console_edit_cursor_tick();
-    let ticked = app.edit_cursor_tick_frame;
+    let ticked = app.edit_cursor.tick_frame;
     assert!(ticked.is_some(), "a held selection ticks");
     app.console_edit_cursor_tick();
-    runtime_assert_eq!(app.edit_cursor_tick_frame => ticked, "a second wake in the same tick emits nothing further");
+    runtime_assert_eq!(app.edit_cursor.tick_frame => ticked, "a second wake in the same tick emits nothing further");
 
     // A rubber band drawn over the object frames it on release.
     // C4EditCursor::LeftButtonUp runs FrameSelection() then clears Hold and
     // DragFrame regardless (C4EditCursor.cpp:287-341).
     let corner = (local.0 + 40, local.1 + 40);
     app.console_viewport_motion(identity, corner, 1.0, false, false);
-    let (anchor, live) = app.edit_cursor_drag_frame.test_value();
+    let (anchor, live) = app.edit_cursor.drag_frame.test_value();
     runtime_assert_eq!(live => (projection.target_x + corner.0, projection.target_y + corner.1), "the band's live corner follows the pointer");
     assert_ne!(anchor, live, "the anchor stays at the press");
 
@@ -5467,9 +5467,9 @@ fn console_viewport_pointer_gestures_select_move_and_frame() {
         "an object inside the band is framed: {:?}",
         framed.objects
     );
-    assert!(!app.edit_cursor_hold, "the release always clears Hold");
+    assert!(!app.edit_cursor.hold, "the release always clears Hold");
     runtime_assert!(
-        app.edit_cursor_drag_frame.is_none(),
+        app.edit_cursor.drag_frame.is_none(),
         "the release always clears DragFrame"
     );
 
@@ -5492,7 +5492,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
         runtime_console_network_fixture(ConsoleEditMode::Edit);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    let projection = app.console_viewport_projections[&identity];
+    let projection = app.console_viewports.projections[&identity];
 
     let subject = app.snapshot.objects.first().test_value();
     let (id, position) = (subject.id, subject.position);
@@ -5515,7 +5515,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
     // `RightButtonUp` opens the menu. A selected object with no contents
     // greys Grab contents and nothing else.
     app.open_console_viewport_context_menu(identity, local);
-    let (open, menu) = app.console_viewport_context_menu.test_ref();
+    let (open, menu) = app.console_viewports.context_menu.test_ref();
     assert_eq!(*open, identity);
     let live = |menu: &clonk_frontend::developer_context_menu::ViewportContextMenu| {
         menu.entries()
@@ -5538,7 +5538,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
     // Choosing Duplicate emits `EMMoveObject(EMMO_Duplicate, 0, 0,
     // nullptr, &Selection)` and closes the menu.
     let rows = app
-        .console_viewport_context_menu
+        .console_viewports.context_menu
         .test_ref()
         .1
         .layout(320, 200);
@@ -5548,7 +5548,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
     };
     assert!(app.console_viewport_context_menu_click(identity, center(1), (320, 200)));
     runtime_assert!(
-        app.console_viewport_context_menu.is_none(),
+        app.console_viewports.context_menu.is_none(),
         "a chosen item closes the menu"
     );
     let decided = commands.take_submitted_decided_controls();
@@ -5577,7 +5577,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
     app.open_console_viewport_context_menu(identity, local);
     assert!(app.console_viewport_context_menu_click(identity, center(2), (320, 200)));
     runtime_assert!(
-        app.console_viewport_context_menu.is_some(),
+        app.console_viewports.context_menu.is_some(),
         "a greyed row does not dismiss the menu"
     );
     runtime_assert!(
@@ -5590,7 +5590,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
         (320, 200)
     ));
     runtime_assert!(
-        app.console_viewport_context_menu.is_none(),
+        app.console_viewports.context_menu.is_none(),
         "a click outside cancels it"
     );
 
@@ -5612,7 +5612,7 @@ fn console_viewport_context_menu_emits_the_object_commands() {
         .console_viewport_right_press(identity, empty, 1.0, false)
         .is_some_and(|snapshot| snapshot.objects.is_empty()));
     app.open_console_viewport_context_menu(identity, empty);
-    runtime_assert_eq!(live(&app.console_viewport_context_menu.as_ref().expect("the menu opened over nothing").1) => vec![ViewportContextItem::Properties]);
+    runtime_assert_eq!(live(&app.console_viewports.context_menu.as_ref().expect("the menu opened over nothing").1) => vec![ViewportContextItem::Properties]);
 }
 
 // C4Console.cpp:1328-1351 and C4ComponentHost.cpp:231-236,330-334 — the
@@ -6124,7 +6124,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
         extent
     ));
     runtime_assert_eq!(
-        app.console_viewport_scroll_drag => Some((identity, ScrollAxis::Horizontal))
+        app.console_viewports.scroll_drag => Some((identity, ScrollAxis::Horizontal))
     );
     runtime_assert_eq!(
         app.rendering.graphics.detached_viewport_view(identity).test_value().0 => held,
@@ -6150,7 +6150,7 @@ fn detached_viewport_scroll_chrome_answers_presses_and_hides_under_the_player_lo
     // Releasing ends it, and a second release is nobody's.
     runtime_assert!(app.console_viewport_scroll_release());
     runtime_assert!(!app.console_viewport_scroll_release());
-    runtime_assert!(app.console_viewport_scroll_drag.is_none());
+    runtime_assert!(app.console_viewports.scroll_drag.is_none());
 
     // Locked, there are no bars and nothing takes a press.
     runtime_assert!(app.toggle_console_viewport_player_lock(identity));
@@ -7076,7 +7076,7 @@ fn console_viewport_file_drop_emits_a_definition_drop_control() {
         runtime_console_network_fixture(ConsoleEditMode::Edit);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    let projection = app.console_viewport_projections[&identity];
+    let projection = app.console_viewports.projections[&identity];
 
     // `DefFileGetID` reads the id out of the dropped group's own
     // `DefCore.txt`, so the file only has to declare a definition the
@@ -7388,7 +7388,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
         container,
     );
     app.open_console_viewport_context_menu(identity, (4, 4));
-    let menu = &app.console_viewport_context_menu.test_ref().1;
+    let menu = &app.console_viewports.context_menu.test_ref().1;
     let contents_row = menu
         .entries()
         .iter()
@@ -7405,7 +7405,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
     // set before the control leaves — that is what lets the freed objects
     // be dragged straight out.
     assert_eq!(app.developer_selection.objects(), &[held]);
-    assert!(app.edit_cursor_hold);
+    assert!(app.edit_cursor.hold);
     let decided = commands.take_submitted_decided_controls();
     let [(_, clonk_engine::ControlPacket::EmMoveObject(exit), false)] = decided.as_slice() else {
         panic!("expected one exit control, got {decided:?}");
@@ -7421,7 +7421,7 @@ fn console_viewport_grab_contents_exits_the_container_it_selected() {
         app.take_console_viewport_pointer_grab(identity),
         "the popup grabbed the pointer for the whole click"
     );
-    assert!(app.edit_cursor_hold, "and Hold survives it");
+    assert!(app.edit_cursor.hold, "and Hold survives it");
     runtime_assert!(
         !app.take_console_viewport_pointer_grab(identity),
         "exactly one release is swallowed"
@@ -7439,7 +7439,7 @@ fn console_viewport_draw_gestures_emit_landscape_tool_controls() {
         runtime_console_network_fixture(ConsoleEditMode::Draw);
     // Drawing is what publishes this window's own projection.
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    let projection = app.console_viewport_projections[&identity];
+    let projection = app.console_viewports.projections[&identity];
     let mode = app.engine.landscape().test_value().mode();
     let world = |local: (i32, i32)| (projection.target_x + local.0, projection.target_y + local.1);
 
@@ -7519,7 +7519,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     let (mut app, _events, mut commands, identity) =
         runtime_console_network_fixture(ConsoleEditMode::Draw);
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    let projection = app.console_viewport_projections[&identity];
+    let projection = app.console_viewports.projections[&identity];
     let world = |local: (i32, i32)| (projection.target_x + local.0, projection.target_y + local.1);
     app.developer_tools.set_tool(Tool::Fill, false);
 
@@ -7574,7 +7574,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     );
     // The repeat is keyed on the engine frame; clear the latch to stand in
     // for the next one rather than running a whole simulation tick.
-    app.edit_cursor_tick_frame = None;
+    app.edit_cursor.tick_frame = None;
     app.console_edit_cursor_tick();
     let decided = commands.take_submitted_decided_controls();
     let [(_, clonk_engine::ControlPacket::EmDrawTool(fill), false)] = decided.as_slice() else {
@@ -7583,7 +7583,7 @@ fn console_draw_fill_refuses_while_halted_and_otherwise_repeats_at_the_cursor() 
     assert_eq!((fill.x, fill.y), world(moved));
 
     app.console_viewport_release(identity);
-    app.edit_cursor_tick_frame = None;
+    app.edit_cursor.tick_frame = None;
     app.console_edit_cursor_tick();
     runtime_assert!(
         commands.take_submitted_decided_controls().is_empty(),
@@ -7708,12 +7708,12 @@ fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     assert!(!app.toggle_console_viewport_player_lock(identity));
     assert!(!app.viewports.console_viewport_player_lock(identity));
 
-    let before = app.console_viewport_projections[&identity];
+    let before = app.console_viewports.projections[&identity];
     assert!(app.scroll_console_viewport(identity, 3, 0));
     // The scroll lands in the camera, and the next draw is what publishes
     // it as this window's projection (`cvp->Execute()` after the scroll).
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    let after = app.console_viewport_projections[&identity];
+    let after = app.console_viewports.projections[&identity];
     runtime_assert_ne!((before.target_x, before.target_y) => (after.target_x, after.target_y), "an unlocked viewport keeps where the scroll put it");
 
     // `UpdateViewPosition`'s clamp is gated on `fIsNoOwnerViewport`
@@ -7725,12 +7725,12 @@ fn console_viewport_scrolls_only_once_its_player_lock_is_off() {
     let (view_x, ..) = app.rendering.graphics.detached_viewport_view(identity).test_value();
     runtime_assert_eq!(app.rendering.graphics.scroll_detached_viewport(identity, -(view_x + 400), 0) => Some((-400, after.target_y)));
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    runtime_assert_eq!(app.console_viewport_projections[&identity].target_x => -400, "an owned viewport keeps a view position outside the landscape");
+    runtime_assert_eq!(app.console_viewports.projections[&identity].target_x => -400, "an owned viewport keeps a view position outside the landscape");
     // And the next step moves relative to it rather than snapping back:
     // the line buttons apply their step unclamped (`:127-128`).
     assert!(app.scroll_console_viewport(identity, 4, 0));
     assert!(app.render_console_viewport(identity, 320, 200).is_some());
-    assert_eq!(app.console_viewport_projections[&identity].target_x, -396);
+    assert_eq!(app.console_viewports.projections[&identity].target_x, -396);
 
     // Locking again needs a valid player, and hides the bars (`:263-265`).
     assert!(app.toggle_console_viewport_player_lock(identity));

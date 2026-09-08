@@ -8045,7 +8045,7 @@ impl GameApp {
             .physical_viewports
             .iter()
             .map(|viewport| viewport.physical_identity)
-            .find_map(|identity| self.console_viewport_projections.get(&identity).copied())
+            .find_map(|identity| self.console_viewports.projections.get(&identity).copied())
             .filter(matches)
     }
 
