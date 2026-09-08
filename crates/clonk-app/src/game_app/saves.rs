@@ -47,7 +47,7 @@ impl GameApp {
         let mut parameters = seed.parameters.clone();
         parameters.random_seed = (self.engine.random_seed() as u32) as i32;
         parameters.startup_player_count = self.engine.startup_player_count().unwrap_or_else(|| {
-            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX)
+            i32::try_from(self.players.infos.nonremoved_player_count()).unwrap_or(i32::MAX)
         });
         parameters.max_players = self
             .engine
@@ -178,7 +178,7 @@ impl GameApp {
             lines.push((clients, true));
         }
 
-        let (_, packets) = self.control_player_infos.retained_rows_snapshot();
+        let (_, packets) = self.players.infos.retained_rows_snapshot();
         let has_retained_players = packets.iter().any(|(_, _, players)| !players.is_empty());
         let players = packets
             .iter()
@@ -1588,26 +1588,25 @@ impl GameApp {
             self.saves.deferred_network_recreation.clear();
             return Ok(());
         }
-        self.saves.deferred_network_recreation = route_network_savegame_recreation(
-            &mut self.control_player_infos,
-            &restore_player_infos,
-        );
+        self.saves.deferred_network_recreation =
+            route_network_savegame_recreation(&mut self.players.infos, &restore_player_infos);
         seed_engine_player_info_parameters(
             &mut self.engine,
             &self.network_league_name,
-            &self.control_player_infos,
+            &self.players.infos,
         );
         remove_unassociated_savegame_player_objects_with_logs(
             &mut self.engine,
-            &self.control_player_infos,
+            &self.players.infos,
             &restore_player_infos,
             save_game,
             &self.startup_tooltip_resources,
         )?;
 
-        let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
+        let memberships = ordered_control_player_team_memberships(&self.players.infos);
         let exact_teams = self.players.team_assignment.as_mut().map(|assignment| {
-            self.control_player_infos
+            self.players
+                .infos
                 .recheck_team_players(assignment.teams_mut());
             let metadata = assignment.teams().clone();
             (
@@ -1757,7 +1756,8 @@ impl GameApp {
                 &mut filename_ledger,
             );
             if savegame.embedded_player_info_ids.contains(&source.info.id) {
-                self.control_player_infos
+                self.players
+                    .infos
                     .clear_recreated_temporary_player_file(source.info.id, false);
             }
             match result {
@@ -1788,7 +1788,8 @@ impl GameApp {
                             )
                         };
                         let current_info = self
-                            .control_player_infos
+                            .players
+                            .infos
                             .get(binding.player_info_id)
                             .cloned()
                             .unwrap_or_else(|| source.info.clone());
@@ -1832,7 +1833,8 @@ impl GameApp {
                         if let Some(player_path) =
                             savegame.external_player_paths.get(&binding.player_info_id)
                         {
-                            self.local_player_profile_paths
+                            self.players
+                                .local_profile_paths
                                 .insert(binding.player_info_id, player_path.clone());
                             let icon = load_local_player_big_icon(player_path);
                             self.cache_joined_player_big_icon(
@@ -1858,7 +1860,7 @@ impl GameApp {
                         error,
                         clonk_engine::RuntimeJoinPlayerRestoreError::ZeroPlayerInfoId(_)
                     ) {
-                        self.control_player_infos.mark_removed(
+                        self.players.infos.mark_removed(
                             source.info.id,
                             false,
                             i32::try_from(engine.frame()).unwrap_or(i32::MAX),

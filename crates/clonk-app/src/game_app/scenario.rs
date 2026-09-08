@@ -1461,7 +1461,7 @@ impl GameApp {
         self.records.live_save_seed = None;
         self.records.template = None;
         self.records.playback = None;
-        self.local_player_profile_paths.clear();
+        self.players.local_profile_paths.clear();
         self.saves.deferred_network_recreation.clear();
         self.saves.network_recreation_progress = None;
         let prepared_go = self
@@ -1886,7 +1886,7 @@ impl GameApp {
                 .map(OfflineStartupPlayers::startup_player_count)
                 .or_else(|| {
                     network_game.then(|| {
-                        i32::try_from(self.control_player_infos.nonremoved_player_count())
+                        i32::try_from(self.players.infos.nonremoved_player_count())
                             .unwrap_or(i32::MAX)
                     })
                 });
@@ -1960,8 +1960,8 @@ impl GameApp {
         if !network_game {
             if let Some(startup) = offline_startup_players.as_ref() {
                 engine.set_local_players([]);
-                self.control_player_infos = ControlPlayerInfoRegistry::default();
-                self.control_player_infos.apply(startup.player_info.clone());
+                self.players.infos = ControlPlayerInfoRegistry::default();
+                self.players.infos.apply(startup.player_info.clone());
             }
         }
         engine.set_network_game(network_game);
@@ -1979,7 +1979,7 @@ impl GameApp {
             replay_player_startup
                 .as_ref()
                 .map(|startup| &startup.restart_player_infos)
-                .unwrap_or(&self.control_player_infos),
+                .unwrap_or(&self.players.infos),
         );
         // Full C4Game::InitGame clears the consumed restart handoff and
         // snapshots the authoritative PlayerInfos before this round's script
@@ -1988,7 +1988,7 @@ impl GameApp {
             replay_player_startup
                 .as_ref()
                 .map(|startup| &startup.restart_player_infos)
-                .unwrap_or(&self.control_player_infos),
+                .unwrap_or(&self.players.infos),
         );
         self.players.restart_restore_roster_items.clear();
         self.players.restart_restore_script_players_joined = false;
@@ -2067,7 +2067,8 @@ impl GameApp {
 
         let pending_offline_joins = if !network_game {
             if offline_startup_players.is_some() {
-                self.control_player_infos
+                self.players
+                    .infos
                     .issue_unjoined_local_players(0, |info| Some(info.filename.clone()))
             } else {
                 Vec::new()
@@ -2099,7 +2100,7 @@ impl GameApp {
         if let Some(savegame) = offline_savegame.as_ref() {
             remove_unassociated_savegame_player_objects_with_logs(
                 &mut engine,
-                &self.control_player_infos,
+                &self.players.infos,
                 &savegame.unassociated_restore_players,
                 savegame.save_game,
                 &self.startup_tooltip_resources,
@@ -2107,7 +2108,7 @@ impl GameApp {
             .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?;
             if !savegame.unassociated_restore_players.is_empty() {
                 engine.recheck_team_player_info_memberships(
-                    &ordered_control_player_team_memberships(&self.control_player_infos),
+                    &ordered_control_player_team_memberships(&self.players.infos),
                 );
             }
         }
@@ -2223,8 +2224,8 @@ impl GameApp {
         self.auto_frame_skip = auto_frame_skip;
         self.engine = engine;
         self.script_created_objects = script_created_objects;
-        self.runtime_player_big_icons.clear();
-        self.runtime_player_big_icon_misses.clear();
+        self.players.big_icons.clear();
+        self.players.big_icon_misses.clear();
         if !replay {
             let resumed_recording_player_infos = offline_savegame.as_ref().map(|savegame| {
                 let mut recording_player_infos = ControlPlayerInfoRegistry::default();
@@ -2232,7 +2233,7 @@ impl GameApp {
                     savegame.recording_last_player_id,
                     [savegame.recording_player_info.clone()],
                 );
-                std::mem::replace(&mut self.control_player_infos, recording_player_infos)
+                std::mem::replace(&mut self.players.infos, recording_player_infos)
             });
             let recording_definition_save_paths = retained_definition_save_paths
                 .as_ref()
@@ -2278,7 +2279,7 @@ impl GameApp {
                 }
             }
             if let Some(resumed) = resumed_recording_player_infos {
-                self.control_player_infos = resumed;
+                self.players.infos = resumed;
             }
             if let Some(error) = fatal_recording_error {
                 return Err(error);
@@ -2356,7 +2357,7 @@ impl GameApp {
                 };
                 let mut team_selection_players = Vec::new();
                 for join in pending_offline_joins {
-                    let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
+                    let Some(info) = self.players.infos.get(join.info_id).cloned() else {
                         tracing::warn!(info_id = join.info_id, "offline join lost its player info");
                         continue;
                     };
@@ -2471,7 +2472,7 @@ impl GameApp {
                                 join.info_id,
                                 player_big_icon.as_ref(),
                             );
-                            self.control_player_infos.mark_joined(
+                            self.players.infos.mark_joined(
                                 join.info_id,
                                 joined.number(),
                                 i32::try_from(self.engine.frame()).unwrap_or(i32::MAX),
@@ -2483,7 +2484,8 @@ impl GameApp {
                             ) {
                                 team_selection_players.push(joined.number());
                             }
-                            self.local_player_profile_paths
+                            self.players
+                                .local_profile_paths
                                 .insert(join.info_id, real_path.clone());
                             joined_player_files.push(real_path);
                         }
@@ -2611,7 +2613,7 @@ impl GameApp {
 
         let offline_player_infos = offline_startup_players
             .is_some()
-            .then(|| std::mem::take(&mut self.control_player_infos));
+            .then(|| std::mem::take(&mut self.players.infos));
         self.rendering.active_game_graphics = Some(active_game_graphics);
         self.ingame_menus.graphics = None;
         self.configure_running_state(label, ground);
@@ -2624,15 +2626,15 @@ impl GameApp {
                 .replace_snapshot(replay_parameter_clients);
         }
         if let Some(startup) = replay_player_startup {
-            self.control_player_infos = startup.player_infos;
+            self.players.infos = startup.player_infos;
             seed_engine_player_info_parameters(
                 &mut self.engine,
                 &self.network_league_name,
-                &self.control_player_infos,
+                &self.players.infos,
             );
         }
         if let Some(player_infos) = offline_player_infos {
-            self.control_player_infos = player_infos;
+            self.players.infos = player_infos;
         }
         if !network_game && !replay {
             self.refresh_current_player_info_teams();
@@ -2723,8 +2725,8 @@ impl GameApp {
 
         self.rendering.active_game_graphics = None;
         self.ingame_menus.graphics = None;
-        self.runtime_player_big_icons.clear();
-        self.runtime_player_big_icon_misses.clear();
+        self.players.big_icons.clear();
+        self.players.big_icon_misses.clear();
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.finish_recording();
@@ -2750,7 +2752,7 @@ impl GameApp {
         seed_engine_player_info_parameters(
             &mut self.engine,
             &self.network_league_name,
-            &self.control_player_infos,
+            &self.players.infos,
         );
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));

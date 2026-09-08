@@ -2448,13 +2448,13 @@ impl GameApp {
         self.network_is_league = false;
         self.network_league_name.clear();
         self.network_stream_address = LegacyCString::default();
-        self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.players.infos = ControlPlayerInfoRegistry::default();
         self.clear_blocking_resource_wait();
         self.admission_resources.clear();
         seed_engine_player_info_parameters(
             &mut self.engine,
             &self.network_league_name,
-            &self.control_player_infos,
+            &self.players.infos,
         );
         self.network_control_running = true;
         self.runtime_network_status_barrier = None;
@@ -2737,10 +2737,10 @@ impl GameApp {
                                 // joining (src/C4Game.cpp:3869-3876;
                                 // src/C4Network2Players.cpp:38-49,78-123).
                                 previous_player_infos =
-                                    Some(std::mem::take(&mut self.control_player_infos));
+                                    Some(std::mem::take(&mut self.players.infos));
                                 previous_admission_resources =
                                     Some(std::mem::take(&mut self.admission_resources));
-                                let player_infos = &mut self.control_player_infos;
+                                let player_infos = &mut self.players.infos;
                                 let resources = &mut self.admission_resources;
                                 match prepared.install_initial_host_player_state(
                                     player_infos,
@@ -2751,7 +2751,7 @@ impl GameApp {
                                 ) {
                                     Ok(ready) => Some(ready),
                                     Err(error) => {
-                                        self.control_player_infos = previous_player_infos
+                                        self.players.infos = previous_player_infos
                                             .take()
                                             .expect("prepared install saved the previous registry");
                                         self.admission_resources =
@@ -2776,7 +2776,7 @@ impl GameApp {
                             manager.set_join_allowed(admission_ready.lobby_join_allowed())
                         {
                             if let Some(previous_player_infos) = previous_player_infos.take() {
-                                self.control_player_infos = previous_player_infos;
+                                self.players.infos = previous_player_infos;
                             }
                             if let Some(previous_admission_resources) =
                                 previous_admission_resources.take()
@@ -2843,7 +2843,7 @@ impl GameApp {
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
                                 &self.network_league_name,
-                                &self.control_player_infos,
+                                &self.players.infos,
                             );
                             self.players.team_assignment = initial_network_team_assignment(
                                 Some(&mode),
@@ -2918,7 +2918,7 @@ impl GameApp {
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
                                 &self.network_league_name,
-                                &self.control_player_infos,
+                                &self.players.infos,
                             );
                             self.players.team_assignment = initial_network_team_assignment(
                                 Some(&mode),
@@ -2944,7 +2944,7 @@ impl GameApp {
                         }
                         Err(error) => {
                             if let Some(previous_player_infos) = previous_player_infos.take() {
-                                self.control_player_infos = previous_player_infos;
+                                self.players.infos = previous_player_infos;
                             }
                             if let Some(previous_admission_resources) =
                                 previous_admission_resources.take()
@@ -2990,7 +2990,7 @@ impl GameApp {
                     seed_engine_player_info_parameters(
                         &mut self.engine,
                         &self.network_league_name,
-                        &self.control_player_infos,
+                        &self.players.infos,
                     );
                     self.network_control_clock = initial_network_control_clock(Some(&mode));
                     self.control_clients = control_clients;
@@ -5249,14 +5249,14 @@ impl GameApp {
             self.players.host_local_alternate_colors.clear();
             self.players.host_local_info_ids.clear();
             self.executing_ready_tick = None;
-            self.control_player_infos = ControlPlayerInfoRegistry::default();
+            self.players.infos = ControlPlayerInfoRegistry::default();
             self.network_is_league = false;
             self.network_league_name.clear();
             self.network_stream_address = LegacyCString::default();
             seed_engine_player_info_parameters(
                 &mut self.engine,
                 &self.network_league_name,
-                &self.control_player_infos,
+                &self.players.infos,
             );
             self.network_control_running = true;
             self.runtime_network_status_barrier = None;

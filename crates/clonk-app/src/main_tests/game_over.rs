@@ -486,7 +486,7 @@ fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
     recorded.team = 2;
     let mut recorded_companion = companion.clone();
     recorded_companion.team = 5;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         8,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -496,8 +496,8 @@ fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
         }],
     );
     app.players.restart_restore_infos
-        .capture_player_infos(&app.control_player_infos);
-    app.control_player_infos.replace_snapshot(
+        .capture_player_infos(&app.players.infos);
+    app.players.infos.replace_snapshot(
         8,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -553,7 +553,7 @@ fn restart_restore_team_submits_full_player_packet_on_roster_construction() {
             .any(|team| team.id == 5),
         "GetGenerateTeamByID creates a missing restored team before submission"
     );
-    main_assert_eq!(app.control_player_infos.client_update_request(0).unwrap().players[0].team => 1, "the roster waits for the authoritative PlayerInfo echo");
+    main_assert_eq!(app.players.infos.client_update_request(0).unwrap().players[0].team => 1, "the roster waits for the authoritative PlayerInfo echo");
 
     app.sync_classic_lobby_roster();
     main_assert!(commands.take_player_info_updates().is_empty(), "an existing PlayerListItem does not rerun its constructor hook");
@@ -581,7 +581,7 @@ fn restart_restore_script_players_rejoin_the_restarted_host_lobby() {
         original_color: 0x00ab_cdef,
         ..clonk_engine::ControlPlayerInfoEntry::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         9,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -591,9 +591,9 @@ fn restart_restore_script_players_rejoin_the_restarted_host_lobby() {
         }],
     );
     app.players.restart_restore_infos
-        .capture_player_infos(&app.control_player_infos);
+        .capture_player_infos(&app.players.infos);
     // The restarted round's freshly prepared host packet holds player files only.
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         9,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -799,7 +799,7 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
         chunk_size: 1,
         ..Default::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         17,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -839,8 +839,8 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
             .is_none(),
         "retained restart must consume the staged scenario during preparation"
     );
-    main_assert_eq!(app.control_player_infos.client_info_ids(0) => vec![17], "a runtime-added host player must survive exactly once");
-    main_assert_eq!(app.control_player_infos.client_packet(0).test_value().players[0].resource => Some(runtime_host_resource.clone()), "the retained host row must keep its published resource identity");
+    main_assert_eq!(app.players.infos.client_info_ids(0) => vec![17], "a runtime-added host player must survive exactly once");
+    main_assert_eq!(app.players.infos.client_packet(0).test_value().players[0].resource => Some(runtime_host_resource.clone()), "the retained host row must keep its published resource identity");
     main_assert_eq!(app.players.host_local_info_ids => HashSet::from([17]), "the host-local identity sidecar must follow the retained row");
     main_assert_eq!(app.players.host_local_alternate_colors => HashMap::from([(91, 0x0012_3456)]), "the host-local alternate-color sidecar must follow the retained resource");
     main_assert_eq!(app.admission_resources.resource_cores.get(&91) => Some(&runtime_host_resource), "the retained host resource must remain in the session catalog");
@@ -1108,7 +1108,7 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
         chunk_size: 1,
         ..Default::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         9,
         [
             clonk_engine::PlayerInfoControlData {
@@ -1163,7 +1163,7 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
     // Retire marks the row as removed while preserving the elimination
     // history that must not be replayed by the next lobby
     // (src/C4PlayerList.cpp:219-267,398-409).
-    main_assert!(app.control_player_infos.mark_retired(8, 42));
+    main_assert!(app.players.infos.mark_retired(8, 42));
     let restart_completion = thread::spawn(move || {
         let restart = commands.receive_host_round_lobby_restart();
         main_assert!(restart.complete(Ok(())));
@@ -1174,23 +1174,23 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
     let _commands = restart_completion.join().test_value();
 
     main_assert_eq!(
-        app.control_player_infos.client_info_ids(7) => vec![7, 11],
+        app.players.infos.client_info_ids(7) => vec![7, 11],
         "a prior-round disconnected bit is lifecycle state, not a reason to discard a live client row"
     );
     main_assert!(
-        !app.control_player_infos.client_info_ids(7).contains(&8),
+        !app.players.infos.client_info_ids(7).contains(&8),
         "an eliminated PlayerInfo row must not be resurrected into the next lobby"
     );
     main_assert!(
-        !app.control_player_infos.client_info_ids(7).contains(&10),
+        !app.players.infos.client_info_ids(7).contains(&10),
         "a removed PlayerInfo row must not be resurrected into the next lobby"
     );
     main_assert!(
-        app.control_player_infos.client_info_ids(7).contains(&11),
+        app.players.infos.client_info_ids(7).contains(&11),
         "a live remote row carrying only prior-round Disconnected must be retained"
     );
     main_assert!(
-        app.control_player_infos.client_packet(9).is_none(),
+        app.players.infos.client_packet(9).is_none(),
         "a PlayerInfo row whose client socket is gone must not be revived in the next lobby"
     );
     let rejoin = clonk_network::PlayerInfoUpdateRequest::new(
@@ -1203,17 +1203,17 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
         }],
     );
     let rejoined = app
-        .control_player_infos
+        .players.infos
         .admit_request(rejoin.clone(), 3)
         .test_value();
     let rejoined_id = rejoined.players[0].id;
-    app.control_player_infos.apply(rejoined);
+    app.players.infos.apply(rejoined);
     main_assert_eq!(
-        app.control_player_infos.client_info_ids(7) => vec![7, 11, rejoined_id],
+        app.players.infos.client_info_ids(7) => vec![7, 11, rejoined_id],
         "retaining the disconnected-only row must not change new-ID allocation"
     );
     main_assert!(
-        app.control_player_infos.admit_request(rejoin, 3).is_none(),
+        app.players.infos.admit_request(rejoin, 3).is_none(),
         "a rejoined player resource must not append a duplicate row"
     );
 }
@@ -1265,7 +1265,7 @@ fn host_round_restart_without_restore_mask_resets_remote_teams() {
             ..Default::default()
         },
     ]);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         7,
         [clonk_engine::PlayerInfoControlData {
             client_id: 7,
@@ -1289,7 +1289,7 @@ fn host_round_restart_without_restore_mask_resets_remote_teams() {
     restart_completion.join().test_value();
 
     let remote_teams = app
-        .control_player_infos
+        .players.infos
         .client_packet(7)
         .test_value()
         .players
@@ -1539,7 +1539,7 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
             host.classic_host_lobby.is_some()
                 && client.network_lobby.is_some()
                 && host.control_clients.contains(client_id)
-                && !host.control_player_infos.client_info_ids(client_id).is_empty()
+                && !host.players.infos.client_info_ids(client_id).is_empty()
         },
     );
     let client_id = i32::try_from(client.network.test_ref().local_client_id()).test_value();
@@ -1559,16 +1559,16 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     let host_scenario = host.scenario_lifecycle.active.clone().test_value();
     let client_scenario = client.scenario_lifecycle.active.clone().test_value();
     main_assert_eq!(client_scenario.title => host_scenario.title);
-    let host_player_ids = host.control_player_infos.client_info_ids(client_id);
-    let client_player_ids = client.control_player_infos.client_info_ids(client_id);
+    let host_player_ids = host.players.infos.client_info_ids(client_id);
+    let client_player_ids = client.players.infos.client_info_ids(client_id);
     main_assert!(!host_player_ids.is_empty(), "the connected player's authoritative row must exist before restart");
     main_assert!(!client_player_ids.is_empty(), "the connected player must see its row before restart");
     let host_player_packet = host
-        .control_player_infos
+        .players.infos
         .client_packet(client_id)
         .test_value();
     let client_player_packet = client
-        .control_player_infos
+        .players.infos
         .client_packet(client_id)
         .test_value();
     let host_addresses = host.network.test_ref().local_addresses();
@@ -1633,14 +1633,14 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     main_assert!(host.classic_host_lobby.test_ref().controller.rows().iter().any(|row| row.id() == LobbyRosterId::Client(client_id)), "the connected client must remain in the host lobby");
     main_assert!(client.network_lobby.test_ref().participants.contains_key(&0));
     main_assert!(client.network_lobby.test_ref().participants.contains_key(&client_local_id));
-    main_assert_eq!(host.control_player_infos.client_info_ids(client_id) => host_player_ids, "the host must retain the connected player's row");
-    main_assert_eq!(client.control_player_infos.client_info_ids(client_id) => client_player_ids, "the client must retain its player row");
+    main_assert_eq!(host.players.infos.client_info_ids(client_id) => host_player_ids, "the host must retain the connected player's row");
+    main_assert_eq!(client.players.infos.client_info_ids(client_id) => client_player_ids, "the client must retain its player row");
     let rebuilt_host_packet = host
-        .control_player_infos
+        .players.infos
         .client_packet(client_id)
         .test_value();
     let rebuilt_client_packet = client
-        .control_player_infos
+        .players.infos
         .client_packet(client_id)
         .test_value();
     main_assert_eq!(rebuilt_client_packet => rebuilt_host_packet, "the rebuilt lobby must leave both peers with the same authoritative PlayerInfo packet");
@@ -1679,11 +1679,11 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
                 && host.control_clients.contains(joining_client_id)
                 && retained_client.control_clients.contains(joining_client_id)
                 && !host
-                    .control_player_infos
+                    .players.infos
                     .client_info_ids(joining_client_id)
                     .is_empty()
                 && !retained_client
-                    .control_player_infos
+                    .players.infos
                     .client_info_ids(joining_client_id)
                     .is_empty()
         },
@@ -1698,14 +1698,14 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         .participants
         .contains_key(&joining_client_network_id));
     let host_joining_player_ids = host
-        .control_player_infos
+        .players.infos
         .client_info_ids(joining_client_id);
     let retained_joining_player_ids = client
-        .control_player_infos
+        .players.infos
         .client_info_ids(joining_client_id);
     main_assert!(!host_joining_player_ids.is_empty());
     main_assert_eq!(retained_joining_player_ids => host_joining_player_ids);
-    main_assert_eq!(client.control_player_infos.client_packet(joining_client_id) => host.control_player_infos.client_packet(joining_client_id));
+    main_assert_eq!(client.players.infos.client_packet(joining_client_id) => host.players.infos.client_packet(joining_client_id));
     main_assert_eq!(joining_client.network_lobby.test_ref().scenario_label() => host_scenario.title);
 
     pump_live_restart_three_apps_until(
@@ -1816,11 +1816,11 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     // matching network resource core above is their scenario identity.
     main_assert_eq!(round_two_joining_client_scenario.title => round_two_host_scenario.title);
     let round_two_host_packet = host
-        .control_player_infos
+        .players.infos
         .client_packet(client_id)
         .test_value();
     let round_two_client_packet = client
-        .control_player_infos
+        .players.infos
         .client_packet(client_id)
         .test_value();
     main_assert_eq!(without_round_player_lifecycle(&round_two_host_packet) => without_round_player_lifecycle(&host_player_packet), "round two may update lifecycle fields but must preserve the remote player's full identity and resource packet");
@@ -1871,7 +1871,7 @@ fn restart_restore_team_obeys_mask_user_and_equal_team_guards() {
         let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
         chooser.player_type = player_type;
         chooser.team = live_team;
-        app.control_player_infos.replace_snapshot(
+        app.players.infos.replace_snapshot(
             8,
             [clonk_engine::PlayerInfoControlData {
                 client_id: 0,
@@ -2790,7 +2790,7 @@ fn client_league_round_result_packet_applies_persistent_evaluation_fields() {
         SocketAddr::from(([127, 0, 0, 1], 11_112)),
         "Client",
     )));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         10,
         [clonk_engine::PlayerInfoControlData {
             client_id: 3,
@@ -2824,7 +2824,7 @@ fn client_league_round_result_packet_applies_persistent_evaluation_fields() {
 
     app.test_network_events();
 
-    let info = app.control_player_infos.get(10).test_value();
+    let info = app.players.infos.get(10).test_value();
     main_assert_eq!((info.league_score, info.league_rank, info.league_rank_symbol) => (0, 0, 0), "EvaluateLeague does not overwrite live PlayerInfo");
     let engine_snapshot = app.engine.snapshot();
     main_assert_eq!(app.snapshot.round_results => engine_snapshot.round_results);
@@ -3237,7 +3237,7 @@ fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
     }];
     let icon = ImageData::new(1, 1, vec![12, 34, 56, 255]);
     let file_name = "Player.c4p".to_string();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         player_info_id,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -3273,12 +3273,12 @@ fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
             },
         },
     );
-    app.runtime_player_big_icons.clear();
-    app.runtime_player_big_icon_misses.clear();
+    app.players.big_icons.clear();
+    app.players.big_icon_misses.clear();
 
     app.handle_game_over().test_value();
-    main_assert_eq!(app.runtime_player_big_icons.get(&player_info_id) => Some(&icon), "evaluation hydration must ignore the viewport portrait switch");
-    app.runtime_player_big_icons.remove(&player_info_id);
+    main_assert_eq!(app.players.big_icons.get(&player_info_id) => Some(&icon), "evaluation hydration must ignore the viewport portrait switch");
+    app.players.big_icons.remove(&player_info_id);
     main_assert_eq!(
         app.dialogs.game_over
             .as_ref()
@@ -3303,7 +3303,7 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
     let player_info_id = app.snapshot.players.first().test_value().player_info_id;
     let icon = ImageData::new(1, 1, vec![9, 8, 7, 255]);
     let file_name = "Departed.c4p".to_string();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         player_info_id,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -3339,8 +3339,8 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
             },
         },
     );
-    app.runtime_player_big_icons.clear();
-    app.runtime_player_big_icon_misses.clear();
+    app.players.big_icons.clear();
+    app.players.big_icon_misses.clear();
 
     // The player is evaluated and retired inside the simulation.
     app.engine
@@ -3351,12 +3351,12 @@ fn game_over_uses_elimination_time_big_icon_after_player_resource_departure() {
             ..clonk_engine::RoundResultsPlayerState::default()
         });
     app.freeze_evaluated_player_big_icons();
-    main_assert_eq!(app.runtime_player_big_icons.get(&player_info_id) => Some(&icon), "evaluation copies the icon while the player still exists");
+    main_assert_eq!(app.players.big_icons.get(&player_info_id) => Some(&icon), "evaluation copies the icon while the player still exists");
 
     // Its player file and resource then depart, so nothing can supply the
     // icon any more.
     app.startup.player_files.clear();
-    app.control_player_infos
+    app.players.infos
         .replace_snapshot(player_info_id + 1, []);
     app.snapshot.round_results.players = vec![clonk_engine::RoundResultsPlayerState {
         player_info_id,

@@ -3016,8 +3016,6 @@ impl GameApp {
             },
             last_startup_dialog: StartupDialog::MainMenu,
             scenario_game_options,
-            runtime_player_big_icons: HashMap::new(),
-            runtime_player_big_icon_misses: HashSet::new(),
             white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
             mode: AppMode::Loading,
@@ -3132,8 +3130,6 @@ impl GameApp {
             control_clients,
             network_client_next_control_ticks,
             network_client_activity: NetworkClientActivity::default(),
-            control_player_infos,
-            local_player_profile_paths: HashMap::new(),
             players: PlayerState {
                 local_owner: runtime.player_owner,
                 local_name: player_name.clone(),
@@ -3145,6 +3141,10 @@ impl GameApp {
                 host_local_alternate_colors: host_local_alternate_colors_by_resource,
                 team_assignment: network_team_assignment,
                 generated_team_name_template,
+                infos: control_player_infos,
+                local_profile_paths: HashMap::new(),
+                big_icons: HashMap::new(),
+                big_icon_misses: HashSet::new(),
             },
             pending_host_rejoin: None,
             admission_resources: AdmissionResourceStore::default(),
@@ -4870,7 +4870,8 @@ impl GameApp {
         let Some(opponent) = self.engine.player(opponent) else {
             return false;
         };
-        self.control_player_infos
+        self.players
+            .infos
             .get(opponent.player_info_id())
             .is_none_or(|info| info.player_type == clonk_engine::PLAYER_INFO_TYPE_USER)
     }
@@ -7226,7 +7227,7 @@ impl GameApp {
                         return;
                     };
                     let updates = match team_assignment.set_distribution(
-                        &mut self.control_player_infos,
+                        &mut self.players.infos,
                         set.data,
                         has_or_will_have_lobby,
                     ) {
@@ -7319,7 +7320,7 @@ impl GameApp {
                         return;
                     }
                     let updates = match team_assignment.set_team_colors_with_alternate_colors(
-                        &mut self.control_player_infos,
+                        &mut self.players.infos,
                         enabled,
                         &restore_players,
                         |player| {
@@ -7519,8 +7520,7 @@ impl GameApp {
                         .as_ref()
                         .and_then(|network| i32::try_from(network.local_client_id()).ok())
                         == Some(info.by_client);
-                    let had_client_packet =
-                        self.control_player_infos.client_packet(client_id).is_some();
+                    let had_client_packet = self.players.infos.client_packet(client_id).is_some();
                     let send_clean_follow_up =
                         matches!(self.runtime_network_role(), RuntimeNetworkRole::Host)
                             && info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
@@ -7530,7 +7530,7 @@ impl GameApp {
                     self.admission_resources
                         .register_player_info_resources(&info.players);
                     self.generate_incoming_player_info_teams(&info.players);
-                    self.control_player_infos.apply(info);
+                    self.players.infos.apply(info);
                     let rebalance_updates = self.recheck_team_memberships_from_player_infos();
                     if local_origin {
                         let mut updated_clients = rebalance_updates
@@ -7540,7 +7540,7 @@ impl GameApp {
                         if send_clean_follow_up {
                             updated_clients.insert(client_id);
                         }
-                        let updates = self.control_player_infos.client_packets(&updated_clients);
+                        let updates = self.players.infos.client_packets(&updated_clients);
                         if let Some(network) = self.network.as_ref() {
                             for update in updates {
                                 if let Err(error) = network.broadcast_player_info(update) {
@@ -7552,7 +7552,7 @@ impl GameApp {
                     seed_engine_player_info_parameters(
                         &mut self.engine,
                         &self.network_league_name,
-                        &self.control_player_infos,
+                        &self.players.infos,
                     );
                     if matches!(self.runtime_network_role(), RuntimeNetworkRole::Offline)
                         && self.engine.is_control_host()
@@ -7563,7 +7563,8 @@ impl GameApp {
                         // CreateScriptPlayer admission path above.
                         let local_client_id = self.offline_local_client_id();
                         let joins = self
-                            .control_player_infos
+                            .players
+                            .infos
                             .issue_unjoined_local_players(local_client_id, |info| {
                                 (!info.filename.is_empty()).then(|| info.filename.clone())
                             });
@@ -7854,11 +7855,9 @@ impl GameApp {
                             self.remove_classic_lobby_resources_at_client(remove.client_id);
                             self.network_client_activity.remove_client(remove.client_id);
                             self.control_messages.remove_client(remove.client_id);
-                            let had_player_info = self
-                                .control_player_infos
-                                .client_packet(remove.client_id)
-                                .is_some();
-                            self.control_player_infos.on_client_part(remove.client_id);
+                            let had_player_info =
+                                self.players.infos.client_packet(remove.client_id).is_some();
+                            self.players.infos.on_client_part(remove.client_id);
                             self.finish_control_client_part(had_player_info);
                         }
                         self.sync_classic_lobby_roster();
@@ -8115,7 +8114,7 @@ impl GameApp {
             .map(|player| player.player_info_id)
             .collect::<Vec<_>>();
         for player_info_id in winner_info_ids {
-            self.control_player_infos.mark_winner(player_info_id);
+            self.players.infos.mark_winner(player_info_id);
         }
         let league_record = self.finish_recording();
         self.game_over_handled = true;
@@ -8954,7 +8953,7 @@ impl GameApp {
         seed_engine_player_info_parameters(
             &mut self.engine,
             &self.network_league_name,
-            &self.control_player_infos,
+            &self.players.infos,
         );
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
@@ -9143,25 +9142,26 @@ impl GameApp {
         // JOINED bit: a nonempty current roster may consist entirely of
         // unjoined takeover entries at this point.
         for saved_player in &save.engine_state.players {
-            self.control_player_infos.resume_joined_savegame_player(
+            self.players.infos.resume_joined_savegame_player(
                 saved_player.player_info_id,
                 saved_player.team.unwrap_or(0),
                 saved_player.no_elimination_check,
             );
         }
         let networked = self.network.is_some();
-        let authoritative_player_infos = self.control_player_infos.player_count() != 0;
+        let authoritative_player_infos = self.players.infos.player_count() != 0;
         if authoritative_player_infos {
             // Savegame takeover keeps the freshly authenticated C4PlayerInfo
             // league fields rather than copying stale saved values.
             seed_engine_player_info_parameters(
                 &mut self.engine,
                 &self.network_league_name,
-                &self.control_player_infos,
+                &self.players.infos,
             );
         }
         let recreation_players = self
-            .control_player_infos
+            .players
+            .infos
             .recreation_players()
             .into_iter()
             .filter(|(client_id, _)| !networked || self.control_clients.contains(*client_id))
@@ -9249,8 +9249,8 @@ impl GameApp {
             saved_pref_auto_context_menu,
         ) in restored_players
         {
-            let linked_client_id = self.control_player_infos.client_id_for_info(player_info_id);
-            let current_info = self.control_player_infos.get(player_info_id);
+            let linked_client_id = self.players.infos.client_id_for_info(player_info_id);
+            let current_info = self.players.infos.get(player_info_id);
             let script_player = current_info
                 .map(|info| info.is_script_player())
                 .unwrap_or(saved_script_player);
@@ -9388,12 +9388,12 @@ impl GameApp {
         let offline_player_infos = self
             .network
             .is_none()
-            .then(|| std::mem::take(&mut self.control_player_infos));
+            .then(|| std::mem::take(&mut self.players.infos));
         self.rendering.active_game_graphics = loaded_game_graphics;
         self.ingame_menus.graphics = None;
         self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
         if let Some(player_infos) = offline_player_infos {
-            self.control_player_infos = player_infos;
+            self.players.infos = player_infos;
         }
         // PlayScenarioMusic one-way enables Game.IsMusicEnabled when RXMusic
         // is on; a configured-off client does not erase a restored true.
@@ -9552,7 +9552,7 @@ impl GameApp {
         self.runtime_network_status_barrier = None;
         if self.network.is_none() {
             self.control_clients = initial_control_clients(None, None);
-            self.control_player_infos = ControlPlayerInfoRegistry::default();
+            self.players.infos = ControlPlayerInfoRegistry::default();
             self.clear_blocking_resource_wait();
             self.admission_resources.clear();
             self.players.host_local_alternate_colors.clear();

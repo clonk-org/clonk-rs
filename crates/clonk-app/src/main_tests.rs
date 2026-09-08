@@ -1956,7 +1956,7 @@ fn install_test_classic_host_team_lobby(
         original_color: 0x0065_4321,
         ..clonk_engine::ControlPlayerInfoEntry::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         8,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -2013,7 +2013,7 @@ fn script_player_add_fixture(
     max_script_players: i32,
 ) -> (GameApp, network::TestNetworkCommands) {
     let mut app = new_state_only_menu_app(320, 200);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [clonk_engine::PlayerInfoControlData {
             client_id: 0,
@@ -4270,7 +4270,8 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
             name: clonk_engine::LegacyCString::from_bytes(b"Host Client".to_vec()).test_value(),
             ..Default::default()
         }]);
-    app.control_player_infos
+    app.players
+        .infos
         .apply(clonk_engine::PlayerInfoControlData {
             client_id: at_client,
             players: vec![clonk_engine::ControlPlayerInfoEntry {
@@ -4315,11 +4316,7 @@ fn synchronized_runtime_join_obeys_parameterless_set_max_player() {
         .engine
         .players()
         .all(|player| player.player_info_id() != info_id));
-    assert!(!app
-        .control_player_infos
-        .get(info_id)
-        .test_value()
-        .is_joined());
+    assert!(!app.players.infos.get(info_id).test_value().is_joined());
     assert_eq!(
         app.local_controls.assignments().collect::<Vec<_>>(),
         controls_before
@@ -4349,7 +4346,8 @@ fn synchronized_join_for_a_missing_client_is_ignored() {
     app.network = Some(manager);
     app.engine.set_network_game(true);
     let info_id = 74;
-    app.control_player_infos
+    app.players
+        .infos
         .apply(clonk_engine::PlayerInfoControlData {
             client_id: 9,
             players: vec![clonk_engine::ControlPlayerInfoEntry {

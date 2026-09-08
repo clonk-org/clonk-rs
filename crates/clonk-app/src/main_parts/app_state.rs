@@ -455,6 +455,17 @@ pub(crate) struct PlayerState {
     pub(crate) team_assignment: Option<NetworkTeamAssignmentState>,
     /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
     pub(crate) generated_team_name_template: LegacyCString,
+    pub(crate) infos: ControlPlayerInfoRegistry,
+    /// Physical profile group retained for each locally admitted PlayerInfo.
+    /// C4Player keeps this as `Filename`; the Rust control packet carries only
+    /// a legacy presentation path, so retain the resolved path separately for
+    /// `C4PlayerList::SynchronizeLocalFiles`.
+    pub(crate) local_profile_paths: HashMap<i32, PathBuf>,
+    /// `C4Player::BigIcon` equivalents keyed by stable C4PlayerInfo ID. The
+    /// renderer projects these onto the current runtime player numbers.
+    pub(crate) big_icons: HashMap<i32, ImageData>,
+    /// Player-info sources already checked without finding a usable BigIcon.
+    pub(crate) big_icon_misses: HashSet<i32>,
 }
 
 /// Control recording and playback: whether to record, what to record
@@ -2302,11 +2313,6 @@ pub(crate) struct GameApp {
     /// displace the dialog reopened after the round ends.
     pub(crate) last_startup_dialog: StartupDialog,
     pub(crate) scenario_game_options: GameOptionButtons,
-    /// `C4Player::BigIcon` equivalents keyed by stable C4PlayerInfo ID. The
-    /// renderer projects these onto the current runtime player numbers.
-    pub(crate) runtime_player_big_icons: HashMap<i32, ImageData>,
-    /// Player-info sources already checked without finding a usable BigIcon.
-    pub(crate) runtime_player_big_icon_misses: HashSet<i32>,
     /// `Config.General.UseWhiteLobbyChat`, which is intentionally distinct
     /// from the in-game white-chat display toggle.
     pub(crate) white_lobby_chat: bool,
@@ -2549,12 +2555,6 @@ pub(crate) struct GameApp {
     /// `CopyClientList` runs and never advances it afterwards.
     pub(crate) network_client_next_control_ticks: HashMap<i32, i32>,
     pub(crate) network_client_activity: NetworkClientActivity,
-    pub(crate) control_player_infos: ControlPlayerInfoRegistry,
-    /// Physical profile group retained for each locally admitted PlayerInfo.
-    /// C4Player keeps this as `Filename`; the Rust control packet carries only
-    /// a legacy presentation path, so retain the resolved path separately for
-    /// `C4PlayerList::SynchronizeLocalFiles`.
-    pub(crate) local_player_profile_paths: HashMap<i32, PathBuf>,
     /// The local profile and the rosters assembled around it.
     pub(crate) players: PlayerState,
     /// Armed on this client by the host's restart notice
@@ -6049,7 +6049,7 @@ pub(crate) fn finish_app_presentation_benchmark(
         input_latency,
         assert_native_tick,
         app.engine.players().count(),
-        app.control_player_infos.nonremoved_player_count(),
+        app.players.infos.nonremoved_player_count(),
         app.control_clients
             .activated_client_ids()
             .into_iter()

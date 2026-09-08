@@ -1271,7 +1271,7 @@ fn staged_host_completion_enters_exact_lobby_over_loader_background() {
         })
         .collect::<Vec<_>>();
     let authoritative_player_ids = app
-        .control_player_infos
+        .players.infos
         .retained_rows_snapshot()
         .1
         .into_iter()
@@ -1396,7 +1396,7 @@ fn staged_host_installs_activated_participant_before_building_lobby_roster() {
         matches!(&player.icon, LobbyRosterIcon::Raster(icon) if icon.width() == 1 && icon.height() == 1 && icon.pixels() == [12, 34, 56, 255])
     );
 
-    let (_, retained) = app.control_player_infos.retained_rows_snapshot();
+    let (_, retained) = app.players.infos.retained_rows_snapshot();
     let retained_player = &retained[0].2[0];
     main_assert_eq!(retained_player.id => player.id);
     let resource = retained_player.resource.test_ref();
@@ -2041,7 +2041,7 @@ fn countdown_zero_quits_a_dialogless_host_that_is_short_of_min_players() {
         let (events, commands) = install_classic_host_network_stub(&mut app);
         app.headless = dialogless;
         app.network_lobby_min_players = Some(2);
-        app.control_player_infos.replace_snapshot(
+        app.players.infos.replace_snapshot(
             1,
             [lobby_fixture!(player_data:
                 0,
@@ -2220,7 +2220,7 @@ fn classic_ready_packets_update_roster_and_start_when_relevant_clients_are_ready
         message_client(0, b"Exact Host"),
         message_client(7, b"Remote"),
     ]);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [lobby_fixture!(player_data: 7, vec![lobby_fixture!(player { id: 1 })])],
     );
@@ -3781,7 +3781,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         team: 2,
     });
     let packet_flags = clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         50,
         [
             lobby_fixture!(player_data: 0, flags: 0, vec![foreign.clone()], by: 0),
@@ -4167,7 +4167,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
             lobby_fixture!(player_update: 7, packet_flags, vec![associated, companion.clone(), script.clone()])
         ]
     );
-    main_assert_eq!(app.control_player_infos.client_update_request(7).unwrap().players[0].savegame_player => 0, "takeover waits for the authoritative echo");
+    main_assert_eq!(app.players.infos.client_update_request(7).unwrap().players[0].savegame_player => 0, "takeover waits for the authoritative echo");
     main_assert!(app
         .handle_context_menu_pointer_button(ElementState::Released, ContextMenuPointerButton::Left,)
         .expect("consume takeover activation release"));
@@ -4218,7 +4218,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
         .iter()
         .position(|row| row.id() == LobbyRosterId::Player(31))
         .test_value();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         50,
         [
             lobby_fixture!(player_data: 0, flags: 0, vec![foreign.clone()], by: 0),
@@ -4236,7 +4236,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
     main_assert_ne!(chooser_index_after => chooser_index_before);
     main_assert_eq!(lobby.controller.selected_roster_id() => Some(&LobbyRosterId::Player(31)), "authoritative row reordering retains semantic joined selection");
     main_assert_eq!(lobby.controller.focus() => LobbyControl::Roster);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         50,
         [
             lobby_fixture!(player_data: 0, flags: 0, vec![foreign], by: 0),
@@ -4275,7 +4275,7 @@ fn joined_roster_double_click_is_roster_scoped() {
     let companion = set_control_test_player(32, 3, clonk_engine::PLAYER_INFO_FLAG_JOIN_ISSUED);
     let packet_flags = clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
     let clients = vec![message_client(0, b"Host"), message_client(7, b"Client")];
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         40,
         [lobby_fixture!(player_data: 7, flags: packet_flags, vec![chooser.clone(), companion.clone()], by: 7)],
     );
@@ -4367,7 +4367,7 @@ fn unstaged_host_retained_roster_routes_script_player_add() {
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.control_clients
         .replace_snapshot([message_client(0, b"Host")]);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         0,
         [lobby_fixture!(player_data: 0, flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL, Vec::new(), by: 0)],
     );
@@ -5434,7 +5434,7 @@ fn classic_lobby_team_combo_rechecks_cpp_team_permissions_before_opening() {
     app.close_context_menu_silently();
 
     chooser.savegame_player = 99;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         8,
         [lobby_fixture!(player_data: 0, flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL, vec![chooser, companion], by: 0)],
     );
@@ -5735,7 +5735,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
         7,
         AdmissionResourceState::Unavailable(AdmissionResourceUnavailable::Unloadable),
     );
-    app.control_player_infos
+    app.players.infos
         .apply(lobby_fixture!(player_data: 8, vec![lobby_fixture!(player { id: 9 })]));
     app.executing_ready_tick = Some(6);
     main_assert!(app.loader.screen.is_some());
@@ -5757,7 +5757,7 @@ fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
     main_assert!(app.sync_checks.local.is_empty() && app.sync_checks.remote.is_empty());
     main_assert!(app.admission_resources.resources.is_empty());
     main_assert!(app.executing_ready_tick.is_none());
-    main_assert!(app.control_player_infos.client_info_ids(8).is_empty());
+    main_assert!(app.players.infos.client_info_ids(8).is_empty());
     main_assert!(app.network_control_running);
     main_assert_eq!(app.scenario_game_options.context() => GameOptionContext::LocalSelector);
     main_assert!(app.dialogs.messages.is_empty());
@@ -5864,7 +5864,7 @@ fn classic_host_lobby_network_events_update_supported_live_state() {
     main_assert!(app.status_text.is_empty());
     main_assert!(app.network_lobby.is_none());
 
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         7,
         [lobby_fixture!(player_data:
             0,
@@ -5892,7 +5892,7 @@ fn classic_host_lobby_network_events_update_supported_live_state() {
         ))
         .test_value();
     app.test_network_events();
-    main_assert_eq!(app.control_player_infos.get(7).unwrap().league_projected_gain => 4);
+    main_assert_eq!(app.players.infos.get(7).unwrap().league_projected_gain => 4);
     let league_broadcasts = commands.take_broadcast_player_infos();
     let [league_info] = league_broadcasts.as_slice() else {
         panic!("expected one projected-gain PlayerInfo broadcast");
@@ -5930,7 +5930,7 @@ fn classic_host_lobby_network_events_update_supported_live_state() {
             .test_value();
     }
     app.test_network_events();
-    main_assert!(app.control_player_infos.contains_client(1));
+    main_assert!(app.players.infos.contains_client(1));
 
     events
         .send(NetworkEvent::PeerConnected {
@@ -6522,14 +6522,14 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         let player_info_propagated = local_client_id.is_some_and(|local_client_id| {
             [0, local_client_id].into_iter().all(|client_id| {
                 let player_resource_available = |app: &GameApp| {
-                    let ids = app.control_player_infos.client_info_ids(client_id);
+                    let ids = app.players.infos.client_info_ids(client_id);
                     let expected_name = if client_id == 0 {
                         b"Exact Player".as_slice()
                     } else {
                         b"Joining Player".as_slice()
                     };
                     ids.len() == 1
-                        && app.control_player_infos.get(ids[0]).is_some_and(|player| {
+                        && app.players.infos.get(ids[0]).is_some_and(|player| {
                             player.name.as_bytes() == expected_name
                                 && player.resource.as_ref().is_some_and(|core| {
                                     app.admission_resources.complete_path(core.id).is_some()
@@ -6549,12 +6549,12 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
             let player_resources = [0, local_client_id]
                 .into_iter()
                 .filter_map(|client_id| {
-                    let ids = client.control_player_infos.client_info_ids(client_id);
+                    let ids = client.players.infos.client_info_ids(client_id);
                     let [id] = ids.as_slice() else {
                         return None;
                     };
                     client
-                        .control_player_infos
+                        .players.infos
                         .get(*id)
                         .and_then(|player| player.resource.as_ref())
                         .map(|core| (client_id, core.id))
@@ -6649,8 +6649,8 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
             client.status_text,
             host.pending_network_host_preparation.is_some(),
             host.pending_lobby_internet_signup.is_some(),
-            host.control_player_infos.retained_rows_snapshot(),
-            client.control_player_infos.retained_rows_snapshot(),
+            host.players.infos.retained_rows_snapshot(),
+            client.players.infos.retained_rows_snapshot(),
             host.admission_resources.present_percent,
             client.admission_resources.present_percent,
         );
@@ -7066,8 +7066,8 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     let prepared = settings.prepared.test_ref();
     main_assert!(!prepared.host_config().allow_join);
     main_assert!(prepared.host_config().initial_join_snapshot.is_some());
-    main_assert!(app.control_player_infos.contains_client(0));
-    main_assert_eq!(app.control_player_infos.player_count() => 0);
+    main_assert!(app.players.infos.contains_client(0));
+    main_assert_eq!(app.players.infos.player_count() => 0);
     main_assert_eq!(prepared.scenario_wire_name().as_bytes() => scenario.identifier.as_bytes(), "the prepared host retains the selected scenario's wire identity");
     main_assert!(
         app.network_lobby.is_none(),
@@ -7277,7 +7277,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     let running_reference = some(&app.advertised_game_reference);
     main_assert_eq!(running_reference.summary().state => "Running");
     main_assert!(!running_reference.summary().join_allowed);
-    app.control_player_infos.apply(lobby_fixture!(player_data {
+    app.players.infos.apply(lobby_fixture!(player_data {
         client_id: 0,
         flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
         players: vec![lobby_fixture!(player {
@@ -7293,7 +7293,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
             }),
         })],
     }));
-    main_assert!(app.control_player_infos.mark_joined(41, 3, 77));
+    main_assert!(app.players.infos.mark_joined(41, 3, 77));
     main_assert!(app
         .control_clients
         .apply_join(&clonk_engine::ClientJoinControlData {
@@ -7333,7 +7333,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         some(&app.advertised_game_reference),
         some(&app.host_join_snapshot).parameters.clone(),
         &app.control_clients,
-        &app.control_player_infos,
+        &app.players.infos,
         app.engine.teams(),
         app.engine.max_players().expect("live maximum is set"),
         app.engine.startup_player_count(),
@@ -7373,7 +7373,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         .players[0];
     main_assert_eq!(republished_player.league_performance => 19);
     main_assert_ne!(republished_player.flags & clonk_engine::PLAYER_INFO_FLAG_WON => 0);
-    let live_player = app.control_player_infos.get(41).test_value();
+    let live_player = app.players.infos.get(41).test_value();
     main_assert_ne!(live_player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE => 0);
     main_assert!(live_player.resource.is_some());
 }
@@ -7745,7 +7745,7 @@ fn finishing_recording_deletes_stale_final_infos_for_an_empty_roster() {
     let directory = tempdir();
     let output_path = directory.path().join("001-Empty.c4s");
     let mut app = new_state_only_running_sandbox_app();
-    app.control_player_infos = ControlPlayerInfoRegistry::default();
+    app.players.infos = ControlPlayerInfoRegistry::default();
     install_test_recording_template(&mut app, output_path.clone());
     some_mut(&mut app.records.template)
         .group
@@ -7834,7 +7834,7 @@ fn lobby_message_keeps_markup_timestamp_and_makes_chat_color_readable() {
     app.show_log_timestamps = false;
     app.control_clients
         .replace_snapshot([message_client(0, b"Local"), message_client(7, b"Remote")]);
-    app.control_player_infos.apply(lobby_fixture!(player_data:
+    app.players.infos.apply(lobby_fixture!(player_data:
         7,
         vec![lobby_fixture!(player {
             player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
@@ -7914,7 +7914,7 @@ fn lobby_roster_makes_black_client_and_player_names_readable() {
     install_test_classic_host_lobby(&mut app);
     app.control_clients
         .replace_snapshot([message_client(0, b"Local"), message_client(7, b"Remote")]);
-    app.control_player_infos.apply(lobby_fixture!(player_data:
+    app.players.infos.apply(lobby_fixture!(player_data:
         7,
         vec![lobby_fixture!(player {
             id: 41,
@@ -7951,12 +7951,12 @@ fn direct_lobby_player_info_survives_network_game_initialization() {
         .test_value();
 
     app.test_network_events();
-    main_assert!(app.control_player_infos.get(info_id).is_some());
+    main_assert!(app.players.infos.get(info_id).is_some());
 
     app.configure_running_state("Network".to_string(), DEFAULT_GROUND_HEIGHT);
 
     main_assert!(
-        app.control_player_infos.get(info_id).is_some(),
+        app.players.infos.get(info_id).is_some(),
         "network game initialization must retain lobby PlayerInfo"
     );
 }
@@ -9551,7 +9551,7 @@ fn final_remote_ready_transition_starts_cpp_default_countdown() {
     let lobby = app_lobby_mut(&mut app.network_lobby);
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
-    app.control_player_infos.apply(lobby_player_infos(7, &[1]));
+    app.players.infos.apply(lobby_player_infos(7, &[1]));
     send_ready_check(&event_tx, 7, clonk_network::ReadyCheckData::Ready);
 
     app.test_network_events();
@@ -9572,7 +9572,7 @@ fn empty_nonhost_does_not_block_ready_autostart() {
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Player client".to_string(), ParticipantKind::Player);
     lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
-    app.control_player_infos.apply(lobby_player_infos(7, &[1]));
+    app.players.infos.apply(lobby_player_infos(7, &[1]));
     send_ready_check(&event_tx, 7, clonk_network::ReadyCheckData::Ready);
 
     app.test_network_events();
@@ -9590,7 +9590,7 @@ fn host_without_players_still_blocks_ready_autostart() {
         selected_host_lobby_with_commands(new_state_only_menu_app(320, 200));
     let lobby = app_lobby_mut(&mut app.network_lobby);
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
-    app.control_player_infos.apply(lobby_player_infos(7, &[1]));
+    app.players.infos.apply(lobby_player_infos(7, &[1]));
     send_ready_check(&event_tx, 7, clonk_network::ReadyCheckData::Ready);
 
     app.test_network_events();
@@ -9612,7 +9612,7 @@ fn unready_nonhost_with_player_blocks_ready_autostart() {
     lobby.register_peer(7, "Unready".to_string(), ParticipantKind::Player);
     lobby.register_peer(9, "Changed".to_string(), ParticipantKind::Player);
     for (client_id, info_id) in [(7, 1), (9, 2)] {
-        app.control_player_infos
+        app.players.infos
             .apply(lobby_player_infos(client_id, &[info_id]));
     }
     send_ready_check(&event_tx, 9, clonk_network::ReadyCheckData::Ready);
@@ -9636,7 +9636,7 @@ fn final_local_host_ready_transition_starts_cpp_default_countdown() {
     let lobby = app_lobby_mut(&mut app.network_lobby);
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
     lobby.participants.get_mut(&7).test_value().ready = true;
-    app.control_player_infos.apply(lobby_player_infos(7, &[1]));
+    app.players.infos.apply(lobby_player_infos(7, &[1]));
 
     process_joined_lobby_action(&mut app, LobbyAction::ToggleReady);
 
@@ -9657,7 +9657,7 @@ fn changed_relevant_client_becoming_unready_aborts_active_countdown() {
     lobby.participants.get_mut(&0).test_value().ready = true;
     lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
     lobby.participants.get_mut(&7).test_value().ready = true;
-    app.control_player_infos.apply(lobby_player_infos(7, &[1]));
+    app.players.infos.apply(lobby_player_infos(7, &[1]));
     process_joined_lobby_action(&mut app, LobbyAction::StartGame);
     assert_lobby_countdowns(&mut commands, &[5]);
     send_ready_check(&event_tx, 7, clonk_network::ReadyCheckData::NotReady);
@@ -9686,7 +9686,7 @@ fn host_countdown_disconnect_fixture(
     app.network_lobby = Some(lobby);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.host_lobby_countdown = Some(HostLobbyCountdown { remaining });
-    app.control_player_infos.apply(lobby_player_infos(
+    app.players.infos.apply(lobby_player_infos(
         i32::try_from(client_id).test_value(),
         player_ids,
     ));
@@ -9733,7 +9733,7 @@ fn host_disconnect_of_playerless_observer_keeps_lobby_countdown() {
     let client_id = 9;
     let (mut app, event_tx, mut commands) =
         host_countdown_disconnect_fixture(client_id, ParticipantKind::Observer, 5, &[]);
-    main_assert!(app.control_player_infos.client_info_ids(9).is_empty());
+    main_assert!(app.players.infos.client_info_ids(9).is_empty());
     send_peer_disconnected(&event_tx, client_id, None);
 
     app.test_network_events();
@@ -9816,7 +9816,7 @@ fn repeated_or_irrelevant_unready_does_not_abort_manual_countdown() {
     lobby.register_peer(7, "Unready player".to_string(), ParticipantKind::Player);
     lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
     lobby.participants.get_mut(&9).test_value().ready = true;
-    app.control_player_infos.apply(lobby_player_infos(7, &[1]));
+    app.players.infos.apply(lobby_player_infos(7, &[1]));
     process_joined_lobby_action(&mut app, LobbyAction::StartGame);
     assert_lobby_countdowns(&mut commands, &[5]);
 
@@ -9860,7 +9860,7 @@ fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
 
     app.test_network_events();
 
-    main_assert_eq!(app.control_player_infos.client_info_ids(7) => vec![1]);
+    main_assert_eq!(app.players.infos.client_info_ids(7) => vec![1]);
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
     main_assert!(app.host_lobby_countdown.is_none());
 
@@ -9877,7 +9877,7 @@ fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
 
     app.test_network_events();
 
-    main_assert!(app.control_player_infos.client_info_ids(7).is_empty());
+    main_assert!(app.players.infos.client_info_ids(7).is_empty());
     main_assert!(commands.take_submitted_lobby_countdowns().is_empty());
     main_assert!(app.host_lobby_countdown.is_none());
 }
@@ -9944,7 +9944,7 @@ fn synchronized_team_selection_and_runtime_switch_refresh_live_parameters() {
         clonk_engine::TeamInfo::new(2, "Green", 0x0000_c800),
     ]);
     let chooser = join_team_selection_player(&mut app, "Chooser", 41, 0x0012_3456);
-    app.control_player_infos.apply(lobby_fixture!(player_data:
+    app.players.infos.apply(lobby_fixture!(player_data:
         0,
         vec![lobby_fixture!(player {
             id: 41,
@@ -9963,7 +9963,7 @@ fn synchronized_team_selection_and_runtime_switch_refresh_live_parameters() {
     app.execute_init_scenario_player_control(chooser, 2)
         .test_value();
 
-    let info = app.control_player_infos.get(41).test_value();
+    let info = app.players.infos.get(41).test_value();
     main_assert_eq!((info.team, info.color, info.original_color) => (2, 0x0000_c800, 0x0012_3456));
     main_assert_eq!(app.engine.teams().iter().find(|team| team.id == 2).expect("green team").player_ids => vec![41]);
     let parameters = &some(&app.host_join_snapshot).parameters;
@@ -9973,7 +9973,7 @@ fn synchronized_team_selection_and_runtime_switch_refresh_live_parameters() {
     app.engine.set_player_team(chooser, Some(1)).test_value();
     app.handle_script_player_info_updates().test_value();
 
-    main_assert_eq!(app.control_player_infos.get(41).unwrap().team => 1);
+    main_assert_eq!(app.players.infos.get(41).unwrap().team => 1);
     let parameters = &some(&app.host_join_snapshot).parameters;
     main_assert_eq!(parameters.player_infos.clients[0].players[0].team => 1);
     main_assert_eq!(parameters.teams.teams[0].player_ids => vec![41]);
@@ -10529,7 +10529,7 @@ fn later_admission_reuses_shifted_initial_hosts_persisted_alternate_color() {
     let resource = |id| lobby_fixture!(resource { id });
     let mut app = new_state_only_menu_app(320, 200);
     app.network_max_players = 8;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         2,
         [lobby_fixture!(player_data {
             client_id: 0,
@@ -10585,7 +10585,7 @@ fn later_admission_reuses_shifted_initial_hosts_persisted_alternate_color() {
     };
     main_assert_eq!(admitted.client_id => 3);
     main_assert_eq!(admitted.players[0].id => 3);
-    main_assert_eq!(app.control_player_infos.get(2).expect("shifted initial host remains retained").color => 0x0000_00e8);
+    main_assert_eq!(app.players.infos.get(2).expect("shifted initial host remains retained").color => 0x0000_00e8);
 }
 
 #[test]
@@ -10598,7 +10598,7 @@ fn host_player_info_conflict_update_precedes_admission_and_converges_join_data()
     // src/C4PlayerInfoConflicts.cpp:193-344).
     let same_name = clonk_engine::LegacyCString::from_bytes(b"Same".to_vec()).test_value();
     let mut app = new_state_only_running_sandbox_app();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [lobby_fixture!(player_data:
             2,
@@ -10633,7 +10633,7 @@ fn host_player_info_conflict_update_precedes_admission_and_converges_join_data()
     main_assert_eq!(updated_existing.players[0].forced_name.as_bytes() => b"Same (2)");
     main_assert!(admitted.players[0].forced_name.is_empty());
     main_assert_eq!(admitted.players[0].id => 2);
-    main_assert!(app.control_player_infos.get(2).is_some());
+    main_assert!(app.players.infos.get(2).is_some());
 
     for info in broadcasts.clone() {
         event_tx
@@ -10646,8 +10646,8 @@ fn host_player_info_conflict_update_precedes_admission_and_converges_join_data()
     }
     app.test_network_events();
 
-    main_assert_eq!(app.control_player_infos.get(1).expect("existing player remains retained").forced_name.as_bytes() => b"Same (2)");
-    main_assert_eq!(app.control_player_infos.get(2).expect("new player control is applied").name.as_bytes() => b"Same");
+    main_assert_eq!(app.players.infos.get(1).expect("existing player remains retained").forced_name.as_bytes() => b"Same (2)");
+    main_assert_eq!(app.players.infos.get(2).expect("new player control is applied").name.as_bytes() => b"Same");
     main_assert_eq!(published.len() => 2);
     let latest = published.last().test_value();
     main_assert_eq!(latest.parameters.player_infos.last_player_id => 2);
@@ -10679,7 +10679,7 @@ fn updated_existing_echo_cannot_issue_new_admission_before_its_echo() {
     );
     let mut app = new_state_only_running_sandbox_app();
     app.control_clients.register(3, true, false);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [lobby_fixture!(player_data:
             3,
@@ -10760,7 +10760,7 @@ fn delayed_admission_joins_parent_before_other_client_rebalance_follow_up() {
     let mut app = new_state_only_running_sandbox_app();
     app.control_clients.register(3, true, false);
     app.control_clients.register(4, true, false);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         30,
         [lobby_fixture!(player_data: 4, vec![other_unjoined, joined_twenty, joined_thirty])],
     );
@@ -10823,7 +10823,7 @@ fn delayed_admission_joins_parent_before_other_client_rebalance_follow_up() {
 fn host_updated_admission_emits_clean_full_follow_up_after_direct_apply() {
     let same_name = clonk_engine::LegacyCString::from_bytes(b"Same".to_vec()).test_value();
     let mut app = new_state_only_running_sandbox_app();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [lobby_fixture!(player_data:
             2,
@@ -10858,7 +10858,7 @@ fn host_updated_admission_emits_clean_full_follow_up_after_direct_apply() {
     main_assert_eq!(clean_follow_up.client_id => 3);
     main_assert_eq!(clean_follow_up.flags & (clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED) => 0);
     main_assert_eq!(clean_follow_up.players => admitted.players);
-    main_assert!(app.control_player_infos.get(2).is_some());
+    main_assert!(app.players.infos.get(2).is_some());
 }
 
 #[test]
@@ -10879,7 +10879,7 @@ fn host_remote_lobby_player_info_assigns_the_unique_least_used_free_team() {
         max_players: 0,
     };
     let mut app = new_state_only_menu_app(320, 200);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [lobby_fixture!(player_data:
             0,
@@ -11061,14 +11061,14 @@ fn queued_lobby_admissions_observe_synchronously_filled_explicit_team() {
             .test_value();
     }
     app.test_network_events();
-    let (_, clients) = app.control_player_infos.retained_rows_snapshot();
+    let (_, clients) = app.players.infos.retained_rows_snapshot();
     main_assert_eq!(clients.iter().map(|(_, _, players)| players.len()).sum::<usize>() => 2, "preexecuted AddPlayers echoes must not duplicate retained rows");
 }
 
 #[test]
 fn admission_that_requires_generated_team_generates_and_broadcasts() {
     let mut app = new_state_only_menu_app(320, 200);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [lobby_fixture!(player_data:
             0,
@@ -11110,7 +11110,7 @@ fn admission_that_requires_generated_team_generates_and_broadcasts() {
 #[test]
 fn joined_player_automatic_admission_updates_live_engine_before_loopback() {
     let mut app = new_state_only_running_sandbox_app();
-    app.control_player_infos.replace_snapshot(41, []);
+    app.players.infos.replace_snapshot(41, []);
     let mut metadata = set_control_test_metadata(
         false,
         vec![
@@ -11192,10 +11192,10 @@ fn offline_set_max_player_raise_reaches_admission_before_queued_script_player() 
 
     main_assert_eq!(app.network_max_players => 2, "the app admission cap follows Game.Parameters.MaxPlayers");
     let admitted = app
-        .control_player_infos
+        .players.infos
         .client_info_ids(0)
         .into_iter()
-        .filter_map(|id| app.control_player_infos.get(id))
+        .filter_map(|id| app.players.infos.get(id))
         .find(|info| info.name.as_bytes() == b"Admitted Bot")
         .test_value();
     main_assert!(

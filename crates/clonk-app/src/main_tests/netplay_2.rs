@@ -474,7 +474,7 @@ fn n2_retired_host_profile_fixture(rejoin_policy: Option<bool>) -> N2RetiredHost
 
     let wire_name = n2_native(player_path.as_os_str().as_encoded_bytes());
     let resource = n2_fixture!(player_resource: 17, wire_name.clone());
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         41,
         [n2_fixture!(player_data {
             client_id: 0,
@@ -4826,7 +4826,7 @@ fn synchronized_player_file_remote_gates_leave_profile_untouched() {
     player.status = clonk_engine::PlayerStatus::Active;
     player.script_player = false;
     app.engine.restore_state(&state).test_value();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         info_id,
         [clonk_engine::PlayerInfoControlData {
             client_id: 8,
@@ -4840,7 +4840,7 @@ fn synchronized_player_file_remote_gates_leave_profile_untouched() {
             ..clonk_engine::PlayerInfoControlData::default()
         }],
     );
-    app.local_player_profile_paths
+    app.players.local_profile_paths
         .insert(info_id, profile_path.clone());
     main_assert_eq!(app.offline_local_client_id() => 0, "the fixture must classify client 8 as remote");
 
@@ -6479,7 +6479,7 @@ fn client_join_data_replaces_authoritative_control_registries() {
     let mut app = new_state_only_menu_app(320, 200);
     app.control_clients.register(99, true, false);
     app.network_client_activity.mark_activated(99, 123);
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         99,
         vec![n2_fixture!(player { id: 3 })],
     ));
@@ -6531,10 +6531,10 @@ fn client_join_data_replaces_authoritative_control_registries() {
     let local = app.control_clients.state(7).test_value();
     main_assert_eq!(local.name.as_bytes() => b"Joining client");
     main_assert_eq!(local.nick.as_bytes() => b"Joiner");
-    main_assert!(app.control_player_infos.get(3).is_none());
-    main_assert!(app.control_player_infos.get(12).is_some());
+    main_assert!(app.players.infos.get(3).is_none());
+    main_assert!(app.players.infos.get(12).is_some());
     let admitted = app
-        .control_player_infos
+        .players.infos
         .admit_request(
             clonk_engine::PlayerInfoUpdateRequest {
                 client_id: 7,
@@ -6731,7 +6731,7 @@ fn offline_runtime_join_player_local_no_network() {
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
     let before_players = app.engine.snapshot().players.len();
-    let before_info_ids = app.control_player_infos.client_info_ids(0);
+    let before_info_ids = app.players.infos.client_info_ids(0);
     app.status_text = "offline join sentinel".to_string();
     let recording_directory = tempdir();
     let recording_path = recording_directory.path().join("001-OfflineRuntime.c4s");
@@ -6742,7 +6742,7 @@ fn offline_runtime_join_player_local_no_network() {
     n2_join_runtime_player(&mut app, player_path);
 
     let joined_info_ids = app
-        .control_player_infos
+        .players.infos
         .client_info_ids(0)
         .into_iter()
         .filter(|info_id| !before_info_ids.contains(info_id))
@@ -6750,7 +6750,7 @@ fn offline_runtime_join_player_local_no_network() {
     let [joined_info_id] = joined_info_ids.as_slice() else {
         panic!("expected one new local player info, got {joined_info_ids:?}");
     };
-    let info = app.control_player_infos.get(*joined_info_id).test_value();
+    let info = app.players.infos.get(*joined_info_id).test_value();
     main_assert_eq!(info.filename.as_bytes() => clonk_script::c4_string_bytes(player_path.to_string_lossy().as_ref()));
     main_assert_eq!(info.name.as_bytes() => clonk_script::c4_string_bytes(&player_file.name));
     main_assert_eq!((info.color, info.original_color) => (player_file.normalized_preferred_color(), player_file.normalized_preferred_color(),));
@@ -6819,14 +6819,14 @@ fn offline_runtime_join_player_local_no_network() {
     let missing = malformed_directory.path().join("Missing.c4p");
     for path in [&malformed, &missing] {
         let before_failure_players = app.engine.snapshot().players;
-        let before_failure_infos = app.control_player_infos.retained_rows_snapshot();
+        let before_failure_infos = app.players.infos.retained_rows_snapshot();
         app.apply_ingame_menu_action(MenuAction::JoinPlayer(path.to_string_lossy().into_owned()))
             .unwrap_or_else(|error| {
                 panic!("an unreadable offline player is not a failure: {error:?}")
             });
         main_assert_eq!(app.status_text => "offline join sentinel", "{path:?} writes no status");
         main_assert_eq!(app.engine.snapshot().players => before_failure_players, "{path:?} joins nobody");
-        main_assert_eq!(app.control_player_infos.retained_rows_snapshot() => before_failure_infos, "{path:?} admits nothing");
+        main_assert_eq!(app.players.infos.retained_rows_snapshot() => before_failure_infos, "{path:?} admits nothing");
     }
 }
 
@@ -6842,12 +6842,12 @@ fn retired_local_player_releases_profile_and_preferred_controls_for_runtime_rejo
     ));
     let mut app = new_synthetic_running_sandbox_app();
     n2_install_startup_player(&mut app, player_path);
-    let before_info_ids = app.control_player_infos.client_info_ids(0);
+    let before_info_ids = app.players.infos.client_info_ids(0);
 
     n2_join_runtime_player(&mut app, player_path);
 
     let retired_info_id = app
-        .control_player_infos
+        .players.infos
         .client_info_ids(0)
         .into_iter()
         .find(|info_id| !before_info_ids.contains(info_id))
@@ -6866,15 +6866,15 @@ fn retired_local_player_releases_profile_and_preferred_controls_for_runtime_rejo
     }
 
     main_assert!(app.engine.player(retired_owner).is_none());
-    let retired_info = app.control_player_infos.get(retired_info_id).test_value();
+    let retired_info = app.players.infos.get(retired_info_id).test_value();
     main_assert_ne!(retired_info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED => 0, "automatic retirement must release the profile from FileInUse");
     main_assert!(app.available_runtime_player_files().iter().any(|entry| { entry.file == player_path.to_string_lossy() }));
-    let info_ids_before_rejoin = app.control_player_infos.client_info_ids(0);
+    let info_ids_before_rejoin = app.players.infos.client_info_ids(0);
 
     n2_join_runtime_player(&mut app, player_path);
 
     let rejoined_info_id = app
-        .control_player_infos
+        .players.infos
         .client_info_ids(0)
         .into_iter()
         .find(|info_id| !info_ids_before_rejoin.contains(info_id))
@@ -7033,7 +7033,7 @@ fn active_network_host_directory_runtime_join_uses_published_standalone_for_loca
     let mut app = new_running_sandbox_app();
     app.players.local_name = "Exact host maker".to_string();
     app.control_clients.register(0, true, false);
-    app.control_player_infos.replace_snapshot(40, []);
+    app.players.infos.replace_snapshot(40, []);
     let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -7144,7 +7144,7 @@ fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
     let mut app = new_running_sandbox_app();
     app.players.local_name = "Exact host maker".to_string();
     app.control_clients.register(0, true, false);
-    app.control_player_infos.replace_snapshot(40, []);
+    app.players.infos.replace_snapshot(40, []);
     let tick = app.local_control_submission_tick();
     let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
@@ -7211,7 +7211,7 @@ fn inactive_remote_client_readds_retired_profile_after_activation_go() {
         id: 7 << 16,
         loadable: true,
     });
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         41,
         [clonk_engine::PlayerInfoControlData {
             client_id: 7,
@@ -7354,7 +7354,7 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
         events: event_tx,
         commands,
     } = n2_retired_host_profile_fixture(None);
-    let retired = app.control_player_infos.get(41).test_value();
+    let retired = app.players.infos.get(41).test_value();
     main_assert_ne!(retired.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED => 0, "retirement releases the profile before the host readmits it");
 
     let (direct_ready, direct_wait) = std::sync::mpsc::channel();
@@ -7405,7 +7405,7 @@ fn active_network_host_readmits_its_own_retired_profile_at_runtime() {
     app.mirror_retired_player_info(&players_before_second_retirement);
     main_assert!(app.engine.player(rejoined).is_none());
     main_assert_ne!(
-        app.control_player_infos.get(42).test_value().flags
+        app.players.infos.get(42).test_value().flags
             & clonk_engine::PLAYER_INFO_FLAG_REMOVED =>
         0,
         "the first rejoin must release the profile when it retires"
@@ -7491,7 +7491,7 @@ fn active_network_host_barring_rejoins_refuses_its_own_retired_profile() {
     main_assert_eq!(order => vec!["publish"]);
     main_assert!(player_infos.is_empty());
     main_assert!(joins.is_empty());
-    main_assert_eq!(app.control_player_infos.player_count() => 1, "only the retired history row remains");
+    main_assert_eq!(app.players.infos.player_count() => 1, "only the retired history row remains");
 }
 
 #[test]
@@ -7508,7 +7508,7 @@ fn active_network_host_runtime_join_assigns_team_before_broadcast() {
     let mut app = new_state_only_running_sandbox_app();
     app.players.local_name = "Exact host maker".to_string();
     app.control_clients.register(0, true, false);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [netplay_player_info_data(
             0,
@@ -7756,14 +7756,14 @@ fn host_player_info_request_queues_authoritative_direct_broadcast() {
         panic!("expected one admitted player");
     };
     main_assert_eq!(player.id => 1);
-    main_assert!(app.control_player_infos.get(1).is_some());
+    main_assert!(app.players.infos.get(1).is_some());
 }
 
 #[test]
 fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
     let mut app = new_state_only_running_sandbox_app();
     app.control_clients.register(3, true, false);
-    app.control_player_infos.replace_snapshot(0, []);
+    app.players.infos.replace_snapshot(0, []);
     let resources = [
         n2_fixture!(player_resource: 17, clonk_engine::LegacyCString::from_bytes(b"First.c4p".to_vec()).test_value()),
         n2_fixture!(player_resource: 18, clonk_engine::LegacyCString::from_bytes(b"Second.c4p".to_vec()).test_value()),
@@ -7825,7 +7825,7 @@ fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
     let first_joins = commands.take_submitted_join_players();
     main_assert_eq!(first_joins.iter().map(|(_, join)| join.info_id).collect::<Vec<_>>() => vec![1]);
     main_assert_ne!(
-        app.control_player_infos.get(1).unwrap().flags
+        app.players.infos.get(1).unwrap().flags
             & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE =>
         0,
         "A Add normalization must survive the later B Add echo"
@@ -7842,14 +7842,14 @@ fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
     app.test_network_events();
     let second_joins = commands.take_submitted_join_players();
     main_assert_eq!(second_joins.iter().map(|(_, join)| join.info_id).collect::<Vec<_>>() => vec![2]);
-    main_assert_ne!(app.control_player_infos.get(1).unwrap().flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE => 0);
+    main_assert_ne!(app.players.infos.get(1).unwrap().flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE => 0);
 }
 
 #[test]
 fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
     let mut app = new_state_only_running_sandbox_app();
     app.control_clients.register(3, true, false);
-    app.control_player_infos.replace_snapshot(0, []);
+    app.players.infos.replace_snapshot(0, []);
     let resource = |id, filename: &[u8]| n2_fixture!(player_resource: id, clonk_engine::LegacyCString::from_bytes(filename.to_vec()).test_value());
     let first_resource = resource(17, b"First.c4p");
     let replacement_resource = resource(18, b"Replacement.c4p");
@@ -7894,7 +7894,7 @@ fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
     main_assert_eq!(controls.len() => 2);
     main_assert_eq!(controls[0].1[0].resource.as_ref() => Some(&first_resource));
     main_assert_eq!(controls[1].1[0].resource.as_ref() => Some(&replacement_resource));
-    main_assert_eq!(app.control_player_infos.get(1).unwrap().resource.as_ref() => Some(&replacement_resource));
+    main_assert_eq!(app.players.infos.get(1).unwrap().resource.as_ref() => Some(&replacement_resource));
 
     n2_send_event(
         &event_tx,
@@ -7909,7 +7909,7 @@ fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
     main_assert_eq!(first_joins.len() => 1);
     main_assert_eq!(first_joins[0].1.source => clonk_engine::JoinPlayerSource::Resource(first_resource));
     main_assert_eq!(
-        app.control_player_infos.get(1).unwrap().resource.as_ref() =>
+        app.players.infos.get(1).unwrap().resource.as_ref() =>
         Some(&replacement_resource),
         "a stale add echo must not overwrite the later replacement row"
     );
@@ -7945,7 +7945,7 @@ fn preexecuted_join_snapshot_is_client_scoped_for_duplicate_info_id() {
 
     let mut app = new_state_only_running_sandbox_app();
     app.control_clients.register(3, true, false);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         7,
         [
             netplay_player_info_data(4, vec![wrong]),
@@ -8030,7 +8030,7 @@ fn host_synchronized_player_info_refreshes_join_data() {
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.host_join_snapshot = clonk_network::HostConfig::default().initial_join_snapshot;
     let authoritative = app
-        .control_player_infos
+        .players.infos
         .admit_request(
             n2_fixture!(player_update:
                 4,
@@ -8069,7 +8069,7 @@ fn client_direct_player_info_does_not_rebalance_random_teams_or_echo_updates() {
     );
     metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         30,
         [netplay_player_info_data(
             3,
@@ -8097,7 +8097,7 @@ fn client_direct_player_info_does_not_rebalance_random_teams_or_echo_updates() {
     let teams = app.players.team_assignment.test_ref().teams();
     main_assert_eq!(teams.teams[0].player_ids => vec![10, 20, 30]);
     main_assert!(teams.teams[1].player_ids.is_empty());
-    main_assert_eq!(app.control_player_infos.get(10).unwrap().team => 1);
+    main_assert_eq!(app.players.infos.get(10).unwrap().team => 1);
     main_assert!(commands.take_broadcast_player_infos().is_empty());
 }
 
@@ -8109,7 +8109,7 @@ fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
     // (src/C4Network2Players.cpp:160-205;
     // src/C4Teams.cpp:53-81,474-542).
     let mut app = new_state_only_menu_app(320, 200);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [netplay_player_info_data(
             0,
@@ -8176,7 +8176,7 @@ fn host_authored_script_player_info_assigns_a_runtime_host_team() {
     // (src/C4Network2Players.cpp:146-153,189-205;
     // src/C4Teams.cpp:474-542).
     let mut app = new_state_only_running_sandbox_app();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [netplay_player_info_data(
             0,
@@ -8244,7 +8244,7 @@ fn host_player_info_request_uses_active_network_player_limit() {
     let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
     app.network = Some(manager);
     app.network_max_players = 1;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [netplay_player_info_data(
             0,
@@ -8335,10 +8335,10 @@ fn offline_create_script_player_joins_through_player_info_control_path() {
     app.handle_script_player_info_updates().test_value();
 
     let infos = app
-        .control_player_infos
+        .players.infos
         .client_info_ids(0)
         .into_iter()
-        .filter_map(|id| app.control_player_infos.get(id))
+        .filter_map(|id| app.players.infos.get(id))
         .filter(|info| info.name.as_bytes() == b"Bot")
         .collect::<Vec<_>>();
     main_assert_eq!(infos.len() => 1, "script PlayerInfo is admitted exactly once");
@@ -8860,7 +8860,7 @@ fn network_host_distribution_reassigns_and_publishes_full_team_state() {
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         20,
         [netplay_player_info_data(
             3,
@@ -8873,7 +8873,7 @@ fn network_host_distribution_reassigns_and_publishes_full_team_state() {
 
     app.execute_control_set(n2_fixture!(control_set: 3, 2, 0));
 
-    main_assert_eq!(app.control_player_infos.get(20).unwrap().team => 2);
+    main_assert_eq!(app.players.infos.get(20).unwrap().team => 2);
     main_assert_eq!(app.engine.team_distribution() => 2);
     let assignment = app.players.team_assignment.as_ref().test_value().teams();
     main_assert_eq!(assignment.teams[0].player_ids => vec![10]);
@@ -8898,7 +8898,7 @@ fn generated_distribution_rebuilds_default_teams_and_publishes() {
     let mut metadata = set_control_test_metadata(true, vec![set_control_test_team(1, vec![20], 0)]);
     metadata.random_team_count = 2;
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         20,
         [netplay_player_info_data(
             3,
@@ -8921,7 +8921,7 @@ fn generated_distribution_rebuilds_default_teams_and_publishes() {
             (2, b"Team 2".as_slice(), 0x0000_c800),
         ]
     );
-    let assigned_team = app.control_player_infos.get(20).test_value().team;
+    let assigned_team = app.players.infos.get(20).test_value().team;
     main_assert!((1..=2).contains(&assigned_team));
     main_assert_eq!(assignment.teams.iter().find(|team| team.id == assigned_team).unwrap().player_ids => vec![20]);
     main_assert_eq!(app.engine.team_distribution() => 3);
@@ -8953,7 +8953,7 @@ fn invalid_host_team_distribution_is_a_silent_no_op() {
         ],
     );
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         20,
         [netplay_player_info_data(
             3,
@@ -8968,7 +8968,7 @@ fn invalid_host_team_distribution_is_a_silent_no_op() {
         .test_value()
         .teams()
         .clone();
-    let before_infos = app.control_player_infos.retained_rows_snapshot();
+    let before_infos = app.players.infos.retained_rows_snapshot();
     let before_snapshot = app.host_join_snapshot.clone();
 
     app.execute_control_set(n2_fixture!(control_set: 3, 9, 0));
@@ -8976,7 +8976,7 @@ fn invalid_host_team_distribution_is_a_silent_no_op() {
     main_assert_eq!(app.status_text => "unchanged");
     main_assert_eq!(app.engine.team_distribution() => before_distribution);
     main_assert_eq!(app.players.team_assignment.as_ref().unwrap().teams() => &before_teams);
-    main_assert_eq!(app.control_player_infos.retained_rows_snapshot() => before_infos);
+    main_assert_eq!(app.players.infos.retained_rows_snapshot() => before_infos);
     main_assert_eq!(app.host_join_snapshot => before_snapshot);
     main_assert_eq!(commands.take_team_control_updates() => (Vec::new(), Vec::new()));
 }
@@ -9004,14 +9004,14 @@ fn network_host_team_colors_broadcasts_attributes_and_full_join_data() {
     let mut joined = set_control_test_player(10, 1, clonk_engine::PLAYER_INFO_FLAG_JOINED);
     joined.color = 0x00f4_0000;
     joined.original_color = 0x00f4_0000;
-    app.control_player_infos
+    app.players.infos
         .replace_snapshot(20, [netplay_player_info_data(3, vec![unjoined, joined])]);
 
     app.execute_control_set(n2_fixture!(control_set: 4, 1, 0));
 
     main_assert!(app.engine.team_colors());
     main_assert!(app.players.team_assignment.as_ref().unwrap().teams().team_colors);
-    main_assert_eq!(app.control_player_infos.get(20).unwrap().color => 0x0000_00f4);
+    main_assert_eq!(app.players.infos.get(20).unwrap().color => 0x0000_00f4);
     let snapshot = app.host_join_snapshot.as_ref().test_value();
     main_assert_eq!(snapshot.parameters.teams.team_colors => 1);
     main_assert_eq!(snapshot.parameters.teams.teams.len() => 2);
@@ -9054,14 +9054,14 @@ fn wire_known_zero_color_and_name_conflicts_resolve_and_publish_team_colors() {
             first.name = clonk_engine::LegacyCString::from_bytes(b"Same".to_vec()).test_value();
             second.name = clonk_engine::LegacyCString::from_bytes(b"same".to_vec()).test_value();
         }
-        app.control_player_infos
+        app.players.infos
             .replace_snapshot(21, [netplay_player_info_data(3, vec![first, second])]);
         app.execute_control_set(n2_fixture!(control_set: 4, 1, 0));
 
         main_assert!(app.engine.team_colors(), "{conflict_kind}");
         main_assert!(app.players.team_assignment.as_ref().unwrap().teams().team_colors, "{conflict_kind}");
-        let first = app.control_player_infos.get(20).test_value();
-        let second = app.control_player_infos.get(21).test_value();
+        let first = app.players.infos.get(20).test_value();
+        let second = app.players.infos.get(21).test_value();
         if conflict_kind == "color" {
             main_assert_ne!(first.color => second.color);
         } else {
@@ -9104,18 +9104,18 @@ fn offline_host_reassigns_but_replay_only_changes_the_distribution_flag() {
         metadata.clone(),
     ));
     offline
-        .control_player_infos
+        .players.infos
         .replace_snapshot(20, [packet.clone()]);
     offline.execute_control_set(n2_fixture!(control_set: 3, 2, 0));
-    main_assert_eq!(offline.control_player_infos.get(20).unwrap().team => 2);
+    main_assert_eq!(offline.players.infos.get(20).unwrap().team => 2);
 
     let mut replay = new_state_only_running_sandbox_app();
     replay.engine.set_control_host(false);
     replay.players.team_assignment = None;
-    replay.control_player_infos.replace_snapshot(20, [packet]);
+    replay.players.infos.replace_snapshot(20, [packet]);
     replay.execute_control_set(n2_fixture!(control_set: 3, 3, 0));
     main_assert_eq!(replay.engine.team_distribution() => 3);
-    main_assert_eq!(replay.control_player_infos.get(20).unwrap().team => 1);
+    main_assert_eq!(replay.players.infos.get(20).unwrap().team => 1);
 }
 
 #[test]
@@ -9231,7 +9231,7 @@ fn offline_player_info_control_rechecks_teams_before_joining_unjoined_script_pla
         set_control_test_player(existing_info_id, 1, clonk_engine::PLAYER_INFO_FLAG_JOINED);
     let mut bot = set_control_test_player(bot_info_id, 1, 0);
     bot.player_type = clonk_engine::PLAYER_INFO_TYPE_SCRIPT;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         bot_info_id,
         [netplay_player_info_data(0, vec![existing.clone(), bot])],
     );
@@ -9552,7 +9552,7 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
             game_part_frame: -99,
         }),
     ];
-    app.control_player_infos
+    app.players.infos
         .replace_snapshot(8, [netplay_player_info_data(3, player_infos.clone())]);
     let mut host_snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
@@ -9576,7 +9576,7 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
     .test_value();
     main_assert!(app.engine.player(17).is_some());
     main_assert_eq!(
-        app.control_player_infos
+        app.players.infos
             .get(7)
             .expect("info retained")
             .flags
@@ -9584,7 +9584,7 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
                 | clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED) =>
         0
     );
-    main_assert_eq!(app.control_player_infos.get(7).expect("info retained").game_part_frame => -99);
+    main_assert_eq!(app.players.infos.get(7).expect("info retained").game_part_frame => -99);
 
     app.apply_ready_controls(
         1,
@@ -9597,11 +9597,11 @@ fn remove_player_control_is_host_only_and_propagates_disconnected() {
 
     main_assert!(app.engine.player(17).is_none());
     main_assert!(app.engine.player(18).is_none());
-    let disconnected = app.control_player_infos.get(7).test_value();
+    let disconnected = app.players.infos.get(7).test_value();
     main_assert_ne!(disconnected.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED => 0);
     main_assert_ne!(disconnected.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED => 0);
     main_assert_eq!(disconnected.game_part_frame => 0);
-    let ordinary = app.control_player_infos.get(8).test_value();
+    let ordinary = app.players.infos.get(8).test_value();
     main_assert_ne!(ordinary.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED => 0);
     main_assert_eq!(ordinary.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED => 0);
     main_assert_eq!(ordinary.game_part_frame => 0);
@@ -9931,7 +9931,7 @@ fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_casc
     app.engine
         .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
         .test_value();
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         3,
         vec![
             n2_fixture!(player {
@@ -9943,7 +9943,7 @@ fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_casc
         ],
     ));
     let retained_color = 0x0000_f400;
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         4,
         vec![n2_fixture!(player {
             id: 9,
@@ -9969,12 +9969,12 @@ fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_casc
 
     main_assert!(!app.control_clients.contains(3));
     main_assert!(app.engine.snapshot().players.iter().all(|player| player.player_info_id != 7));
-    let retained = app.control_player_infos.get(7).test_value();
+    let retained = app.players.infos.get(7).test_value();
     main_assert_ne!(retained.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED => 0);
     main_assert_ne!(retained.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED => 0);
-    main_assert!(app.control_player_infos.get(8).is_none());
+    main_assert!(app.players.infos.get(8).is_none());
     main_assert_eq!(app.engine.teams()[0].player_ids => vec![9]);
-    let unaffected = app.control_player_infos.get(9).test_value();
+    let unaffected = app.players.infos.get(9).test_value();
     main_assert_eq!(unaffected.color => retained_color);
     main_assert_eq!(unaffected.forced_name.as_bytes() => b"Alias");
     main_assert_eq!(unaffected.league_projected_gain => 5);
@@ -9995,7 +9995,7 @@ fn synchronized_client_remove_without_player_info_skips_the_part_cascade() {
     app.engine
         .set_teams(runtime_teams_from_initial_metadata(&metadata));
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         4,
         vec![n2_fixture!(player {
             id: 77,
@@ -10016,7 +10016,7 @@ fn synchronized_client_remove_without_player_info_skips_the_part_cascade() {
     )
     .test_value();
 
-    let retained = app.control_player_infos.get(77).test_value();
+    let retained = app.players.infos.get(77).test_value();
     main_assert_eq!(retained.color => 0x0000_f400);
     main_assert_eq!(retained.league_projected_gain => 5);
     main_assert_eq!(app.players.team_assignment.as_ref().unwrap().teams().teams[0].player_ids => vec![77],);
@@ -10034,7 +10034,7 @@ fn network_host_without_control_host_still_runs_client_part_updates() {
     app.network_mode = Some(NetworkMode::Host(host_network_settings()));
     app.engine.set_control_host(false);
     app.control_clients.register(3, true, false);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         40,
         [
             netplay_player_info_data(3, vec![set_control_test_player(30, 0, 0)]),
@@ -10060,7 +10060,7 @@ fn network_host_without_control_host_still_runs_client_part_updates() {
     )
     .test_value();
 
-    main_assert_eq!(app.control_player_infos.get(40).unwrap().league_projected_gain => -1,);
+    main_assert_eq!(app.players.infos.get(40).unwrap().league_projected_gain => -1,);
     let broadcasts = commands.take_broadcast_player_infos();
     let [update] = broadcasts.as_slice() else {
         panic!("expected one gain-reset packet, got {broadcasts:?}");
@@ -10107,7 +10107,7 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
     app.control_clients = ControlClientRegistry::default();
     app.control_clients.register(0, true, false);
     app.control_clients.register(local_client, true, false);
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         0,
         vec![n2_fixture!(player: remote_info, clonk_engine::PLAYER_INFO_FLAG_JOINED)],
     ));
@@ -10717,14 +10717,14 @@ fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
     app.network_control_running = false;
     app.control_clients.register(3, false, false);
     app.control_clients.register(4, true, false);
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         3,
         vec![n2_fixture!(player {
             id: 31,
             player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
         })],
     ));
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         4,
         vec![n2_fixture!(player {
             id: 41,
@@ -10762,7 +10762,7 @@ fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
 
     main_assert!(app.control_clients.is_activated(3));
     main_assert!(!app.control_clients.contains(4));
-    main_assert!(app.control_player_infos.get(41).is_none());
+    main_assert!(app.players.infos.get(41).is_none());
     let joins = commands.take_submitted_join_players();
     main_assert_eq!(joins.len() => 1);
     main_assert_eq!(joins[0].0 => 3);
@@ -11444,7 +11444,7 @@ fn saved_game_reapplies_current_player_info_identity_and_preferences() {
     let text = |value: &str| {
         clonk_engine::LegacyCString::from_bytes(value.as_bytes().to_vec()).test_value()
     };
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         0,
         vec![n2_fixture!(player {
             id: info_id,
@@ -11491,8 +11491,8 @@ fn saved_game_promotes_unjoined_takeover_info_before_recreation_filter() {
     let text = |value: &str| {
         clonk_engine::LegacyCString::from_bytes(value.as_bytes().to_vec()).test_value()
     };
-    app.control_player_infos = ControlPlayerInfoRegistry::default();
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos = ControlPlayerInfoRegistry::default();
+    app.players.infos.apply(netplay_player_info_data(
         0,
         vec![n2_fixture!(player {
             id: saved_info_id + 100,
@@ -11521,7 +11521,7 @@ fn saved_game_promotes_unjoined_takeover_info_before_recreation_filter() {
     main_assert_eq!(player.player_info_id() => saved_info_id);
     main_assert_eq!(player.name() => "Current takeover");
     main_assert!(player.no_elimination_check());
-    main_assert_eq!(app.control_player_infos.recreation_info_ids() => vec![saved_info_id]);
+    main_assert_eq!(app.players.infos.recreation_info_ids() => vec![saved_info_id]);
 }
 
 #[test]
@@ -11642,8 +11642,8 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
         player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
         resource: Some(n2_fixture!(player_resource: 20, native(b"StaleScriptResource.c4p"))),
     });
-    app.control_player_infos = ControlPlayerInfoRegistry::default();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos = ControlPlayerInfoRegistry::default();
+    app.players.infos.replace_snapshot(
         script_current.id,
         [netplay_player_info_data(
             0,
@@ -11710,7 +11710,7 @@ fn ordinary_network_savegame_starts_associated_profile_wait_after_go_commit() {
     // RecreatePlayerFiles stages every embedded script profile and discards
     // its live resource before RecreatePlayers reaches the first user pRes
     // wait (C4Game.cpp:2841-2847; C4PlayerInfo.cpp:1448-1521).
-    let staged_script = app.control_player_infos.get(11).test_value();
+    let staged_script = app.players.infos.get(11).test_value();
     main_assert!(staged_script.resource.is_none());
     main_assert_eq!(staged_script.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE => 0);
 
@@ -11950,8 +11950,8 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
         activated: true,
         name: native(b"Current client"),
     })]);
-    app.control_player_infos = ControlPlayerInfoRegistry::default();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos = ControlPlayerInfoRegistry::default();
+    app.players.infos.replace_snapshot(
         missing_filename_current.id,
         [netplay_player_info_data(
             0,
@@ -12017,7 +12017,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
     // GetLocalJoinFilename then uses for RecreatePlayers
     // (C4PlayerInfo.cpp:124-130,275-292,1566-1601).
     main_assert_eq!((filename_player.player_info_id(), filename_player.name(), filename_player.wealth(), filename_player.score(),) => (8, "Bob current", 23, 37));
-    let filename_info = app.control_player_infos.get(8).test_value();
+    let filename_info = app.players.infos.get(8).test_value();
     main_assert!(filename_info.resource.is_none());
     main_assert_eq!(filename_info.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE => 0);
     let installed_script = app.engine.test_player(4);
@@ -12031,7 +12031,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
     // the retained info Removed (C4PlayerInfo.cpp:124-130,1566-1603;
     // C4PlayerList.cpp:302-314).
     main_assert!(app.engine.player(6).is_none());
-    main_assert!(app.control_player_infos.get(12).is_some_and(|info| { info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0 }));
+    main_assert!(app.players.infos.get(12).is_some_and(|info| { info.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0 }));
     main_assert!(app.engine.snapshot().round_results.players.iter().any(|result| result.player_info_id == 12 && result.score_old == 0));
     main_assert_eq!(
         app.engine
@@ -12041,7 +12041,7 @@ fn ordinary_network_savegame_recreates_associated_user_player_with_local_control
         clonk_engine::ObjectStatus::Deleted,
         "RemoveUnassociatedPlayers removes raw-category crew before recreation"
     );
-    let script_info = app.control_player_infos.get(10).test_value();
+    let script_info = app.players.infos.get(10).test_value();
     // RecreatePlayerFiles extracts script profiles to a temporary path and
     // DeleteTempFile clears that filename/resource after the attempted join
     // (C4PlayerInfo.cpp:1460-1504,1601-1603).
@@ -12093,8 +12093,8 @@ fn regular_network_scenario_recreates_fileless_script_player_without_runtime_dat
         activated: true,
         name: native(b"Current client"),
     })]);
-    app.control_player_infos = ControlPlayerInfoRegistry::default();
-    app.control_player_infos
+    app.players.infos = ControlPlayerInfoRegistry::default();
+    app.players.infos
         .replace_snapshot(current.id, [netplay_player_info_data(0, vec![current])]);
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(scenario_path);
@@ -12172,8 +12172,8 @@ fn dragon_rock_network_restore_makes_script_npcs_hostile_to_joined_users() {
             name: native(b"Network client"),
         }),
     ]);
-    app.control_player_infos = ControlPlayerInfoRegistry::default();
-    app.control_player_infos.replace_snapshot(
+    app.players.infos = ControlPlayerInfoRegistry::default();
+    app.players.infos.replace_snapshot(
         user_info_id,
         [
             netplay_player_info_data(0, vec![current_script]),
@@ -12957,13 +12957,13 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
         activated: true,
         name: native(b"Current client"),
     })]);
-    app.control_player_infos = ControlPlayerInfoRegistry::default();
+    app.players.infos = ControlPlayerInfoRegistry::default();
     let mut current_first = first.clone();
     // Parameters may still carry a savegame-takeover association. The
     // exclusive NetworkRuntimeJoin branch must not reinterpret it against
     // the dynamic-local SavePlayerInfos list.
     current_first.savegame_player = second.id;
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         22,
         [netplay_player_info_data(
             0,
@@ -13011,7 +13011,7 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
     app.finalize_network_loaded_scenario(true).test_value();
 
     main_assert_eq!(
-        app.control_player_infos
+        app.players.infos
             .get(11)
             .expect("runtime join leaves main player infos untouched")
             .savegame_player =>
@@ -14281,7 +14281,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
     app.app_paths = Some(paths.clone());
     app.scenario_lifecycle.active = Some(frontend.clone());
     let player_info_id = app.engine.test_player(app.players.local_owner).player_info_id();
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         0,
         vec![n2_fixture!(player {
             id: player_info_id,
@@ -14500,7 +14500,7 @@ fn network_quicksave_latency_report() {
     host.app_paths = Some(paths);
     host.scenario_lifecycle.active = Some(frontend.clone());
     let player_info_id = host.engine.test_player(host.players.local_owner).player_info_id();
-    host.control_player_infos.apply(netplay_player_info_data(
+    host.players.infos.apply(netplay_player_info_data(
         0,
         vec![n2_fixture!(player {
             id: player_info_id,
@@ -14630,7 +14630,7 @@ fn native_save_rejects_a_joined_player_without_a_runtime_section() {
         vec![None; 256],
     ));
     app.engine.set_landscape(landscape);
-    app.control_player_infos.apply(netplay_player_info_data(
+    app.players.infos.apply(netplay_player_info_data(
         3,
         vec![n2_fixture!(player {
             id: 313,
@@ -15002,7 +15002,7 @@ fn network_host_own_join_binds_the_local_presentation_to_its_player() {
     app.admission_resources
         .mark_complete(resource_id, player_path.clone());
     let info_id = 1;
-    app.control_player_infos.apply(n2_fixture!(player_data:
+    app.players.infos.apply(n2_fixture!(player_data:
         0,
         vec![n2_fixture!(player {
             id: info_id,
@@ -15078,7 +15078,7 @@ fn network_client_routes_player_targeted_sound_only_to_its_local_player() {
         (11, 3, "Remote client"),
         (12, 7, "Local client"),
     ] {
-        app.control_player_infos.apply(n2_fixture!(player_data:
+        app.players.infos.apply(n2_fixture!(player_data:
             at_client,
             vec![n2_fixture!(player {
                 id: info_id,

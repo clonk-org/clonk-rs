@@ -2168,13 +2168,13 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     );
     assert_eq!(app.snapshot.frame, 0, "joins precede the first game tick");
     assert_eq!(app.snapshot.hud.local_players, vec![0, 1]);
-    assert_eq!(app.control_player_infos.player_count(), 3);
+    assert_eq!(app.players.infos.player_count(), 3);
     for (info_id, filename) in [
         (1, b"Alice.c4p".as_slice()),
         (2, b"Bob.c4p".as_slice()),
         (3, b"Alice.c4p".as_slice()),
     ] {
-        let info = app.control_player_infos.get(info_id).test_value();
+        let info = app.players.infos.get(info_id).test_value();
         runtime_assert_eq!(
             info.filename.as_bytes() => filename;
             info.flags & clonk_engine::PLAYER_INFO_FLAG_JOINED != 0 => info_id != 3;
@@ -2249,7 +2249,7 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
         "Failed to start Two players: Fullscreen mode requires at least one participating player.",
     );
     assert!(app.engine.snapshot().players.is_empty());
-    assert_eq!(app.control_player_infos.player_count(), 0);
+    assert_eq!(app.players.infos.player_count(), 0);
     reset_cached_app_paths();
 }
 
@@ -4711,7 +4711,7 @@ fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_playe
     let mut app = new_state_only_running_sandbox_app();
     app.network_max_players = 1;
     app.engine.set_max_players(1);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         1,
         [clonk_engine::PlayerInfoControlData::new(
             0,
@@ -4751,10 +4751,10 @@ fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_playe
 
     assert_eq!(app.network_max_players, 1);
     runtime_assert!(
-        app.control_player_infos
+        app.players.infos
             .client_info_ids(0)
             .into_iter()
-            .filter_map(|id| app.control_player_infos.get(id))
+            .filter_map(|id| app.players.infos.get(id))
             .all(|info| info.name.as_bytes() != b"Rejected Bot"),
         "the unchanged full cap rejects the PlayerInfo",
     );
@@ -9134,7 +9134,7 @@ fn f4_player_tooltip_names_follow_retained_visibility_and_effective_name() {
     let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
     app.control_clients
         .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         3,
         [clonk_engine::PlayerInfoControlData::new(
             7,

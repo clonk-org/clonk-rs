@@ -952,7 +952,7 @@ fn observer_menu_lists_players_and_live_previews_selection() {
         flags,
         ..clonk_engine::ControlPlayerInfoEntry::default()
     };
-    app.control_player_infos.replace_snapshot(
+    app.players.infos.replace_snapshot(
         hidden_info,
         [clonk_engine::PlayerInfoControlData::new(
             0,
