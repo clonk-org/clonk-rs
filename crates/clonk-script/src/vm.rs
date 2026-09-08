@@ -17084,7 +17084,10 @@ fn compiled_fallback_reasons(
                         expression(reasons, value, false);
                     }
                 }
-                Stmt::Break | Stmt::Continue => insert(reasons, Reason::LoopControl),
+                // `break`/`continue` lower into the compiled plan's while and
+                // classic-for forms, so they are never the blocker on their
+                // own; a foreach body is still blamed on `Reason::Foreach`.
+                Stmt::Break | Stmt::Continue => {}
                 Stmt::Expr(expr) => expression(reasons, expr, true),
                 Stmt::If {
                     condition,
@@ -17148,6 +17151,18 @@ fn compiled_fallback_reasons(
     reasons
 }
 
+/// One enclosing loop's pending `break`/`continue` fixups. C4Aul keeps the
+/// same per-loop control list and patches it once the loop's exit and back
+/// edge are known (C4AulParse.cpp:2502-2508,2613-2619).
+struct CompiledLoopContext {
+    /// Value-stack depth C4Aul records in `Loop::StackSize` when the loop is
+    /// pushed. A control statement at a different depth would need C4Aul's
+    /// AB_STACK unwind, which this builder does not emit.
+    stack_depth: usize,
+    breaks: Vec<usize>,
+    continues: Vec<usize>,
+}
+
 struct CompiledFunctionBuilder {
     slots: Vec<CompiledSlot>,
     bare_slots: FxHashMap<String, usize>,
@@ -17155,6 +17170,7 @@ struct CompiledFunctionBuilder {
     function_vars: Vec<String>,
     instructions: Vec<CompiledInstruction>,
     call_sites: Vec<CompiledCallSite>,
+    loops: Vec<CompiledLoopContext>,
     stack_depth: usize,
     max_stack: usize,
     uses_effect_slots: bool,
@@ -17174,6 +17190,7 @@ impl CompiledFunctionBuilder {
             function_vars: Vec::new(),
             instructions: Vec::new(),
             call_sites: Vec::new(),
+            loops: Vec::new(),
             stack_depth: 0,
             max_stack: 0,
             uses_effect_slots: false,
@@ -17226,6 +17243,52 @@ impl CompiledFunctionBuilder {
         self.instructions.push(instruction);
         self.stack_depth += 1;
         self.max_stack = self.max_stack.max(self.stack_depth);
+    }
+
+    /// C4Aul pushes the loop only once its condition has been consumed, so the
+    /// recorded stack size is the depth every control statement must unwind to
+    /// (C4AulParse.cpp:2492-2496,2593-2594).
+    fn push_loop(&mut self) {
+        self.loops.push(CompiledLoopContext {
+            stack_depth: self.stack_depth,
+            breaks: Vec::new(),
+            continues: Vec::new(),
+        });
+    }
+
+    /// Emits the `break`/`continue` jump against the innermost loop, leaving
+    /// its target for the enclosing loop form to patch.
+    fn compile_loop_control(&mut self, is_break: bool) -> Option<()> {
+        let context = self.loops.last()?;
+        // C4Aul precedes the jump with an AB_STACK unwind when the control
+        // statement sits deeper than the loop entry. Statement boundaries here
+        // are always balanced, so a mismatch means an unmodelled construct.
+        if self.stack_depth != context.stack_depth {
+            return None;
+        }
+        let jump = self.instructions.len();
+        self.instructions
+            .push(CompiledInstruction::Jump(usize::MAX));
+        let context = self.loops.last_mut()?;
+        if is_break {
+            context.breaks.push(jump);
+        } else {
+            context.continues.push(jump);
+        }
+        Some(())
+    }
+
+    /// Patches the innermost loop's controls, mirroring the fixup C4Aul runs
+    /// before `PopLoop` (C4AulParse.cpp:2502-2508,2613-2619).
+    fn pop_loop(&mut self, break_target: usize, continue_target: usize) -> Option<()> {
+        let context = self.loops.pop()?;
+        for jump in context.breaks {
+            self.instructions[jump] = CompiledInstruction::Jump(break_target);
+        }
+        for jump in context.continues {
+            self.instructions[jump] = CompiledInstruction::Jump(continue_target);
+        }
+        Some(())
     }
 
     fn pop_instruction(&mut self, instruction: CompiledInstruction) -> Option<()> {
@@ -17661,10 +17724,13 @@ impl CompiledFunctionBuilder {
                     self.compile_expression(condition)?;
                     let end_jump = self.instructions.len();
                     self.pop_instruction(CompiledInstruction::JumpIfFalse(usize::MAX))?;
+                    self.push_loop();
                     self.compile_statements(body)?;
                     self.instructions.push(CompiledInstruction::Jump(start));
                     let end = self.instructions.len();
                     self.instructions[end_jump] = CompiledInstruction::JumpIfFalse(end);
+                    // `continue` re-tests the condition; `break` leaves the loop.
+                    self.pop_loop(end, start)?;
                 }
                 Stmt::For {
                     init,
@@ -17699,17 +17765,30 @@ impl CompiledFunctionBuilder {
                     } else {
                         None
                     };
+                    self.push_loop();
                     self.compile_statements(body)?;
+                    let increment_start = self.instructions.len();
                     if let Some(increment) = increment {
                         self.compile_discarded_expression(increment)?;
                     }
                     self.instructions
                         .push(CompiledInstruction::Jump(condition_start));
+                    let end = self.instructions.len();
                     if let Some(end_jump) = end_jump {
-                        let end = self.instructions.len();
                         self.instructions[end_jump] = CompiledInstruction::JumpIfFalse(end);
                     }
+                    // C4Aul's back edge is the incrementor when there is one,
+                    // otherwise the condition, otherwise the body; `continue`
+                    // shares it (C4AulParse.cpp:2604-2619).
+                    let back_edge = if increment.is_some() {
+                        increment_start
+                    } else {
+                        condition_start
+                    };
+                    self.pop_loop(end, back_edge)?;
                 }
+                Stmt::Break => self.compile_loop_control(true)?,
+                Stmt::Continue => self.compile_loop_control(false)?,
                 Stmt::Block(statements) | Stmt::Sequence(statements) => {
                     self.compile_statements(statements)?;
                 }
@@ -19509,6 +19588,10 @@ mod tests {
         };
     }
 
+    /// Opaque host-continuation request for the suspension probes below.
+    #[derive(Debug)]
+    struct PauseProbeRequest;
+
     macro_rules! check_script {
         ($source:expr, $entry:expr, $args:expr; unwrap => $expected:expr) => {
             check_eq!(execute_script($source, $entry, $args).unwrap() => $expected);
@@ -20226,15 +20309,25 @@ mod tests {
     }
 
     #[test]
-    fn execution_profile_does_not_blame_supported_classic_for_for_loop_control_fallback() {
+    fn execution_profile_blames_only_foreach_for_a_loop_control_fallback() {
+        // Loop control lowers into while and classic-for, so the surviving
+        // blocker in a foreach body is the foreach itself.
         let mut engine = crate::engine::Engine::new();
         engine
             .load_script(
-                "func Probe() {\n\
+                "func Compiled() {\n\
                      var total = 0;\n\
                      for (var i = 0; i < 3; i++) {\n\
                          if (i == 1) continue;\n\
                          total += i;\n\
+                     }\n\
+                     return total;\n\
+                 }\n\
+                 func Ast(values) {\n\
+                     var total = 0;\n\
+                     for (var value in values) {\n\
+                         if (value == 1) continue;\n\
+                         total += value;\n\
                      }\n\
                      return total;\n\
                  }",
@@ -20242,11 +20335,14 @@ mod tests {
             .expect("profile script loads");
         crate::execution_profile::reset();
 
-        check_eq!(engine.call("Probe", &[]).expect("AST call succeeds") => Value::Int(2));
+        check_eq!(engine.call("Compiled", &[]).expect("compiled call succeeds") => Value::Int(2));
+        check_eq!(engine.call("Ast", &[Value::Array(vec![Value::Int(0), Value::Int(1), Value::Int(2)])]).expect("AST call succeeds") => Value::Int(2));
         let profile = crate::execution_profile::snapshot();
 
+        check_eq!(profile.compiled => 1);
         check_eq!(profile.ast_without_plan => 1);
-        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::LoopControl) => 1);
+        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 1);
+        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::LoopControl) => 0);
         check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::ClassicFor) => 0);
     }
 
@@ -20421,25 +20517,288 @@ mod tests {
     }
 
     #[test]
-    fn classic_for_with_continue_keeps_exact_ast_fallback() {
-        // AB_CONTINUE targets the increment clause while AB_BREAK targets the
-        // loop exit (C4AulParse.cpp:2789-3088). Until the compiled builder has
-        // explicit loop fixups, retaining the AST path preserves both edges.
+    fn compiled_while_break_leaves_the_loop() {
+        // `break` unwinds to the loop's stack size and emits AB_JUMP
+        // (C4AulParse.cpp:2109-2127); Parse_While patches it to the loop exit
+        // (C4AulParse.cpp:2502-2508).
         reset_compiled_function_execution_count();
         check_script!(
-            "func Sum(count) {\n\
+            "func Sum(limit) {\n\
                  var total = 0;\n\
-                 for (var i = 0; i < count; i++) {\n\
-                     if (i == 2) continue;\n\
+                 var i = 0;\n\
+                 while (i < 10) {\n\
+                     if (i == limit) break;\n\
                      total += i;\n\
+                     i++;\n\
                  }\n\
                  return total;\n\
              }",
             "Sum",
-            &[Value::Int(5)];
-            expect "continue reaches the increment clause" => Value::Int(8)
+            &[Value::Int(4)];
+            expect "break leaves the while loop" => Value::Int(6)
         );
-        check_eq!(compiled_function_execution_count() => 0);
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn compiled_loop_control_binds_to_the_innermost_loop() {
+        // C4Aul patches only `pLoopStack`'s own control list before PopLoop,
+        // so an inner loop consumes its own break/continue and leaves the
+        // outer loop's edges alone (C4AulParse.cpp:2502-2508,2613-2619).
+        reset_compiled_function_execution_count();
+        check_script!(
+            "func Probe() {\n\
+                 var trace = 0;\n\
+                 for (var outer = 0; outer < 3; outer++) {\n\
+                     if (outer == 1) continue;\n\
+                     var inner = 0;\n\
+                     while (inner < 3) {\n\
+                         inner++;\n\
+                         if (inner == 2) break;\n\
+                         trace = trace * 10 + inner;\n\
+                     }\n\
+                     trace = trace * 10 + 9;\n\
+                 }\n\
+                 return trace;\n\
+             }",
+            "Probe",
+            &[];
+            expect "inner break leaves only the inner loop" => Value::Int(1919)
+        );
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn compiled_loop_control_matches_the_ast_side_effect_order() {
+        // `continue` re-enters through the incrementor and `break` skips both
+        // it and the condition, so every clause callback keeps the AST order
+        // (C4AulParse.cpp:2604-2619).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\n\
+                 local trace;\n\
+                 func Mark(value) { trace = trace * 10 + value; return value; }\n\
+                 func Body() {\n\
+                     trace = 0;\n\
+                     for (var i = Mark(1); Mark(i) < 4; i = Mark(i + 1)) {\n\
+                         if (i == 2) { Mark(7); continue; }\n\
+                         if (i == 3) { Mark(8); break; }\n\
+                         Mark(9);\n\
+                     }\n\
+                     return trace;\n\
+                 }\n\
+                 func Compiled() { return Body(); }\n\
+                 func Interpreted() {\n\
+                     if (false) return nil ?? 1;\n\
+                     trace = 0;\n\
+                     for (var i = Mark(1); Mark(i) < 4; i = Mark(i + 1)) {\n\
+                         if (i == 2) { Mark(7); continue; }\n\
+                         if (i == 3) { Mark(8); break; }\n\
+                         Mark(9);\n\
+                     }\n\
+                     return trace;\n\
+                 }",
+            )
+            .expect("loop control script loads");
+
+        reset_compiled_function_execution_count();
+        let compiled = engine
+            .call_with_locals("Compiled", &[], &HashMap::new())
+            .expect("compiled loop control succeeds")
+            .0;
+        // Compiled, Body, and its nine Mark callbacks all lower.
+        check_eq!(compiled_function_execution_count() => 11);
+        let interpreted = engine
+            .call_with_locals("Interpreted", &[], &HashMap::new())
+            .expect("AST loop control succeeds")
+            .0;
+
+        check_eq!(compiled => Value::Int(119_227_338));
+        check_eq!(interpreted => compiled);
+        // Only the nine Mark callbacks lower inside the AST run.
+        check_eq!(compiled_function_execution_count() => 20);
+    }
+
+    #[test]
+    fn compiled_loop_resumes_a_host_suspension_and_still_takes_its_break_edge() {
+        // A suspension stores the instruction pointer, so a resumed body has
+        // to land on the same patched loop edges the first pass would have
+        // taken (C4AulParse.cpp:2109-2127,2604-2619).
+        let marks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mark_sink = std::sync::Arc::clone(&marks);
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("Mark", move |args| {
+            mark_sink
+                .lock()
+                .expect("mark lock")
+                .push(args.first().cloned());
+            Ok(Value::Nil)
+        });
+        engine.register_host_function("Pause", |_| {
+            Err(RuntimeError::host_continuation(
+                PauseProbeRequest,
+                Value::Nil,
+            ))
+        });
+        const SOURCE: &str = "#strict 3\n\
+             func Probe() {\n\
+                 var total = 0;\n\
+                 for (var i = 0; i < 4; i++) {\n\
+                     if (i == 1) { Mark(i); continue; }\n\
+                     if (i == 3) break;\n\
+                     total = total + Pause();\n\
+                     Mark(total);\n\
+                 }\n\
+                 return total;\n\
+             }";
+        engine
+            .load_script(SOURCE)
+            .expect("suspending loop script loads");
+        // The invocation counter only sees completed direct executions, so a
+        // suspending call is pinned through its plan instead.
+        let functions = parse_functions(SOURCE, "suspending loop script parses");
+        check!(CompiledFunction::compile(&functions["Probe"]).is_some());
+
+        let mut outcome = engine
+            .call_with_continuation("Probe", &[])
+            .expect("Probe suspends inside the loop");
+        let mut suspensions = 0;
+        let result = loop {
+            match outcome {
+                ScriptCallOutcome::Suspended(suspension) => {
+                    suspensions += 1;
+                    check!(suspension.request::<PauseProbeRequest>().is_some());
+                    outcome = engine
+                        .resume_script_continuation_with_value(suspension, Value::Int(5))
+                        .expect("Probe resumes inside the loop");
+                }
+                ScriptCallOutcome::Complete(value) => break value,
+            }
+        };
+
+        // `i == 1` continues past Pause and `i == 3` breaks out before it.
+        check_eq!(suspensions => 2);
+        check_eq!(result => Value::Int(10));
+        check_eq!(
+            *marks.lock().expect("mark lock")
+                => vec![Some(Value::Int(5)), Some(Value::Int(1)), Some(Value::Int(10))]
+        );
+    }
+
+    #[test]
+    fn compiled_loop_control_leaves_no_value_stack_residue() {
+        // C4Aul precedes every loop control with an AB_STACK unwind back to
+        // `Loop::StackSize`, so a break or continue cannot leak operands past
+        // the loop (C4AulParse.cpp:2109-2149).
+        const BODY: &str = "ObserveStack();\n\
+             var i = 0;\n\
+             while (i < 3) { i++; if (i == 2) break; }\n\
+             ObserveStack();\n\
+             for (var j = 0; j < 4; j++) {\n\
+                 if (j == 1) continue;\n\
+                 if (j == 2) break;\n\
+             }\n\
+             ObserveStack();\n\
+             return 7;";
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host_observed = std::sync::Arc::clone(&observed);
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("ObserveStack", move |_| {
+            host_observed
+                .lock()
+                .expect("stack observation lock")
+                .push(VALUE_STACK_SIZE.with(Cell::get));
+            Ok(Value::Nil)
+        });
+        engine
+            .load_script(&format!(
+                "func Compiled() {{ {BODY} }}\n\
+                 func Interpreted() {{ if (false) return nil ?? 1; {BODY} }}"
+            ))
+            .expect("loop residue script loads");
+
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Compiled", &[]).expect("compiled loop succeeds") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(engine.call("Interpreted", &[]).expect("AST loop succeeds") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        let observed = observed.lock().expect("stack observation lock");
+
+        check_eq!(observed.len() => 6);
+        check_eq!(observed[1] => observed[0]);
+        check_eq!(observed[2] => observed[0]);
+        check_eq!(observed[4] => observed[3]);
+        check_eq!(observed[5] => observed[3]);
+    }
+
+    #[test]
+    fn compiled_clauseless_for_continues_to_its_body() {
+        // With neither incrementor nor condition C4Aul's back edge is the body
+        // itself, and `continue` shares it (C4AulParse.cpp:2604-2619).
+        reset_compiled_function_execution_count();
+        check_script!(
+            "func Probe() {\n\
+                 var i = 0;\n\
+                 var trace = 0;\n\
+                 for (;;) {\n\
+                     i++;\n\
+                     if (i == 2) continue;\n\
+                     trace = trace * 10 + i;\n\
+                     if (i >= 4) break;\n\
+                 }\n\
+                 return trace;\n\
+             }",
+            "Probe",
+            &[];
+            expect "a clauseless for re-enters at its body" => Value::Int(134)
+        );
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn compiled_conditionless_for_continues_to_its_incrementor() {
+        // An incrementor without a condition still owns the back edge, and
+        // C4Aul emits no jump from it to a condition that does not exist
+        // (C4AulParse.cpp:2586-2619).
+        reset_compiled_function_execution_count();
+        check_script!(
+            "func Probe() {\n\
+                 var trace = 0;\n\
+                 for (var i = 0;; i++) {\n\
+                     if (i == 1) continue;\n\
+                     trace = trace * 10 + i;\n\
+                     if (i == 3) break;\n\
+                 }\n\
+                 return trace;\n\
+             }",
+            "Probe",
+            &[];
+            expect "continue reaches the incrementor without a condition" => Value::Int(23)
+        );
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn compiled_loop_control_keeps_unreachable_trailing_statements_lowerable() {
+        // C4Aul emits the statements after an unconditional break as ordinary
+        // dead code rather than rejecting the function, so the plan keeps the
+        // same shape (C4AulParse.cpp:2109-2127).
+        reset_compiled_function_execution_count();
+        check_script!(
+            "func Probe() {\n\
+                 var total = 1;\n\
+                 while (total < 100) {\n\
+                     break;\n\
+                     total = 50;\n\
+                 }\n\
+                 return total;\n\
+             }",
+            "Probe",
+            &[];
+            expect "the statement after break never runs" => Value::Int(1)
+        );
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[cfg(target_pointer_width = "64")]
