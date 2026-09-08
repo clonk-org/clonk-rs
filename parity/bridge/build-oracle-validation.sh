@@ -80,11 +80,13 @@ else
 	exit 1
 fi
 
-# The config bridge's C++ never compiled at the pin: two assigners in
-# src/C4Config.cpp take the wrong types (clonk-org/clonk-rs#1264). The fix is
-# layered the same way as the runtime instrumentation, and only when the
-# option that compiles that code is requested. $1 = patch path, $2 = label,
-# $3 = ON to apply.
+# The validation bridges' C++ never built at the pin: the config bridge's two
+# assigners in src/C4Config.cpp take the wrong types (clonk-org/clonk-rs#1264)
+# and the group bridge moves an entry name before keying on it
+# (clonk-org/clonk-rs#1265); both log where nothing listens, and both leave the
+# c4group tool unlinkable. Each fix is layered the same way as the runtime
+# instrumentation, and only when the option that compiles that code is
+# requested. $1 = patch path, $2 = label, $3 = ON to apply.
 layer_bridge_patch() {
 	local patch=$1 label=$2 enabled=$3
 	[ "$enabled" = ON ] || return 0
@@ -99,7 +101,8 @@ layer_bridge_patch() {
 	fi
 }
 layer_bridge_patch "$REPO_ROOT/parity/bridge/oracle-config-bridge.patch" config-bridge "$USE_RUST_CONFIG"
-echo "==> oracle  $ORACLE_ROOT (at the pin)"
+layer_bridge_patch "$REPO_ROOT/parity/bridge/oracle-group-bridge.patch" group-bridge "$USE_RUST_GROUP_VALIDATION"
+echo "==> oracle   $ORACLE_ROOT (at the pin)"
 echo "==> port     $REPO_ROOT"
 echo "==> profile  $PROFILE"
 
@@ -193,4 +196,13 @@ if [ "$USE_RUST_CONFIG" = ON ]; then
 
 		    parity/bridge/run-config-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
 	CONFIG
+fi
+if [ "$USE_RUST_GROUP_VALIDATION" = ON ]; then
+	cat <<-GROUP
+
+		The group-validation bridge is linked. Run its differential (folder and
+		packed fixtures, fault injection, reads, frees) with:
+
+		    parity/bridge/run-group-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
+	GROUP
 fi
