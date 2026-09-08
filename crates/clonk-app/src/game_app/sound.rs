@@ -35,7 +35,8 @@ impl GameApp {
         self.sound.runtime_music_enabled = enabled;
         if enabled {
             if let Some(path) = self
-                .active_scenario
+                .scenario_lifecycle
+                .active
                 .as_ref()
                 .and_then(|scenario| scenario.path.clone())
             {
@@ -590,7 +591,8 @@ impl GameApp {
                 .is_some_and(|audio| !audio.borrow().music_is_playing());
         if restart_music {
             if let Some(path) = self
-                .active_scenario
+                .scenario_lifecycle
+                .active
                 .as_ref()
                 .and_then(|scenario| scenario.path.clone())
             {

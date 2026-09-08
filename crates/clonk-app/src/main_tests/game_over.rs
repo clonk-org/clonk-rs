@@ -263,7 +263,7 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
 
     let (sender, receiver) = mpsc::channel();
     app.loader.screen = loader_screen;
-    app.loading_state = Some(ScenarioLoadingState::new(
+    app.scenario_lifecycle.loading = Some(ScenarioLoadingState::new(
         frontend,
         loader_refreshed_resources,
         HashMap::new(),
@@ -284,13 +284,13 @@ fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
     main_assert_eq!(app.scensel.mode => ScenarioSelectorMode::Local);
     main_assert_eq!(app.last_startup_dialog => StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local));
     main_assert_eq!(app.startup.scenario_back_dialog => None);
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
     main_assert!(app.loader.screen.is_some());
     main_assert!(app.loader.error.is_none());
-    main_assert!(app.active_scenario.is_none());
-    main_assert!(app.active_definition_load.is_none());
+    main_assert!(app.scenario_lifecycle.active.is_none());
+    main_assert!(app.scenario_lifecycle.definition_load.is_none());
     main_assert!(app.active_global_gui_failures.is_empty());
     main_assert!(app.dialogs.client_list.is_none());
     assert_startup_error_log(&app, "controlled local load failure");
@@ -723,8 +723,8 @@ fn host_round_restart_keeps_the_session_up_and_rebuilds_its_own_lobby() {
         .and_then(Path::parent)
         .test_value();
     let mut app = new_menu_app_with_paths(800, 600, &paths);
-    app.active_scenario = Some(tutorial_frontend(repository));
-    app.active_definition_load = Some(ScenarioDefinitionLoad::Seed {
+    app.scenario_lifecycle.active = Some(tutorial_frontend(repository));
+    app.scenario_lifecycle.definition_load = Some(ScenarioDefinitionLoad::Seed {
         modules: vec!["Objects.c4d".to_string()],
         definition_root: None,
     });
@@ -766,8 +766,8 @@ fn running_host_round_restart_keeps_connected_clients_in_the_rebuilt_lobby() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     let staged = prepare_minimal_host_lobby(&app, scenario.clone());
     let host_name = staged.lobby.local_name.clone();
-    app.active_scenario = Some(scenario);
-    app.active_definition_load = Some(activated_definition_load(
+    app.scenario_lifecycle.active = Some(scenario);
+    app.scenario_lifecycle.definition_load = Some(activated_definition_load(
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
@@ -891,8 +891,8 @@ fn running_host_round_restart_refreshes_retained_advertising() {
     let staged = prepare_minimal_host_lobby(&app, scenario.clone());
     let host_name = staged.lobby.local_name.clone();
     let host_nick = staged.lobby.nick.clone();
-    app.active_scenario = Some(scenario);
-    app.active_definition_load = Some(activated_definition_load(
+    app.scenario_lifecycle.active = Some(scenario);
+    app.scenario_lifecycle.definition_load = Some(activated_definition_load(
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
@@ -969,8 +969,8 @@ fn running_host_round_restart_keeps_live_password_and_comment() {
     let staged = prepare_minimal_host_lobby(&app, scenario.clone());
     let host_name = staged.lobby.local_name.clone();
     let host_nick = staged.lobby.nick.clone();
-    app.active_scenario = Some(scenario);
-    app.active_definition_load = Some(activated_definition_load(
+    app.scenario_lifecycle.active = Some(scenario);
+    app.scenario_lifecycle.definition_load = Some(activated_definition_load(
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
@@ -1028,8 +1028,8 @@ fn rejected_live_round_restart_falls_back_to_announced_rehosting() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     let staged = prepare_minimal_host_lobby(&app, scenario.clone());
     let host_name = staged.lobby.local_name.clone();
-    app.active_scenario = Some(scenario);
-    app.active_definition_load = Some(activated_definition_load(
+    app.scenario_lifecycle.active = Some(scenario);
+    app.scenario_lifecycle.definition_load = Some(activated_definition_load(
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
@@ -1075,8 +1075,8 @@ fn host_round_restart_does_not_resurrect_disconnected_player_rows() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     let staged = prepare_minimal_host_lobby(&app, scenario.clone());
     let host_name = staged.lobby.local_name.clone();
-    app.active_scenario = Some(scenario);
-    app.active_definition_load = Some(activated_definition_load(
+    app.scenario_lifecycle.active = Some(scenario);
+    app.scenario_lifecycle.definition_load = Some(activated_definition_load(
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
@@ -1238,8 +1238,8 @@ fn host_round_restart_without_restore_mask_resets_remote_teams() {
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     let staged = prepare_minimal_host_lobby(&app, scenario.clone());
     let host_name = staged.lobby.local_name.clone();
-    app.active_scenario = Some(scenario);
-    app.active_definition_load = Some(activated_definition_load(
+    app.scenario_lifecycle.active = Some(scenario);
+    app.scenario_lifecycle.definition_load = Some(activated_definition_load(
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
@@ -1309,8 +1309,8 @@ fn observer_host_round_restart_without_profile_does_not_open_first_player_dialog
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     let staged = prepare_minimal_host_lobby(&app, scenario.clone());
     let host_name = staged.lobby.local_name.clone();
-    app.active_scenario = Some(scenario);
-    app.active_definition_load = Some(activated_definition_load(
+    app.scenario_lifecycle.active = Some(scenario);
+    app.scenario_lifecycle.definition_load = Some(activated_definition_load(
         Some(staged.effective_definition_modules.clone()),
         staged.definition_load,
     ));
@@ -1556,8 +1556,8 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
         thread::sleep(Duration::from_millis(2));
     }
 
-    let host_scenario = host.active_scenario.clone().test_value();
-    let client_scenario = client.active_scenario.clone().test_value();
+    let host_scenario = host.scenario_lifecycle.active.clone().test_value();
+    let client_scenario = client.scenario_lifecycle.active.clone().test_value();
     main_assert_eq!(client_scenario.title => host_scenario.title);
     let host_player_ids = host.control_player_infos.client_info_ids(client_id);
     let client_player_ids = client.control_player_infos.client_info_ids(client_id);
@@ -1807,9 +1807,9 @@ fn host_restart_keeps_real_peer_in_same_scenario_lobby_and_starts_again() {
     main_assert!(host.startup_network.connection.is_none());
     main_assert!(client.startup_network.connection.is_none(), "round two must still use the retained worker instead of dialing again");
     main_assert!(client.pending_host_rejoin.is_none());
-    let round_two_host_scenario = host.active_scenario.test_ref();
-    let round_two_client_scenario = client.active_scenario.test_ref();
-    let round_two_joining_client_scenario = joining_client.active_scenario.test_ref();
+    let round_two_host_scenario = host.scenario_lifecycle.active.test_ref();
+    let round_two_client_scenario = client.scenario_lifecycle.active.test_ref();
+    let round_two_joining_client_scenario = joining_client.scenario_lifecycle.active.test_ref();
     main_assert_eq!(round_two_client_scenario.identifier => client_scenario.identifier);
     main_assert_eq!(round_two_client_scenario.title => round_two_host_scenario.title);
     // Fresh clients execute a local Combined<ID>.c4s transport artifact; the
@@ -2281,12 +2281,12 @@ fn a_console_opened_round_parks_the_server_for_the_next_open() {
     // follow_app_state` does: the point is that `/open` is accepted and its
     // parameters land, not that the file exists.
     let (_boot_sender, boot_receiver) = mpsc::channel();
-    server.boot_loading = Some(BootLoadingState::new(boot_receiver));
+    server.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(boot_receiver));
     server
         .process_console_command("/open \"Missions/Second Round/Scenario.txt\"")
         .test_value();
     main_assert_eq!(server.classic_command_line.scenario => Some(PathBuf::from("Missions/Second Round")));
-    main_assert!(server.auto_start_classic_command_line_scenario, "the operator's next round is queued without restarting the process");
+    main_assert!(server.scenario_lifecycle.auto_start_classic_command_line_scenario, "the operator's next round is queued without restarting the process");
     main_assert!(!server.take_exit_request());
 }
 
@@ -6252,7 +6252,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
     declined.test_update();
     let declined_frame = declined.engine.frame();
     main_assert!(declined_frame > 0);
-    let declined_scenario = declined.active_scenario.test_ref().identifier.clone();
+    let declined_scenario = declined.scenario_lifecycle.active.test_ref().identifier.clone();
     declined.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     finish_abort_dialog(
         &mut declined,
@@ -6261,7 +6261,7 @@ fn abort_confirmation_declines_confirms_and_restarts() {
     main_assert!(declined.ingame_menus.players.is_none());
     main_assert!(declined.dialogs.messages.is_empty());
     main_assert!(matches!(declined.mode, AppMode::Running));
-    main_assert_eq!(declined.active_scenario.as_ref().map(|active| active.identifier.as_str()) => Some(declined_scenario.as_str()));
+    main_assert_eq!(declined.scenario_lifecycle.active.as_ref().map(|active| active.identifier.as_str()) => Some(declined_scenario.as_str()));
     main_assert_eq!(declined.engine.frame() => declined_frame);
 
     let mut confirmed = new_running_sandbox_app();
@@ -6271,20 +6271,20 @@ fn abort_confirmation_declines_confirms_and_restarts() {
         clonk_frontend::message_dialog::MessageDialogResult::Yes,
     );
     main_assert!(matches!(confirmed.mode, AppMode::Menu));
-    main_assert!(confirmed.active_scenario.is_none());
+    main_assert!(confirmed.scenario_lifecycle.active.is_none());
     main_assert!(confirmed.ingame_menus.players.is_none());
 
     let mut restarted = new_running_sandbox_app();
     restarted.test_update();
     main_assert!(restarted.engine.frame() > 0);
-    let scenario = restarted.active_scenario.test_ref().identifier.clone();
+    let scenario = restarted.scenario_lifecycle.active.test_ref().identifier.clone();
     restarted.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
     finish_abort_dialog(
         &mut restarted,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
     );
     wait_for_running(&mut restarted);
-    main_assert_eq!(restarted.active_scenario.as_ref().map(|active| active.identifier.as_str()) => Some(scenario.as_str()));
+    main_assert_eq!(restarted.scenario_lifecycle.active.as_ref().map(|active| active.identifier.as_str()) => Some(scenario.as_str()));
     main_assert_eq!(restarted.engine.frame() => 0);
     main_assert!(restarted.ingame_menus.players.is_none());
     main_assert!(restarted.dialogs.messages.is_empty());
@@ -6312,7 +6312,7 @@ fn restart_is_control_host_only_and_game_over_suppresses_abort() {
         &mut film_client,
         clonk_frontend::message_dialog::MessageDialogResult::Restart,
     );
-    main_assert!(!film_client.abort_restart_pending);
+    main_assert!(!film_client.scenario_lifecycle.abort_restart_pending);
     main_assert_eq!(film_client.scensel.mode => ScenarioSelectorMode::NetworkHost, "C++ preserves NetworkActive for a Film2 client's NextMission");
 
     let mut game_over = new_game_over_keyboard_app();
@@ -6476,7 +6476,7 @@ fn next_mission_action_launches_the_catalog_target() {
     target.path = Some(target_path);
     app.scensel.catalog
         .insert(target.identifier.clone(), target.clone());
-    app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+    app.scenario_lifecycle.definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: vec![carried_definition.to_string_lossy().into_owned()],
         definition_root: None,
     });
@@ -6493,9 +6493,9 @@ fn next_mission_action_launches_the_catalog_target() {
         .test_value();
     wait_for_running(&mut app);
 
-    main_assert_eq!(app.active_scenario.as_ref().map(|scenario| scenario.identifier.as_str()) => Some("Tutorial.c4f/Tutorial02.c4s"));
+    main_assert_eq!(app.scenario_lifecycle.active.as_ref().map(|scenario| scenario.identifier.as_str()) => Some("Tutorial.c4f/Tutorial02.c4s"));
     main_assert!(matches!(
-        app.active_definition_load.as_ref(),
+        app.scenario_lifecycle.definition_load.as_ref(),
         Some(ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root: None,

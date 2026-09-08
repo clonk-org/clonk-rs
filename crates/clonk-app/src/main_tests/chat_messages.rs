@@ -6,7 +6,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     let mut startup = new_state_only_menu_app(320, 200);
     startup.console_session.enabled = true;
     let (boot_sender, boot_receiver) = mpsc::channel();
-    startup.boot_loading = Some(BootLoadingState::new(boot_receiver));
+    startup.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(boot_receiver));
     startup.mode = AppMode::Loading;
     startup
         .process_console_command(
@@ -17,17 +17,17 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     main_assert_eq!(startup.classic_command_line.network_active => Some(true));
     main_assert_eq!(startup.classic_command_line.lobby_timeout => Some(Some(17)));
     main_assert_eq!(startup.classic_command_line.comment.as_deref() => Some("console game"));
-    main_assert!(startup.auto_start_classic_command_line_scenario);
+    main_assert!(startup.scenario_lifecycle.auto_start_classic_command_line_scenario);
     startup.process_console_command("/close").test_value();
     main_assert_eq!(startup.mode => AppMode::Loading);
-    main_assert!(startup.boot_loading.is_some());
-    main_assert!(!startup.auto_start_classic_command_line_scenario);
+    main_assert!(startup.scenario_lifecycle.boot_loading.is_some());
+    main_assert!(!startup.scenario_lifecycle.auto_start_classic_command_line_scenario);
     boot_sender
         .send(BootLoadingEvent::Finished(None))
         .test_value();
     startup.poll_boot_loading();
     main_assert_eq!(startup.mode => AppMode::Menu);
-    main_assert!(startup.boot_loading.is_none());
+    main_assert!(startup.scenario_lifecycle.boot_loading.is_none());
     main_assert!(startup.console_startup_active());
 
     let (_query_sender, query_receiver) = mpsc::channel::<
@@ -71,7 +71,7 @@ fn console_open_close_and_message_fallback_follow_app_state() {
     running.frame_skip = 9;
     running.process_console_command("/close").test_value();
     main_assert_eq!(running.mode => AppMode::Menu);
-    main_assert!(running.active_scenario.is_none());
+    main_assert!(running.scenario_lifecycle.active.is_none());
     main_assert!(!running.full_speed);
     main_assert_eq!(running.frame_skip => 1);
 }

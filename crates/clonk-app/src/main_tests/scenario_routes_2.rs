@@ -2135,7 +2135,7 @@ fn saved_game_restores_music_level_after_scenario_reconfiguration(
     let paths = cached_app_paths().test_value();
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
-    let scenario = app.active_scenario.clone().test_value();
+    let scenario = app.scenario_lifecycle.active.clone().test_value();
     let mut engine_state = app.engine.capture_state();
     engine_state.music_level = 25;
     let save = SavedGameFile {
@@ -2146,7 +2146,7 @@ fn saved_game_restores_music_level_after_scenario_reconfiguration(
             &app.scenario_label,
             app.fallback_ground,
         ),
-        definition_load: app.active_definition_load.clone(),
+        definition_load: app.scenario_lifecycle.definition_load.clone(),
         focus_id: app.focus_id,
         user_label: Some("restored music level".to_string()),
         runtime_music_enabled: Some(false),
@@ -2176,7 +2176,7 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
     let paths = cached_app_paths().test_value();
     paths.ensure_user_dirs().test_value();
     fs::write(paths.config_file(), "[General]\nLanguageEx=US\n").test_value();
-    let scenario = app.active_scenario.clone().test_value();
+    let scenario = app.scenario_lifecycle.active.clone().test_value();
     let mut engine_state = app.engine.capture_state();
     engine_state.play_list = Some("Theme*".to_string());
     let save = SavedGameFile {
@@ -2187,7 +2187,7 @@ fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
             &app.scenario_label,
             app.fallback_ground,
         ),
-        definition_load: app.active_definition_load.clone(),
+        definition_load: app.scenario_lifecycle.definition_load.clone(),
         focus_id: app.focus_id,
         user_label: Some("restored playlist".to_string()),
         runtime_music_enabled: Some(false),

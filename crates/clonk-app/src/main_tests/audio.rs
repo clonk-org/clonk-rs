@@ -119,13 +119,13 @@ fn console_quit_is_global_and_headless_loop_exits_cleanly() {
     let mut boot = new_state_only_menu_app(320, 200);
     let (sender, receiver) = mpsc::channel();
     sender.send(BootLoadingEvent::Finished(None)).test_value();
-    boot.boot_loading = Some(BootLoadingState::new(receiver));
+    boot.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(receiver));
     boot.mode = AppMode::Loading;
     boot.console_session.enabled = true;
     boot.loader.screen = None;
     boot.poll_boot_loading();
     main_assert_eq!(boot.mode => AppMode::Menu);
-    main_assert!(boot.boot_loading.is_none());
+    main_assert!(boot.scenario_lifecycle.boot_loading.is_none());
 }
 
 /// A dedicated server has no loader screen to fail on:
@@ -141,7 +141,7 @@ fn headless_boot_leaves_loading_without_a_loader_screen_or_console_authority() {
         let mut app = new_state_only_menu_app(320, 200);
         let (sender, receiver) = mpsc::channel();
         sender.send(BootLoadingEvent::Finished(None)).test_value();
-        app.boot_loading = Some(BootLoadingState::new(receiver));
+        app.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(receiver));
         app.mode = AppMode::Loading;
         app.loader.screen = None;
         app
@@ -157,7 +157,7 @@ fn headless_boot_leaves_loading_without_a_loader_screen_or_console_authority() {
     server.headless = true;
     server.poll_boot_loading();
     main_assert_eq!(server.mode => AppMode::Menu);
-    main_assert!(server.boot_loading.is_none());
+    main_assert!(server.scenario_lifecycle.boot_loading.is_none());
     main_assert!(!server.console_session.enabled, "headless must not grant developer-console authority");
 }
 

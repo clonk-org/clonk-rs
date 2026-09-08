@@ -2665,7 +2665,8 @@ impl GameApp {
         let team_snapshot = clonk_network::join_team_list_snapshot(metadata);
         self.engine.set_teams(runtime_teams.clone());
         if let Some(prepared) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_mut()
             .and_then(|loading| loading.prepared_go.as_mut())
         {
@@ -5144,7 +5145,7 @@ impl GameApp {
                 return Err("client preload completed for stale JoinData".to_string());
             }
             self.client_combined_scenario_path = Some(artifact.scenario_path.clone());
-            self.network_material_resource_groups =
+            self.scenario_lifecycle.network_material_resource_groups =
                 Some(std::mem::take(&mut client.material_groups));
         } else if let Some(catalog_host) = artifact.catalog_host.as_ref() {
             let current = self.catalog_host_preload_key().as_ref() == Some(&catalog_host.key);
@@ -7418,7 +7419,7 @@ impl GameApp {
         self.dialogs.league_signup_pointer_capture = false;
         self.dialogs.league_signup_pointer_position = None;
         self.definition_selection.dialog = None;
-        self.pending_definition_selection = None;
+        self.definition_selection.pending = None;
         self.pending_lobby_player_selection = None;
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();

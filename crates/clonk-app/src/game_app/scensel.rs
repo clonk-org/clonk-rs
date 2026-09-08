@@ -1195,7 +1195,7 @@ impl GameApp {
                 entries,
             ),
         );
-        self.pending_definition_selection = Some(PendingDefinitionSelection {
+        self.definition_selection.pending = Some(PendingDefinitionSelection {
             scenario,
             selector_mode: self.scensel.mode,
             root,
@@ -1274,7 +1274,7 @@ impl GameApp {
         self.definition_selection.dialog = Some(
             clonk_frontend::definition_sel::DefinitionSelController::new_player(root, entries),
         );
-        self.pending_definition_selection = None;
+        self.definition_selection.pending = None;
         self.pending_lobby_player_selection = Some(PendingLobbyPlayerSelection {
             client_id,
             config,
@@ -1636,7 +1636,8 @@ impl GameApp {
                         continue;
                     }
                     let Some(root) = self
-                        .pending_definition_selection
+                        .definition_selection
+                        .pending
                         .as_ref()
                         .map(|pending| pending.root.clone())
                     else {
@@ -1697,7 +1698,7 @@ impl GameApp {
                         }
                         break;
                     }
-                    let Some(pending) = self.pending_definition_selection.take() else {
+                    let Some(pending) = self.definition_selection.pending.take() else {
                         tracing::error!("definition selector accepted without pending scenario");
                         self.startup_tooltip.pointer_left();
                         self.definition_selection.dialog = None;
@@ -1719,7 +1720,7 @@ impl GameApp {
                 DefinitionSelAction::Cancelled => {
                     self.startup_tooltip.pointer_left();
                     self.definition_selection.dialog = None;
-                    self.pending_definition_selection = None;
+                    self.definition_selection.pending = None;
                     self.pending_lobby_player_selection = None;
                     self.definition_selection.last_click = None;
                     break;

@@ -315,7 +315,8 @@ impl GameApp {
             "cannot save while no game is running"
         );
         let active = self
-            .active_scenario
+            .scenario_lifecycle
+            .active
             .clone()
             .ok_or_else(|| anyhow!("active scenario metadata is unavailable"))?;
         let validation_policy = match kind {
@@ -423,7 +424,7 @@ impl GameApp {
             // reopens the copy *before* SaveGame applies its host guard.
             // Preserve unpacked directories just as CopyDirectory does.
             if retarget_active_scenario {
-                if let Some(active) = self.active_scenario.as_mut() {
+                if let Some(active) = self.scenario_lifecycle.active.as_mut() {
                     active.identifier = destination.to_string_lossy().into_owned();
                     active.path = Some(destination.clone());
                     active.source_paths = vec![destination.clone()];
@@ -549,25 +550,29 @@ impl GameApp {
             }
         }
 
-        let definition_modules = match self.active_definition_load.as_ref() {
+        let definition_modules = match self.scenario_lifecycle.definition_load.as_ref() {
             Some(ScenarioDefinitionLoad::Seed { modules, .. })
             | Some(ScenarioDefinitionLoad::Fixed { modules, .. }) => modules.clone(),
             None => Vec::new(),
         };
-        let description_definition_modules =
-            if self.active_description_definition_modules.is_empty()
-                && !definition_modules.is_empty()
-            {
-                // State-only embedders may seed the historical String vector
-                // directly. Its C4 byte projection remains the exact fallback
-                // whenever no filesystem-derived byte cache exists.
-                definition_modules
-                    .iter()
-                    .map(|module| clonk_script::c4_string_bytes(module))
-                    .collect()
-            } else {
-                self.active_description_definition_modules.clone()
-            };
+        let description_definition_modules = if self
+            .scenario_lifecycle
+            .description_definition_modules
+            .is_empty()
+            && !definition_modules.is_empty()
+        {
+            // State-only embedders may seed the historical String vector
+            // directly. Its C4 byte projection remains the exact fallback
+            // whenever no filesystem-derived byte cache exists.
+            definition_modules
+                .iter()
+                .map(|module| clonk_script::c4_string_bytes(module))
+                .collect()
+        } else {
+            self.scenario_lifecycle
+                .description_definition_modules
+                .clone()
+        };
         let native_config = load_native_config_bytes(self.app_paths.as_ref());
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(self.app_paths.as_ref(), &native_config);
@@ -1037,7 +1042,8 @@ impl GameApp {
     }
 
     fn savegame_slot_base(&self) -> String {
-        self.active_scenario
+        self.scenario_lifecycle
+            .active
             .as_ref()
             .map(classic_savegame_scenario_name)
             .unwrap_or_else(|| sanitize_save_label(&self.scenario_label))
@@ -1104,7 +1110,8 @@ impl GameApp {
 
     fn generate_default_save_label(&self) -> String {
         let base = self
-            .active_scenario
+            .scenario_lifecycle
+            .active
             .as_ref()
             .map(|scenario| scenario.title.clone())
             .unwrap_or_else(|| self.scenario_label.clone());
@@ -1177,7 +1184,8 @@ impl GameApp {
                         .map(|seed| seed.scenario_title.as_bytes().to_vec())
                 })
                 .or_else(|| {
-                    self.active_scenario
+                    self.scenario_lifecycle
+                        .active
                         .as_ref()
                         .map(|scenario| clonk_script::c4_string_bytes(&scenario.title))
                 })
@@ -1409,7 +1417,8 @@ impl GameApp {
         }
 
         let scenario = self
-            .active_scenario
+            .scenario_lifecycle
+            .active
             .clone()
             .unwrap_or_else(FrontendScenario::fallback);
         let savegame_policy = clonk_engine::LiveC4SavePolicy::Savegame {
@@ -1452,7 +1461,7 @@ impl GameApp {
                 &self.scenario_label,
                 self.fallback_ground,
             ),
-            definition_load: self.active_definition_load.clone(),
+            definition_load: self.scenario_lifecycle.definition_load.clone(),
             focus_id: self.focus_id,
             user_label: Some(stored_label.clone()),
             runtime_music_enabled: Some(self.sound.runtime_music_enabled),
@@ -1566,7 +1575,8 @@ impl GameApp {
         save_game: bool,
     ) -> Result<(), EngineError> {
         let restore_player_infos = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.restore_player_infos.clone())
@@ -1623,7 +1633,8 @@ impl GameApp {
         };
         self.engine.set_teams(runtime_teams.clone());
         if let Some(prepared) = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_mut()
             .and_then(|loading| loading.prepared_go.as_mut())
         {

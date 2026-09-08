@@ -2335,8 +2335,8 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
     let mut frontend = FrontendScenario::fallback();
     frontend.identifier = "Combined2.c4s".to_string();
     frontend.path = Some(combined.clone());
-    app.active_scenario = Some(frontend.clone());
-    app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+    app.scenario_lifecycle.active = Some(frontend.clone());
+    app.scenario_lifecycle.definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: Vec::new(),
         definition_root: None,
     });
@@ -2398,8 +2398,8 @@ fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
     // (OpenScenario chain + effective definition roots) and overloads
     // identically.
     let mut host_app = new_menu_app_with_paths(320, 200, &paths);
-    host_app.active_scenario = Some(frontend);
-    host_app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+    host_app.scenario_lifecycle.active = Some(frontend);
+    host_app.scenario_lifecycle.definition_load = Some(ScenarioDefinitionLoad::Fixed {
         modules: Vec::new(),
         definition_root: None,
     });

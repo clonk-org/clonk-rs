@@ -1728,7 +1728,7 @@ fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
         "GUISpinBoxArrow",
         "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp: unreadable".to_string(),
     );
-    app.loading_state = Some(ScenarioLoadingState::new(
+    app.scenario_lifecycle.loading = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
         resources,
         failures.clone(),
@@ -1754,7 +1754,7 @@ fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
         .update()
         .expect_err("refresh failure must fail before resource replacement");
     assert_engine_parity_boundary(error, boundary.clone());
-    let state = app.loading_state.test_ref();
+    let state = app.scenario_lifecycle.loading.test_ref();
     main_assert!(state.refresh_requested);
     main_assert!(state.refreshed_resources.is_some());
     main_assert_eq!(state.refreshed_global_gui_failures.as_ref() => Some(&failures));
@@ -1812,7 +1812,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
     let refreshed = make_resources(&success, [0x11, 0x22, 0x33, 0xff]);
     let expected_progress = refreshed.progress_bar().test_value().pixels().to_vec();
     let (sender, receiver) = mpsc::channel();
-    success.loading_state = Some(ScenarioLoadingState::new(
+    success.scenario_lifecycle.loading = Some(ScenarioLoadingState::new(
         frontend,
         refreshed,
         HashMap::new(),
@@ -1828,7 +1828,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
         .test_value();
     success.poll_loading().test_value();
     main_assert_eq!(success.mode => AppMode::Running);
-    main_assert!(success.loading_state.is_none());
+    main_assert!(success.scenario_lifecycle.loading.is_none());
     main_assert_eq!(success.loader.screen.as_ref().expect("loader retained").state().progress() => 100);
     main_assert!(success.active_global_gui_failures.is_empty());
     main_assert_eq!(
@@ -1854,7 +1854,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
     failure.loader.screen = loader_screen;
     let refreshed = make_resources(&failure, [0x44, 0x55, 0x66, 0xff]);
     let (sender, receiver) = mpsc::channel();
-    failure.loading_state = Some(ScenarioLoadingState::new(
+    failure.scenario_lifecycle.loading = Some(ScenarioLoadingState::new(
         FrontendScenario::fallback(),
         refreshed,
         HashMap::new(),
@@ -1871,7 +1871,7 @@ fn accepted_loading_reaches_100_only_after_successful_activation() {
     failure.poll_loading().test_value();
     main_assert_eq!(failure.mode => AppMode::Menu);
     main_assert_eq!(failure.startup.view => StartupView::MainMenu);
-    main_assert!(failure.loading_state.is_none());
+    main_assert!(failure.scenario_lifecycle.loading.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
     main_assert!(failure.loader.screen.is_some());
@@ -2205,7 +2205,7 @@ fn resource_join_record_copies_player_group_for_replay() {
     main_assert!(copied.exists("Player.txt"));
     let mut scenario = FrontendScenario::fallback();
     scenario.path = Some(output_path);
-    app.active_scenario = Some(scenario);
+    app.scenario_lifecycle.active = Some(scenario);
     app.records.playback = Some(
         ControlRecordPlayback::from_bytes(&record.read_file("CtrlRec.c4b").test_value())
             .test_value(),
@@ -4300,7 +4300,7 @@ fn start_real_scenario_loads_from_disk() {
     main_assert!(app.snapshot.objects.iter().any(|object| object.definition_id == "Mover"), "expected spawned Mover object");
     main_assert!(app.focus_id.is_some(), "expected focus to be assigned for crew member");
     main_assert_eq!(
-        app.active_scenario
+        app.scenario_lifecycle.active
             .as_ref()
             .and_then(|active| active.path.as_ref())
             .map(|path| path.as_path()) =>

@@ -122,7 +122,7 @@ pub(crate) fn stage_loader_checkpoint(
     scenario: FrontendScenario,
 ) -> Result<StartupPixelCheckpoint> {
     anyhow::ensure!(
-        app.loading_state.is_none(),
+        app.scenario_lifecycle.loading.is_none(),
         "loader capture requires an idle scenario loader"
     );
     app.start_scenario(scenario)
@@ -140,7 +140,8 @@ pub(crate) fn stage_loader_checkpoint(
             .saturating_duration_since(now)
             .min(WORKER_POLL_INTERVAL);
         let event = app
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .context("the scenario loader disappeared before the capture checkpoint")?
             .receiver
@@ -176,7 +177,8 @@ pub(crate) fn stage_loader_checkpoint(
     }
 
     let loading = app
-        .loading_state
+        .scenario_lifecycle
+        .loading
         .as_ref()
         .context("the scenario loader disappeared at its capture checkpoint")?;
     let expected_log_tail = [
@@ -359,7 +361,8 @@ mod tests {
         assert_eq!(checkpoint.random_count, 0);
         assert_eq!(app.mode, AppMode::Loading);
         let loading = app
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .expect("the sixty-percent worker remains live");
         assert_eq!(loading.last_progress, 60);

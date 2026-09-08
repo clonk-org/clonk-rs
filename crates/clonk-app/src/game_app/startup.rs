@@ -2468,11 +2468,13 @@ impl GameApp {
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
-        self.network_material_resource_groups = None;
-        self.loading_state = None;
-        self.active_scenario = None;
-        self.active_definition_load = None;
-        self.active_description_definition_modules.clear();
+        self.scenario_lifecycle.network_material_resource_groups = None;
+        self.scenario_lifecycle.loading = None;
+        self.scenario_lifecycle.active = None;
+        self.scenario_lifecycle.definition_load = None;
+        self.scenario_lifecycle
+            .description_definition_modules
+            .clear();
         self.mode = AppMode::Menu;
         self.status_text.clear();
 
@@ -5195,7 +5197,7 @@ impl GameApp {
         self.dialogs.game_option_consumed_keys.clear();
         self.scenario_game_options.cancel_interaction();
         self.definition_selection.dialog = None;
-        self.pending_definition_selection = None;
+        self.definition_selection.pending = None;
         self.pending_lobby_player_selection = None;
         self.definition_selection.last_click = None;
         self.definition_selection.consumed_keys.clear();
@@ -5319,7 +5321,7 @@ impl GameApp {
     }
 
     pub(crate) fn apply_scenario_loader_frame(&mut self, progress: i32, log: Option<Vec<String>>) {
-        let Some(state) = self.loading_state.as_mut() else {
+        let Some(state) = self.scenario_lifecycle.loading.as_mut() else {
             return;
         };
         let (progress, log) = state.accept_loader_frame(progress, log);
@@ -5337,7 +5339,8 @@ impl GameApp {
 
     pub(crate) fn advance_scenario_loader(&mut self, progress: i32, line: &'static str) {
         let mut log = self
-            .loading_state
+            .scenario_lifecycle
+            .loading
             .as_ref()
             .map(|state| state.log.clone())
             .unwrap_or_default();
@@ -5352,7 +5355,7 @@ impl GameApp {
 
     pub(crate) fn poll_boot_loading(&mut self) {
         let mut material_library: Option<Option<Arc<MaterialSet>>> = None;
-        if let Some(state) = self.boot_loading.as_mut() {
+        if let Some(state) = self.scenario_lifecycle.boot_loading.as_mut() {
             match state.receiver.try_recv() {
                 Ok(BootLoadingEvent::Finished(library)) => {
                     material_library = Some(library);
@@ -5368,12 +5371,12 @@ impl GameApp {
         }
 
         if let Some(library) = material_library {
-            self.boot_loading = None;
+            self.scenario_lifecycle.boot_loading = None;
             self.rendering.material_library = library;
             self.apply_material_library();
             if !self.console_session.enabled
                 && !self.headless
-                && self.loading_state.is_none()
+                && self.scenario_lifecycle.loading.is_none()
                 && !self.classic_loader_render_preconditions_ready()
             {
                 // A fast boot worker must not bypass a failed loader before
@@ -5387,8 +5390,12 @@ impl GameApp {
                 // (C4Game.h:132-135).
                 return;
             }
-            if self.auto_start_classic_command_line_scenario {
-                self.auto_start_classic_command_line_scenario = false;
+            if self
+                .scenario_lifecycle
+                .auto_start_classic_command_line_scenario
+            {
+                self.scenario_lifecycle
+                    .auto_start_classic_command_line_scenario = false;
                 let mut failed = false;
                 if let Err(error) = self.launch_classic_command_line_scenario() {
                     tracing::error!(?error, "failed to start command-line scenario");
@@ -5409,7 +5416,8 @@ impl GameApp {
                     return;
                 }
                 if failed
-                    || (self.startup_network.connection.is_none() && self.loading_state.is_none())
+                    || (self.startup_network.connection.is_none()
+                        && self.scenario_lifecycle.loading.is_none())
                 {
                     self.mode = AppMode::Menu;
                     self.show_main_menu();
@@ -5422,7 +5430,7 @@ impl GameApp {
             // the menu in that case: the `Menu` update arm does not poll scenario
             // loading, so doing so would strand the in-flight load forever. Stay
             // in `Loading` and let `poll_loading` carry the scenario to `Running`.
-            if self.loading_state.is_none()
+            if self.scenario_lifecycle.loading.is_none()
                 && self.startup_network.connection.is_none()
                 && self.classic_direct_reference_query.is_none()
             {
@@ -5465,8 +5473,8 @@ impl GameApp {
                 // `--sandbox`: jump straight into the built-in sandbox once boot
                 // completes, so the in-game scene can be launched/captured without
                 // navigating the menu. One-shot, so return_to_menu works after.
-                if self.auto_start_sandbox {
-                    self.auto_start_sandbox = false;
+                if self.scenario_lifecycle.auto_start_sandbox {
+                    self.scenario_lifecycle.auto_start_sandbox = false;
                     if let Err(err) = self.start_sandbox_scenario(FrontendScenario::fallback()) {
                         tracing::warn!(error = ?err, "failed to auto-start sandbox scenario");
                     }
@@ -5957,11 +5965,12 @@ impl GameApp {
     }
 
     pub(crate) fn loader_boundary(&self, detail: impl Into<String>) -> anyhow::Error {
-        let context = if self.loading_state.is_some() || self.loader.terminal_frame_pending {
-            "scenario loading"
-        } else {
-            "startup loading"
-        };
+        let context =
+            if self.scenario_lifecycle.loading.is_some() || self.loader.terminal_frame_pending {
+                "scenario loading"
+            } else {
+                "startup loading"
+            };
         anyhow::Error::new(report_classic_parity_boundary(
             ClassicParityBoundary::LoaderScreen {
                 context,

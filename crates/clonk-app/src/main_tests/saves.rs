@@ -494,12 +494,12 @@ fn classic_record_stream_is_converted_and_activated() {
     let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
     app.apply_classic_command_line(&classic).test_value();
     app.launch_classic_command_line_scenario().test_value();
-    main_assert!(app.auto_start_classic_command_line_scenario);
+    main_assert!(app.scenario_lifecycle.auto_start_classic_command_line_scenario);
     wait_for_running_with_attempts(&mut app, 2_400);
 
     let output_path = fixture.path().join("League.c4s");
     main_assert_eq!(app.classic_command_line.scenario.as_deref() => Some(output_path.as_path()));
-    main_assert_eq!(app.active_scenario.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(output_path.as_path()));
+    main_assert_eq!(app.scenario_lifecycle.active.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(output_path.as_path()));
     main_assert!(app.records.playback.is_some());
     main_assert!(app.network.is_none());
     main_assert!(app.network_mode.is_none());
@@ -1320,7 +1320,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
 
     main_assert_eq!(app.mode => AppMode::Menu);
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app.status_text.is_empty());
     main_assert_eq!(app.dialogs.messages.len() => 1);
@@ -1373,7 +1373,7 @@ fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.dialogs.messages.is_empty());
     main_assert_eq!(app.startup.view => StartupView::ScenarioBrowser);
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     main_assert!(app.definition_selection.dialog.is_none());
     main_assert!(app.status_text.is_empty());
     reset_cached_app_paths();
@@ -4459,7 +4459,7 @@ fn film_target_removal_recreates_the_first_player_viewport() {
 fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
     let mut app = new_running_sandbox_app();
     let scenario = app
-        .active_scenario
+        .scenario_lifecycle.active
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
     let save = saves_fixture!(
@@ -4470,7 +4470,7 @@ fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
                         &app.scenario_label,
                         app.fallback_ground,
                     ),
-            app.active_definition_load.clone(),
+            app.scenario_lifecycle.definition_load.clone(),
             app.focus_id,
             Some("runtime music state".to_string()),
             Some(false),
@@ -4494,7 +4494,7 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
     let mut app = new_running_sandbox_app();
     let owner = app.players.local_owner;
     let scenario = app
-        .active_scenario
+        .scenario_lifecycle.active
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
     let mut engine_state = app.engine.capture_state();
@@ -4523,7 +4523,7 @@ fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
                         &app.scenario_label,
                         app.fallback_ground,
                     ),
-            app.active_definition_load.clone(),
+            app.scenario_lifecycle.definition_load.clone(),
             app.focus_id,
             Some("local control restore".to_string()),
             Some(app.sound.runtime_music_enabled),
@@ -4567,7 +4567,7 @@ fn saved_game_skips_removed_current_player_without_deleting_objects() {
             -1,
         ));
     let scenario = app
-        .active_scenario
+        .scenario_lifecycle.active
         .clone()
         .unwrap_or_else(FrontendScenario::fallback);
     let save = saves_fixture!(
@@ -4578,7 +4578,7 @@ fn saved_game_skips_removed_current_player_without_deleting_objects() {
                         &app.scenario_label,
                         app.fallback_ground,
                     ),
-            app.active_definition_load.clone(),
+            app.scenario_lifecycle.definition_load.clone(),
             app.focus_id,
             Some("removed player skipped".to_string()),
             Some(app.sound.runtime_music_enabled),
@@ -4701,7 +4701,7 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
     old_style.path = Some(paths.install_root().join("planet/Missions.c4f/01.c4s"));
     old_style.identifier = "StaleAlias.c4f/Wrong999.c4s".to_string();
     old_style.title = localized_title.to_string();
-    app.active_scenario = Some(old_style.clone());
+    app.scenario_lifecycle.active = Some(old_style.clone());
 
     let old_slot = configured_folder.join("Missions.c4f").join("Missions1.c4s");
     main_assert_eq!(app.savegame_slot_path(1) => old_slot);
@@ -4714,13 +4714,13 @@ fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
             .install_root()
             .join("planet/Tutorial.c4f/Tutorial007.c4s"),
     );
-    app.active_scenario = Some(new_style);
+    app.scenario_lifecycle.active = Some(new_style);
     main_assert_eq!(app.savegame_slot_path(10) => configured_folder.join("Tutorial.c4f").join("Tutorial10.c4s"));
 
     let mut loose_numeric = FrontendScenario::fallback();
     loose_numeric.identifier = "Loose/01.c4s".to_string();
     loose_numeric.path = Some(paths.install_root().join("planet/Loose/01.c4s"));
-    app.active_scenario = Some(loose_numeric);
+    app.scenario_lifecycle.active = Some(loose_numeric);
     main_assert_eq!(app.savegame_slot_path(1) => configured_folder.join("01.c4f").join("011.c4s"), "a regular directory is not Game.pParentGroup");
 
     persist_config_value(&paths, "General", "SaveGameFolder", "Relative Saves.c4f").test_value();
@@ -4824,7 +4824,7 @@ fn configured_native_savegames_folder_is_browsable_and_selects_a_resume() {
     app.handle_menu_actions(vec![StartupMenuAction::StartScenario(summary(resume))])
         .test_value();
     main_assert_eq!(app.mode => AppMode::Loading);
-    main_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.scenario.path.as_deref()) => Some(saved_scenario.as_path()));
+    main_assert_eq!(app.scenario_lifecycle.loading.as_ref().and_then(|loading| loading.scenario.path.as_deref()) => Some(saved_scenario.as_path()));
     reset_cached_app_paths();
 }
 
@@ -4903,7 +4903,7 @@ fn savegame_slot_probe_uses_c4group_validity() {
     let mut scenario = FrontendScenario::fallback();
     scenario.identifier = "Probe.c4s".to_string();
     scenario.path = Some(fixture.path().join("Probe.c4s"));
-    app.active_scenario = Some(scenario);
+    app.scenario_lifecycle.active = Some(scenario);
     app.network_is_league = true;
     main_assert!(app.can_quick_save(), "offline saves ignore retained league state");
 
@@ -5144,7 +5144,7 @@ fn quick_save_persists_across_sessions() {
             main_assert!(matches!(app.mode, AppMode::Running), "quick load should enter running mode");
             main_assert_eq!(app.snapshot.frame => saved_frame, "quick load should restore the saved frame");
             main_assert!(
-                app.active_scenario
+                app.scenario_lifecycle.active
                     .as_ref()
                     .and_then(|scenario| scenario.path.as_ref())
                     .map(|path| path.ends_with("Alpha.c4s"))

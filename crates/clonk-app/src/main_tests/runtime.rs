@@ -480,14 +480,14 @@ fn console_open_real_scenario_reaches_running() {
 
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     let boot_result = app
-        .boot_loading
+        .scenario_lifecycle.boot_loading
         .take()
         .expect("real boot worker")
         .receiver
         .recv_timeout(Duration::from_secs(30))
         .test_value();
     let (boot_sender, boot_receiver) = mpsc::channel();
-    app.boot_loading = Some(BootLoadingState::new(boot_receiver));
+    app.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(boot_receiver));
     app.console_session.enabled = true;
     let command = format!(
         "/open \"{}\" \"{}\" \"{}\"",
@@ -496,12 +496,12 @@ fn console_open_real_scenario_reaches_running() {
         definition_path.display(),
     );
     app.process_console_command(&command).test_value();
-    assert!(app.loading_state.is_none());
-    assert!(app.auto_start_classic_command_line_scenario);
+    assert!(app.scenario_lifecycle.loading.is_none());
+    assert!(app.scenario_lifecycle.auto_start_classic_command_line_scenario);
     boot_sender.send(boot_result).test_value();
     app.poll_boot_loading();
-    assert!(!app.auto_start_classic_command_line_scenario);
-    assert!(app.loading_state.is_some());
+    assert!(!app.scenario_lifecycle.auto_start_classic_command_line_scenario);
+    assert!(app.scenario_lifecycle.loading.is_some());
 
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -517,7 +517,7 @@ fn console_open_real_scenario_reaches_running() {
         app.test_update();
         thread::sleep(Duration::from_millis(2));
     }
-    runtime_assert_eq!(app.active_scenario.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(scenario_path.as_path()));
+    runtime_assert_eq!(app.scenario_lifecycle.active.as_ref().and_then(|scenario| scenario.path.as_deref()) => Some(scenario_path.as_path()));
     assert!(app.startup.dialog_fade.is_none());
     reset_cached_app_paths();
 }
@@ -694,7 +694,7 @@ fn pinned_offline_seed_reaches_dynamic_map_and_engine() {
     );
 
     app.start_scenario(scenario).test_value();
-    runtime_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.offline_random_seed) => Some(7), "the main thread freezes LC_PIN_SEED before spawning the loader");
+    runtime_assert_eq!(app.scenario_lifecycle.loading.as_ref().and_then(|loading| loading.offline_random_seed) => Some(7), "the main thread freezes LC_PIN_SEED before spawning the loader");
     // This loads the shipped definition tree and dynamic landscape. Give
     // the loader thread room to run alongside the parallel full suite.
     wait_for_running_with_attempts(&mut app, 2_400);
@@ -773,7 +773,7 @@ fn fresh_offline_skyparcour_retries_and_activates_the_accepted_seed() {
     );
 
     app.start_scenario(scenario).test_value();
-    runtime_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.offline_random_seed) => Some(1_784_903_470), "the candidate seed is frozen before asynchronous validation");
+    runtime_assert_eq!(app.scenario_lifecycle.loading.as_ref().and_then(|loading| loading.offline_random_seed) => Some(1_784_903_470), "the candidate seed is frozen before asynchronous validation");
     wait_for_running_with_attempts(&mut app, 4_800);
 
     runtime_assert_eq!(app.engine.random_seed() => 1_784_903_471, "activation, saves, and recordings must use the accepted seed");
@@ -2240,7 +2240,7 @@ fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() 
     }
     assert!(matches!(app.mode, AppMode::Menu));
     assert_eq!(app.startup.view, StartupView::MainMenu);
-    assert!(app.loading_state.is_none());
+    assert!(app.scenario_lifecycle.loading.is_none());
     // The return through PreInit re-initializes the loader screen for the
     // next game (src/C4Application.cpp:242-247,373-389).
     assert!(app.loader.screen.is_some());
@@ -5630,7 +5630,7 @@ fn developer_component_editors_commit_accept_and_cancel_like_the_native_host() {
     let scenario = directory.path().join("Round.c4s");
     std::fs::create_dir(&scenario).test_value();
     std::fs::write(scenario.join("Title.txt"), "Round\n").test_value();
-    app.active_scenario.test_mut().path = Some(scenario.clone());
+    app.scenario_lifecycle.active.test_mut().path = Some(scenario.clone());
 
     // Title opens on the component's own bytes.
     app.dispatch_developer_console_actions(vec![DeveloperConsoleAction::EditTitle])

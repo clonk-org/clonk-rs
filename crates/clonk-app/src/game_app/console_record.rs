@@ -8,8 +8,10 @@ use super::*;
 
 impl GameApp {
     fn console_game_initialization_active(&self) -> bool {
-        self.loading_state.is_some()
-            || self.auto_start_classic_command_line_scenario
+        self.scenario_lifecycle.loading.is_some()
+            || self
+                .scenario_lifecycle
+                .auto_start_classic_command_line_scenario
             || self.classic_direct_reference_query.is_some()
             || self.startup_network.connection.is_some()
             || self.pending_network_join.is_some()
@@ -25,7 +27,7 @@ impl GameApp {
         self.mode == AppMode::Running
             || self.console_lobby_active()
             || self.console_game_initialization_active()
-            || (self.boot_loading.is_none()
+            || (self.scenario_lifecycle.boot_loading.is_none()
                 && (self.network.is_some()
                     || self.network_mode.is_some()
                     || self.network_lobby.is_some()
@@ -47,7 +49,7 @@ impl GameApp {
     }
 
     pub(crate) fn close_console_game(&mut self) {
-        let boot_still_loading = self.boot_loading.is_some();
+        let boot_still_loading = self.scenario_lifecycle.boot_loading.is_some();
         let network_game_active = self.network.is_some()
             || self.network_mode.is_some()
             || self.network_lobby.is_some()
@@ -61,8 +63,9 @@ impl GameApp {
             || self.network_start_wait.is_some()
             || self.pending_network_join_data.is_some()
             || self.pending_client_start_status.is_some();
-        self.auto_start_sandbox = false;
-        self.auto_start_classic_command_line_scenario = false;
+        self.scenario_lifecycle.auto_start_sandbox = false;
+        self.scenario_lifecycle
+            .auto_start_classic_command_line_scenario = false;
         self.classic_direct_reference_query = None;
         if network_game_active {
             // `show_main_menu` owns the complete native network teardown for
@@ -158,11 +161,13 @@ impl GameApp {
         })
         .collect();
         let current_scenario_path = self
-            .active_scenario
+            .scenario_lifecycle
+            .active
             .as_ref()
             .and_then(|scenario| scenario.path.clone())
             .or_else(|| {
-                self.loading_state
+                self.scenario_lifecycle
+                    .loading
                     .as_ref()
                     .and_then(|loading| loading.scenario.path.clone())
             });
@@ -1360,7 +1365,8 @@ impl GameApp {
         core: &clonk_engine::NetworkResourceCore,
     ) -> std::result::Result<Group, String> {
         let record_path = self
-            .active_scenario
+            .scenario_lifecycle
+            .active
             .as_ref()
             .and_then(|scenario| scenario.path.as_deref())
             .ok_or_else(|| "active replay has no record-group path".to_string())?;

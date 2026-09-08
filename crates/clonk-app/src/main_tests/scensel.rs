@@ -161,7 +161,7 @@ fn checked_definition_checkbox_intercepts_start_even_when_local_only_disables_it
 
     let selector = app.definition_selection.dialog.test_ref();
     main_assert_eq!(selector.accepted_selection() => ["Objects.c4d"]);
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     app.process_definition_selector_actions(vec![
         clonk_frontend::definition_sel::DefinitionSelAction::Cancelled,
     ])
@@ -298,7 +298,7 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
         ))]
     })
     .test_value();
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     main_assert!(app.definition_selection.dialog.is_none());
     main_assert_eq!(app.dialogs.messages.len() => 1);
     main_assert_eq!(app.dialogs.messages[0].state.caption() => "Start nicht möglich.");

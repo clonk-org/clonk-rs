@@ -2172,7 +2172,7 @@ fn atomic_go_worker_failure_is_reported_before_lobby_teardown() {
 
     main_assert_eq!(go_observer.join().expect("atomic Go observer") => vec![network::TestLobbyStartCommand::BeginGo {status: expected_go, join_allowed: false,}]);
     main_assert!(!matches!(app.mode, AppMode::Loading));
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     main_assert!(app.classic_host_lobby.is_some());
     main_assert!(app.network_lobby.is_some());
     main_assert!(app.status_text.contains("host loop rejected Go"));
@@ -7178,13 +7178,13 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         "later second pulses cannot repeat zero or GO"
     );
     main_assert!(matches!(app.mode, AppMode::Loading));
-    main_assert!(app.loading_state.is_some());
+    main_assert!(app.scenario_lifecycle.loading.is_some());
     main_assert!(app.context_menus.open.is_none());
     main_assert_eq!(app.context_menus.lobby_option => None);
     // Init returns from InitNetworkHost/DoLobby at 7 before beginning
     // InitGame's script and definition phases
     // (src/C4Game.cpp:438-457,3872-3913).
-    main_assert_eq!(some(&app.loading_state).last_progress => 7);
+    main_assert_eq!(some(&app.scenario_lifecycle.loading).last_progress => 7);
     main_assert_eq!(some(&app.loader.screen).state().progress() => 7);
     main_assert!(app
         .network_start_wait
@@ -7197,7 +7197,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     // src/C4GameParameters.cpp:418-432,555;
     // src/C4Game.cpp:2617-2627).
     main_assert_eq!(
-        app.loading_state
+        app.scenario_lifecycle.loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|loading| loading.random_seed) =>
@@ -7205,7 +7205,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         "prepared host must retain Parameters.RandomSeed for scenario activation"
     );
     main_assert_eq!(
-        app.loading_state
+        app.scenario_lifecycle.loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|loading| (loading.use_fair_crew, loading.fair_crew_strength)) =>
@@ -7221,7 +7221,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     loop {
         app.poll_loading().test_value();
         if app
-            .loading_state
+            .scenario_lifecycle.loading
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .is_some_and(|pending| pending.local_reached)
@@ -7235,7 +7235,7 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         std::thread::sleep(Duration::from_millis(1));
     }
     main_assert_eq!(some(&app.loader.screen).state().progress() => 97);
-    main_assert!(app.loading_state.as_ref().is_some_and(|loading| loading
+    main_assert!(app.scenario_lifecycle.loading.as_ref().is_some_and(|loading| loading
         .log
         .iter()
         .any(|line| line == "Definition selection resolved")));
@@ -7245,12 +7245,12 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
         "the network host seed remains authoritative over offline defaults (status: {:?}, mode: {:?}, loading: {})",
         app.status_text,
         app.mode,
-        app.loading_state.is_some(),
+        app.scenario_lifecycle.loading.is_some(),
     );
     main_assert_eq!((app.engine.use_fair_crew(), app.engine.fair_crew_strength(),) => prepared_fair_crew,);
     main_assert_eq!(commands.take_status_reached() => 1);
     main_assert!(matches!(app.mode, AppMode::Loading));
-    main_assert!(app.loading_state.is_some());
+    main_assert!(app.scenario_lifecycle.loading.is_some());
     main_assert!(app
         .network_start_wait
         .as_ref()
@@ -7261,14 +7261,14 @@ fn selected_network_scenario_installs_prepared_host_before_admission() {
     );
     send_network_event(&events, NetworkEvent::StatusRequested(expected_go));
     app.test_network_events();
-    main_assert_eq!(app.loading_state.as_ref().and_then(|loading| loading.prepared_go.as_ref()).map(|pending| pending.local_reached) => Some(true));
+    main_assert_eq!(app.scenario_lifecycle.loading.as_ref().and_then(|loading| loading.prepared_go.as_ref()).map(|pending| pending.local_reached) => Some(true));
     main_assert_eq!(commands.take_status_reached() => 0, "an identical host status echo must not report local reach twice");
     main_assert!(app.engine.snapshot().players.is_empty(), "network InitPlayers must not directly join the local player before host-issued JoinPlr controls");
 
     send_network_event(&events, NetworkEvent::StatusCommitted(expected_go));
     app.test_network_events();
     main_assert!(matches!(app.mode, AppMode::Running));
-    main_assert!(app.loading_state.is_none());
+    main_assert!(app.scenario_lifecycle.loading.is_none());
     main_assert!(app.network_start_wait.is_none());
     main_assert!(
         app.network_game_advertiser.is_some(),
@@ -8118,14 +8118,14 @@ fn clearing_client_lobby_preload_removes_only_its_committed_combined_file() {
     let mut app = new_state_only_menu_app(320, 200);
     app.client_combined_scenario_path = Some(owned_path.clone());
     app.client_combined_preload_file.replace(owned_path.clone());
-    app.network_material_resource_groups = Some(Vec::new());
+    app.scenario_lifecycle.network_material_resource_groups = Some(Vec::new());
 
     app.clear_lobby_preload();
 
     main_assert!(!owned_path.exists());
     main_assert!(app.client_combined_scenario_path.is_none());
     main_assert!(!app.client_combined_preload_file.is_owned());
-    main_assert!(app.network_material_resource_groups.is_none());
+    main_assert!(app.scenario_lifecycle.network_material_resource_groups.is_none());
 
     let existing_path = directory.path().join("Combined8.c4s");
     fs::write(&existing_path, b"pre-existing scenario").test_value();
@@ -8286,7 +8286,7 @@ fn catalog_host_lobby_preload_is_eligible_and_caches_the_selected_scenario() {
         "the regular loading path consumes the cached scenario"
     );
     let deadline = Instant::now() + Duration::from_secs(30);
-    while app.loading_state.is_some() {
+    while app.scenario_lifecycle.loading.is_some() {
         app.poll_loading().test_value();
         main_assert!(
             Instant::now() < deadline,
@@ -10461,7 +10461,7 @@ fn startup_network_client_enters_and_acknowledges_lobby_when_boot_completes() {
 
     app.mode = AppMode::Loading;
     let (boot_tx, boot_rx) = mpsc::channel();
-    app.boot_loading = Some(BootLoadingState::new(boot_rx));
+    app.scenario_lifecycle.boot_loading = Some(BootLoadingState::new(boot_rx));
     boot_tx.send(BootLoadingEvent::Finished(None)).test_value();
 
     app.poll_boot_loading();
