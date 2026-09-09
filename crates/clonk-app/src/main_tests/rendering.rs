@@ -5858,6 +5858,48 @@ fn classic_region_cursor_physical_bounds(
     )
 }
 
+// Seats the classic tooltip timer ahead of every clock the render path can
+// read, so `CLASSIC_TOOLTIP_DELAY` provably cannot elapse while a damage
+// assertion runs. This is the mirror of the backdating the tooltip tests below
+// use to force a tooltip: pointer input stays active and the retained pointer
+// is unchanged, exactly the state a fast machine observes right after a move.
+fn hold_startup_tooltip_pending(app: &mut GameApp, point: GuiPoint) {
+    let unreachable = Instant::now()
+        .checked_add(Duration::from_secs(3600))
+        .test_value();
+    app.startup_tooltip = ClassicTooltipTracker::new_at(unreachable);
+    app.startup_tooltip.note_pointer_move_at(point, unreachable);
+}
+
+// C4GUI::CMouse gates the delayed tooltip on wall-clock time
+// (src/C4Gui.cpp:907-927), so an exact damage assertion taken after a cursor
+// move races CLASSIC_TOOLTIP_DELAY: a shard slow enough to spend 500ms between
+// the move and the frame under test also draws the tooltip
+// (clonk-org/clonk-rs#1607). A held pointer stays active input, and therefore
+// still defers the native text path, while never becoming eligible.
+#[test]
+fn held_startup_tooltip_pointer_stays_pending_across_any_frame_delay() {
+    let mut app = new_real_menu_app(640, 480);
+    let button = clonk_frontend::main_menu_layout(640, 480).buttons[0];
+    let point = GuiPoint::new((button.x + 30) as f32, (button.y + 20) as f32);
+
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(point.x),
+        f64::from(point.y),
+    ));
+    hold_startup_tooltip_pending(&mut app, point);
+
+    main_assert_eq!(app.startup_tooltip.pending_pointer() => Some(point));
+    main_assert!(app.startup_element_tooltip_pending());
+    main_assert_eq!(app.startup_tooltip.eligible_pointer() => None);
+    main_assert_eq!(
+        app.startup_tooltip.eligible_pointer_at(
+            Instant::now() + clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY * 2,
+        ) => None,
+        "a frame slow enough to cross the classic delay must still see no tooltip"
+    );
+}
+
 // C4GUI::CMouse paints the Region cursor at the live pointer and therefore
 // replaces its prior footprint on movement (src/C4Gui.cpp:445-467). Both
 // half-open footprints must be restored without joining their untouched gap.
@@ -5878,12 +5920,14 @@ fn startup_cursor_movement_damages_separate_exact_old_and_new_footprints() {
         f64::from(old_point.x),
         f64::from(old_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, old_point);
     let old = classic_region_cursor_bounds(&app, old_point);
     let _ = app.render_retained_gpu_frame(presentation).test_value();
     app.test_cursor(PhysicalPosition::new(
         f64::from(new_point.x),
         f64::from(new_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, new_point);
     let new = classic_region_cursor_bounds(&app, new_point);
     let moved = app.render_retained_gpu_frame(presentation).test_value();
 
@@ -5912,12 +5956,14 @@ fn startup_cursor_movement_inside_one_button_keeps_its_overlay_ownership() {
         f64::from(old_point.x),
         f64::from(old_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, old_point);
     let old = classic_region_cursor_bounds(&app, old_point);
     let _ = app.render_retained_gpu_frame(presentation).test_value();
     app.test_cursor(PhysicalPosition::new(
         f64::from(new_point.x),
         f64::from(new_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, new_point);
     let new = classic_region_cursor_bounds(&app, new_point);
     for rect in [&old, &new] {
         main_assert!(
@@ -5962,12 +6008,14 @@ fn startup_cursor_movement_damages_exact_footprints_at_fractional_scale() {
         f64::from(old_point.x),
         f64::from(old_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, old_point);
     let old = classic_region_cursor_physical_bounds(&app, old_point, presentation);
     let _ = app.render_retained_gpu_frame(presentation).test_value();
     app.test_cursor(PhysicalPosition::new(
         f64::from(new_point.x),
         f64::from(new_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, new_point);
     let new = classic_region_cursor_physical_bounds(&app, new_point, presentation);
     let moved = app.render_retained_gpu_frame(presentation).test_value();
 
