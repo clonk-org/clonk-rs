@@ -139,16 +139,14 @@ jobs:
           path: .git/modules/content
           key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
 
-      # cache/save reports service failures as warnings. Fail this producer if
-      # the immutable object store was not actually published.
+      # Fail this producer if the immutable object store was not actually
+      # published; the verifier polls so a propagating index does not.
       - name: Verify pinned content checkout publication
         if: steps.content-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/verify-cache-handoff
         with:
           path: .git/modules/content
           key: clonk-content-git-v1-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ steps.content.outputs.revision }}
-          fail-on-cache-miss: true
-          lookup-only: true
 
   linux-landing-cache:
     name: Warm the Linux landing cache

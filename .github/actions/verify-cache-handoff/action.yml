@@ -1,0 +1,59 @@
+name: Verify a cache handoff
+description: >-
+  Confirm a cache entry this job just saved is readable, polling while the
+  cache index propagates.
+
+inputs:
+  path:
+    description: Path the producer saved. Only the key is looked up.
+    required: true
+  key:
+    description: Exact cache key the producer saved.
+    required: true
+
+# cache/save reports service failures as warnings, so a producer row would
+# otherwise hand off nothing and still go green. The cache index is only
+# eventually consistent though: a lookup milliseconds after the save can miss
+# an entry that exists and always did, which failed a whole release entry in
+# clonk-org/clonk-rs#1608. Poll before declaring the handoff lost, so a genuine
+# dropped save still fails the producer that "re-run failed jobs" recreates.
+runs:
+  using: composite
+  steps:
+    - name: Look up the handoff
+      id: first
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        lookup-only: true
+
+    - name: Wait for the cache index
+      if: steps.first.outputs.cache-hit != 'true'
+      shell: bash
+      run: sleep 5
+
+    - name: Look up the handoff again
+      id: second
+      if: steps.first.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        lookup-only: true
+
+    # Each retry repeats every predecessor's condition: a skipped step reports
+    # no cache-hit at all, so a partial condition would retry after a hit.
+    - name: Wait for the cache index once more
+      if: steps.first.outputs.cache-hit != 'true' && steps.second.outputs.cache-hit != 'true'
+      shell: bash
+      run: sleep 10
+
+    - name: Fail the handoff if the entry never became readable
+      if: steps.first.outputs.cache-hit != 'true' && steps.second.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+        fail-on-cache-miss: true
+        lookup-only: true

@@ -220,8 +220,10 @@ class WorkflowRuntimeInventoryTests(unittest.TestCase):
         # is left here must still never save from a merge-queue ref.
         self.assertEqual(landing.count(restore), 2)
         self.assertNotIn(save, landing)
-        self.assertEqual(main.count(restore), 4)
+        self.assertEqual(main.count(restore), 3)
         self.assertEqual(main.count(save), 2)
+        # The fourth restore moved into the retrying handoff verifier.
+        self.assertEqual(main.count("uses: ./.github/actions/verify-cache-handoff"), 1)
         thinlto_start = release_prebuild.index("Restore trusted-main ThinLTO cache")
         thinlto_end = release_prebuild.index("\n      - name:", thinlto_start)
         thinlto_step = release_prebuild[thinlto_start:thinlto_end]

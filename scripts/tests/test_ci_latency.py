@@ -252,6 +252,9 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn(".git/modules/content", content_producer)
         self.assertIn("lookup-only: true", content_producer)
         self.assertIn(
+            "uses: ./.github/actions/verify-cache-handoff", content_producer
+        )
+        self.assertIn(
             "key: clonk-content-git-v1-${{ runner.os }}-"
             "${{ hashFiles('.gitmodules') }}-"
             "${{ steps.content.outputs.revision }}",
@@ -269,7 +272,7 @@ class CiLatencyTests(unittest.TestCase):
             ),
             4,
         )
-        self.assertIn("fail-on-cache-miss: true", content_producer)
+        self.assertNotIn("fail-on-cache-miss", content_producer)
         self.assertNotIn("restore-keys:", content_producer)
         self.assertIn("github.event_name == 'workflow_dispatch'", content_producer)
         self.assertIn("github.sha || 'rolling'", content_producer)
