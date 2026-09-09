@@ -226,6 +226,42 @@ impl ResourceTransferBackend {
         Ok(())
     }
 
+    /// Replaces an announced non-loadable core with the one its completed
+    /// deflate produced, keeping the file already reserved for it.
+    ///
+    /// This is a replacement rather than a remove-and-register: `forget` would
+    /// unlink the temporary standalone the deflate has just written into.
+    pub(crate) fn upgrade_local_core(
+        &mut self,
+        core: NetworkResourceCore,
+        path: impl AsRef<Path>,
+        ownership: ResourceFileOwnership,
+        binary_compatible: bool,
+    ) -> Result<(), ResourceTransferError> {
+        let resource_id = core.id;
+        if !self.cores.contains_key(&resource_id) {
+            return Err(ResourceTransferError::MissingCore(resource_id));
+        }
+        self.catalog.forget_resource(resource_id);
+        if core.loadable {
+            self.files
+                .register_local_complete(&core, &path, ownership)?;
+        }
+        if !self.catalog.register(ResourceRegistration::from_core(
+            &core,
+            binary_compatible,
+            false,
+        )) {
+            return Err(ResourceTransferError::CatalogRegistrationRejected(
+                resource_id,
+            ));
+        }
+        self.local_sources
+            .insert(resource_id, path.as_ref().to_path_buf());
+        self.cores.insert(resource_id, core);
+        Ok(())
+    }
+
     /// Registers one host-published resource. C++ keeps NRT_System and any
     /// over-limit definition logically present even though they have no
     /// standalone/chunks; loadable resources retain the complete-file path.

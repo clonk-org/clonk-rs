@@ -365,6 +365,9 @@ pub enum ControlMessage {
     },
     /// Which participant class held up one host-routed aggregate tick.
     ControlWaitAttribution(crate::ControlWaitAttribution),
+    /// Transfer identity for resources announced before the host's exact
+    /// deflate had run.
+    ResourceUpgrade(crate::ResourceUpgradePacket),
 }
 
 #[derive(Debug)]
@@ -729,6 +732,13 @@ impl<S> ControlTransport<S> {
                     attribution,
                 ));
             }
+            ControlMessage::ResourceUpgrade(packet) => {
+                frame.extend(
+                    crate::resource_upgrade::encode_resource_upgrade(&packet).map_err(|_| {
+                        TransportError::UnsupportedPacket(crate::PID_PORT_RESOURCE_UPGRADE)
+                    })?,
+                );
+            }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
                 let control_tick = i32::try_from(control_tick)
@@ -928,6 +938,11 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
                     crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION,
                 ))
         }
+        crate::PID_PORT_RESOURCE_UPGRADE => crate::resource_upgrade::decode_resource_upgrade(body)
+            .map(ControlMessage::ResourceUpgrade)
+            .ok_or(TransportError::UnsupportedPacket(
+                crate::PID_PORT_RESOURCE_UPGRADE,
+            )),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
 }

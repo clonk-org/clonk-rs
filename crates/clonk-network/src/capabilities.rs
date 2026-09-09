@@ -103,6 +103,16 @@ impl PortCapabilities {
     /// the whole `CompatProfile` enum, so the announcement needs no payload
     /// and the wire layout is unchanged.
     pub const COMPAT_PROFILE_LEGACY_CLONK: u32 = 1 << 8;
+    /// Resource cores announced before the host's exact deflate has run, and
+    /// upgraded in place by [`crate::PID_PORT_RESOURCE_UPGRADE`] once it has.
+    ///
+    /// A stock peer must never be given such a core. One that lacks the content
+    /// refuses it outright (`src/C4Network2Res.cpp:1500-1505`), and one that
+    /// has it as an unpacked directory matches on the contents CRC and then
+    /// skips `GetStandalone` (`src/C4Network2Res.cpp:582`), loading its own
+    /// `readdir` order where every packed peer uses `C4CFN_FLS` order — and
+    /// entry order decides material slots.
+    pub const DEFERRED_RESOURCE_CORES: u32 = 1 << 9;
 
     /// Everything this build knows how to do.
     pub fn supported() -> Self {

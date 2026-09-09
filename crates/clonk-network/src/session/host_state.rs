@@ -139,6 +139,9 @@ pub(crate) struct HostState {
     /// not yet reported every chunk. An already joined peer is not required
     /// to fetch a dynamic published solely for a later joiner.
     pub(crate) dynamic_required_clients: BTreeSet<ClientId>,
+    /// Whether [`Self::join_snapshot`] still announces directory-backed cores
+    /// without the deflate that gives them a transfer identity.
+    pub(crate) deferred_resource_cores: bool,
     pub(crate) resource_catalog: crate::ResourceCatalog,
     pub(crate) resource_backend: Option<crate::ResourceTransferBackend>,
     pub(crate) published_player_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
@@ -1370,6 +1373,75 @@ pub(crate) fn publish_host_runtime_dynamic(
         core,
         previous_dynamic_id,
     })
+}
+
+/// Installs the packed result of a deferred publication.
+///
+/// Every completed resource keeps the ID and the reserved filename it was
+/// announced with, so this only replaces cores: the catalogs and the backend
+/// learn the transfer identity the deflate produced, and the snapshot handed
+/// to later joiners stops being deferred.
+pub(crate) fn complete_host_deferred_resources(
+    snapshot: HostJoinSnapshot,
+    resources: Vec<crate::HostedResourceFile>,
+    state: &mut HostState,
+) -> Result<Vec<clonk_engine::NetworkResourceCore>, String> {
+    if !state.deferred_resource_cores {
+        return Err("host has no deferred resource publication to complete".to_string());
+    }
+    if state.resource_backend.is_none() && !resources.is_empty() {
+        return Err("host has no filesystem resource backend".to_string());
+    }
+    if let Some(backend) = state.resource_backend.as_mut() {
+        for resource in &resources {
+            backend
+                .upgrade_local_core(
+                    resource.core.clone(),
+                    &resource.path,
+                    resource.ownership,
+                    resource.binary_compatible,
+                )
+                .map_err(|error| {
+                    format!(
+                        "completed resource {} could not be registered: {error}",
+                        resource.core.id
+                    )
+                })?;
+        }
+    }
+    for resource in &resources {
+        state.resource_catalog.forget_resource(resource.core.id);
+        if !state
+            .resource_catalog
+            .register(crate::ResourceRegistration::from_core(
+                &resource.core,
+                resource.binary_compatible,
+                false,
+            ))
+        {
+            return Err(format!(
+                "completed resource {} was rejected by the host catalog",
+                resource.core.id
+            ));
+        }
+    }
+    for resource in &resources {
+        if let Some(configured) = state
+            .config
+            .resource_files
+            .iter_mut()
+            .find(|configured| configured.core.id == resource.core.id)
+        {
+            *configured = resource.clone();
+        }
+    }
+    let cores = resources
+        .into_iter()
+        .map(|resource| resource.core)
+        .collect();
+    state.join_snapshot = Some(snapshot);
+    state.deferred_resource_cores = false;
+    Ok(cores)
 }
 
 pub(crate) fn remove_host_runtime_dynamic(state: &mut HostState) -> Result<bool, String> {

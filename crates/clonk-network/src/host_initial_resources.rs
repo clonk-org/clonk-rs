@@ -9,8 +9,9 @@ use clonk_engine::{LegacyCString, NetworkResourceCore};
 use thiserror::Error;
 
 use crate::host_resource_core::{
-    build_host_resource_core_with_prepared_directory, prepare_directory_standalone,
-    PreparedDirectoryStandalone, ReusableStandalone,
+    build_host_resource_core_with_prepared_directory, finish_deferred_directory_standalone,
+    prepare_directory_standalone, snapshot_directory_standalone, DeferredDirectoryStandalone,
+    DirectoryStandaloneSnapshot, PreparedDirectoryStandalone, ReusableStandalone, STOCK_CHUNK_SIZE,
 };
 use crate::{
     HostConfig, HostJoinSnapshot, HostResourceCoreError, HostResourceCoreSpec,
@@ -68,6 +69,48 @@ pub struct HostInitialResourcePublication {
 }
 
 impl HostInitialResourcePublication {
+    /// Replaces every core this publication announced non-loadable with the
+    /// one its completed deflate produced.
+    ///
+    /// Aliases share a resource ID, so each finished core replaces every entry
+    /// carrying it.
+    pub fn apply_completed_packing(&mut self, completed: CompletedHostResourcePacking) {
+        for core in completed.cores {
+            // Deferral only ever reserves a standalone, so a completed core is
+            // servable exactly when it became loadable.
+            let binary_compatible = core.loadable;
+            for resource in self
+                .resource_files
+                .iter_mut()
+                .filter(|resource| resource.core.id == core.id)
+            {
+                resource.core = core.clone();
+                resource.binary_compatible = binary_compatible;
+            }
+            for registration in self
+                .resource_registrations
+                .iter_mut()
+                .filter(|registration| registration.resource_id == core.id)
+            {
+                *registration = ResourceRegistration::from_core(&core, binary_compatible, false);
+            }
+            if self.join_snapshot.parameters.scenario.id == core.id {
+                self.join_snapshot.parameters.scenario = core.clone();
+            }
+            for resource in self
+                .join_snapshot
+                .parameters
+                .game_resources
+                .iter_mut()
+                .filter(|resource| resource.id == core.id)
+            {
+                *resource = core.clone();
+            }
+        }
+        self.reusable_standalones
+            .extend(completed.reusable_standalones);
+    }
+
     /// Moves the publication fields consumed by `start_host` into an existing
     /// host configuration without changing admission policy or transport
     /// settings.
@@ -77,6 +120,119 @@ impl HostInitialResourcePublication {
         config.resource_directory = Some(self.resource_directory);
         config.resource_files = self.resource_files;
         config.player_resource_sources = self.player_resource_sources;
+    }
+}
+
+/// A publication whose exact deflates have not run yet.
+#[derive(Debug)]
+pub struct DeferredHostInitialResourcePublication {
+    /// Announceable immediately. Every directory-backed resource carries its
+    /// contents CRC with `C4Network2ResCore::Set`'s non-loadable sentinels
+    /// (`src/C4Network2Res.cpp:83-92`), which is all a peer needs to recognise
+    /// content it already has (`src/C4Network2Res.cpp:448`).
+    pub publication: HostInitialResourcePublication,
+    pub packing: PendingHostResourcePacking,
+}
+
+/// The exact deflates a [`DeferredHostInitialResourcePublication`] postponed.
+#[derive(Debug)]
+pub struct PendingHostResourcePacking {
+    entries: Vec<PendingDirectoryStandalone>,
+}
+
+#[derive(Debug)]
+struct PendingDirectoryStandalone {
+    core: NetworkResourceCore,
+    source_path: PathBuf,
+    standalone: DeferredDirectoryStandalone,
+    needs_file_sha: bool,
+}
+
+/// Cores that were announced non-loadable and now have their bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedHostResourcePacking {
+    cores: Vec<NetworkResourceCore>,
+    reusable_standalones: Vec<ReusableStandalone>,
+}
+
+impl CompletedHostResourcePacking {
+    /// The finished cores, in the order their resources were published.
+    pub fn cores(&self) -> &[NetworkResourceCore] {
+        &self.cores
+    }
+}
+
+impl PendingHostResourcePacking {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Runs every postponed deflate and installs each image at the filename
+    /// its announcement already reserved.
+    pub fn complete(
+        self,
+    ) -> Result<CompletedHostResourcePacking, HostInitialResourcePublicationError> {
+        let mut cores = Vec::with_capacity(self.entries.len());
+        let mut reusable_standalones = Vec::with_capacity(self.entries.len());
+        for entry in self.entries {
+            let resource_type = entry.standalone.resource_type;
+            let source_path = entry.source_path;
+            let standalone_path = entry.standalone.standalone_path.clone();
+            let finished =
+                finish_deferred_directory_standalone(entry.standalone).map_err(|source| {
+                    HostInitialResourcePublicationError::ResourceCore {
+                        resource_type,
+                        path: source_path.clone(),
+                        source,
+                    }
+                })?;
+            let mut publication = HostResourcePublication {
+                core: entry.core,
+                source_path: source_path.clone(),
+                standalone_path: Some(standalone_path.clone()),
+                standalone_ownership: Some(ResourceFileOwnership::Temporary),
+            };
+            if let Some((file_size, file_crc)) = finished.installed.filter(|_| finished.loadable) {
+                publication.core.loadable = true;
+                publication.core.chunk_size = STOCK_CHUNK_SIZE;
+                publication.core.file_size = file_size as u32;
+                publication.core.file_crc = file_crc;
+            }
+            if entry.needs_file_sha {
+                // CalcHash ignores CalculateSHA's false return.
+                let _ = publication.calculate_file_sha();
+            }
+            if finished.installed.is_some() {
+                reusable_standalones.push(ReusableStandalone {
+                    source_path,
+                    contents_crc: finished.contents_crc,
+                    source_size: finished.source_size,
+                    standalone_path,
+                    file_size: u64::from(publication.core.file_size),
+                    file_crc: publication.core.file_crc,
+                });
+            }
+            cores.push(publication.core);
+        }
+        Ok(CompletedHostResourcePacking {
+            cores,
+            reusable_standalones,
+        })
+    }
+}
+
+/// How a source directory's standalone is produced for one publication.
+enum DirectoryPacking {
+    /// Packed inline. `None` where the source is not a directory.
+    Now(Option<PreparedDirectoryStandalone>),
+    /// Traversed now and packed later. `None` where the source is not a
+    /// directory.
+    Later(Option<DirectoryStandaloneSnapshot>),
+}
+
+impl DirectoryPacking {
+    fn is_deferred(&self) -> bool {
+        matches!(self, Self::Later(_))
     }
 }
 
@@ -115,6 +271,31 @@ pub enum HostInitialResourcePublicationError {
 pub fn publish_host_initial_resources(
     spec: HostInitialResourcePublicationSpec,
 ) -> Result<HostInitialResourcePublication, HostInitialResourcePublicationError> {
+    publish_initial_resources(spec, false).map(|deferred| deferred.publication)
+}
+
+/// Publishes the same resources in the same order, but announces every
+/// directory-backed one before its exact deflate has run.
+///
+/// The deflate of an unpacked definition is the whole cost of publication, and
+/// nothing a peer needs to recognise content it already has depends on it: a
+/// core carrying only its contents CRC is a legal core to a stock peer
+/// (`src/C4Network2Res.cpp:129-136`), and `SetByCore` matches on that CRC alone
+/// (`src/C4Network2Res.cpp:448`). Such a core must still never *reach* a stock
+/// peer -- one that lacks the content refuses it outright
+/// (`src/C4Network2Res.cpp:1500-1505`), and one that has it as a directory
+/// skips `GetStandalone` (`src/C4Network2Res.cpp:582`) and loads its own
+/// `readdir` order, which decides material slots.
+pub fn publish_deferred_host_initial_resources(
+    spec: HostInitialResourcePublicationSpec,
+) -> Result<DeferredHostInitialResourcePublication, HostInitialResourcePublicationError> {
+    publish_initial_resources(spec, true)
+}
+
+fn publish_initial_resources(
+    spec: HostInitialResourcePublicationSpec,
+    defer_directory_standalones: bool,
+) -> Result<DeferredHostInitialResourcePublication, HostInitialResourcePublicationError> {
     fs::create_dir_all(&spec.network_directory)
         .map_err(HostInitialResourcePublicationError::NetworkDirectory)?;
     let expected_count = 3_usize
@@ -137,6 +318,7 @@ pub fn publish_host_initial_resources(
         spec.group_maker.as_bytes(),
         None,
         &spec.reusable_standalones,
+        defer_directory_standalones,
     );
     let scenario_core = publications.publish_or_reuse(
         &spec.scenario,
@@ -156,6 +338,7 @@ pub fn publish_host_initial_resources(
                 spec.group_maker.as_bytes(),
                 Some(u64::from(spec.max_load_file_size)),
                 &spec.reusable_standalones,
+                defer_directory_standalones,
             )
         },
         |definition, prepared| {
@@ -170,8 +353,12 @@ pub fn publish_host_initial_resources(
         },
     )?;
 
-    let system_core =
-        publications.publish_or_reuse(&spec.system, HostResourceType::System, &spec, None)?;
+    let system_core = publications.publish_or_reuse(
+        &spec.system,
+        HostResourceType::System,
+        &spec,
+        DirectoryPacking::Now(None),
+    )?;
     game_resources.push(system_core);
 
     for material in &spec.materials {
@@ -180,6 +367,7 @@ pub fn publish_host_initial_resources(
             spec.group_maker.as_bytes(),
             None,
             &spec.reusable_standalones,
+            defer_directory_standalones,
         );
         let core =
             publications.publish_or_reuse(material, HostResourceType::Material, &spec, prepared)?;
@@ -207,6 +395,7 @@ pub fn publish_host_initial_resources(
         &spec,
         &mut publications.temporary_files,
         None,
+        false,
     )?;
     validate_dynamic_metadata(&spec.dynamic, &dynamic.core)?;
     let dynamic_retained_name =
@@ -226,7 +415,12 @@ pub fn publish_host_initial_resources(
     let mut player_resource_sources = Vec::with_capacity(spec.players.len());
     for player in &spec.players {
         let temporary_checkpoint = publications.temporary_files.checkpoint();
-        match publications.publish_or_reuse(player, HostResourceType::Player, &spec, None) {
+        match publications.publish_or_reuse(
+            player,
+            HostResourceType::Player,
+            &spec,
+            DirectoryPacking::Now(None),
+        ) {
             Ok(core) => {
                 player_resource_sources.push((player.path.clone(), core.clone()));
                 player_cores.push(core);
@@ -250,14 +444,19 @@ pub fn publish_host_initial_resources(
     };
 
     publications.temporary_files.disarm();
-    Ok(HostInitialResourcePublication {
-        join_snapshot,
-        player_cores,
-        player_resource_sources,
-        resource_registrations: publications.registrations,
-        resource_directory: spec.network_directory,
-        resource_files: publications.resource_files,
-        reusable_standalones: publications.reusable_standalones,
+    Ok(DeferredHostInitialResourcePublication {
+        publication: HostInitialResourcePublication {
+            join_snapshot,
+            player_cores,
+            player_resource_sources,
+            resource_registrations: publications.registrations,
+            resource_directory: spec.network_directory,
+            resource_files: publications.resource_files,
+            reusable_standalones: publications.reusable_standalones,
+        },
+        packing: PendingHostResourcePacking {
+            entries: publications.pending,
+        },
     })
 }
 
@@ -283,18 +482,36 @@ fn prepare_source_directory(
     group_maker: &[u8],
     max_source_size: Option<u64>,
     reusable_standalones: &[ReusableStandalone],
-) -> Option<PreparedDirectoryStandalone> {
-    (source.virtual_group_bytes.is_none()
-        && fs::metadata(&source.path).is_ok_and(|metadata| metadata.is_dir()))
-    .then(|| {
-        prepare_directory_standalone(
-            &source.path,
-            group_maker,
-            max_source_size,
-            reusable_standalones,
-        )
-    })
-    .and_then(Result::ok)
+    defer: bool,
+) -> DirectoryPacking {
+    let is_directory = source.virtual_group_bytes.is_none()
+        && fs::metadata(&source.path).is_ok_and(|metadata| metadata.is_dir());
+    if defer {
+        return DirectoryPacking::Later(
+            is_directory
+                .then(|| {
+                    snapshot_directory_standalone(
+                        &source.path,
+                        group_maker,
+                        max_source_size,
+                        reusable_standalones,
+                    )
+                })
+                .and_then(Result::ok),
+        );
+    }
+    DirectoryPacking::Now(
+        is_directory
+            .then(|| {
+                prepare_directory_standalone(
+                    &source.path,
+                    group_maker,
+                    max_source_size,
+                    reusable_standalones,
+                )
+            })
+            .and_then(Result::ok),
+    )
 }
 
 fn publish_source(
@@ -304,6 +521,7 @@ fn publish_source(
     spec: &HostInitialResourcePublicationSpec,
     temporary_files: &mut TemporaryFiles,
     prepared_directory: Option<PreparedDirectoryStandalone>,
+    defer_directory_standalone: bool,
 ) -> Result<HostResourcePublication, HostInitialResourcePublicationError> {
     let (source_path, source_ownership) = if let Some(bytes) = source.virtual_group_bytes.as_deref()
     {
@@ -326,7 +544,8 @@ fn publish_source(
         spec.group_maker.clone(),
     )
     .with_source_ownership(source_ownership)
-    .with_standalone_name(source.opened_name.clone());
+    .with_standalone_name(source.opened_name.clone())
+    .with_deferred_directory_standalone(defer_directory_standalone);
     if resource_type == HostResourceType::Definitions {
         core_spec = core_spec.with_max_load_file_size(spec.max_load_file_size);
     }
@@ -347,6 +566,9 @@ fn publish_source(
         publication.standalone_ownership = Some(ResourceFileOwnership::Temporary);
     }
     if !spec.parameters.league_address.is_empty()
+        // A deferred standalone is still an empty reservation; its FileSHA is
+        // taken once the packed bytes are installed.
+        && !is_deferred_reservation(&publication, defer_directory_standalone)
         && matches!(
             resource_type,
             HostResourceType::Scenario
@@ -367,6 +589,12 @@ fn publish_source(
     Ok(publication)
 }
 
+/// Whether this publication reserved a standalone filename whose bytes a
+/// later `PendingHostResourcePacking::complete` still owes it.
+fn is_deferred_reservation(publication: &HostResourcePublication, deferred: bool) -> bool {
+    deferred && !publication.core.loadable && publication.standalone_path.is_some()
+}
+
 struct SourcePublications {
     next_id: i32,
     temporary_files: TemporaryFiles,
@@ -374,6 +602,7 @@ struct SourcePublications {
     registrations: Vec<ResourceRegistration>,
     resource_files: Vec<HostedResourceFile>,
     reusable_standalones: Vec<ReusableStandalone>,
+    pending: Vec<PendingDirectoryStandalone>,
 }
 
 impl SourcePublications {
@@ -385,6 +614,7 @@ impl SourcePublications {
             registrations: Vec::with_capacity(capacity),
             resource_files: Vec::with_capacity(capacity),
             reusable_standalones: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -393,7 +623,7 @@ impl SourcePublications {
         source: &HostInitialResourceSource,
         resource_type: HostResourceType,
         spec: &HostInitialResourcePublicationSpec,
-        prepared_directory: Option<PreparedDirectoryStandalone>,
+        packing: DirectoryPacking,
     ) -> Result<NetworkResourceCore, HostInitialResourcePublicationError> {
         // AddByFile searches the incoming source filename against the name
         // retained after each earlier group open. That comparison is
@@ -408,6 +638,22 @@ impl SourcePublications {
         // though its row is skipped and later modules continue.
         let resource_id = self.next_id;
         self.next_id += 1;
+        let deferred = packing.is_deferred();
+        // A deferred snapshot still answers the pre-pack size check and the
+        // contents CRC; only the image is missing.
+        let (prepared_directory, deferred_snapshot) = match packing {
+            DirectoryPacking::Now(prepared) => (prepared, None),
+            DirectoryPacking::Later(snapshot) => (
+                snapshot
+                    .as_ref()
+                    .map(|snapshot| PreparedDirectoryStandalone {
+                        contents_crc: snapshot.contents_crc(),
+                        source_size: snapshot.source_size(),
+                        packed: None,
+                    }),
+                snapshot,
+            ),
+        };
         let packed_snapshot = prepared_directory
             .as_ref()
             .filter(|prepared| prepared.packed.is_some())
@@ -419,7 +665,26 @@ impl SourcePublications {
             spec,
             &mut self.temporary_files,
             prepared_directory,
+            deferred,
         )?;
+        if let Some(snapshot) =
+            deferred_snapshot.filter(|_| is_deferred_reservation(&publication, deferred))
+        {
+            self.pending.push(PendingDirectoryStandalone {
+                core: publication.core.clone(),
+                source_path: publication.source_path.clone(),
+                standalone: DeferredDirectoryStandalone {
+                    snapshot,
+                    standalone_path: publication
+                        .standalone_path
+                        .clone()
+                        .expect("a deferred reservation has a standalone path"),
+                    resource_type,
+                    max_load_file_size: spec.max_load_file_size,
+                },
+                needs_file_sha: !spec.parameters.league_address.is_empty(),
+            });
+        }
         // The next round of this session serves this image again for the
         // same directory while its contents are unchanged
         // (src/C4Network2Res.cpp:1443-1449; clonk-org/clonk-rs#1472).

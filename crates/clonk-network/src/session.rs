@@ -1210,6 +1210,7 @@ mod tests {
             client_addresses: BTreeMap::new(),
             netpuncher_game_ids: NetpuncherGameIds::default(),
             pending_kinds: BTreeMap::new(),
+            deferred_resource_cores: false,
             join_snapshot: config.initial_join_snapshot.clone(),
             dynamic_required_clients: BTreeSet::new(),
             resource_catalog: crate::ResourceCatalog::new(HOST_CLIENT_ID as i32),
@@ -14597,6 +14598,58 @@ mod tests {
         );
 
         host.publish_join_snapshot(snapshot).await.test_value();
+        let client = timeout(EVENT_WAIT, client_task)
+            .await
+            .test_value()
+            .unwrap()
+            .test_value();
+
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deferred_join_snapshot_withholds_join_data_until_the_packing_completes() {
+        // A snapshot published before the host's exact deflates have run
+        // carries `C4Network2ResCore::Set`'s non-loadable sentinels
+        // (src/C4Network2Res.cpp:83-92). A peer that cannot take the later
+        // upgrade must not be given one: without the content it refuses the
+        // core outright (src/C4Network2Res.cpp:1500-1505), and with the content
+        // as a directory `GetStandalone` declines it (src/C4Network2Res.cpp:582)
+        // and it loads its own readdir order, which decides material slots.
+        let (addr, listener) = bind_test_listener().await;
+        let mut config = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
+        config.initial_join_snapshot = None;
+        let mut host = start_host(listener, config).await.test_value();
+        let mut host_events = host.take_event_receiver();
+        let client_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+
+        host.publish_deferred_join_snapshot(snapshot.clone())
+            .await
+            .test_value();
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
+                Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before JoinData was requested"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !client_task.is_finished(),
+            "a peer without DEFERRED_RESOURCE_CORES must wait for the packed snapshot"
+        );
+
+        let upgraded = host
+            .complete_deferred_resources(snapshot, Vec::new())
+            .await
+            .test_value();
+        assert_eq!(upgraded, 0, "no peer holds deferred cores to upgrade");
+
         let client = timeout(EVENT_WAIT, client_task)
             .await
             .test_value()

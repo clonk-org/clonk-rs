@@ -39,6 +39,7 @@ mod resource_catalog;
 mod resource_file_store;
 mod resource_packet;
 mod resource_transfer_backend;
+mod resource_upgrade;
 mod resync;
 mod search;
 mod session;
@@ -132,10 +133,16 @@ pub use host_game_reference::{
     HostGameReferenceMetadata,
 };
 pub use host_initial_resources::{
-    publish_host_initial_resources, HostInitialResourcePublication,
-    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
-    HostInitialResourceSource,
+    publish_deferred_host_initial_resources, publish_host_initial_resources,
+    CompletedHostResourcePacking, DeferredHostInitialResourcePublication,
+    HostInitialResourcePublication, HostInitialResourcePublicationError,
+    HostInitialResourcePublicationSpec, HostInitialResourceSource, PendingHostResourcePacking,
 };
+pub use resource_upgrade::{
+    decode_resource_upgrade_payload, encode_resource_upgrade_payload, ResourceUpgradeCodecError,
+    ResourceUpgradePacket, MAX_RESOURCE_UPGRADE_CORES, PID_PORT_RESOURCE_UPGRADE,
+};
+
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
     HostResourceType, ReusableStandalone, MAX_PLAYER_BIG_ICON_SIZE, STOCK_CHUNK_SIZE,
