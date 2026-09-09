@@ -14,9 +14,10 @@
 //! also the screenshot and deterministic-test readback source.
 
 use clonk_graphics::{
-    ClipperProjection, GpuBlend, GpuCommand, GpuGammaMode, GpuObjectSprite, GpuOuterModulation,
-    GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex,
-    GpuSpriteQuad, GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
+    ClipperProjection, Color, GpuBlend, GpuCommand, GpuGammaMode, GpuObjectSprite,
+    GpuOuterModulation, GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene,
+    GpuSolidAlphaMode, GpuSolidVertex, GpuSpriteQuad, GpuTextureFormat, GpuTextureId,
+    GpuTextureResource, GpuVertex, Rect,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -1237,6 +1238,8 @@ fn record_renderer_health(
 pub enum GpuRendererError {
     #[error("retained GPU composition requires at least one ordered scene layer")]
     NoSceneLayers,
+    #[error("retained GPU patch has no matching previous composition for {extent:?}")]
+    NoPreviousComposition { extent: [u32; 2] },
     #[error("GPU layer {layer} uses physical extent {actual:?}, expected {expected:?}")]
     LayerPhysicalExtentMismatch {
         layer: usize,
@@ -2020,12 +2023,87 @@ struct LandscapeBindingKey {
     liquid: Option<GpuTextureId>,
 }
 
+#[derive(Default)]
+struct SceneBindingReachability {
+    quad: HashSet<QuadBindingKey>,
+    object: HashSet<ObjectBindingKey>,
+    landscape: HashSet<LandscapeBindingKey>,
+}
+
+impl SceneBindingReachability {
+    fn from_layers(layers: &[GpuSceneLayer<'_>]) -> Self {
+        let mut reachable = Self::default();
+        for command in layers.iter().flat_map(|layer| layer.scene.commands.iter()) {
+            match command {
+                GpuCommand::Quad { .. } => {
+                    if let Some(run) = quad_run_key(command) {
+                        reachable.quad.insert(run.binding);
+                    }
+                }
+                GpuCommand::SpriteBatch { quads, .. } => {
+                    if !quads.is_empty() {
+                        let run = quad_run_key(command)
+                            .expect("validated sprite batches have a textured run key");
+                        reachable.quad.insert(run.binding);
+                    }
+                }
+                GpuCommand::ObjectBatch { sprites, .. } => {
+                    if !sprites.is_empty() {
+                        let run = object_run_key(command)
+                            .expect("validated object batches have a textured run key");
+                        reachable.object.insert(run.binding);
+                    }
+                }
+                GpuCommand::Landscape {
+                    base,
+                    liquid_mask,
+                    liquid,
+                    ..
+                } => {
+                    reachable.landscape.insert(LandscapeBindingKey {
+                        base: *base,
+                        mask: *liquid_mask,
+                        liquid: *liquid,
+                    });
+                }
+                GpuCommand::Solid { .. } => {}
+            }
+        }
+        reachable
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Scissor {
     x: u32,
     y: u32,
     width: u32,
     height: u32,
+}
+
+impl Scissor {
+    fn intersection(self, other: Self) -> Option<Self> {
+        let left = self.x.max(other.x);
+        let top = self.y.max(other.y);
+        let right = self
+            .x
+            .saturating_add(self.width)
+            .min(other.x.saturating_add(other.width));
+        let bottom = self
+            .y
+            .saturating_add(self.height)
+            .min(other.y.saturating_add(other.height));
+        if right <= left || bottom <= top {
+            None
+        } else {
+            Some(Self {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            })
+        }
+    }
 }
 
 /// C++ installs one rounded viewport and clip-relative projection every time
@@ -2209,6 +2287,57 @@ impl DrawCall {
             calls.push(call);
         }
     }
+}
+
+fn restrict_draw_calls_to_damage(
+    calls: &mut Vec<DrawCall>,
+    layer_start: usize,
+    damage: &[Scissor],
+) {
+    let unrestricted = calls.drain(layer_start..).collect::<Vec<_>>();
+    calls.reserve(unrestricted.len().saturating_mul(damage.len()));
+    for &patch in damage {
+        for call in &unrestricted {
+            let Some(scissor) = call.scissor.intersection(patch) else {
+                continue;
+            };
+            let mut patched = call.clone();
+            patched.scissor = scissor;
+            DrawCall::push_compatible_quad(calls, layer_start, patched);
+        }
+    }
+}
+
+fn append_damage_clears(
+    instances: &mut Vec<PackedSolidRectInstance>,
+    calls: &mut Vec<DrawCall>,
+    clear: Color,
+    damage: &[Scissor],
+) -> Result<(), GpuRendererError> {
+    if damage.is_empty() {
+        return Ok(());
+    }
+    let start = solid_rect_instance_count(instances)?;
+    instances.push(PackedSolidRectInstance {
+        clip_rect: [-1.0, 1.0, 1.0, -1.0],
+        color: [clear.r, clear.g, clear.b, clear.a].map(|component| f32::from(component) / 255.0),
+        // A full-frame attachment clear is not fragment-gamma corrected or
+        // dithered. The sparse equivalent must feed the same raw byte colour
+        // into the later monitor-gamma/presentation passes.
+        flags: 0,
+    });
+    let end = solid_rect_instance_count(instances)?;
+    for &scissor in damage {
+        calls.push(DrawCall {
+            vertices: start..end,
+            scissor,
+            blend: GpuBlend::Replace,
+            kind: DrawKind::SolidRect {
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+            },
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -3413,6 +3542,67 @@ impl RetainedGpuRenderer {
         layers: &[GpuSceneLayer<'_>],
         request_readback: bool,
     ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
+        self.render_layers_with_load(
+            device,
+            queue,
+            encoder,
+            surface_view,
+            layers,
+            request_readback,
+            None,
+        )
+    }
+
+    /// Compose physical framebuffer patches over the preceding successful
+    /// frame. The damage is shared by every ordered layer: each patch is
+    /// cleared to the base scene colour, then the complete painter sequence is
+    /// replayed through it. Callers must independently prove frame lineage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_layers_preserving_previous(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        surface_view: &wgpu::TextureView,
+        layers: &[GpuSceneLayer<'_>],
+        physical_damage: &[Rect],
+        request_readback: bool,
+    ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
+        let extent = layers
+            .first()
+            .ok_or(GpuRendererError::NoSceneLayers)?
+            .presentation
+            .physical_extent;
+        if !self
+            .composition
+            .as_ref()
+            .is_some_and(|composition| composition.extent == extent)
+            || self.last_presented_monitor_gamma.is_none()
+        {
+            return Err(GpuRendererError::NoPreviousComposition { extent });
+        }
+        self.render_layers_with_load(
+            device,
+            queue,
+            encoder,
+            surface_view,
+            layers,
+            request_readback,
+            Some(physical_damage),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_layers_with_load(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        surface_view: &wgpu::TextureView,
+        layers: &[GpuSceneLayer<'_>],
+        request_readback: bool,
+        physical_damage: Option<&[Rect]>,
+    ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
         self.last_stats = GpuRendererStats::default();
         let validation_started = Instant::now();
         self.check_health()?;
@@ -3485,7 +3675,7 @@ impl RetainedGpuRenderer {
 
         let stream_started = Instant::now();
         let shader_encoding = stream_started.duration_since(command_encoding_started);
-        let draw_stream = self.build_layered_draw_stream(layers)?;
+        let draw_stream = self.build_layered_draw_stream(layers, physical_damage)?;
         self.last_stats.record_draw_stream(&draw_stream);
         let BuiltDrawStream {
             vertices,
@@ -3503,34 +3693,17 @@ impl RetainedGpuRenderer {
             packed_object_sprite_instance_bytes(&object_sprite_instances);
         let landscape_instance_bytes = packed_landscape_instance_bytes(&landscape_instances);
         let solid_rect_instance_bytes = packed_solid_rect_instance_bytes(&solid_rect_instances);
+        let reachable_bindings = SceneBindingReachability::from_layers(layers);
         self.ensure_bind_groups(device, &calls)?;
-        let mut used_quad_bindings = HashSet::new();
-        let mut used_object_bindings = HashSet::new();
-        let mut used_landscape_bindings = HashSet::new();
-        for call in &calls {
-            match call.kind {
-                DrawKind::Quad(key) | DrawKind::Sprite(key) => {
-                    used_quad_bindings.insert(key);
-                }
-                DrawKind::ObjectSprite(key) => {
-                    used_object_bindings.insert(key.binding);
-                }
-                DrawKind::Landscape(key) | DrawKind::LandscapeInstance(key) => {
-                    used_landscape_bindings.insert(key);
-                }
-                DrawKind::Solid { .. } | DrawKind::SolidRect { .. } => {}
-            }
-        }
-        // Bind groups are cheap to recreate and can otherwise grow with every
-        // historical combination of retained textures. Keep only bindings
-        // reachable by this frame; source textures themselves follow the
-        // larger bounded LRU below and survive temporary invisibility.
+        // Damage narrows the packed stream, not the authoritative scene. Walk
+        // the complete command lists so undamaged live bindings survive while
+        // historical combinations still leave the caches immediately.
         self.quad_bind_groups
-            .retain(|key, _| used_quad_bindings.contains(key));
+            .retain(|key, _| reachable_bindings.quad.contains(key));
         self.object_bind_groups
-            .retain(|key, _| used_object_bindings.contains(key));
+            .retain(|key, _| reachable_bindings.object.contains(key));
         self.landscape_bind_groups
-            .retain(|key, _| used_landscape_bindings.contains(key));
+            .retain(|key, _| reachable_bindings.landscape.contains(key));
         Self::ensure_vertex_buffer_capacity(
             device,
             &mut self.vertex_buffer,
@@ -3636,12 +3809,16 @@ impl RetainedGpuRenderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: f64::from(clear.r) / 255.0,
-                        g: f64::from(clear.g) / 255.0,
-                        b: f64::from(clear.b) / 255.0,
-                        a: f64::from(clear.a) / 255.0,
-                    }),
+                    load: if physical_damage.is_some() {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(clear.r) / 255.0,
+                            g: f64::from(clear.g) / 255.0,
+                            b: f64::from(clear.b) / 255.0,
+                            a: f64::from(clear.a) / 255.0,
+                        })
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })];
@@ -4168,6 +4345,7 @@ impl RetainedGpuRenderer {
     fn build_layered_draw_stream(
         &mut self,
         layers: &[GpuSceneLayer<'_>],
+        physical_damage: Option<&[Rect]>,
     ) -> Result<BuiltDrawStream, GpuRendererError> {
         let mut vertices = std::mem::take(&mut self.vertex_scratch);
         let mut quad_instances = std::mem::take(&mut self.quad_instance_scratch);
@@ -4183,21 +4361,50 @@ impl RetainedGpuRenderer {
         landscape_instances.clear();
         solid_rect_instances.clear();
         calls.clear();
-        calls.reserve(layers.iter().map(|layer| layer.scene.commands.len()).sum());
-        for layer in layers {
-            let layer_call_start = calls.len();
-            self.append_draw_stream(
-                layer.scene,
-                &layer.presentation,
-                &mut vertices,
-                &mut quad_instances,
-                &mut sprite_instances,
-                &mut object_sprite_instances,
-                &mut landscape_instances,
+        let damage = physical_damage
+            .map(|damage| physical_damage_scissors(damage, layers[0].presentation.physical_extent));
+        let patch_count = damage.as_ref().map_or(1, Vec::len);
+        let command_capacity = layers
+            .iter()
+            .map(|layer| layer.scene.commands.len())
+            .sum::<usize>()
+            .saturating_mul(patch_count);
+        calls.reserve(command_capacity.saturating_add(damage.as_ref().map_or(0, Vec::len)));
+        if let Some(damage) = damage.as_deref() {
+            append_damage_clears(
                 &mut solid_rect_instances,
                 &mut calls,
-                layer_call_start,
+                layers[0].scene.clear,
+                damage,
             )?;
+        }
+        for layer in layers {
+            for patch_index in 0..patch_count {
+                let patch = damage
+                    .as_deref()
+                    .map(|damage| std::slice::from_ref(&damage[patch_index]));
+                let layer_call_start = calls.len();
+                // Damage scissors are pairwise disjoint. Pack the complete
+                // painter sequence independently for each patch so a retained
+                // batch range contains only atoms that can reach that patch;
+                // ordering between patches cannot affect any pixel.
+                self.append_draw_stream(
+                    layer.scene,
+                    &layer.presentation,
+                    patch,
+                    &mut vertices,
+                    &mut quad_instances,
+                    &mut sprite_instances,
+                    &mut object_sprite_instances,
+                    &mut landscape_instances,
+                    &mut solid_rect_instances,
+                    &mut calls,
+                    layer_call_start,
+                )?;
+                if let Some(patch) = patch {
+                    restrict_draw_calls_to_damage(&mut calls, layer_call_start, patch);
+                }
+            }
         }
         Ok(BuiltDrawStream {
             vertices,
@@ -4216,6 +4423,7 @@ impl RetainedGpuRenderer {
         &self,
         scene: &GpuScene,
         presentation: &GpuPresentation,
+        physical_damage: Option<&[Scissor]>,
         vertices: &mut Vec<PackedVertex>,
         quad_instances: &mut Vec<PackedQuadInstance>,
         sprite_instances: &mut Vec<PackedSpriteInstance>,
@@ -4227,6 +4435,11 @@ impl RetainedGpuRenderer {
     ) -> Result<(), GpuRendererError> {
         let mut commands = scene.commands.iter().peekable();
         while let Some(command) = commands.next() {
+            if let Some(damage) = physical_damage {
+                if !command_intersects_physical_damage(command, scene, presentation, damage)? {
+                    continue;
+                }
+            }
             match command {
                 GpuCommand::Quad { owner_mask, .. } => {
                     if owner_mask.is_some() {
@@ -4260,6 +4473,16 @@ impl RetainedGpuRenderer {
                         matches!(next, GpuCommand::Quad { .. }) && quad_run_key(next) == Some(run)
                     }) {
                         if let Some(next) = commands.next() {
+                            if let Some(damage) = physical_damage {
+                                if !command_intersects_physical_damage(
+                                    next,
+                                    scene,
+                                    presentation,
+                                    damage,
+                                )? {
+                                    continue;
+                                }
+                            }
                             append_prepared_quad_command(
                                 quad_instances,
                                 calls,
@@ -4289,7 +4512,19 @@ impl RetainedGpuRenderer {
                     let start = sprite_instance_count(sprite_instances)?;
                     let gamma = fragment_gamma_flag(scene.gamma_mode, *gamma);
                     let sprite_projection = SpriteProjection::new(&projection);
-                    for quad in quads {
+                    for (atom, quad) in quads.iter().enumerate() {
+                        if physical_damage.is_some_and(|damage| {
+                            !command_atom_intersects_physical_damage(
+                                command,
+                                atom,
+                                scene.logical_extent,
+                                presentation,
+                                &projection,
+                                damage,
+                            )
+                        }) {
+                            continue;
+                        }
                         sprite_instances.push(packed_sprite_instance(
                             *quad,
                             *mod2,
@@ -4297,16 +4532,19 @@ impl RetainedGpuRenderer {
                             sprite_projection,
                         )?);
                     }
-                    DrawCall::push_compatible_quad(
-                        calls,
-                        layer_call_start,
-                        DrawCall {
-                            vertices: start..sprite_instance_count(sprite_instances)?,
-                            scissor: projection.scissor,
-                            blend: run.blend,
-                            kind: DrawKind::Sprite(run.binding),
-                        },
-                    );
+                    let end = sprite_instance_count(sprite_instances)?;
+                    if start != end {
+                        DrawCall::push_compatible_quad(
+                            calls,
+                            layer_call_start,
+                            DrawCall {
+                                vertices: start..end,
+                                scissor: projection.scissor,
+                                blend: run.blend,
+                                kind: DrawKind::Sprite(run.binding),
+                            },
+                        );
+                    }
                 }
                 GpuCommand::ObjectBatch { sprites, gamma, .. } => {
                     if sprites.is_empty() {
@@ -4325,23 +4563,38 @@ impl RetainedGpuRenderer {
                     };
                     let start = object_sprite_instance_count(object_sprite_instances)?;
                     let gamma = fragment_gamma_flag(scene.gamma_mode, *gamma);
-                    for sprite in sprites {
+                    for (atom, sprite) in sprites.iter().enumerate() {
+                        if physical_damage.is_some_and(|damage| {
+                            !command_atom_intersects_physical_damage(
+                                command,
+                                atom,
+                                scene.logical_extent,
+                                presentation,
+                                &projection,
+                                damage,
+                            )
+                        }) {
+                            continue;
+                        }
                         object_sprite_instances.push(packed_object_sprite_instance(
                             *sprite,
                             gamma,
                             &projection,
                         )?);
                     }
-                    DrawCall::push_compatible_quad(
-                        calls,
-                        layer_call_start,
-                        DrawCall {
-                            vertices: start..object_sprite_instance_count(object_sprite_instances)?,
-                            scissor: projection.scissor,
-                            blend: run.blend,
-                            kind: DrawKind::ObjectSprite(run),
-                        },
-                    );
+                    let end = object_sprite_instance_count(object_sprite_instances)?;
+                    if start != end {
+                        DrawCall::push_compatible_quad(
+                            calls,
+                            layer_call_start,
+                            DrawCall {
+                                vertices: start..end,
+                                scissor: projection.scissor,
+                                blend: run.blend,
+                                kind: DrawKind::ObjectSprite(run),
+                            },
+                        );
+                    }
                 }
                 GpuCommand::Landscape {
                     base,
@@ -4497,7 +4750,19 @@ impl RetainedGpuRenderer {
                     let (start, end, kind) = match topology {
                         GpuPrimitiveTopology::PointList => {
                             let start = solid_rect_instance_count(solid_rect_instances)?;
-                            for vertex in solid {
+                            for (atom, vertex) in solid.iter().enumerate() {
+                                if physical_damage.is_some_and(|damage| {
+                                    !command_atom_intersects_physical_damage(
+                                        command,
+                                        atom,
+                                        scene.logical_extent,
+                                        presentation,
+                                        &projection,
+                                        damage,
+                                    )
+                                }) {
+                                    continue;
+                                }
                                 if let Some(point) = packed_point_rect(*vertex, gamma, &projection)?
                                 {
                                     solid_rect_instances.push(point);
@@ -4513,7 +4778,19 @@ impl RetainedGpuRenderer {
                         }
                         GpuPrimitiveTopology::LineList => {
                             let start = solid_rect_instance_count(solid_rect_instances)?;
-                            for pair in solid.chunks_exact(2) {
+                            for (atom, pair) in solid.chunks_exact(2).enumerate() {
+                                if physical_damage.is_some_and(|damage| {
+                                    !command_atom_intersects_physical_damage(
+                                        command,
+                                        atom,
+                                        scene.logical_extent,
+                                        presentation,
+                                        &projection,
+                                        damage,
+                                    )
+                                }) {
+                                    continue;
+                                }
                                 append_line_fragment_instances(
                                     solid_rect_instances,
                                     pair[0],
@@ -4532,17 +4809,31 @@ impl RetainedGpuRenderer {
                         }
                         GpuPrimitiveTopology::TriangleList => {
                             let start = vertex_count(vertices)?;
-                            for vertex in solid {
-                                append_vertex(
-                                    vertices,
-                                    packed_solid_vertex(
-                                        vertex.position,
-                                        vertex.color,
-                                        gamma,
-                                        style.dither,
+                            for (atom, primitive) in solid.chunks_exact(3).enumerate() {
+                                if physical_damage.is_some_and(|damage| {
+                                    !command_atom_intersects_physical_damage(
+                                        command,
+                                        atom,
+                                        scene.logical_extent,
+                                        presentation,
                                         &projection,
-                                    )?,
-                                );
+                                        damage,
+                                    )
+                                }) {
+                                    continue;
+                                }
+                                for vertex in primitive {
+                                    append_vertex(
+                                        vertices,
+                                        packed_solid_vertex(
+                                            vertex.position,
+                                            vertex.color,
+                                            gamma,
+                                            style.dither,
+                                            &projection,
+                                        )?,
+                                    );
+                                }
                             }
                             (
                                 start,
@@ -6098,6 +6389,89 @@ fn draw_projection(
     }))
 }
 
+fn projected_logical_scissor(bounds: Rect, projection: &DrawProjection) -> Option<Scissor> {
+    let (left, top) = projection
+        .clipper
+        .logical_to_physical(f64::from(bounds.x), f64::from(bounds.y));
+    let (right, bottom) = projection.clipper.logical_to_physical(
+        f64::from(bounds.x) + f64::from(bounds.width),
+        f64::from(bounds.y) + f64::from(bounds.height),
+    );
+    let left = left.floor().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    let top = top.floor().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    let right = right.ceil().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    let bottom = bottom.ceil().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    let projected = Rect::new(
+        left,
+        top,
+        u32::try_from(i64::from(right) - i64::from(left)).unwrap_or(u32::MAX),
+        u32::try_from(i64::from(bottom) - i64::from(top)).unwrap_or(u32::MAX),
+    );
+    physical_scissor(projected, projection.physical_extent)
+        .and_then(|bounds| projection.scissor.intersection(bounds))
+}
+
+fn logical_bounds_intersect_physical_damage(
+    bounds: Option<Rect>,
+    projection: &DrawProjection,
+    damage: &[Scissor],
+) -> bool {
+    bounds
+        .and_then(|bounds| projected_logical_scissor(bounds, projection))
+        .is_some_and(|bounds| {
+            damage
+                .iter()
+                .copied()
+                .any(|patch| bounds.intersection(patch).is_some())
+        })
+}
+
+fn logical_raster_padding(presentation: &GpuPresentation) -> f32 {
+    presentation.world_zoom.max(1.0 / presentation.scale)
+}
+
+fn command_intersects_physical_damage(
+    command: &GpuCommand,
+    scene: &GpuScene,
+    presentation: &GpuPresentation,
+    damage: &[Scissor],
+) -> Result<bool, GpuRendererError> {
+    let raster_padding = logical_raster_padding(presentation);
+    let Some(bounds) =
+        command.logical_bounds_with_raster_padding(scene.logical_extent, raster_padding)
+    else {
+        return Ok(false);
+    };
+    let Some(projection) = draw_projection(command.clip(), scene.logical_extent, presentation)?
+    else {
+        return Ok(false);
+    };
+    Ok(logical_bounds_intersect_physical_damage(
+        Some(bounds),
+        &projection,
+        damage,
+    ))
+}
+
+fn command_atom_intersects_physical_damage(
+    command: &GpuCommand,
+    atom: usize,
+    logical_extent: [u32; 2],
+    presentation: &GpuPresentation,
+    projection: &DrawProjection,
+    damage: &[Scissor],
+) -> bool {
+    logical_bounds_intersect_physical_damage(
+        command.logical_atom_bounds_with_raster_padding(
+            logical_extent,
+            logical_raster_padding(presentation),
+            atom,
+        ),
+        projection,
+        damage,
+    )
+}
+
 fn physical_scissor(clip: Rect, extent: [u32; 2]) -> Option<Scissor> {
     let [width, height] = extent;
     let left = i64::from(clip.x).clamp(0, i64::from(width));
@@ -6113,6 +6487,82 @@ fn physical_scissor(clip: Rect, extent: [u32; 2]) -> Option<Scissor> {
         width: (right - left) as u32,
         height: (bottom - top) as u32,
     })
+}
+
+/// Append `rect - covered` as at most four non-overlapping rectangles.
+fn subtract_scissor(rect: Scissor, covered: Scissor, output: &mut Vec<Scissor>) {
+    let Some(overlap) = rect.intersection(covered) else {
+        output.push(rect);
+        return;
+    };
+    let rect_right = rect.x.saturating_add(rect.width);
+    let rect_bottom = rect.y.saturating_add(rect.height);
+    let overlap_right = overlap.x.saturating_add(overlap.width);
+    let overlap_bottom = overlap.y.saturating_add(overlap.height);
+
+    if rect.y < overlap.y {
+        output.push(Scissor {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: overlap.y - rect.y,
+        });
+    }
+    if overlap_bottom < rect_bottom {
+        output.push(Scissor {
+            x: rect.x,
+            y: overlap_bottom,
+            width: rect.width,
+            height: rect_bottom - overlap_bottom,
+        });
+    }
+    if rect.x < overlap.x {
+        output.push(Scissor {
+            x: rect.x,
+            y: overlap.y,
+            width: overlap.x - rect.x,
+            height: overlap.height,
+        });
+    }
+    if overlap_right < rect_right {
+        output.push(Scissor {
+            x: overlap_right,
+            y: overlap.y,
+            width: rect_right - overlap_right,
+            height: overlap.height,
+        });
+    }
+}
+
+/// Turn an arbitrary rectangle list into a pairwise-disjoint partition of the
+/// same union. A scene is replayed once per result, so overlap must be removed
+/// to keep translucent and additive pixels from being blended twice.
+fn disjoint_scissors(scissors: Vec<Scissor>) -> Vec<Scissor> {
+    let mut disjoint = Vec::with_capacity(scissors.len());
+    for scissor in scissors {
+        let mut fragments = vec![scissor];
+        for &covered in &disjoint {
+            let mut remaining = Vec::with_capacity(fragments.len().saturating_mul(4));
+            for fragment in fragments {
+                subtract_scissor(fragment, covered, &mut remaining);
+            }
+            fragments = remaining;
+            if fragments.is_empty() {
+                break;
+            }
+        }
+        disjoint.extend(fragments);
+    }
+    disjoint
+}
+
+fn physical_damage_scissors(damage: &[Rect], extent: [u32; 2]) -> Vec<Scissor> {
+    disjoint_scissors(
+        damage
+            .iter()
+            .filter_map(|&rect| physical_scissor(rect, extent))
+            .collect(),
+    )
 }
 
 fn validate_presentation(
@@ -9621,6 +10071,107 @@ mod tests {
             [0.0, 1.0, 0.0, 2.0],
             "homogeneous W must preserve the same Euclidean coordinate"
         );
+    }
+
+    #[test]
+    fn fractional_physical_damage_narrows_only_the_secondary_scissor() {
+        let presentation = presentation([5, 4], 1.5, 1, 1.0);
+        let primary = Rect::new(1, 1, 2, 1);
+        let projection = draw_projection(Some(primary), [4, 3], &presentation)
+            .expect("valid fractional presentation")
+            .expect("primary clip intersects the physical framebuffer");
+        let projected_before = clip_position([2.0, 1.0, 1.0], &projection).unwrap();
+        let mut calls = vec![DrawCall {
+            vertices: 0..6,
+            scissor: projection.scissor,
+            blend: GpuBlend::Normal,
+            kind: DrawKind::Solid {
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+            },
+        }];
+        restrict_draw_calls_to_damage(
+            &mut calls,
+            0,
+            &[Scissor {
+                x: 2,
+                y: 1,
+                width: 2,
+                height: 2,
+            }],
+        );
+
+        assert_eq!(projection.clipper.logical_clip(), primary);
+        assert_eq!(
+            clip_position([2.0, 1.0, 1.0], &projection).unwrap(),
+            projected_before
+        );
+        assert_eq!(
+            calls[0].scissor,
+            Scissor {
+                x: 2,
+                y: 1,
+                width: 2,
+                height: 2,
+            }
+        );
+        let replaced_projection =
+            draw_projection(Some(Rect::new(2, 1, 1, 1)), [4, 3], &presentation)
+                .expect("valid replacement projection")
+                .expect("replacement clip intersects the framebuffer");
+        assert_ne!(
+            clip_position([2.0, 1.0, 1.0], &replaced_projection).unwrap(),
+            projected_before,
+            "the regression must distinguish secondary scissoring from replacing the primary clip"
+        );
+    }
+
+    #[test]
+    fn damage_drops_draw_calls_whose_projected_scissor_does_not_intersect() {
+        let mut calls = vec![DrawCall {
+            vertices: 0..6,
+            scissor: Scissor {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+            },
+            blend: GpuBlend::Normal,
+            kind: DrawKind::Solid {
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+            },
+        }];
+        restrict_draw_calls_to_damage(
+            &mut calls,
+            0,
+            &[Scissor {
+                x: 5,
+                y: 0,
+                width: 2,
+                height: 2,
+            }],
+        );
+
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn physical_damage_partitions_overlapping_rectangles_without_duplicate_pixels() {
+        let physical = [Rect::new(1, 1, 4, 2), Rect::new(3, 0, 2, 4)];
+        let scissors = physical_damage_scissors(&physical, [8, 8]);
+        let area = scissors
+            .iter()
+            .map(|rect| u64::from(rect.width) * u64::from(rect.height))
+            .sum::<u64>();
+
+        assert_eq!(
+            area, 12,
+            "the two 8-pixel rectangles overlap by four pixels"
+        );
+        for (index, left) in scissors.iter().enumerate() {
+            for right in &scissors[index + 1..] {
+                assert_eq!(left.intersection(*right), None);
+            }
+        }
     }
 
     #[test]
@@ -15163,6 +15714,667 @@ mod tests {
             textures,
             commands,
         )
+    }
+
+    #[test]
+    fn preserved_composition_rewrites_only_the_patch_commands() {
+        gpu_or_skip!(device, queue, "retained dirty-region composition");
+        let extent = [4, 2];
+        let red = Color::opaque(200, 10, 20);
+        let blue = Color::opaque(10, 20, 200);
+        let mut renderer = test_renderer(&device, &queue);
+        let full = test_scene(extent, red, Vec::new(), Vec::new());
+        let first = render_identity_readback(&mut renderer, &device, &queue, &full);
+        let red_rgba = [red.r, red.g, red.b, red.a];
+        let blue_rgba = [blue.r, blue.g, blue.b, blue.a];
+        assert!(first.rgba.chunks_exact(4).all(|pixel| pixel == red_rgba));
+
+        let vertex = |x, y| GpuSolidVertex {
+            position: [x, y, 1.0],
+            color: rgba_f32(blue_rgba),
+            outer_modulation: clonk_graphics::GpuSolidOuterModulation::PackedC4,
+        };
+        let patch = test_scene(
+            extent,
+            Color::opaque(0, 200, 0),
+            Vec::new(),
+            vec![GpuCommand::Solid {
+                vertices: vec![
+                    vertex(1.0, 0.0),
+                    vertex(3.0, 0.0),
+                    vertex(1.0, 2.0),
+                    vertex(1.0, 2.0),
+                    vertex(3.0, 0.0),
+                    vertex(3.0, 2.0),
+                ],
+                topology: GpuPrimitiveTopology::TriangleList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                style: GpuSolidStyle::NONE,
+            }],
+        );
+        let damage = [Rect::new(1, 0, 2, 2)];
+        let layer = GpuSceneLayer::new(&patch, GpuPresentation::identity(4, 2));
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_damage_patch_surface",
+            extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let mut encoder = test_encoder(&device, "lc_gpu_damage_patch_encoder");
+        let ticket = renderer
+            .render_layers_preserving_previous(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                std::slice::from_ref(&layer),
+                &damage,
+                true,
+            )
+            .expect("encode retained patch")
+            .expect("patch readback");
+        queue.submit(Some(encoder.finish()));
+        let patched = ticket.read(&device).expect("map retained patch");
+
+        for y in 0..2 {
+            for x in 0..4 {
+                let offset = (y * 4 + x) * 4;
+                let expected = if (1..3).contains(&x) { blue } else { red };
+                let expected = [expected.r, expected.g, expected.b, expected.a];
+                assert_eq!(&patched.rgba[offset..offset + 4], &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn physical_damage_does_not_pack_a_full_clip_command_outside_the_patch() {
+        gpu_or_skip!(device, queue, "retained GPU command damage culling");
+        let extent = [4, 2];
+        let clear = Color::opaque(20, 30, 40);
+        let blue = Color::opaque(10, 20, 200);
+        let mut renderer = test_renderer(&device, &queue);
+        let previous = test_scene(extent, clear, Vec::new(), Vec::new());
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &previous);
+
+        let vertex = |x, y| GpuSolidVertex {
+            position: [x, y, 1.0],
+            color: rgba_f32([blue.r, blue.g, blue.b, blue.a]),
+            outer_modulation: clonk_graphics::GpuSolidOuterModulation::PackedC4,
+        };
+        let scene = test_scene(
+            extent,
+            clear,
+            Vec::new(),
+            vec![GpuCommand::Solid {
+                vertices: vec![
+                    vertex(0.0, 0.0),
+                    vertex(1.0, 0.0),
+                    vertex(0.0, 2.0),
+                    vertex(0.0, 2.0),
+                    vertex(1.0, 0.0),
+                    vertex(1.0, 2.0),
+                ],
+                topology: GpuPrimitiveTopology::TriangleList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: Some(Rect::new(0, 0, 4, 2)),
+                blend: GpuBlend::Replace,
+                style: GpuSolidStyle::NONE,
+            }],
+        );
+        let damage = [Rect::new(3, 0, 1, 2)];
+        let layer = GpuSceneLayer::new(&scene, GpuPresentation::identity(4, 2));
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_command_damage_culling_surface",
+            extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let mut encoder = test_encoder(&device, "lc_gpu_command_damage_culling_encoder");
+        renderer
+            .render_layers_preserving_previous(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                std::slice::from_ref(&layer),
+                &damage,
+                false,
+            )
+            .expect("encode retained patch");
+        queue.submit(Some(encoder.finish()));
+
+        assert_eq!(renderer.last_stats().solid_draw_calls, 0);
+        assert_eq!(
+            renderer.last_stats().generic_vertices,
+            0,
+            "a command outside physical damage must not be packed or uploaded"
+        );
+    }
+
+    #[test]
+    fn physical_damage_packs_only_intersecting_batch_atoms_and_solid_primitives() {
+        gpu_or_skip!(device, queue, "retained GPU atom damage culling");
+        let extent = [4, 2];
+        let clear = Color::opaque(20, 30, 40);
+        let texture = GpuTextureId::fresh();
+        let mut renderer = test_renderer(&device, &queue);
+        let previous = test_scene(extent, clear, Vec::new(), Vec::new());
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &previous);
+        let positions = |left, right| {
+            [
+                [left, 0.0, 1.0],
+                [right, 0.0, 1.0],
+                [left, 2.0, 1.0],
+                [right, 2.0, 1.0],
+            ]
+        };
+        let object = |left, right| {
+            GpuObjectSprite::new(
+                positions(left, right),
+                [0.0, 0.0, 1.0, 1.0],
+                [0x00ff_ffff; 4],
+                GpuSampler::Nearest,
+                0.0,
+                false,
+                GpuOuterModulation::Inherit,
+            )
+        };
+        let color = rgba_f32([10, 20, 200, 255]);
+        let solid_rect = |left, right| {
+            vec![
+                solid_vertex(left, 0.0, color),
+                solid_vertex(right, 0.0, color),
+                solid_vertex(left, 2.0, color),
+                solid_vertex(left, 2.0, color),
+                solid_vertex(right, 0.0, color),
+                solid_vertex(right, 2.0, color),
+            ]
+        };
+        let clip = Some(Rect::new(0, 0, 4, 2));
+        let scene = test_scene(
+            extent,
+            clear,
+            vec![rgba_resource(texture, [255; 4])],
+            vec![
+                GpuCommand::SpriteBatch {
+                    texture,
+                    quads: vec![
+                        GpuSpriteQuad {
+                            rect: [0.0, 0.0, 1.0, 2.0],
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                            modulation: 0x00ff_ffff,
+                        },
+                        GpuSpriteQuad {
+                            rect: [3.0, 0.0, 4.0, 2.0],
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                            modulation: 0x00ff_ffff,
+                        },
+                    ],
+                    clip,
+                    blend: GpuBlend::Normal,
+                    mod2: false,
+                    gamma: false,
+                    outer_modulation: GpuOuterModulation::Inherit,
+                },
+                GpuCommand::ObjectBatch {
+                    texture,
+                    owner_texture: None,
+                    sprites: vec![object(0.0, 1.0), object(3.0, 4.0)],
+                    clip,
+                    blend: GpuBlend::Normal,
+                    gamma: false,
+                },
+                GpuCommand::Solid {
+                    vertices: [solid_rect(0.0, 1.0), solid_rect(3.0, 4.0)].concat(),
+                    topology: GpuPrimitiveTopology::TriangleList,
+                    alpha_mode: GpuSolidAlphaMode::SourceOver,
+                    clip,
+                    blend: GpuBlend::Replace,
+                    style: GpuSolidStyle::NONE,
+                },
+            ],
+        );
+        let damage = [Rect::new(3, 0, 1, 2)];
+        let layer = GpuSceneLayer::new(&scene, GpuPresentation::identity(4, 2));
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_atom_damage_culling_surface",
+            extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let mut encoder = test_encoder(&device, "lc_gpu_atom_damage_culling_encoder");
+        renderer
+            .render_layers_preserving_previous(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                std::slice::from_ref(&layer),
+                &damage,
+                false,
+            )
+            .expect("encode retained atom patch");
+        queue.submit(Some(encoder.finish()));
+
+        let stats = renderer.last_stats();
+        assert_eq!(stats.sprite_instances, 1);
+        assert_eq!(
+            stats.sprite_instance_upload_bytes,
+            PACKED_SPRITE_INSTANCE_STRIDE as usize
+        );
+        assert_eq!(stats.object_sprite_instances, 1);
+        assert_eq!(
+            stats.object_sprite_upload_bytes,
+            PACKED_OBJECT_SPRITE_INSTANCE_STRIDE as usize
+        );
+        assert_eq!(stats.generic_vertices, 6);
+        assert_eq!(
+            stats.generic_vertex_upload_bytes,
+            6 * PACKED_VERTEX_STRIDE as usize
+        );
+    }
+
+    #[test]
+    fn physical_damage_submits_each_solid_atom_only_to_its_intersecting_patch() {
+        gpu_or_skip!(device, queue, "retained GPU per-patch atom culling");
+        let extent = [4, 2];
+        let color = rgba_f32([10, 20, 200, 255]);
+        let scene = test_scene(
+            extent,
+            Color::opaque(20, 30, 40),
+            Vec::new(),
+            vec![GpuCommand::Solid {
+                vertices: vec![
+                    solid_vertex(0.0, 0.0, color),
+                    solid_vertex(1.0, 0.0, color),
+                    solid_vertex(0.0, 2.0, color),
+                    solid_vertex(3.0, 0.0, color),
+                    solid_vertex(4.0, 0.0, color),
+                    solid_vertex(4.0, 2.0, color),
+                ],
+                topology: GpuPrimitiveTopology::TriangleList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: Some(Rect::new(0, 0, 4, 2)),
+                blend: GpuBlend::Normal,
+                style: GpuSolidStyle::NONE,
+            }],
+        );
+        let damage = [Rect::new(0, 0, 1, 2), Rect::new(3, 0, 1, 2)];
+        let layer = GpuSceneLayer::new(&scene, GpuPresentation::identity(4, 2));
+        let mut renderer = test_renderer(&device, &queue);
+        let stream = renderer
+            .build_layered_draw_stream(std::slice::from_ref(&layer), Some(&damage))
+            .expect("build per-patch draw stream");
+        let solid_submissions = stream
+            .calls
+            .iter()
+            .filter_map(|call| {
+                matches!(call.kind, DrawKind::Solid { .. })
+                    .then_some((call.vertices.clone(), call.scissor))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            solid_submissions,
+            [
+                (
+                    0..3,
+                    Scissor {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 2,
+                    },
+                ),
+                (
+                    3..6,
+                    Scissor {
+                        x: 3,
+                        y: 0,
+                        width: 1,
+                        height: 2,
+                    },
+                ),
+            ]
+        );
+        assert_eq!(
+            solid_submissions
+                .iter()
+                .map(|(range, _)| range.end - range.start)
+                .sum::<u32>(),
+            6,
+            "each three-vertex atom must be submitted once, not once per damage patch"
+        );
+    }
+
+    #[test]
+    fn physical_damage_retains_only_bindings_reachable_from_full_scenes() {
+        gpu_or_skip!(device, queue, "retained GPU sparse binding residency");
+        let extent = [4, 2];
+        let left = GpuTextureId::fresh();
+        let right = GpuTextureId::fresh();
+        let identity = [1.0, 1.0, 1.0, 0.0];
+        let scene = test_scene(
+            extent,
+            Color::transparent(),
+            vec![
+                rgba_resource(left, [255; 4]),
+                rgba_resource(right, [255; 4]),
+            ],
+            vec![
+                quad_command(
+                    left,
+                    quad(0.0, 0.0, 1.0, 2.0, 1.0, identity),
+                    fixture_options!(blend = GpuBlend::Replace),
+                ),
+                quad_command(
+                    right,
+                    quad(3.0, 0.0, 4.0, 2.0, 1.0, identity),
+                    fixture_options!(blend = GpuBlend::Replace),
+                ),
+            ],
+        );
+        let mut renderer = test_renderer(&device, &queue);
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        assert_eq!(renderer.quad_bind_groups.len(), 2);
+
+        let damage = [Rect::new(0, 0, 1, 2)];
+        let layer = GpuSceneLayer::new(&scene, GpuPresentation::identity(4, 2));
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_sparse_binding_residency_surface",
+            extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let mut encoder = test_encoder(&device, "lc_gpu_sparse_binding_residency_encoder");
+        renderer
+            .render_layers_preserving_previous(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                std::slice::from_ref(&layer),
+                &damage,
+                false,
+            )
+            .expect("encode sparse binding patch");
+        queue.submit(Some(encoder.finish()));
+
+        assert_eq!(
+            renderer.quad_bind_groups.len(),
+            2,
+            "sparse reachability must not purge bindings still named by the complete scene"
+        );
+
+        let evolved = test_scene(
+            extent,
+            Color::transparent(),
+            vec![
+                rgba_resource(left, [255; 4]),
+                rgba_resource(right, [255; 4]),
+            ],
+            vec![quad_command(
+                left,
+                quad(0.0, 0.0, 1.0, 2.0, 1.0, identity),
+                fixture_options!(blend = GpuBlend::Replace),
+            )],
+        );
+        let layer = GpuSceneLayer::new(&evolved, GpuPresentation::identity(4, 2));
+        let mut encoder = test_encoder(&device, "lc_gpu_sparse_binding_evolution_encoder");
+        renderer
+            .render_layers_preserving_previous(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                std::slice::from_ref(&layer),
+                &damage,
+                false,
+            )
+            .expect("encode evolved sparse binding patch");
+        queue.submit(Some(encoder.finish()));
+
+        assert_eq!(
+            renderer.quad_bind_groups.len(),
+            1,
+            "a sparse frame must discard historical bindings absent from its full scene"
+        );
+    }
+
+    #[test]
+    fn preserved_physical_damage_clears_a_removed_atom() {
+        gpu_or_skip!(device, queue, "retained GPU removed-atom damage clear");
+        let extent = [4, 2];
+        let red = Color::opaque(200, 10, 20);
+        let blue = Color::opaque(10, 20, 200);
+        let mut renderer = test_renderer(&device, &queue);
+        let vertex = |x, y| GpuSolidVertex {
+            position: [x, y, 1.0],
+            color: rgba_f32([blue.r, blue.g, blue.b, blue.a]),
+            outer_modulation: clonk_graphics::GpuSolidOuterModulation::PackedC4,
+        };
+        let previous = test_scene(
+            extent,
+            red,
+            Vec::new(),
+            vec![GpuCommand::Solid {
+                vertices: vec![
+                    vertex(1.0, 0.0),
+                    vertex(3.0, 0.0),
+                    vertex(1.0, 2.0),
+                    vertex(1.0, 2.0),
+                    vertex(3.0, 0.0),
+                    vertex(3.0, 2.0),
+                ],
+                topology: GpuPrimitiveTopology::TriangleList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                style: GpuSolidStyle::NONE,
+            }],
+        );
+        let first = render_identity_readback(&mut renderer, &device, &queue, &previous);
+        let red_rgba = [red.r, red.g, red.b, red.a];
+        let blue_rgba = [blue.r, blue.g, blue.b, blue.a];
+        assert_eq!(&first.rgba[0..4], &red_rgba);
+        assert_eq!(&first.rgba[4..8], &blue_rgba);
+
+        let removed = test_scene(extent, red, Vec::new(), Vec::new());
+        let damage = [Rect::new(1, 0, 2, 2)];
+        let layer = GpuSceneLayer::new(&removed, GpuPresentation::identity(4, 2));
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_removed_atom_damage_surface",
+            extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let mut encoder = test_encoder(&device, "lc_gpu_removed_atom_damage_encoder");
+        let ticket = renderer
+            .render_layers_preserving_previous(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                std::slice::from_ref(&layer),
+                &damage,
+                true,
+            )
+            .expect("encode retained removal patch")
+            .expect("patch readback");
+        queue.submit(Some(encoder.finish()));
+        let patched = ticket.read(&device).expect("map retained removal patch");
+
+        assert!(
+            patched.rgba.chunks_exact(4).all(|pixel| pixel == red_rgba),
+            "removing the only atom must restore the base scene clear inside damage"
+        );
+    }
+
+    #[test]
+    fn sparse_layered_composition_matches_full_gpu_readback_inside_damage() {
+        gpu_or_skip!(device, queue, "retained layered GPU damage equivalence");
+        let physical_extent = [7, 5];
+        let base_clear = Color::opaque(12, 24, 36);
+        let sentinel = Color::opaque(231, 17, 193);
+        let solid_rect =
+            |left: f32, top: f32, right: f32, bottom: f32, color, blend| GpuCommand::Solid {
+                vertices: vec![
+                    solid_vertex(left, top, color),
+                    solid_vertex(right, top, color),
+                    solid_vertex(left, bottom, color),
+                    solid_vertex(left, bottom, color),
+                    solid_vertex(right, top, color),
+                    solid_vertex(right, bottom, color),
+                ],
+                topology: GpuPrimitiveTopology::TriangleList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend,
+                style: GpuSolidStyle::NONE,
+            };
+        let base = test_scene(
+            [4, 4],
+            base_clear,
+            Vec::new(),
+            vec![
+                solid_rect(
+                    0.0,
+                    0.0,
+                    3.0,
+                    3.0,
+                    rgba_f32([220, 40, 20, 128]),
+                    GpuBlend::Normal,
+                ),
+                solid_rect(
+                    1.0,
+                    1.0,
+                    4.0,
+                    4.0,
+                    rgba_f32([20, 180, 70, 96]),
+                    GpuBlend::Additive,
+                ),
+            ],
+        );
+        let overlay = test_scene(
+            physical_extent,
+            Color::transparent(),
+            Vec::new(),
+            vec![
+                solid_rect(
+                    1.0,
+                    0.0,
+                    6.0,
+                    4.0,
+                    rgba_f32([30, 60, 230, 144]),
+                    GpuBlend::Normal,
+                ),
+                solid_rect(
+                    0.0,
+                    2.0,
+                    7.0,
+                    5.0,
+                    rgba_f32([240, 150, 20, 80]),
+                    GpuBlend::Additive,
+                ),
+            ],
+        );
+        let base_presentation = presentation(physical_extent, 1.5, 1, 1.0);
+        let layers = [
+            GpuSceneLayer::new(&base, base_presentation),
+            GpuSceneLayer::new(
+                &overlay,
+                GpuPresentation::identity(physical_extent[0], physical_extent[1]),
+            ),
+        ];
+        let damage = [
+            Rect::new(0, 0, 3, 3),
+            Rect::new(2, 1, 4, 3),
+            Rect::new(5, 4, 2, 1),
+        ];
+        assert!(damage[0].intersection(damage[1]).is_some());
+        assert!(damage[2]
+            .intersection(damage[0])
+            .or_else(|| damage[2].intersection(damage[1]))
+            .is_none());
+
+        let mut full_renderer = test_renderer(&device, &queue);
+        let full = render_layers_readback(&mut full_renderer, &device, &queue, &layers);
+        assert_ne!(
+            readback_pixel(&full, 2, 2),
+            [base_clear.r, base_clear.g, base_clear.b, base_clear.a],
+            "the oracle pixel shared by all four translucent/additive draws must be painted"
+        );
+
+        let sentinel_scene = test_scene([4, 4], sentinel, Vec::new(), Vec::new());
+        let mut sparse_renderer = test_renderer(&device, &queue);
+        let sentinel_frame = render_readback(
+            &mut sparse_renderer,
+            &device,
+            &queue,
+            &sentinel_scene,
+            &base_presentation,
+        );
+        let sentinel_rgba = [sentinel.r, sentinel.g, sentinel.b, sentinel.a];
+        assert!(sentinel_frame
+            .rgba
+            .chunks_exact(4)
+            .all(|pixel| pixel == sentinel_rgba));
+
+        let (_target, target_view) = test_target(
+            &device,
+            "lc_gpu_sparse_layered_equivalence_surface",
+            physical_extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let mut encoder = test_encoder(&device, "lc_gpu_sparse_layered_equivalence_encoder");
+        let ticket = sparse_renderer
+            .render_layers_preserving_previous(
+                &device,
+                &queue,
+                &mut encoder,
+                &target_view,
+                &layers,
+                &damage,
+                true,
+            )
+            .expect("encode sparse layered frame")
+            .expect("request sparse layered readback");
+        queue.submit(Some(encoder.finish()));
+        let sparse = ticket.read(&device).expect("map sparse layered frame");
+        let damage = physical_damage_scissors(&damage, physical_extent);
+        let mut compared_damage = 0;
+        let mut compared_sentinel = 0;
+        for y in 0..physical_extent[1] {
+            for x in 0..physical_extent[0] {
+                let inside_damage = damage.iter().any(|patch| {
+                    x >= patch.x
+                        && x < patch.x + patch.width
+                        && y >= patch.y
+                        && y < patch.y + patch.height
+                });
+                let expected = if inside_damage {
+                    compared_damage += 1;
+                    readback_pixel(&full, x, y)
+                } else {
+                    compared_sentinel += 1;
+                    sentinel_rgba
+                };
+                assert_eq!(
+                    readback_pixel(&sparse, x, y),
+                    expected,
+                    "physical pixel ({x}, {y}), inside damage={inside_damage}"
+                );
+            }
+        }
+        assert!(compared_damage > 0 && compared_sentinel > 0);
     }
 
     /// Renders one scene to a surface of `format` and returns the surface

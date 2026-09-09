@@ -2,6 +2,7 @@ pub mod clip_projection;
 pub mod clonk_font;
 pub mod color;
 pub mod compositing;
+pub mod damage;
 pub mod font;
 pub mod gamma;
 pub mod gpu_scene;
@@ -12,6 +13,7 @@ pub mod transform;
 
 pub use clip_projection::ClipperProjection;
 pub use color::Color;
+pub use damage::{DamageRegion, PaintNode};
 pub use font::{BitmapFont, FontMetrics, TextFont, TrueTypeFont, TrueTypeFontError};
 pub use gamma::GammaRamp;
 pub use gpu_scene::{

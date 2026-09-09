@@ -1241,14 +1241,38 @@ pub(crate) fn present_retained_gpu_frame_profiled(
                 let needs_current_readback = request_current_readback
                     || (request_native_save_readback && previous_native_readback.is_none());
                 let reduce_current = needs_current_readback && current_readback_is_thumbnail_only;
-                readback = renderer.render_layers(
-                    context.device,
-                    context.queue,
-                    encoder,
-                    surface_view,
-                    &layers,
-                    needs_current_readback && !reduce_current,
-                )?;
+                let request_full_readback = needs_current_readback && !reduce_current;
+                readback = match frame.physical_damage.as_ref() {
+                    Some(damage) => match renderer.render_layers_preserving_previous(
+                        context.device,
+                        context.queue,
+                        encoder,
+                        surface_view,
+                        &layers,
+                        damage.rects(),
+                        request_full_readback,
+                    ) {
+                        Err(gpu_renderer::GpuRendererError::NoPreviousComposition { .. }) => {
+                            renderer.render_layers(
+                                context.device,
+                                context.queue,
+                                encoder,
+                                surface_view,
+                                &layers,
+                                request_full_readback,
+                            )?
+                        }
+                        result => result?,
+                    },
+                    None => renderer.render_layers(
+                        context.device,
+                        context.queue,
+                        encoder,
+                        surface_view,
+                        &layers,
+                        request_full_readback,
+                    )?,
+                };
                 if reduce_current {
                     // The composition still holds the frame just presented, so
                     // the reduction reads it before anything overwrites it.

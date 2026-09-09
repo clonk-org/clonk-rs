@@ -1,7 +1,7 @@
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet, NativeClonkFontSet};
 use crate::{draw_text, fill_rect, GuiPoint, ImageData, KeyCode};
 use clonk_graphics::clonk_font::TextAlign;
-use clonk_graphics::{Color, Surface, TextFont};
+use clonk_graphics::{Color, PaintNode, Rect as GraphicsRect, Surface, TextFont};
 use clonk_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
 use std::sync::Arc;
 
@@ -232,7 +232,7 @@ pub fn draw_bar(
     );
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MainMenuItem {
     LocalGame,
     NetworkGame,
@@ -247,6 +247,34 @@ pub enum MainMenuAction {
     SelectionChanged(MainMenuItem),
     Activate(MainMenuItem),
 }
+
+/// Stable identity of one main-dialog child in native painter order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StartupMainMenuPaintId {
+    Button(MainMenuItem),
+    Participants,
+    FanProject,
+}
+
+/// Exact, collision-free state that can change one main-dialog child's pixels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupMainMenuPaintVisual {
+    Button {
+        text: &'static str,
+        enabled: bool,
+        fallback_selected: bool,
+        highlighted: bool,
+        pressed: bool,
+    },
+    Participants {
+        text: String,
+    },
+    FanProject {
+        text: &'static str,
+    },
+}
+
+pub type StartupMainMenuPaintNode = PaintNode<StartupMainMenuPaintId, StartupMainMenuPaintVisual>;
 
 #[derive(Clone)]
 pub struct StartupMainMenu {
@@ -369,7 +397,7 @@ impl StartupMainMenu {
             && point.y < (rect.y + rect.h) as f32
     }
 
-    fn fanproject_contains(&self, point: GuiPoint) -> bool {
+    fn fanproject_rect(&self) -> IntRect {
         let layout = main_menu_layout(
             self.size.width.max(1.0) as i32,
             self.size.height.max(1.0) as i32,
@@ -388,16 +416,105 @@ impl StartupMainMenu {
                 )
             },
         );
-        let rect = IntRect::new(
+        IntRect::new(
             layout.fanproject_anchor_x - width,
             layout.client.y + layout.client.h - line_height / 2,
             width,
             line_height,
-        );
+        )
+    }
+
+    fn fanproject_contains(&self, point: GuiPoint) -> bool {
+        let rect = self.fanproject_rect();
         point.x >= rect.x as f32
             && point.y >= rect.y as f32
             && point.x < (rect.x + rect.w) as f32
             && point.y < (rect.y + rect.h) as f32
+    }
+
+    /// Describes every directly painted main-dialog child without rasterizing
+    /// it, using scale-native metrics when supplied. Nodes remain in C++ child
+    /// order so intersecting redraws can replay unchanged overlapping controls.
+    pub fn paint_nodes_with_native_fonts(
+        &self,
+        participants_label: &str,
+        draw_focus: bool,
+        native_fonts: Option<&NativeClonkFontSet>,
+    ) -> Vec<StartupMainMenuPaintNode> {
+        let layout = main_menu_layout(
+            self.size.width.max(1.0) as i32,
+            self.size.height.max(1.0) as i32,
+        );
+        let pressed_index = self
+            .pressed_index
+            .or_else(|| self.key_pressed.map(|(index, _)| index));
+        let mut nodes = Vec::with_capacity(self.buttons.len() + 2);
+        nodes.extend(self.buttons.iter().zip(layout.buttons).enumerate().map(
+            |(index, (button, bounds))| {
+                let enabled = button.enabled;
+                PaintNode::new(
+                    StartupMainMenuPaintId::Button(button.item),
+                    graphics_rect(bounds),
+                    StartupMainMenuPaintVisual::Button {
+                        text: button.label,
+                        enabled,
+                        fallback_selected: self.textures.is_none()
+                            && enabled
+                            && draw_focus
+                            && self.selected_index == Some(index),
+                        highlighted: self.highlight.is_some()
+                            && enabled
+                            && ((draw_focus && self.selected_index == Some(index))
+                                || self.hover_index == Some(index)),
+                        pressed: enabled && pressed_index == Some(index),
+                    },
+                )
+            },
+        ));
+        // The retained linear-sampled glyph quad owns the one logical fringe
+        // below GetTextExtent as well as the reported text height. Keeping it
+        // in the semantic owner prevents the anonymous glyph commands from
+        // widening an otherwise exact label invalidation at fractional scale.
+        let participants_bounds = native_fonts.map_or_else(
+            || self.participants_rect(participants_label),
+            |fonts| {
+                let (expanded, _) = expand_hotkey_markup(participants_label);
+                let (width, height) = fonts.title.measure(&expanded, true);
+                IntRect::new(
+                    layout.participants_anchor.0 - width,
+                    layout.participants_anchor.1,
+                    width,
+                    height.saturating_add(1),
+                )
+            },
+        );
+        nodes.push(PaintNode::new(
+            StartupMainMenuPaintId::Participants,
+            graphics_rect(participants_bounds),
+            StartupMainMenuPaintVisual::Participants {
+                text: participants_label.to_owned(),
+            },
+        ));
+        let fanproject_bounds = native_fonts.map_or_else(
+            || self.fanproject_rect(),
+            |fonts| {
+                let (width, height) = fonts.mini.measure(FANPROJECT_TEXT, false);
+                IntRect::new(
+                    layout.fanproject_anchor_x - width,
+                    layout.client.y + layout.client.h - fonts.mini.logical_line_height() / 2,
+                    width,
+                    height.saturating_add(1),
+                )
+            },
+        );
+        nodes.push(PaintNode::new(
+            StartupMainMenuPaintId::FanProject,
+            graphics_rect(fanproject_bounds),
+            StartupMainMenuPaintVisual::FanProject {
+                text: FANPROJECT_TEXT,
+            },
+        ));
+        nodes
     }
 
     /// Returns the native tooltip target at `point`, without applying the
@@ -581,7 +698,11 @@ impl StartupMainMenu {
     /// part of Rust's bilinear scale-1 base frame (`C4Fonts.cpp:158-173`;
     /// `StdFont.cpp:319-352,841-842`).
     pub fn render_chrome(&mut self, surface: &mut Surface) {
-        self.render_base(surface, "", false, true);
+        self.render_chrome_with_draw_focus(surface, true);
+    }
+
+    pub fn render_chrome_with_draw_focus(&mut self, surface: &mut Surface, draw_focus: bool) {
+        self.render_base(surface, "", false, draw_focus);
     }
 
     fn render_base(
@@ -940,6 +1061,10 @@ impl StartupMainMenu {
     }
 }
 
+fn graphics_rect(rect: IntRect) -> GraphicsRect {
+    GraphicsRect::new(rect.x, rect.y, rect.w.max(0) as u32, rect.h.max(0) as u32)
+}
+
 impl MenuButton {
     const fn new(label: &'static str, item: MainMenuItem) -> Self {
         Self {
@@ -1067,6 +1192,130 @@ mod tests {
         // Fan-project label anchor: right edge of the client rect.
         assert_eq!(layout.fanproject_anchor_x, 1255);
         assert_eq!(layout.client.y + layout.client.h, 701);
+    }
+
+    // C4StartupMainDlg appends six buttons, the participants label and the
+    // fan-project label in this order and at these bounds
+    // (C4StartupMainDlg.cpp:42-74); Container paints children head-to-tail
+    // (C4GuiContainers.cpp:33-44).
+    #[test]
+    fn paint_nodes_preserve_main_dialog_child_order_bounds_and_identity() {
+        let fonts = endeavour_font_set();
+        let mut menu = main_menu();
+        menu.set_clonk_fonts(Some(Arc::clone(&fonts)));
+        let participants = "Players: Ada, Bob";
+        let layout = main_menu_layout(1280, 720);
+        let items = [
+            MainMenuItem::LocalGame,
+            MainMenuItem::NetworkGame,
+            MainMenuItem::PlayerSelection,
+            MainMenuItem::Options,
+            MainMenuItem::About,
+            MainMenuItem::Quit,
+        ];
+        let labels = [
+            "&Start Game",
+            "Start &Network Game",
+            "&Player Selection",
+            "&Options",
+            "&About",
+            "E&xit",
+        ];
+        let mut expected = items
+            .into_iter()
+            .zip(labels)
+            .zip(layout.buttons)
+            .enumerate()
+            .map(|(index, ((item, text), bounds))| {
+                clonk_graphics::PaintNode::new(
+                    StartupMainMenuPaintId::Button(item),
+                    clonk_graphics::Rect::new(bounds.x, bounds.y, bounds.w as u32, bounds.h as u32),
+                    StartupMainMenuPaintVisual::Button {
+                        text,
+                        enabled: true,
+                        fallback_selected: index == 0,
+                        highlighted: false,
+                        pressed: false,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let participants_bounds = menu.participants_rect(participants);
+        expected.push(clonk_graphics::PaintNode::new(
+            StartupMainMenuPaintId::Participants,
+            clonk_graphics::Rect::new(
+                participants_bounds.x,
+                participants_bounds.y,
+                participants_bounds.w as u32,
+                participants_bounds.h as u32,
+            ),
+            StartupMainMenuPaintVisual::Participants {
+                text: participants.to_owned(),
+            },
+        ));
+        let (fanproject_width, fanproject_height) = fonts.mini.measure(FANPROJECT_TEXT, false);
+        expected.push(clonk_graphics::PaintNode::new(
+            StartupMainMenuPaintId::FanProject,
+            clonk_graphics::Rect::new(
+                layout.fanproject_anchor_x - fanproject_width,
+                layout.client.y + layout.client.h - fanproject_height / 2,
+                fanproject_width as u32,
+                fanproject_height as u32,
+            ),
+            StartupMainMenuPaintVisual::FanProject {
+                text: FANPROJECT_TEXT,
+            },
+        ));
+
+        assert_eq!(
+            menu.paint_nodes_with_native_fonts(participants, true, None),
+            expected
+        );
+    }
+
+    // Button pixels depend on down, enabled, focus, mouse-over and caption
+    // state (C4GuiButton.cpp:81-109,160-175); UpdateParticipants replaces the
+    // live label text (C4StartupMainDlg.cpp:174-200).
+    #[test]
+    fn paint_node_equality_distinguishes_each_live_main_menu_visual_input() {
+        let mut menu = main_menu();
+        menu.set_highlight_texture(Some(ImageData::new(1, 1, vec![255; 4])));
+        let participants = "Players: Ada";
+        let baseline = menu.paint_nodes_with_native_fonts(participants, true, None);
+
+        let _ = menu.handle_pointer_move(button_center(0));
+        let hover_on_focused = menu.paint_nodes_with_native_fonts(participants, true, None);
+        assert_eq!(
+            baseline[0], hover_on_focused[0],
+            "focus and hover share the same effective highlight pixels"
+        );
+        menu.pointer_left();
+
+        let without_focus = menu.paint_nodes_with_native_fonts(participants, false, None);
+        assert_ne!(baseline[0], without_focus[0]);
+        assert_eq!(&baseline[1..], &without_focus[1..]);
+
+        let _ = menu.handle_pointer_move(button_center(1));
+        let hovered = menu.paint_nodes_with_native_fonts(participants, true, None);
+        assert_ne!(baseline[1], hovered[1]);
+        assert_eq!(baseline[1].id(), hovered[1].id());
+
+        let _ = menu.handle_pointer_down(button_center(1));
+        let pressed = menu.paint_nodes_with_native_fonts(participants, true, None);
+        assert_ne!(hovered[1], pressed[1]);
+        assert_eq!(hovered[1].bounds(), pressed[1].bounds());
+
+        menu.set_item_enabled(MainMenuItem::NetworkGame, false);
+        let disabled = menu.paint_nodes_with_native_fonts(participants, true, None);
+        assert_ne!(pressed[1], disabled[1]);
+
+        let changed_participants =
+            menu.paint_nodes_with_native_fonts("Players: Ada, Bob", true, None);
+        assert_ne!(disabled[6], changed_participants[6]);
+        assert_eq!(disabled[6].id(), changed_participants[6].id());
+        assert_eq!(&disabled[..6], &changed_participants[..6]);
+        assert_eq!(disabled[7], changed_participants[7]);
     }
 
     #[test]

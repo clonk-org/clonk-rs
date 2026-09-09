@@ -237,6 +237,8 @@ mod main_app_state;
 mod main_assets;
 #[path = "main_parts/audio.rs"]
 mod main_audio;
+#[path = "main_parts/dirty_regions.rs"]
+mod main_dirty_regions;
 #[path = "main_parts/gpu_profile.rs"]
 mod main_gpu_profile;
 #[path = "main_parts/render_io.rs"]
@@ -247,6 +249,7 @@ mod main_resources;
 pub(crate) use main_app_state::*;
 pub(crate) use main_assets::*;
 pub(crate) use main_audio::*;
+pub(crate) use main_dirty_regions::*;
 pub(crate) use main_gpu_profile::*;
 pub(crate) use main_render_io::*;
 pub(crate) use main_resources::*;
@@ -1987,64 +1990,70 @@ fn run() -> Result<()> {
                                 // retry on the normal refresh schedule without
                                 // treating it as a presentation or spinning while
                                 // the surface remains occluded.
+                                app.invalidate_startup_gpu_damage();
                                 render_floor.note_refused_presentation(Instant::now());
                                 false
                             }
-                            Err(error) => match retained_gpu_present_recovery(&error) {
-                                RetainedGpuPresentRecovery::RebuildDevice => {
-                                    let rebuild_schedule = surface_rebuild.note_loss();
-                                    tracing::warn!(
-                                        ?error,
-                                        "retained GPU device requires recreation"
-                                    );
-                                    match rebuild_retained_gpu_device(
-                                        window,
-                                        pixels_slot,
-                                        retained_gpu_renderer,
-                                    ) {
-                                        Ok(()) => {
-                                            if let Some(probe) = device_loss_probe.as_mut() {
-                                                probe.note_rebuild(format!("{error:#}"), true);
+                            Err(error) => {
+                                app.invalidate_startup_gpu_damage();
+                                match retained_gpu_present_recovery(&error) {
+                                    RetainedGpuPresentRecovery::RebuildDevice => {
+                                        let rebuild_schedule = surface_rebuild.note_loss();
+                                        tracing::warn!(
+                                            ?error,
+                                            "retained GPU device requires recreation"
+                                        );
+                                        match rebuild_retained_gpu_device(
+                                            window,
+                                            pixels_slot,
+                                            retained_gpu_renderer,
+                                        ) {
+                                            Ok(()) => {
+                                                if let Some(probe) = device_loss_probe.as_mut() {
+                                                    probe.note_rebuild(format!("{error:#}"), true);
+                                                }
+                                                render_floor
+                                                    .note_refused_presentation(Instant::now());
+                                                if rebuild_schedule
+                                                    == SurfaceRebuildSchedule::Immediate
+                                                {
+                                                    window.request_redraw();
+                                                }
                                             }
-                                            render_floor.note_refused_presentation(Instant::now());
-                                            if rebuild_schedule == SurfaceRebuildSchedule::Immediate
-                                            {
-                                                window.request_redraw();
+                                            Err(rebuild_error) => {
+                                                tracing::error!(
+                                                    ?rebuild_error,
+                                                    "retained GPU recovery failed"
+                                                );
+                                                if let Some(probe) = device_loss_probe.as_mut() {
+                                                    probe.note_rebuild(format!("{error:#}"), false);
+                                                    probe.conclude(&event_handler_exit_code);
+                                                }
+                                                event_target.exit();
                                             }
                                         }
-                                        Err(rebuild_error) => {
-                                            tracing::error!(
-                                                ?rebuild_error,
-                                                "retained GPU recovery failed"
-                                            );
-                                            if let Some(probe) = device_loss_probe.as_mut() {
-                                                probe.note_rebuild(format!("{error:#}"), false);
-                                                probe.conclude(&event_handler_exit_code);
-                                            }
-                                            event_target.exit();
-                                        }
+                                        false
                                     }
-                                    false
-                                }
-                                RetainedGpuPresentRecovery::CpuFallback => {
-                                    // `render_layers` validated the composition
-                                    // extent against this device before returning
-                                    // this source/shader limit error. The ordinary
-                                    // CPU presenter below therefore has a valid
-                                    // physical target and is the exact reference
-                                    // fallback for this device.
-                                    tracing::warn!(
+                                    RetainedGpuPresentRecovery::CpuFallback => {
+                                        // `render_layers` validated the composition
+                                        // extent against this device before returning
+                                        // this source/shader limit error. The ordinary
+                                        // CPU presenter below therefore has a valid
+                                        // physical target and is the exact reference
+                                        // fallback for this device.
+                                        tracing::warn!(
                                         ?error,
                                         "retained GPU texture exceeds device limit; using CPU presentation"
                                     );
-                                    true
+                                        true
+                                    }
+                                    RetainedGpuPresentRecovery::Fatal => {
+                                        tracing::error!(?error, "retained GPU render failed");
+                                        event_target.exit();
+                                        false
+                                    }
                                 }
-                                RetainedGpuPresentRecovery::Fatal => {
-                                    tracing::error!(?error, "retained GPU render failed");
-                                    event_target.exit();
-                                    false
-                                }
-                            },
+                            }
                         };
                         if !fallback_to_cpu {
                             window.set_cursor_visible(app.platform_cursor_visible());
@@ -2060,6 +2069,7 @@ fn run() -> Result<()> {
                     };
                     let pixels = &mut pixels;
                     app.presentation.retained_gpu_presentation_active = false;
+                    app.invalidate_startup_gpu_damage();
                     let (physical_width, physical_height) = presenter.physical_size();
                     // Only a GPU target has a texture limit to exceed; the
                     // software presenter's frame is an ordinary allocation.
@@ -2998,6 +3008,8 @@ impl GameApp {
                 retained_gpu_presentation_active: false,
                 retained_gpu_ordered_capture_active: false,
                 retained_native_capture_surface: None,
+                startup_gpu_paint_owners: None,
+                rendered_startup_tooltip_owner: None,
                 pending_native_presentation: None,
                 frames_since_redraw: 0,
                 frames_per_second: 0,
@@ -3606,6 +3618,7 @@ impl GameApp {
             text,
             fonts: None,
             gpu_recorder,
+            owner: None,
         });
     }
 
@@ -3639,6 +3652,7 @@ impl GameApp {
                 text,
                 fonts: None,
                 gpu_recorder,
+                owner: None,
             });
         }
     }
@@ -3706,6 +3720,23 @@ impl GameApp {
             &mut self.presentation.pending_native_presentation,
             self.presentation.retained_gpu_ordered_capture_active,
         );
+    }
+
+    fn next_pending_native_overlay_owned(&mut self, owner: RetainedGpuLayerOwner) {
+        let previous_len = self
+            .presentation
+            .pending_native_presentation
+            .as_ref()
+            .map_or(0, |plan| plan.batches.len());
+        self.next_pending_native_overlay();
+        let plan = self
+            .presentation
+            .pending_native_presentation
+            .as_mut()
+            .expect("ordered presentation plan is active");
+        if plan.batches.len() > previous_len {
+            plan.batches.last_mut().expect("batch was appended").owner = Some(owner);
+        }
     }
 
     fn next_pending_native_overlay_with_clip(&mut self, isolated_clip: Rect) {
