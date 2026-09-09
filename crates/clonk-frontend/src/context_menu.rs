@@ -1419,14 +1419,19 @@ fn render_panel_only<A: Clone>(
     Ok(())
 }
 
-pub fn draw_classic_tooltip(
-    surface: &mut Surface,
+struct ClassicTooltipLayout {
+    bounds: IntRect,
+    broken_text: String,
+}
+
+fn classic_tooltip_layout(
+    surface_width: u32,
+    surface_height: u32,
     font: &ClonkFont,
     pointer: GuiPoint,
     text: &str,
-    gamma: Option<&GammaRamp>,
-) {
-    let max_width = TOOLTIP_MAX_WIDTH.min((surface.width() as i32).max(50));
+) -> ClassicTooltipLayout {
+    let max_width = TOOLTIP_MAX_WIDTH.min((surface_width as i32).max(50));
     let broken = crate::message_dialog::break_message(font, text, max_width);
     let (text_width, text_height) = font.measure(&broken, true);
     let width = text_width + 6;
@@ -1434,12 +1439,12 @@ pub fn draw_classic_tooltip(
     let pointer_x = pointer.x as i32;
     let pointer_y = pointer.y as i32;
     let y = if pointer_y < height + 5 {
-        (pointer_y + 5).min(surface.height() as i32 - height)
+        (pointer_y + 5).min(surface_height as i32 - height)
     } else {
         pointer_y - height - 5
     };
     let candidate_x = pointer_x - width / 2;
-    let max_x = surface.width() as i32 - width;
+    let max_x = surface_width as i32 - width;
     let x = if candidate_x < 0 {
         0
     } else if candidate_x > max_x {
@@ -1447,6 +1452,48 @@ pub fn draw_classic_tooltip(
     } else {
         candidate_x
     };
+    ClassicTooltipLayout {
+        bounds: IntRect::new(x, y, width, height),
+        broken_text: broken,
+    }
+}
+
+/// Exact outer rectangle used by [`draw_classic_tooltip`].
+///
+/// This exposes `Screen::DrawToolTip`'s measured 6-by-4 frame expansion and
+/// pointer-relative edge placement (oracle `7d43b47`, `src/C4Gui.cpp:907-924`)
+/// without drawing. Negative origins are retained for surfaces smaller than
+/// the tooltip; non-positive malformed-font extents yield an empty rectangle.
+pub fn classic_tooltip_bounds(
+    surface_width: u32,
+    surface_height: u32,
+    font: &ClonkFont,
+    pointer: GuiPoint,
+    text: &str,
+) -> clonk_graphics::Rect {
+    let bounds = classic_tooltip_layout(surface_width, surface_height, font, pointer, text).bounds;
+    clonk_graphics::Rect::new(
+        bounds.x,
+        bounds.y,
+        u32::try_from(bounds.w).unwrap_or(0),
+        u32::try_from(bounds.h).unwrap_or(0),
+    )
+}
+
+pub fn draw_classic_tooltip(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    pointer: GuiPoint,
+    text: &str,
+    gamma: Option<&GammaRamp>,
+) -> clonk_graphics::Rect {
+    let layout = classic_tooltip_layout(surface.width(), surface.height(), font, pointer, text);
+    let IntRect {
+        x,
+        y,
+        w: width,
+        h: height,
+    } = layout.bounds;
     draw_engine_box(
         surface,
         x,
@@ -1469,12 +1516,18 @@ pub fn draw_classic_tooltip(
         surface,
         x + 3,
         y + 1,
-        &broken,
+        &layout.broken_text,
         TOOLTIP_TEXT,
         TextAlign::Left,
         true,
         gamma,
     );
+    clonk_graphics::Rect::new(
+        x,
+        y,
+        u32::try_from(width).unwrap_or(0),
+        u32::try_from(height).unwrap_or(0),
+    )
 }
 
 #[cfg(test)]
@@ -1642,6 +1695,55 @@ mod tests {
 
     fn screen() -> IntRect {
         IntRect::new(0, 0, 320, 200)
+    }
+
+    // Screen::DrawToolTip measures the broken text, adds the 6x4 frame room,
+    // flips above/below the pointer and clamps horizontally
+    // (oracle 7d43b47, src/C4Gui.cpp:907-924).
+    #[test]
+    fn classic_tooltip_bounds_match_the_cpp_box_and_edge_placement() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let font = &fonts.text;
+        let text = "Queryable tooltip bounds";
+        let broken = crate::message_dialog::break_message(font, text, 200);
+        let (text_width, text_height) = font.measure(&broken, true);
+        let width = u32::try_from(text_width + 6).expect("positive tooltip width");
+        let height = u32::try_from(text_height + 4).expect("positive tooltip height");
+
+        let above = classic_tooltip_bounds(200, 100, font, GuiPoint::new(100.0, 80.0), text);
+        assert_eq!(
+            above,
+            clonk_graphics::Rect::new(
+                100 - i32::try_from(width).unwrap() / 2,
+                80 - i32::try_from(height).unwrap() - 5,
+                width,
+                height,
+            )
+        );
+
+        let below_right = classic_tooltip_bounds(200, 100, font, GuiPoint::new(199.0, 1.0), text);
+        assert_eq!(
+            below_right,
+            clonk_graphics::Rect::new(200 - i32::try_from(width).unwrap(), 6, width, height,)
+        );
+    }
+
+    // Screen::DrawToolTip already owns the measured rectangle it paints, so
+    // callers can reuse it without breaking and measuring the text again
+    // (oracle 7d43b47, src/C4Gui.cpp:907-924).
+    #[test]
+    fn classic_tooltip_draw_returns_its_exact_outer_bounds() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let font = &fonts.text;
+        let pointer = GuiPoint::new(100.0, 80.0);
+        let text = "One measured tooltip";
+        let expected = classic_tooltip_bounds(200, 100, font, pointer, text);
+        let mut surface = Surface::new(200, 100, PixelFormat::Rgba8888);
+
+        assert_eq!(
+            draw_classic_tooltip(&mut surface, font, pointer, text, None),
+            expected
+        );
     }
 
     #[test]

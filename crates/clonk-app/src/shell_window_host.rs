@@ -107,8 +107,10 @@ impl DeveloperWindowPresenter<GameApp> for ShellWindowHost {
             .renderer
             .as_mut()
             .ok_or_else(|| "the shell has no retained GPU renderer".to_string())?;
-        present_retained_gpu_frame(app, pixels, &self.presenter, renderer)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        app.with_independent_startup_gpu_lineage(|app| {
+            present_retained_gpu_frame(app, pixels, &self.presenter, renderer)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
     }
 }

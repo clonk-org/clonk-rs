@@ -16,11 +16,22 @@ pub(crate) struct NativePresentationPlan {
 pub(crate) struct RetainedGpuFrame {
     pub(crate) layers: Vec<RetainedGpuFrameLayer>,
     pub(crate) capture_stats: clonk_graphics::GpuSceneCaptureStats,
+    /// `None` starts/replaces compositor lineage with a complete frame;
+    /// `Some` patches the preceding successful startup presentation.
+    pub(crate) physical_damage: Option<clonk_graphics::DamageRegion>,
 }
 
 pub(crate) struct RetainedGpuFrameLayer {
     pub(crate) scene: GpuScene,
     pub(crate) presentation: GpuPresentation,
+    /// Provenance for an isolated painter-order layer whose conservative
+    /// command bounds may be represented by a more exact semantic owner.
+    pub(crate) owner: Option<RetainedGpuLayerOwner>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetainedGpuLayerOwner {
+    StartupElementTooltip,
 }
 
 #[derive(Clone)]
@@ -40,6 +51,8 @@ pub(crate) struct NativePresentationBatch {
     /// Painter-ordered logical commands recorded for this exact batch. CPU
     /// presentation leaves this empty and replays `logical_layer` instead.
     pub(crate) gpu_recorder: Option<GpuSceneRecorder>,
+    /// Carried into every retained layer produced from this isolated batch.
+    pub(crate) owner: Option<RetainedGpuLayerOwner>,
 }
 
 /// Config-driven bits the startup parity renderers display.
@@ -1256,9 +1269,21 @@ pub(crate) fn render_startup_frame(
             StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
                 if defer_native_main_text {
-                    main_menu.render_chrome(surface);
+                    main_menu.render_chrome_with_draw_focus(
+                        surface,
+                        !context_menu_open
+                            && !definition_selector_open
+                            && !game_option_input_open
+                            && !message_dialog_open,
+                    );
                 } else {
-                    main_menu.render(surface, !context_menu_open);
+                    main_menu.render(
+                        surface,
+                        !context_menu_open
+                            && !definition_selector_open
+                            && !game_option_input_open
+                            && !message_dialog_open,
+                    );
                 }
                 // Logo + version line per C4StartupMainDlg::DrawElement
                 // (C4StartupMainDlg.cpp:111-122), in C++ integer math.

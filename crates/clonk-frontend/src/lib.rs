@@ -110,7 +110,8 @@ pub use input::InputDispatcher;
 pub use startup_about::{AboutAction, StartupAboutDialog};
 pub use startup_main_menu::{
     centered_label_rect, centered_label_tooltip_at, main_menu_layout, MainMenuAction, MainMenuItem,
-    StartupMainMenu, StartupTooltip,
+    StartupMainMenu, StartupMainMenuPaintId, StartupMainMenuPaintNode, StartupMainMenuPaintVisual,
+    StartupTooltip,
 };
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
 pub use startup_options::{ControlOptionItem, ControlOptionsAction, ControlOptionsView};

@@ -1654,6 +1654,13 @@ pub(crate) struct PresentationState {
     pub(crate) retained_gpu_ordered_capture_active: bool,
     /// Reused command-only target for scale-native physical text layers.
     pub(crate) retained_native_capture_surface: Option<Surface>,
+    /// Paint ownership for the last successfully prepared startup GPU frame.
+    /// The renderer still establishes the corresponding compositor lineage;
+    /// any non-retained presentation clears this cache before it can be used.
+    pub(crate) startup_gpu_paint_owners: Option<StartupGpuPaintOwners>,
+    /// Element tooltip actually emitted during the current retained capture.
+    /// This avoids re-querying the live 500ms clock after the draw boundary.
+    pub(crate) rendered_startup_tooltip_owner: Option<RenderedStartupTooltipOwner>,
     /// Ordered logical chrome/native-text batches prepared during the current
     /// logical render and consumed immediately after FramePresenter upscales
     /// the base. Keeping later chrome in separate batches preserves C4GUI
@@ -7156,6 +7163,66 @@ pub(crate) enum StartupView {
     PlayerSelection,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StartupGpuPaintOwners {
+    pub(crate) view: StartupView,
+    pub(crate) retained: RetainedGpuPaintOwners,
+    pub(crate) main_menu: Option<Vec<clonk_frontend::StartupMainMenuPaintNode>>,
+    pub(crate) overlays: Vec<StartupOverlayPaintNode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum StartupOverlayPaintId {
+    ElementTooltip,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StartupOverlayPaintVisual {
+    Tooltip { text: String },
+}
+
+pub(crate) type StartupOverlayPaintNode =
+    clonk_graphics::PaintNode<StartupOverlayPaintId, StartupOverlayPaintVisual>;
+
+pub(crate) struct RenderedStartupTooltipOwner {
+    pub(crate) logical_bounds: Rect,
+    pub(crate) text: String,
+}
+
+impl StartupGpuPaintOwners {
+    pub(crate) fn damage_from(&self, previous: &Self) -> clonk_graphics::DamageRegion {
+        if self.view != previous.view {
+            let mut damage = clonk_graphics::DamageRegion::new(self.retained.physical_bounds);
+            damage.add(self.retained.physical_bounds);
+            return damage;
+        }
+        let mut damage = self.retained.damage_from(&previous.retained);
+        let previous_main = previous.main_menu.as_deref().unwrap_or(&[]);
+        let current_main = self.main_menu.as_deref().unwrap_or(&[]);
+        let semantic = clonk_graphics::DamageRegion::between(
+            self.retained.physical_bounds,
+            previous_main,
+            current_main,
+        );
+        semantic
+            .rects()
+            .iter()
+            .copied()
+            .for_each(|rect| damage.add(rect));
+        let overlays = clonk_graphics::DamageRegion::between(
+            self.retained.physical_bounds,
+            &previous.overlays,
+            &self.overlays,
+        );
+        overlays
+            .rects()
+            .iter()
+            .copied()
+            .for_each(|rect| damage.add(rect));
+        damage
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartupDialog {
     MainMenu,
@@ -10605,8 +10672,12 @@ impl MainMenuState {
             .render_with_draw_focus(surface, &self.participants_label, draw_focus);
     }
 
-    pub(crate) fn render_chrome(&mut self, surface: &mut Surface) {
-        self.menu.render_chrome(surface);
+    pub(crate) fn render_chrome_with_draw_focus(
+        &mut self,
+        surface: &mut Surface,
+        draw_focus: bool,
+    ) {
+        self.menu.render_chrome_with_draw_focus(surface, draw_focus);
     }
 
     pub(crate) fn render_native_text(

@@ -13,6 +13,17 @@ use super::*;
 /// narrow enough not to eat the view a 400x250 window starts with.
 const CONSOLE_SCROLL_BAR_THICKNESS: i32 = 6;
 
+// Sparse composition replays the ordered scene once per disjoint patch. Keep
+// ordinary one- and two-owner transitions sparse, but bound the worst-case
+// command walk before a fragmented region multiplies the complete menu scene.
+const MAX_STARTUP_GPU_DAMAGE_PATCHES: usize = 8;
+
+pub(crate) fn startup_gpu_damage_for_replay(
+    damage: clonk_graphics::DamageRegion,
+) -> Option<clonk_graphics::DamageRegion> {
+    (!damage.is_full() && damage.rects().len() <= MAX_STARTUP_GPU_DAMAGE_PATCHES).then_some(damage)
+}
+
 impl GameApp {
     /// Compose the port's opt-in diagnostics overlay (`Graphics.ShowStats`,
     /// plus a default-unbound `StatsToggle` key — both off by default).
@@ -1728,6 +1739,7 @@ impl GameApp {
                                 text: Vec::new(),
                                 fonts: None,
                                 gpu_recorder: fade.underlay_gpu_recorder.clone(),
+                                owner: None,
                             });
                             if outgoing_opacity != 0 {
                                 if let Some(outgoing) = fade.outgoing_gpu_plan.as_ref() {
@@ -1745,6 +1757,7 @@ impl GameApp {
                                     text: incoming_text,
                                     fonts: None,
                                     gpu_recorder: incoming_gpu_recorder,
+                                    owner: None,
                                 };
                                 apply_startup_fade_to_batch(&mut incoming, incoming_opacity)?;
                                 plan.batches.push(incoming);
@@ -1767,6 +1780,7 @@ impl GameApp {
                                         ),
                                         fonts: fade.outgoing_native_fonts.clone(),
                                         gpu_recorder: None,
+                                        owner: None,
                                     });
                                 }
                             }
@@ -1784,6 +1798,7 @@ impl GameApp {
                                     ),
                                     fonts: None,
                                     gpu_recorder: None,
+                                    owner: None,
                                 });
                             }
                         }
@@ -1947,7 +1962,13 @@ impl GameApp {
                 }
                 let startup_tooltips_drawn = self.render_startup_tooltips()?;
                 if ordered_native && startup_tooltips_drawn {
-                    self.next_pending_native_overlay();
+                    if self.presentation.rendered_startup_tooltip_owner.is_some() {
+                        self.next_pending_native_overlay_owned(
+                            RetainedGpuLayerOwner::StartupElementTooltip,
+                        );
+                    } else {
+                        self.next_pending_native_overlay();
+                    }
                 }
                 if self.render_league_signup_tooltip(Some(menu_gamma))? && ordered_native {
                     self.next_pending_native_overlay();
@@ -2565,6 +2586,8 @@ impl GameApp {
         &mut self,
         presentation: GpuPresentation,
     ) -> Result<RetainedGpuFrame> {
+        self.presentation.rendered_startup_tooltip_owner = None;
+        let startup_damage_eligible = self.startup_gpu_damage_eligible();
         let gamma = self.retained_gpu_frame_gamma();
         let renderer_config = self.rendering.graphics.advanced_renderer_config();
         // The monitor resolve is a second full-screen pass; the detail
@@ -2595,12 +2618,9 @@ impl GameApp {
                 .pending_native_presentation
                 .take()
                 .ok_or_else(|| anyhow!("ordered GPU presentation ended without a layer plan"))?;
-            return self.retained_gpu_frame_from_native_plan(
-                plan,
-                presentation,
-                &gamma,
-                gamma_mode,
-            );
+            let frame =
+                self.retained_gpu_frame_from_native_plan(plan, presentation, &gamma, gamma_mode)?;
+            return Ok(self.attach_startup_gpu_damage(frame, startup_damage_eligible, true));
         }
 
         self.rendering.graphics.begin_gpu_scene_capture();
@@ -2628,18 +2648,138 @@ impl GameApp {
                 frame.layers.push(RetainedGpuFrameLayer {
                     scene,
                     presentation,
+                    owner: None,
                 });
             }
             frame.capture_stats.merge(capture_stats);
-            return Ok(frame);
+            return Ok(self.attach_startup_gpu_damage(frame, startup_damage_eligible, false));
         }
-        Ok(RetainedGpuFrame {
+        let frame = RetainedGpuFrame {
             layers: vec![RetainedGpuFrameLayer {
                 scene,
                 presentation,
+                owner: None,
             }],
             capture_stats,
-        })
+            physical_damage: None,
+        };
+        Ok(self.attach_startup_gpu_damage(frame, startup_damage_eligible, false))
+    }
+
+    pub(crate) fn startup_gpu_damage_eligible(&self) -> bool {
+        self.mode == AppMode::Menu
+            && self.startup.dialog_fade.is_none()
+            && !self.console_session.enabled
+            && self.startup.view != StartupView::NetworkLobby
+    }
+
+    fn attach_startup_gpu_damage(
+        &mut self,
+        mut frame: RetainedGpuFrame,
+        eligible: bool,
+        ordered_native: bool,
+    ) -> RetainedGpuFrame {
+        if !eligible {
+            self.presentation.startup_gpu_paint_owners = None;
+            return frame;
+        }
+        let main_menu = frame
+            .layers
+            .first()
+            .filter(|_| self.startup.view == StartupView::MainMenu)
+            .map(|layer| {
+                let presentation = layer.presentation;
+                let context_menu_open = self.context_menus.open.is_some()
+                    || self.startup.player_properties_dialog.is_some()
+                    || self.dialogs.league_signup.is_some()
+                    || self.chat.external_dialog_visible
+                    || self.dialogs.client_list.is_some()
+                    || self.definition_selection.dialog.is_some()
+                    || self.dialogs.game_option_input.is_some()
+                    || !self.dialogs.messages.is_empty();
+                let logical_extent = [
+                    self.rendering.graphics.surface().width(),
+                    self.rendering.graphics.surface().height(),
+                ];
+                self.main_menu_state
+                    .menu
+                    .paint_nodes_with_native_fonts(
+                        &self.main_menu_state.participants_label,
+                        !context_menu_open,
+                        ordered_native
+                            .then_some(self.native_startup_fonts.as_deref())
+                            .flatten(),
+                    )
+                    .into_iter()
+                    .filter_map(|node| {
+                        retained_gpu_physical_bounds(node.bounds(), logical_extent, presentation)
+                            .map(|bounds| {
+                                clonk_graphics::PaintNode::new(
+                                    *node.id(),
+                                    bounds,
+                                    node.visual().clone(),
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let overlays = self
+            .presentation
+            .rendered_startup_tooltip_owner
+            .take()
+            .and_then(|tooltip| {
+                retained_gpu_physical_bounds(
+                    tooltip.logical_bounds,
+                    [
+                        self.rendering.graphics.surface().width(),
+                        self.rendering.graphics.surface().height(),
+                    ],
+                    frame.layers.first()?.presentation,
+                )
+                .map(|bounds| {
+                    clonk_graphics::PaintNode::new(
+                        StartupOverlayPaintId::ElementTooltip,
+                        bounds,
+                        StartupOverlayPaintVisual::Tooltip { text: tooltip.text },
+                    )
+                })
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let raster_halo_owners = overlays
+            .iter()
+            .map(clonk_graphics::PaintNode::bounds)
+            .collect::<Vec<_>>();
+        let owners = StartupGpuPaintOwners {
+            view: self.startup.view,
+            retained: retained_gpu_frame_paint_owners(&frame, &raster_halo_owners),
+            main_menu,
+            overlays,
+        };
+        frame.physical_damage = self
+            .presentation
+            .startup_gpu_paint_owners
+            .as_ref()
+            .and_then(|previous| startup_gpu_damage_for_replay(owners.damage_from(previous)));
+        self.presentation.startup_gpu_paint_owners = Some(owners);
+        frame
+    }
+
+    pub(crate) fn invalidate_startup_gpu_damage(&mut self) {
+        self.presentation.startup_gpu_paint_owners = None;
+    }
+
+    /// Run a presentation for a renderer/target other than the primary game
+    /// window without allowing either compositor's backing pixels to satisfy
+    /// the other's retained ownership cache.
+    pub(crate) fn with_independent_startup_gpu_lineage<T>(
+        &mut self,
+        present: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.invalidate_startup_gpu_damage();
+        let result = present(self);
+        self.invalidate_startup_gpu_damage();
+        result
     }
 
     fn retained_gpu_frame_from_native_plan(
@@ -2669,6 +2809,7 @@ impl GameApp {
         let mut layers = Vec::new();
         let result = (|| -> Result<()> {
             for batch in plan.batches {
+                let owner = batch.owner;
                 anyhow::ensure!(
                     batch.logical_layer.is_none(),
                     "ordered retained GPU capture produced a CPU logical layer"
@@ -2681,6 +2822,7 @@ impl GameApp {
                     layers.push(RetainedGpuFrameLayer {
                         scene,
                         presentation: logical_presentation,
+                        owner,
                     });
                 }
 
@@ -2737,6 +2879,7 @@ impl GameApp {
                 layers.push(RetainedGpuFrameLayer {
                     scene,
                     presentation: GpuPresentation::identity(physical_width, physical_height),
+                    owner,
                 });
             }
             anyhow::ensure!(
@@ -2753,6 +2896,7 @@ impl GameApp {
         Ok(RetainedGpuFrame {
             layers,
             capture_stats,
+            physical_damage: None,
         })
     }
 
@@ -5978,6 +6122,7 @@ impl GameApp {
                     text,
                     fonts: None,
                     gpu_recorder: surface.take_gpu_scene_capture(),
+                    owner: None,
                 });
             surface.clear_clip();
             if !self.presentation.retained_gpu_ordered_capture_active {

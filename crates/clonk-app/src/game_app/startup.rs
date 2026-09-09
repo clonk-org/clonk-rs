@@ -5484,13 +5484,17 @@ impl GameApp {
             .as_deref()
             .context("classic shadowless tooltip font is unavailable")?;
         let gamma = self.startup_fragment_gamma();
-        clonk_frontend::context_menu::draw_classic_tooltip(
+        let logical_bounds = clonk_frontend::context_menu::draw_classic_tooltip(
             self.rendering.graphics.surface_mut(),
             tooltip_font,
             pointer,
             &text,
             Some(&gamma),
         );
+        self.presentation.rendered_startup_tooltip_owner = Some(RenderedStartupTooltipOwner {
+            logical_bounds,
+            text,
+        });
         Ok(true)
     }
 

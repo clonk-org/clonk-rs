@@ -2712,6 +2712,7 @@ fn startup_fade_modulates_retained_draws_and_text_like_cpp() {
             }],
             fonts: None,
             gpu_recorder: surface.take_gpu_scene_capture(),
+            owner: None,
         };
         apply_startup_fade_to_batch(&mut batch, opacity).test_value();
         let scene = batch.gpu_recorder.take().test_value().into_scene(
@@ -5666,4 +5667,548 @@ fn native_menu_text_baseline_is_one_bound_draw_per_glyph() {
          outnumber bindings: {quads} draws over {} bindings",
         textures.len()
     );
+}
+
+// C++ paints every visible GUI child in list order on each presentation
+// (src/C4GuiContainers.cpp:33-45). Rust's retained compositor may skip that
+// work only after one complete frame establishes ownership and an identical
+// second frame proves that no physical pixel changed.
+#[test]
+fn unchanged_startup_frame_carries_an_empty_physical_damage_region() {
+    let mut app = new_real_menu_app(320, 200);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+
+    let first = app.render_retained_gpu_frame(presentation).test_value();
+    let second = app.render_retained_gpu_frame(presentation).test_value();
+
+    main_assert!(
+        first.physical_damage.is_none(),
+        "the cache lineage starts with a complete frame"
+    );
+    main_assert_eq!(second.physical_damage.test_ref().rects() => &[], "an identical frame must issue no patch draw");
+}
+
+#[test]
+fn fragmented_startup_damage_falls_back_before_patch_replay_multiplies_work() {
+    let bounds = Rect::new(0, 0, 20, 1);
+    let mut damage = clonk_graphics::DamageRegion::new(bounds);
+    for x in (0..16).step_by(2) {
+        damage.add(Rect::new(x, 0, 1, 1));
+    }
+    main_assert!(game_app_render::startup_gpu_damage_for_replay(damage.clone()).is_some());
+
+    damage.add(Rect::new(16, 0, 1, 1));
+    main_assert!(game_app_render::startup_gpu_damage_for_replay(damage).is_none());
+}
+
+// C4GUI moves keyboard focus by clearing the old Control and assigning the
+// new one before the next Draw (src/C4GuiDialogs.cpp:599-614). The retained
+// compositor must therefore restore and repaint both exact control bounds.
+#[test]
+fn startup_focus_move_damages_exact_old_and_new_button_bounds() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+    let layout = clonk_frontend::main_menu_layout(640, 480);
+
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    let _ = app.main_menu_state.menu.handle_key_down(KeyCode::Down);
+    let moved = app.render_retained_gpu_frame(presentation).test_value();
+
+    let expected = layout.buttons[..2]
+        .iter()
+        .map(|rect| Rect::new(rect.x, rect.y, rect.w as u32, rect.h as u32))
+        .collect::<Vec<_>>();
+    main_assert_eq!(moved.physical_damage.test_ref().rects() => expected.as_slice());
+}
+
+// CStdGL projects each GUI clipper into its scaled viewport before drawing
+// the focused control (src/StdGL.cpp:528-532). Fractional application scales
+// must expand both half-open button bounds to the touched physical pixels.
+#[test]
+fn startup_focus_damage_projects_exact_button_bounds_at_fractional_scale() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.5, false);
+    app.configure_native_startup_fonts(1.5, false);
+    let presentation = GpuPresentation {
+        physical_extent: [960, 720],
+        scale: 1.5,
+        crop_top: 0,
+        world_zoom: 1.0,
+    };
+    let layout = clonk_frontend::main_menu_layout(640, 480);
+
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    let _ = app.main_menu_state.menu.handle_key_down(KeyCode::Down);
+    let moved = app.render_retained_gpu_frame(presentation).test_value();
+
+    let expected = layout.buttons[..2]
+        .iter()
+        .map(|rect| Rect::new(rect.x, rect.y, rect.w as u32, rect.h as u32))
+        .map(|rect| retained_gpu_physical_bounds(rect, [640, 480], presentation).test_value())
+        .collect::<Vec<_>>();
+    main_assert_eq!(moved.physical_damage.test_ref().rects() => expected.as_slice());
+}
+
+// UpdateParticipants changes the autosized TextLabel text and bounds together
+// (src/C4StartupMainDlg.cpp:174-200; src/C4GuiLabels.cpp:141-153). Redraw owns
+// the union of the old and new projected label footprints, including at 1.5x.
+#[test]
+fn startup_participants_text_damages_exact_old_and_new_autosized_bounds() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.5, false);
+    app.configure_native_startup_fonts(1.5, false);
+    let presentation = GpuPresentation {
+        physical_extent: [960, 720],
+        scale: 1.5,
+        crop_top: 0,
+        world_zoom: 1.0,
+    };
+    let layout = clonk_frontend::main_menu_layout(640, 480);
+    let native_fonts = app.native_startup_fonts.clone().test_value();
+    let label_bounds = |text: &str| {
+        let (expanded, _) = clonk_frontend::expand_hotkey_markup(text);
+        let (width, height) = native_fonts.title.measure(&expanded, true);
+        Rect::new(
+            layout.participants_anchor.0 - width,
+            layout.participants_anchor.1,
+            width as u32,
+            height.saturating_add(1) as u32,
+        )
+    };
+    let old_bounds = label_bounds(&app.main_menu_state.participants_label);
+
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    app.main_menu_state
+        .update_participants_label("Players: Ada, Bob, Claire".to_owned());
+    let new_bounds = label_bounds(&app.main_menu_state.participants_label);
+    let changed = app.render_retained_gpu_frame(presentation).test_value();
+
+    let mut expected = clonk_graphics::DamageRegion::new(Rect::new(0, 0, 960, 720));
+    expected.add(retained_gpu_physical_bounds(old_bounds, [640, 480], presentation).test_value());
+    expected.add(retained_gpu_physical_bounds(new_bounds, [640, 480], presentation).test_value());
+    main_assert_eq!(changed.physical_damage.test_ref().rects() => expected.rects());
+}
+
+fn classic_region_cursor_bounds(app: &GameApp, point: GuiPoint) -> Rect {
+    let cell = app
+        .assets
+        .cursor_atlas()
+        .image_for_resolution(640)
+        .test_value()
+        .height() as i32;
+    let hotspot = if cell == 13 { 0 } else { cell / 2 };
+    Rect::new(
+        point.x as i32 - hotspot,
+        point.y as i32 - hotspot,
+        cell as u32,
+        cell as u32,
+    )
+}
+
+fn install_complete_test_cursor_atlas(app: &mut GameApp) {
+    Arc::get_mut(&mut app.assets).test_value().cursor_atlas = Arc::new(CursorAtlas::new(
+        (0..8)
+            .map(|index| {
+                let cell = if index == 6 { 6 } else { 4 };
+                Some(ImageData::new(
+                    40 * cell,
+                    cell,
+                    vec![255; (40 * cell * cell * 4) as usize],
+                ))
+            })
+            .collect(),
+    ));
+    app.resize(640, 480).test_value();
+}
+
+fn classic_region_cursor_physical_bounds(
+    app: &GameApp,
+    point: GuiPoint,
+    presentation: GpuPresentation,
+) -> Rect {
+    let cell = app
+        .assets
+        .cursor_atlas()
+        .image_for_scaled_resolution(640, presentation.scale)
+        .test_value()
+        .height() as i32;
+    let hotspot = if cell == 13 { 0 } else { cell / 2 };
+    Rect::new(
+        (point.x * presentation.scale - hotspot as f32).trunc() as i32,
+        (point.y * presentation.scale - hotspot as f32).trunc() as i32
+            + presentation.crop_top as i32,
+        cell as u32,
+        cell as u32,
+    )
+}
+
+// C4GUI::CMouse paints the Region cursor at the live pointer and therefore
+// replaces its prior footprint on movement (src/C4Gui.cpp:445-467). Both
+// half-open footprints must be restored without joining their untouched gap.
+#[test]
+fn startup_cursor_movement_damages_separate_exact_old_and_new_footprints() {
+    let mut app = new_real_menu_app(640, 480);
+    install_complete_test_cursor_atlas(&mut app);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+    let old_point = GuiPoint::new(50.0, 100.0);
+    let new_point = GuiPoint::new(150.0, 100.0);
+
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(old_point.x),
+        f64::from(old_point.y),
+    ));
+    let old = classic_region_cursor_bounds(&app, old_point);
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(new_point.x),
+        f64::from(new_point.y),
+    ));
+    let new = classic_region_cursor_bounds(&app, new_point);
+    let moved = app.render_retained_gpu_frame(presentation).test_value();
+
+    let mut expected = clonk_graphics::DamageRegion::new(Rect::new(0, 0, 640, 480));
+    [old, new].into_iter().for_each(|rect| expected.add(rect));
+    main_assert_eq!(moved.physical_damage.test_ref().rects() => expected.rects());
+}
+
+// C4GUI::CMouse remains the topmost startup control even while both cursor
+// positions are inside one unchanged button (src/C4Gui.cpp:608-625).
+#[test]
+fn startup_cursor_movement_inside_one_button_keeps_its_overlay_ownership() {
+    let mut app = new_real_menu_app(640, 480);
+    install_complete_test_cursor_atlas(&mut app);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+    let button = clonk_frontend::main_menu_layout(640, 480).buttons[0];
+    let old_point = GuiPoint::new((button.x + 30) as f32, (button.y + 20) as f32);
+    let new_point = GuiPoint::new((button.x + 70) as f32, (button.y + 20) as f32);
+
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(old_point.x),
+        f64::from(old_point.y),
+    ));
+    let old = classic_region_cursor_bounds(&app, old_point);
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(new_point.x),
+        f64::from(new_point.y),
+    ));
+    let new = classic_region_cursor_bounds(&app, new_point);
+    for rect in [&old, &new] {
+        main_assert!(
+            rect.x >= button.x
+                && rect.y >= button.y
+                && i64::from(rect.x) + i64::from(rect.width)
+                    <= i64::from(button.x) + i64::from(button.w)
+                && i64::from(rect.y) + i64::from(rect.height)
+                    <= i64::from(button.y) + i64::from(button.h),
+            "the cursor fixture remains wholly inside one button"
+        );
+    }
+    let moved = app.render_retained_gpu_frame(presentation).test_value();
+
+    let mut expected = clonk_graphics::DamageRegion::new(Rect::new(0, 0, 640, 480));
+    [old, new].into_iter().for_each(|rect| expected.add(rect));
+    main_assert_eq!(moved.physical_damage.test_ref().rects() => expected.rects());
+}
+
+// ReloadResolutionDependentFiles changes the selected cursor tier with the
+// application scale, while C4GUI::CMouse applies the tier's hotspot in native
+// pixels (src/C4GraphicsResource.cpp:468-504; src/C4Gui.cpp:445-467).
+#[test]
+fn startup_cursor_movement_damages_exact_footprints_at_fractional_scale() {
+    let mut app = new_real_menu_app(640, 480);
+    install_complete_test_cursor_atlas(&mut app);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.5, false);
+    app.configure_native_startup_fonts(1.5, false);
+    let presentation = GpuPresentation {
+        physical_extent: [960, 720],
+        scale: 1.5,
+        crop_top: 0,
+        world_zoom: 1.0,
+    };
+    let old_point = GuiPoint::new(50.0, 100.0);
+    let new_point = GuiPoint::new(150.0, 100.0);
+
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(old_point.x),
+        f64::from(old_point.y),
+    ));
+    let old = classic_region_cursor_physical_bounds(&app, old_point, presentation);
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(new_point.x),
+        f64::from(new_point.y),
+    ));
+    let new = classic_region_cursor_physical_bounds(&app, new_point, presentation);
+    let moved = app.render_retained_gpu_frame(presentation).test_value();
+
+    let mut expected = clonk_graphics::DamageRegion::new(Rect::new(0, 0, 960, 720));
+    [old, new].into_iter().for_each(|rect| expected.add(rect));
+    main_assert_eq!(moved.physical_damage.test_ref().rects() => expected.rects());
+}
+
+// Dialog fade composes the complete underlay, outgoing dialog and incoming
+// dialog in painter order (src/C4GuiDialogs.cpp:483-528). No sparse lineage
+// may survive while any one of those full-screen opacity layers is active.
+#[test]
+fn startup_dialog_fade_forces_a_complete_gpu_frame() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    app.handle_main_menu_activation(MainMenuItem::About)
+        .test_value();
+    let fading = app.render_retained_gpu_frame(presentation).test_value();
+
+    main_assert!(
+        fading.physical_damage.is_none(),
+        "fade replaces sparse compositor lineage"
+    );
+    main_assert!(app.presentation.startup_gpu_paint_owners.is_none());
+}
+
+// The C++ startup screen owns the GUI tree, not the developer console or the
+// transparent client-lobby overlay (src/C4GraphicsSystem.cpp:117-145;
+// src/C4Gui.cpp:654-692). Those paths need independent compositor lineage.
+#[test]
+fn startup_damage_eligibility_excludes_console_and_transparent_client_lobby() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+
+    main_assert!(app.startup_gpu_damage_eligible());
+    app.console_session.enabled = true;
+    main_assert!(!app.startup_gpu_damage_eligible());
+    app.console_session.enabled = false;
+    app.startup.view = StartupView::NetworkLobby;
+    main_assert!(!app.startup_gpu_damage_eligible());
+}
+
+#[test]
+fn external_gpu_target_cannot_share_startup_compositor_lineage() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    main_assert!(app.presentation.startup_gpu_paint_owners.is_some());
+
+    let marker = app.with_independent_startup_gpu_lineage(|app| {
+        main_assert!(app.presentation.startup_gpu_paint_owners.is_none());
+        let _ = app.render_retained_gpu_frame(presentation).test_value();
+        main_assert!(app.presentation.startup_gpu_paint_owners.is_some());
+        17
+    });
+
+    main_assert_eq!(marker => 17);
+    main_assert!(app.presentation.startup_gpu_paint_owners.is_none());
+}
+
+// Screen draws a due tooltip after every dialog and after the GUI cursor
+// (src/C4Gui.cpp:608-625,907-927). Adding that topmost layer must invalidate
+// only its exact outer rectangle while preserving every lower-layer command.
+#[test]
+fn startup_tooltip_appearance_damages_only_its_topmost_outer_bounds() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+    let button = clonk_frontend::main_menu_layout(640, 480).buttons[0];
+    let point = GuiPoint::new(
+        (button.x + button.w / 2) as f32,
+        (button.y + button.h / 2) as f32,
+    );
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(point.x),
+        f64::from(point.y),
+    ));
+    app.startup_tooltip.note_non_pointer_input();
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+
+    let started = Instant::now()
+        .checked_sub(clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY + Duration::from_millis(1))
+        .test_value();
+    app.startup_tooltip = ClassicTooltipTracker::new_at(started);
+    app.startup_tooltip.note_pointer_move_at(point, started);
+    let target = app.startup_element_tooltip_target_at(point).test_value();
+    let text = app.resolve_startup_tooltip_text(target);
+    let font = app.assets.global_tooltip_font.as_deref().test_value();
+    let outer = clonk_frontend::context_menu::classic_tooltip_bounds(640, 480, font, point, &text);
+    let mut probe = Surface::new(640, 480, PixelFormat::Rgba8888);
+    probe.fill(Color::transparent());
+    clonk_frontend::context_menu::draw_classic_tooltip(&mut probe, font, point, &text, None);
+    let changed_pixels = probe
+        .pixels()
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(_, pixel)| *pixel != [0, 0, 0, 0])
+        .map(|(index, _)| ((index % 640) as i32, (index / 640) as i32))
+        .collect::<Vec<_>>();
+    let min_x = changed_pixels.iter().map(|(x, _)| *x).min().test_value();
+    let max_x = changed_pixels.iter().map(|(x, _)| *x).max().test_value();
+    let min_y = changed_pixels.iter().map(|(_, y)| *y).min().test_value();
+    let max_y = changed_pixels.iter().map(|(_, y)| *y).max().test_value();
+    let expected = Rect::new(
+        min_x,
+        min_y,
+        (max_x - min_x + 1) as u32,
+        (max_y - min_y + 1) as u32,
+    );
+    main_assert_eq!(expected => outer, "the CPU reference draw owns the advertised tooltip bounds");
+
+    let tipped = app.render_retained_gpu_frame(presentation).test_value();
+
+    main_assert_eq!(tipped.physical_damage.test_ref().rects() => &[expected]);
+}
+
+// CStdGL projects Screen::DrawToolTip through the application scale while the
+// tooltip remains the last GUI overlay (src/StdGL.cpp:528-532;
+// src/C4Gui.cpp:608-625,907-927). Appearance and removal own the same exact
+// projected outer rectangle at fractional scale.
+#[test]
+fn startup_tooltip_appearance_and_removal_keep_exact_fractional_bounds() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.5, false);
+    app.configure_native_startup_fonts(1.5, false);
+    let presentation = GpuPresentation {
+        physical_extent: [960, 720],
+        scale: 1.5,
+        crop_top: 0,
+        world_zoom: 1.0,
+    };
+    let button = clonk_frontend::main_menu_layout(640, 480).buttons[0];
+    let point = GuiPoint::new(
+        (button.x + button.w / 2) as f32,
+        (button.y + button.h / 2) as f32,
+    );
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(point.x),
+        f64::from(point.y),
+    ));
+    app.startup_tooltip.note_non_pointer_input();
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+
+    let started = Instant::now()
+        .checked_sub(clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY + Duration::from_millis(1))
+        .test_value();
+    app.startup_tooltip = ClassicTooltipTracker::new_at(started);
+    app.startup_tooltip.note_pointer_move_at(point, started);
+    let target = app.startup_element_tooltip_target_at(point).test_value();
+    let text = app.resolve_startup_tooltip_text(target);
+    let font = app.assets.global_tooltip_font.as_deref().test_value();
+    let logical =
+        clonk_frontend::context_menu::classic_tooltip_bounds(640, 480, font, point, &text);
+    let expected = retained_gpu_physical_bounds(logical, [640, 480], presentation).test_value();
+
+    let tipped = app.render_retained_gpu_frame(presentation).test_value();
+    main_assert_eq!(tipped.physical_damage.test_ref().rects() => &[expected]);
+
+    app.startup_tooltip.note_non_pointer_input();
+    let removed = app.render_retained_gpu_frame(presentation).test_value();
+    main_assert_eq!(removed.physical_damage.test_ref().rects() => &[expected]);
+}
+
+// Replacing the fullscreen dialog changes the root painter and its clear
+// ownership (src/C4Gui.cpp:654-692). Even if every pixel is represented as
+// damage, the compositor must clear and replace rather than load old pixels.
+#[test]
+fn startup_view_replacement_starts_new_complete_compositor_lineage() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+    app.handle_main_menu_activation(MainMenuItem::About)
+        .test_value();
+    app.startup.dialog_fade = None;
+    let about = app.render_retained_gpu_frame(presentation).test_value();
+
+    main_assert!(
+        about.physical_damage.is_none(),
+        "a root replacement must run the clear pass"
+    );
+}
+
+// A topmost modal makes the underlying dialog inactive before both are drawn
+// (src/C4GuiDialogs.cpp:599-614; src/C4GuiContainers.cpp:33-45). Its arrival
+// must clear the main button's focus owner before the modal layer is replayed.
+#[test]
+fn startup_modal_suppresses_underlying_focus_paint_ownership() {
+    let mut app = new_real_menu_app(640, 480);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(1.0, false);
+    app.configure_native_startup_fonts(1.0, false);
+    let presentation = retained_test_presentation(&app);
+    let _ = app.render_retained_gpu_frame(presentation).test_value();
+
+    app.push_message_dialog(
+        clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+            "Notice",
+            "Topmost modal",
+            clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+        ),
+        MessageDialogContinuation::None,
+    )
+    .test_value();
+    let modal = app.render_retained_gpu_frame(presentation).test_value();
+
+    let expected = app.main_menu_state.menu.paint_nodes_with_native_fonts(
+        &app.main_menu_state.participants_label,
+        false,
+        app.native_startup_fonts.as_deref(),
+    );
+    main_assert_eq!(app.presentation.startup_gpu_paint_owners.test_ref().main_menu.test_ref() => &expected);
+    main_assert!(modal
+        .physical_damage
+        .test_ref()
+        .intersects(expected[0].bounds()));
 }

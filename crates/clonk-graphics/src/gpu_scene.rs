@@ -568,7 +568,215 @@ pub enum GpuSceneModulationError {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct LogicalBoundsAccumulator {
+    finite: Option<[f64; 4]>,
+    unbounded: bool,
+}
+
+impl LogicalBoundsAccumulator {
+    fn include_cartesian(&mut self, x: f32, y: f32) {
+        if !x.is_finite() || !y.is_finite() {
+            self.unbounded = true;
+            return;
+        }
+        let x = f64::from(x);
+        let y = f64::from(y);
+        if let Some([left, top, right, bottom]) = self.finite {
+            self.finite = Some([left.min(x), top.min(y), right.max(x), bottom.max(y)]);
+        } else {
+            self.finite = Some([x, y, x, y]);
+        }
+    }
+
+    /// Include one connected primitive. Opposite W signs mean an edge crosses
+    /// the projective horizon, so its Cartesian envelope is not finite.
+    fn include_homogeneous_group(&mut self, positions: impl Iterator<Item = [f32; 3]>) {
+        let mut positive_w = None;
+        for [x, y, w] in positions {
+            if !x.is_finite() || !y.is_finite() || !w.is_finite() || w == 0.0 {
+                self.unbounded = true;
+                return;
+            }
+            let positive = w.is_sign_positive();
+            if positive_w.is_some_and(|previous| previous != positive) {
+                self.unbounded = true;
+                return;
+            }
+            positive_w = Some(positive);
+            self.include_cartesian(x / w, y / w);
+        }
+    }
+
+    fn clipped_rect(self, clip: Rect, padding: f32) -> Option<Rect> {
+        if self.unbounded || !padding.is_finite() || padding < 0.0 {
+            return Some(clip);
+        }
+        let [min_x, min_y, max_x, max_y] = self.finite?;
+        let padding = f64::from(padding);
+        let clip_left = i64::from(clip.x);
+        let clip_top = i64::from(clip.y);
+        let clip_right = clip_left + i64::from(clip.width);
+        let clip_bottom = clip_top + i64::from(clip.height);
+        let left = ((min_x - padding).floor() as i64).max(clip_left);
+        let top = ((min_y - padding).floor() as i64).max(clip_top);
+        let right = ((max_x + padding).ceil() as i64).min(clip_right);
+        let bottom = ((max_y + padding).ceil() as i64).min(clip_bottom);
+        if right <= left || bottom <= top {
+            return None;
+        }
+        let Ok(x) = i32::try_from(left) else {
+            return Some(clip);
+        };
+        let Ok(y) = i32::try_from(top) else {
+            return Some(clip);
+        };
+        let Ok(width) = u32::try_from(right - left) else {
+            return Some(clip);
+        };
+        let Ok(height) = u32::try_from(bottom - top) else {
+            return Some(clip);
+        };
+        Some(Rect::new(x, y, width, height))
+    }
+}
+
+fn command_clip_in_extent(clip: Option<Rect>, [width, height]: [u32; 2]) -> Option<Rect> {
+    let clip = clip.unwrap_or_else(|| Rect::new(0, 0, width, height));
+    let left = i64::from(clip.x).max(0);
+    let top = i64::from(clip.y).max(0);
+    let right = (i64::from(clip.x) + i64::from(clip.width)).min(i64::from(width));
+    let bottom = (i64::from(clip.y) + i64::from(clip.height)).min(i64::from(height));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Rect::new(
+        i32::try_from(left).unwrap_or(i32::MAX),
+        i32::try_from(top).unwrap_or(i32::MAX),
+        u32::try_from(right - left).unwrap_or(u32::MAX),
+        u32::try_from(bottom - top).unwrap_or(u32::MAX),
+    ))
+}
+
 impl GpuCommand {
+    /// C++'s semantic primary clipper for this command.
+    pub const fn clip(&self) -> Option<Rect> {
+        match self {
+            Self::Quad { clip, .. }
+            | Self::SpriteBatch { clip, .. }
+            | Self::ObjectBatch { clip, .. }
+            | Self::Landscape { clip, .. }
+            | Self::Solid { clip, .. } => *clip,
+        }
+    }
+
+    /// Conservative logical pixel coverage at the native one-pixel point and
+    /// line width. Projective positions are divided by W; a primitive crossing
+    /// W=0 conservatively owns its whole effective primary clip.
+    pub fn logical_bounds(&self, logical_extent: [u32; 2]) -> Option<Rect> {
+        self.logical_bounds_with_raster_padding(logical_extent, 1.0)
+    }
+
+    /// As [`Self::logical_bounds`], with an explicit logical-coordinate halo
+    /// for point and line rasters. Callers presenting a scene with a wider
+    /// `world_zoom` can supply a physical-to-logical conservative radius;
+    /// textured and solid triangle commands ignore this value.
+    pub fn logical_bounds_with_raster_padding(
+        &self,
+        logical_extent: [u32; 2],
+        raster_padding: f32,
+    ) -> Option<Rect> {
+        let clip = command_clip_in_extent(self.clip(), logical_extent)?;
+        let mut bounds = LogicalBoundsAccumulator::default();
+        let padding = match self {
+            Self::Quad { vertices, .. } | Self::Landscape { vertices, .. } => {
+                bounds.include_homogeneous_group(vertices.iter().map(|vertex| vertex.position));
+                0.0
+            }
+            Self::SpriteBatch { quads, .. } => {
+                for quad in quads {
+                    let [left, top, right, bottom] = quad.rect;
+                    bounds.include_cartesian(left, top);
+                    bounds.include_cartesian(right, bottom);
+                }
+                0.0
+            }
+            Self::ObjectBatch { sprites, .. } => {
+                for sprite in sprites {
+                    bounds.include_homogeneous_group(sprite.positions.into_iter());
+                }
+                0.0
+            }
+            Self::Solid {
+                vertices, topology, ..
+            } => {
+                let primitive_size = match topology {
+                    GpuPrimitiveTopology::TriangleList => 3,
+                    GpuPrimitiveTopology::LineList => 2,
+                    GpuPrimitiveTopology::PointList => 1,
+                };
+                for primitive in vertices.chunks(primitive_size) {
+                    bounds
+                        .include_homogeneous_group(primitive.iter().map(|vertex| vertex.position));
+                }
+                match topology {
+                    GpuPrimitiveTopology::TriangleList => 0.0,
+                    GpuPrimitiveTopology::LineList | GpuPrimitiveTopology::PointList => {
+                        raster_padding
+                    }
+                }
+            }
+        };
+        bounds.clipped_rect(clip, padding)
+    }
+
+    /// Conservative logical coverage of one painter-order atom within this
+    /// command. Sprite/object batch entries are atoms; solid commands use one
+    /// point, line pair, or triangle triple. Quad and landscape commands each
+    /// expose atom zero. A missing or fully clipped atom returns `None`.
+    pub fn logical_atom_bounds_with_raster_padding(
+        &self,
+        logical_extent: [u32; 2],
+        raster_padding: f32,
+        atom: usize,
+    ) -> Option<Rect> {
+        let clip = command_clip_in_extent(self.clip(), logical_extent)?;
+        let mut bounds = LogicalBoundsAccumulator::default();
+        let padding = match self {
+            Self::Quad { vertices, .. } | Self::Landscape { vertices, .. } => {
+                if atom != 0 {
+                    return None;
+                }
+                bounds.include_homogeneous_group(vertices.iter().map(|vertex| vertex.position));
+                0.0
+            }
+            Self::SpriteBatch { quads, .. } => {
+                let [left, top, right, bottom] = quads.get(atom)?.rect;
+                bounds.include_cartesian(left, top);
+                bounds.include_cartesian(right, bottom);
+                0.0
+            }
+            Self::ObjectBatch { sprites, .. } => {
+                bounds.include_homogeneous_group(sprites.get(atom)?.positions.into_iter());
+                0.0
+            }
+            Self::Solid {
+                vertices, topology, ..
+            } => {
+                let (primitive_size, padding) = match topology {
+                    GpuPrimitiveTopology::TriangleList => (3, 0.0),
+                    GpuPrimitiveTopology::LineList => (2, raster_padding),
+                    GpuPrimitiveTopology::PointList => (1, raster_padding),
+                };
+                let start = atom.checked_mul(primitive_size)?;
+                let primitive = vertices.get(start..start.checked_add(primitive_size)?)?;
+                bounds.include_homogeneous_group(primitive.iter().map(|vertex| vertex.position));
+                padding
+            }
+        };
+        bounds.clipped_rect(clip, padding)
+    }
+
     pub fn translate(&mut self, x: f32, y: f32) {
         match self {
             Self::Quad { vertices, clip, .. } | Self::Landscape { vertices, clip, .. } => {
@@ -1891,6 +2099,151 @@ mod tests {
         let mut vertex = GpuVertex::new([20.0, 30.0, 2.0], [0.0, 0.0], [1.0, 1.0, 1.0, 0.0]);
         vertex.translate(5.0, 7.0);
         assert_eq!(vertex.position, [30.0, 44.0, 2.0]);
+    }
+
+    #[test]
+    fn logical_bounds_divide_homogeneous_vertices_and_intersect_primary_clip() {
+        let vertex = |x, y| GpuVertex::new([x, y, 2.0], [0.0, 0.0], [1.0; 4]);
+        let command = GpuCommand::Quad {
+            texture: GpuTextureId::fresh(),
+            owner_mask: None,
+            vertices: [
+                vertex(2.5, 4.5),
+                vertex(15.5, 4.5),
+                vertex(2.5, 19.5),
+                vertex(15.5, 19.5),
+            ],
+            clip: Some(Rect::new(3, 1, 4, 7)),
+            blend: GpuBlend::Normal,
+            base_mod2: false,
+            owner_mod2: false,
+            sampler: GpuSampler::Nearest,
+            gamma: false,
+        };
+
+        assert_eq!(command.clip(), Some(Rect::new(3, 1, 4, 7)));
+        assert_eq!(
+            command.logical_bounds([10, 10]),
+            Some(Rect::new(3, 2, 4, 6))
+        );
+    }
+
+    #[test]
+    fn logical_bounds_cover_compact_sprite_and_object_batches() {
+        let sprite_batch = GpuCommand::SpriteBatch {
+            texture: GpuTextureId::fresh(),
+            quads: vec![
+                GpuSpriteQuad {
+                    rect: [6.75, 8.25, 2.25, 3.5],
+                    uv: [0.0; 4],
+                    modulation: 0x00ff_ffff,
+                },
+                GpuSpriteQuad {
+                    rect: [10.0, 1.0, 12.5, 4.0],
+                    uv: [0.0; 4],
+                    modulation: 0x00ff_ffff,
+                },
+            ],
+            clip: None,
+            blend: GpuBlend::Normal,
+            mod2: false,
+            gamma: false,
+            outer_modulation: GpuOuterModulation::Inherit,
+        };
+        let object_batch = GpuCommand::ObjectBatch {
+            texture: GpuTextureId::fresh(),
+            owner_texture: None,
+            sprites: vec![GpuObjectSprite::new(
+                [
+                    [4.0, 6.0, 2.0],
+                    [14.0, 6.0, 2.0],
+                    [4.0, 18.0, 2.0],
+                    [14.0, 18.0, 2.0],
+                ],
+                [0.0; 4],
+                [0x00ff_ffff; 4],
+                GpuSampler::Nearest,
+                0.0,
+                false,
+                GpuOuterModulation::Inherit,
+            )],
+            clip: Some(Rect::new(0, 4, 20, 3)),
+            blend: GpuBlend::Normal,
+            gamma: false,
+        };
+
+        assert_eq!(
+            sprite_batch.logical_bounds([20, 20]),
+            Some(Rect::new(2, 1, 11, 8))
+        );
+        assert_eq!(
+            object_batch.logical_bounds([20, 20]),
+            Some(Rect::new(2, 4, 5, 3))
+        );
+    }
+
+    #[test]
+    fn logical_bounds_pad_line_and_point_rasters() {
+        let vertex = |x, y| GpuSolidVertex {
+            position: [x, y, 1.0],
+            color: [1.0; 4],
+            outer_modulation: GpuSolidOuterModulation::Ignore,
+        };
+        let command = GpuCommand::Solid {
+            vertices: vec![vertex(3.5, 4.5), vertex(6.5, 4.5)],
+            topology: GpuPrimitiveTopology::LineList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
+            clip: None,
+            blend: GpuBlend::Normal,
+            style: GpuSolidStyle::NONE,
+        };
+
+        assert_eq!(
+            command.logical_bounds_with_raster_padding([10, 10], 1.0),
+            Some(Rect::new(2, 3, 6, 3))
+        );
+        assert_eq!(
+            command.logical_bounds_with_raster_padding([10, 10], 2.0),
+            Some(Rect::new(1, 2, 8, 5))
+        );
+    }
+
+    #[test]
+    fn projective_horizon_falls_back_to_the_effective_primary_clip() {
+        let vertex = |x, y, w| GpuVertex::new([x, y, w], [0.0, 0.0], [1.0; 4]);
+        let command = GpuCommand::Landscape {
+            base: GpuTextureId::fresh(),
+            liquid_mask: None,
+            liquid: None,
+            vertices: [
+                vertex(2.0, 2.0, 1.0),
+                vertex(8.0, 2.0, 1.0),
+                vertex(-2.0, -8.0, -1.0),
+                vertex(-8.0, -8.0, -1.0),
+            ],
+            clip: Some(Rect::new(1, 3, 6, 5)),
+            phase: [0.0; 3],
+            gamma: false,
+        };
+
+        assert_eq!(
+            command.logical_bounds([10, 10]),
+            Some(Rect::new(1, 3, 6, 5))
+        );
+    }
+
+    #[test]
+    fn empty_batch_has_no_logical_bounds() {
+        let command = GpuCommand::ObjectBatch {
+            texture: GpuTextureId::fresh(),
+            owner_texture: None,
+            sprites: Vec::new(),
+            clip: None,
+            blend: GpuBlend::Normal,
+            gamma: false,
+        };
+
+        assert_eq!(command.logical_bounds([10, 10]), None);
     }
 
     #[test]
