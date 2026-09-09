@@ -67,6 +67,7 @@ pub struct HostResourceCoreSpec {
     group_maker: LegacyCString,
     max_load_file_size: u32,
     standalone_name: Option<LegacyCString>,
+    defer_directory_standalone: bool,
 }
 
 impl HostResourceCoreSpec {
@@ -106,6 +107,7 @@ impl HostResourceCoreSpec {
             group_maker,
             max_load_file_size: DEFAULT_MAX_LOAD_FILE_SIZE,
             standalone_name: None,
+            defer_directory_standalone: false,
         }
     }
 
@@ -121,6 +123,14 @@ impl HostResourceCoreSpec {
 
     pub fn with_standalone_name(mut self, name: LegacyCString) -> Self {
         self.standalone_name = Some(name);
+        self
+    }
+
+    /// Reserves a directory's standalone filename and leaves its bytes — and
+    /// so the loadable half of its core — to a later
+    /// [`finish_deferred_directory_standalone`].
+    pub(crate) fn with_deferred_directory_standalone(mut self, deferred: bool) -> Self {
+        self.defer_directory_standalone = deferred;
         self
     }
 }
@@ -268,6 +278,25 @@ pub(crate) fn build_host_resource_core_with_prepared_directory(
             Ok(true) | Err(_) => return Ok(unloadable_publication(core, source_path)),
             Ok(false) => {}
         }
+    }
+
+    if spec.defer_directory_standalone
+        && metadata.is_dir()
+        && spec.source_ownership == ResourceFileOwnership::Persistent
+    {
+        // Reserve the standalone filename now and write its bytes later. The
+        // name is what `AddByFile` compares on every subsequent lookup
+        // (src/C4Network2Res.cpp:1443-1449), so deciding it here is what keeps
+        // a deferred publication allocating the same resource IDs and aliases
+        // as the packed one. The core keeps `Set`'s non-loadable sentinels
+        // until the deflate supplies size and CRC (src/C4Network2Res.cpp:83-92).
+        let path = write_standalone(standalone_directory.as_ref(), &standalone_name, &[])?;
+        return Ok(HostResourcePublication {
+            core,
+            source_path,
+            standalone_path: Some(path),
+            standalone_ownership: Some(ResourceFileOwnership::Temporary),
+        });
     }
 
     let mut prepared_directory = prepared_directory;
@@ -646,6 +675,14 @@ enum DirectoryStandaloneImage {
 }
 
 impl DirectoryStandaloneSnapshot {
+    pub(crate) fn contents_crc(&self) -> u32 {
+        self.contents_crc
+    }
+
+    pub(crate) fn source_size(&self) -> u64 {
+        self.source_size
+    }
+
     pub(crate) fn pack(self) -> Result<PreparedDirectoryStandalone, HostResourceCoreError> {
         let packed = match self.image {
             DirectoryStandaloneImage::Oversize => None,
@@ -695,6 +732,78 @@ impl ReusableStandalone {
                 && clonk_resources::c4group_file_crc(image) == self.file_crc
         })
     }
+}
+
+/// What a deferred directory standalone still owes its announced core: the
+/// traversal it was announced from, and the filename already reserved for the
+/// bytes.
+#[derive(Debug)]
+pub(crate) struct DeferredDirectoryStandalone {
+    pub(crate) snapshot: DirectoryStandaloneSnapshot,
+    pub(crate) standalone_path: PathBuf,
+    pub(crate) resource_type: HostResourceType,
+    pub(crate) max_load_file_size: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct FinishedDirectoryStandalone {
+    /// Size and CRC of the image installed at the reserved filename, or `None`
+    /// when no bytes were written at all.
+    pub(crate) installed: Option<(u64, u32)>,
+    /// Whether the announced core becomes loadable. False wherever the packed
+    /// path would also have left it unloadable.
+    pub(crate) loadable: bool,
+    pub(crate) contents_crc: u32,
+    pub(crate) source_size: u64,
+}
+
+/// Runs the exact deflate a deferred publication postponed and installs it at
+/// the reserved filename.
+///
+/// The outcomes mirror the packed path's tail exactly: a definition that
+/// cannot be packed, or that exceeds `MaxLoadFileSize` once packed, keeps the
+/// non-loadable core it was announced with, and every other failure is an
+/// error. It differs only in retaining the reserved file where the packed path
+/// never created one, which keeps the resource's `AddByFile` identity stable
+/// across both halves and leaves the file to the ordinary temporary cleanup.
+pub(crate) fn finish_deferred_directory_standalone(
+    deferred: DeferredDirectoryStandalone,
+) -> Result<FinishedDirectoryStandalone, HostResourceCoreError> {
+    let DeferredDirectoryStandalone {
+        snapshot,
+        standalone_path,
+        resource_type,
+        max_load_file_size,
+    } = deferred;
+    let contents_crc = snapshot.contents_crc();
+    let source_size = snapshot.source_size();
+    let uninstalled = FinishedDirectoryStandalone {
+        installed: None,
+        loadable: false,
+        contents_crc,
+        source_size,
+    };
+    let definition = resource_type == HostResourceType::Definitions;
+    let packed = match snapshot.pack().and_then(|prepared| match prepared.packed {
+        Some(packed) => fs::write(&standalone_path, &packed)
+            .map(|()| Some(packed))
+            .map_err(HostResourceCoreError::from),
+        None => Ok(None),
+    }) {
+        Ok(Some(packed)) => packed,
+        Ok(None) => return Ok(uninstalled),
+        Err(_) if definition => return Ok(uninstalled),
+        Err(error) => return Err(error),
+    };
+    let installed = (packed.len() as u64, crc32(0, &packed));
+    Ok(FinishedDirectoryStandalone {
+        installed: Some(installed),
+        // The post-pack limit clears only the standalone: the file stays for
+        // AddByFile identity while the synchronized core remains unloadable.
+        loadable: !(definition && installed.0 > u64::from(max_load_file_size)),
+        contents_crc,
+        source_size,
+    })
 }
 
 pub(crate) fn prepare_directory_standalone(

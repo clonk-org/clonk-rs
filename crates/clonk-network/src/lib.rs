@@ -132,9 +132,10 @@ pub use host_game_reference::{
     HostGameReferenceMetadata,
 };
 pub use host_initial_resources::{
-    publish_host_initial_resources, HostInitialResourcePublication,
-    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
-    HostInitialResourceSource,
+    publish_deferred_host_initial_resources, publish_host_initial_resources,
+    CompletedHostResourcePacking, DeferredHostInitialResourcePublication,
+    HostInitialResourcePublication, HostInitialResourcePublicationError,
+    HostInitialResourcePublicationSpec, HostInitialResourceSource, PendingHostResourcePacking,
 };
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,

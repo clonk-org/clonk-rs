@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clonk_engine::LegacyCString;
 use clonk_network::{
-    publish_host_initial_resources, HostConfig, HostInitialResourcePublicationSpec,
-    HostInitialResourceSource, HostResourceType, InitialNetworkDynamic, InitialNetworkDynamicEntry,
-    JoinClientRegistrySnapshot, JoinGameParametersEnvelope, JoinTeamListSnapshot,
-    PlayerInfoListSnapshot, ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket,
-    ResourceTransferBackend,
+    publish_deferred_host_initial_resources, publish_host_initial_resources, HostConfig,
+    HostInitialResourcePublicationSpec, HostInitialResourceSource, HostResourceType,
+    InitialNetworkDynamic, InitialNetworkDynamicEntry, JoinClientRegistrySnapshot,
+    JoinGameParametersEnvelope, JoinTeamListSnapshot, PlayerInfoListSnapshot,
+    ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket, ResourceTransferBackend,
 };
 use clonk_resources::{c4group_file_crc, MutableGroup};
 use sha1::{Digest, Sha1};
@@ -1102,4 +1102,95 @@ fn dynamic_metadata_that_disagrees_with_the_packed_bytes_is_refused() {
             other => panic!("{label}: expected a metadata mismatch, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn deferred_publication_announces_contents_before_packing_and_completes_to_the_packed_result() {
+    // C4Network2ResCore::Set leaves a core non-loadable carrying only its
+    // contents CRC, and SetByCore matches a local copy on that CRC and nothing
+    // else (src/C4Network2Res.cpp:83-92,448). Announcing that core first lets
+    // the exact deflate run while peers are already joining, and completing it
+    // has to land on exactly the bytes a single-phase publication produces.
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "Scenario.c4s", "OracleHost", b"scenario");
+    let system = packed_source(&sources, "System.c4g", "OracleHost", b"system");
+    let definition = sources.join("Objects.c4d");
+    fs::create_dir_all(&definition).unwrap();
+    fs::write(definition.join("Names.txt"), b"objects").unwrap();
+    let material = sources.join("Material.c4g");
+    fs::create_dir_all(&material).unwrap();
+    fs::write(material.join("Earth.c4m"), b"earth").unwrap();
+
+    let dynamic = composed_dynamic();
+    let spec = |network: PathBuf| HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: crate::c4(b"OracleHost"),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario.clone(), b"Missions/Scenario.c4s"),
+        definitions: vec![source(definition.clone(), b"Objects.c4d")],
+        system: source(system.clone(), b"System.c4g"),
+        materials: vec![source(material.clone(), b"Material.c4g")],
+        players: Vec::new(),
+        dynamic: dynamic.clone(),
+        dynamic_wire_name: crate::c4(b"Network/DynScenario.c4s"),
+        parameters: base_parameters(),
+        dynamic_tick: 7,
+        reusable_standalones: Vec::new(),
+    };
+
+    let packed = publish_host_initial_resources(spec(directory.path().join("packed"))).unwrap();
+    let deferred =
+        publish_deferred_host_initial_resources(spec(directory.path().join("deferred"))).unwrap();
+    let mut publication = deferred.publication;
+    let packing = deferred.packing;
+
+    // Every directory-backed resource is announced with the contents CRC the
+    // packed run derives, but without the transfer identity that only the
+    // deflate can supply.
+    let announced = &publication.join_snapshot.parameters.game_resources;
+    let definition_core = &announced[0];
+    let material_core = &announced[2];
+    assert!(!definition_core.loadable);
+    assert!(!material_core.loadable);
+    assert_eq!(
+        (definition_core.contents_crc, material_core.contents_crc),
+        (
+            packed.join_snapshot.parameters.game_resources[0].contents_crc,
+            packed.join_snapshot.parameters.game_resources[2].contents_crc,
+        )
+    );
+    // A packed source has no deflate to wait for, so it is loadable already.
+    assert!(publication.join_snapshot.parameters.scenario.loadable);
+    assert!(publication.join_snapshot.dynamic.loadable);
+    // Nothing deferred may be advertised as servable before its bytes exist.
+    assert!(publication
+        .resource_files
+        .iter()
+        .filter(|resource| !resource.core.loadable)
+        .all(|resource| !resource.binary_compatible));
+
+    publication.apply_completed_packing(packing.complete().unwrap());
+
+    assert_eq!(
+        publication.join_snapshot.parameters.game_resources,
+        packed.join_snapshot.parameters.game_resources
+    );
+    assert_eq!(
+        publication.join_snapshot.parameters.scenario,
+        packed.join_snapshot.parameters.scenario
+    );
+    assert_eq!(
+        publication.resource_registrations,
+        packed.resource_registrations
+    );
+    let cores = |publication: &clonk_network::HostInitialResourcePublication| {
+        publication
+            .resource_files
+            .iter()
+            .map(|resource| (resource.core.clone(), resource.binary_compatible))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cores(&publication), cores(&packed));
 }
