@@ -5920,12 +5920,14 @@ fn startup_cursor_movement_damages_separate_exact_old_and_new_footprints() {
         f64::from(old_point.x),
         f64::from(old_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, old_point);
     let old = classic_region_cursor_bounds(&app, old_point);
     let _ = app.render_retained_gpu_frame(presentation).test_value();
     app.test_cursor(PhysicalPosition::new(
         f64::from(new_point.x),
         f64::from(new_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, new_point);
     let new = classic_region_cursor_bounds(&app, new_point);
     let moved = app.render_retained_gpu_frame(presentation).test_value();
 
@@ -5954,12 +5956,14 @@ fn startup_cursor_movement_inside_one_button_keeps_its_overlay_ownership() {
         f64::from(old_point.x),
         f64::from(old_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, old_point);
     let old = classic_region_cursor_bounds(&app, old_point);
     let _ = app.render_retained_gpu_frame(presentation).test_value();
     app.test_cursor(PhysicalPosition::new(
         f64::from(new_point.x),
         f64::from(new_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, new_point);
     let new = classic_region_cursor_bounds(&app, new_point);
     for rect in [&old, &new] {
         main_assert!(
@@ -6004,12 +6008,14 @@ fn startup_cursor_movement_damages_exact_footprints_at_fractional_scale() {
         f64::from(old_point.x),
         f64::from(old_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, old_point);
     let old = classic_region_cursor_physical_bounds(&app, old_point, presentation);
     let _ = app.render_retained_gpu_frame(presentation).test_value();
     app.test_cursor(PhysicalPosition::new(
         f64::from(new_point.x),
         f64::from(new_point.y),
     ));
+    hold_startup_tooltip_pending(&mut app, new_point);
     let new = classic_region_cursor_physical_bounds(&app, new_point, presentation);
     let moved = app.render_retained_gpu_frame(presentation).test_value();
 
