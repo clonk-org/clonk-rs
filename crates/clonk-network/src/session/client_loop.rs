@@ -1881,11 +1881,18 @@ pub(crate) async fn run_client_loop_with_routes(
                 };
                 match result {
                     Ok(ControlMessage::PortCapabilities(_)) => {}
-                    // This build does not announce
-                    // `PortCapabilities::DEFERRED_RESOURCE_CORES`, so no host
-                    // it joined may send one. Acting on an unsolicited core
-                    // rewrite would let any peer redirect a resource transfer.
-                    Ok(ControlMessage::ResourceUpgrade(_)) => {}
+                    Ok(ControlMessage::ResourceUpgrade(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
+                    Ok(ControlMessage::ResourceUpgrade(packet)) => {
+                        if let Err(error) = resource_state.apply_resource_upgrade(packet) {
+                            let _ = event_tx.send(ClientEvent::Disconnected { reason: Some(format!("invalid resource upgrade: {error}")) }).await;
+                            break;
+                        }
+                        for (core, path, local) in std::mem::take(&mut resource_state.initial_complete_resources) {
+                            let _ = event_tx.send(ClientEvent::ResourceComplete {
+                                resource_id: core.id, core, path, local,
+                            }).await;
+                        }
+                    }
                     // This fence is client-to-host only. A peer cannot release
                     // another retained client's quarantine.
                     Ok(ControlMessage::RoundRestartAck { .. }) => {}

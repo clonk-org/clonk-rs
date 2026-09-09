@@ -800,6 +800,90 @@ fn retained_lobby_replacement_accepts_a_resource_backed_runtime_host_player() {
 }
 
 #[test]
+fn deferred_host_inputs_match_the_frozen_packed_publication_and_keep_one_launch() {
+    // The host must open its published packed rows for InitDefs and materials
+    // (src/C4Game.cpp:901-977); source directory rewrites cannot change them.
+    let mut fixture = minimal_install(None);
+    let packed = prepare(&fixture, &[]).unwrap();
+    let _packed_network = std::mem::replace(&mut fixture.network, tempfile::tempdir().unwrap());
+    let mut pending = prepare_typed_with_names_and_league_impl(
+        &fixture,
+        &[],
+        "Host Name",
+        "Host Nick",
+        "netpuncher.openclonk.org:11115",
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(pending.resources_pending());
+    assert_eq!(
+        pending.claim_scenario().unwrap_err(),
+        PreparedHostUseError::ResourcesPending
+    );
+    let worker = pending.clone();
+    pending.set_runtime_join_allowed(true);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=7"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.install_roots[0].join("Defs.c4d/Good.c4d/Script.c"),
+        b"invalid script after announcement",
+    )
+    .unwrap();
+    let completed = worker.complete_pending_resources().unwrap();
+    assert_eq!(
+        completed.host_config().initial_join_snapshot,
+        packed.host_config().initial_join_snapshot
+    );
+    assert_eq!(
+        completed.host_config().resource_registrations,
+        packed.host_config().resource_registrations
+    );
+    assert_eq!(
+        completed.reusable_standalones().len(),
+        packed.reusable_standalones().len()
+    );
+    for (actual, expected) in completed
+        .host_config()
+        .resource_files
+        .iter()
+        .zip(&packed.host_config().resource_files)
+    {
+        assert_eq!(actual.core, expected.core);
+        assert_eq!(actual.binary_compatible, expected.binary_compatible);
+        if actual.path.is_file() {
+            assert_eq!(
+                fs::read(&actual.path).unwrap(),
+                fs::read(&expected.path).unwrap()
+            );
+        }
+    }
+    pending.install_completed_resources(completed).unwrap();
+    assert!(!pending.resources_pending());
+    assert!(
+        pending.admission().runtime_join_allowed(),
+        "completion must retain a live lobby option change"
+    );
+    let ticket = pending.claim_scenario_load().unwrap();
+    assert!(ticket.requires_post_lobby_load());
+    assert_eq!(
+        ticket
+            .retained()
+            .initial_network_scenario_metadata()
+            .unwrap()
+            .max_players,
+        2
+    );
+    assert_eq!(
+        pending.claim_scenario().unwrap_err(),
+        PreparedHostUseError::ScenarioAlreadyClaimed
+    );
+}
+
+#[test]
 fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
     // C4Game owns one C4S member: OpenScenario loads it before InitNetworkHost,
     // and the same loaded value survives the lobby and is consumed by InitGame
@@ -2060,6 +2144,7 @@ fn master_server_only_host_defers_local_player_until_start_response() {
         "Host Nick",
         "netpuncher.openclonk.org:11115",
         Some(&league),
+        false,
     )
     .expect("master-server-only host prepares");
 
@@ -2606,6 +2691,7 @@ fn prepare_typed_with_names_impl(
         host_nick,
         netpuncher_address,
         None,
+        false,
     )
 }
 
@@ -2616,6 +2702,7 @@ fn prepare_typed_with_names_and_league_impl(
     host_nick: &str,
     netpuncher_address: &str,
     league: Option<&PreparedLeagueHostConfig>,
+    deferred: bool,
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
@@ -2638,7 +2725,7 @@ fn prepare_typed_with_names_and_league_impl(
         fixture.install_roots[0].display(),
         std::path::MAIN_SEPARATOR
     );
-    prepare_host_bootstrap(PreparedHostBootstrapSpec {
+    let spec = PreparedHostBootstrapSpec {
         scenario_path: &fixture.scenario_path,
         install_roots: &fixture.install_roots,
         definition_resources: &definition_resources,
@@ -2676,7 +2763,13 @@ fn prepare_typed_with_names_and_league_impl(
         },
         league,
         reusable_standalones: &[],
-    })
+    };
+    if deferred {
+        prepared_host_bootstrap::prepare_deferred_host_bootstrap_with_staged_scenario_and_team_assignment_oracle(
+            spec, None, &[], &mut RecordingInitialHostTeamAssignmentOracle::default())
+    } else {
+        prepare_host_bootstrap(spec)
+    }
 }
 
 /// One round of `fixture` with its own maker and the records of an earlier

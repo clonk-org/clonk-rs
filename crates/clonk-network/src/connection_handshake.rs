@@ -23,6 +23,7 @@ pub struct ClientConnectionHandshake {
     pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
     pub join_data: JoinDataEnvelope,
+    pub pending_resource_cores: Vec<clonk_engine::NetworkResourceCore>,
     /// Kept empty for API compatibility. C++ may receive resource packets
     /// before JoinData, but its resource list is still empty and ignores them;
     /// periodic discovery restarts negotiation after registration
@@ -580,6 +581,7 @@ pub(crate) async fn run_client_connection_handshake_with_liveness<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let announce_extensions = local_request.port_protocol;
     let local_connection_id = local_request.connection_id;
     let compatibility_build = local_request.build;
     let mut connection = LegacyConnection::new(local_request);
@@ -630,6 +632,8 @@ where
         ));
     }
 
+    let mut early_capabilities_sent = false;
+    let mut pending_resource_cores = Vec::new();
     let pending_resources = Vec::new();
     let mut pending_controls = Vec::new();
     let mut pending_addresses = Vec::new();
@@ -642,9 +646,22 @@ where
             None => read_handshake_message(transport, &mut liveness).await?,
         };
         match message {
-            // Announced after the handshake completes; nothing to do with one
-            // that arrives early beyond not treating it as a protocol error.
-            ControlMessage::PortCapabilities(_) => continue,
+            // A deferred host needs our capability before it can send JoinData.
+            // Reply early only when the host announces that extension itself.
+            ControlMessage::PortCapabilities(capabilities) => {
+                if peer_is_port
+                    && announce_extensions
+                    && !early_capabilities_sent
+                    && capabilities.has(crate::PortCapabilities::DEFERRED_RESOURCE_CORES)
+                {
+                    transport
+                        .send_message(ControlMessage::PortCapabilities(
+                            crate::PortCapabilities::supported_without_voice(),
+                        ))
+                        .await?;
+                    early_capabilities_sent = true;
+                }
+            }
             // A host restarting mid-handshake is about to close this
             // connection anyway. The join fails on its own; the notice is only
             // actionable once there is a round to leave.
@@ -657,8 +674,17 @@ where
             // client's fresh JoinData has been installed.
             ControlMessage::RoundRestartAck { .. } => continue,
             ControlMessage::ControlWaitAttribution(_) => continue,
-            // The cores it upgrades only exist once JoinData has been installed.
-            ControlMessage::ResourceUpgrade(_) => continue,
+            // Remember the pending identities that the following JoinData may
+            // leave unresolved. Final upgrades are handled by the client loop.
+            ControlMessage::ResourceUpgrade(packet) => {
+                if peer_is_port
+                    && announce_extensions
+                    && packet.pending
+                    && pending_resource_cores.is_empty()
+                {
+                    pending_resource_cores = packet.cores;
+                }
+            }
             ControlMessage::JoinData(join_data) => {
                 let remote_connection_id = connection.remote_connection_id().ok_or(
                     ConnectionHandshakeError::ReducerInvariant(
@@ -670,6 +696,7 @@ where
                     remote_connection_id,
                     peer_core,
                     join_data: *join_data,
+                    pending_resource_cores,
                     pending_resources,
                     pending_controls,
                     pending_addresses,

@@ -128,11 +128,31 @@ impl NetworkHostPreparation {
         self,
         global_system_scripts: &[(String, String)],
     ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+        self.prepare_inner(global_system_scripts, false)
+    }
+
+    pub fn prepare_deferred_with_global_system_scripts(
+        self,
+        global_system_scripts: &[(String, String)],
+    ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+        self.prepare_inner(global_system_scripts, true)
+    }
+
+    fn prepare_inner(
+        self,
+        global_system_scripts: &[(String, String)],
+        deferred: bool,
+    ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
         let start_unix_seconds = unix_seconds_now();
         let random_seed_unix_seconds = pinned_host_parameter_seed_seconds(unix_seconds_now());
         let mut team_assignment =
             ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template);
-        prepare_host_bootstrap_with_staged_scenario_and_team_assignment_oracle(
+        let prepare = if deferred {
+            crate::prepared_host_bootstrap::prepare_deferred_host_bootstrap_with_staged_scenario_and_team_assignment_oracle
+        } else {
+            prepare_host_bootstrap_with_staged_scenario_and_team_assignment_oracle
+        };
+        prepare(
             PreparedHostBootstrapSpec {
                 scenario_path: &self.scenario_path,
                 install_roots: &self.install_roots,

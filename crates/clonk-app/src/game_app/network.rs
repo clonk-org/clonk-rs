@@ -5132,6 +5132,18 @@ impl GameApp {
                         path,
                         local,
                     } => {
+                        // An early JoinData may still hold the non-loadable
+                        // announcement. Keep the retained load/save inputs in
+                        // step with the resource backend's completed identity.
+                        if let Some(join_data) = self.netplay.pending_join_data.as_mut() {
+                            for current in std::iter::once(&mut join_data.parameters.scenario)
+                                .chain(&mut join_data.parameters.game_resources)
+                                .chain(std::iter::once(&mut join_data.dynamic))
+                                .filter(|current| current.id == core.id)
+                            {
+                                *current = core.clone();
+                            }
+                        }
                         // The control host registers FinishDerive's returned
                         // core synchronously so a second save can derive from
                         // it before this queued event is drained. Retain that
@@ -5548,7 +5560,7 @@ impl GameApp {
                     return;
                 }
                 let prepared = preparation
-                    .prepare_with_global_system_scripts(&global_system_scripts)
+                    .prepare_deferred_with_global_system_scripts(&global_system_scripts)
                     .map_err(|error| {
                         NetworkStartError::Other(format!("host preparation failed: {error}"))
                     });
@@ -5579,8 +5591,8 @@ impl GameApp {
         }
     }
 
-    /// Replaces the resource-empty preliminary transport with the exact final
-    /// host off-thread, leaving the already-rendered lobby on screen. Rebinding
+    /// Replaces the resource-empty preliminary transport with the frozen host
+    /// identity off-thread, leaving the rendered lobby on screen. Rebinding
     /// preserves the established startup and restart semantics for every host,
     /// including configured master/league registration.
     fn begin_prepared_network_host_after_preparation(
@@ -5717,12 +5729,44 @@ impl GameApp {
         Ok(())
     }
 
-    /// Finishes exact resource preparation after the closed-admission lobby is
-    /// already rendered. The preliminary transport remains discoverable with
-    /// admission closed while the ordinary fully prepared host replaces it,
-    /// so incomplete JoinData stays unreachable and later round-restart
-    /// semantics remain unchanged.
+    /// Whether this host still owes the packed inputs required for Go.
+    pub(crate) fn host_resources_pending(&self) -> bool {
+        matches!(self.netplay.mode.as_ref(), Some(NetworkMode::Host(HostSettings { prepared: Some(prepared), .. })) if prepared.resources_pending())
+    }
+
     pub(crate) fn poll_pending_network_host_preparation(&mut self) -> Result<(), EngineError> {
+        if self.netplay.pending_host_preparation.is_none()
+            && self.startup_network.connection.is_none()
+            && self.netplay.manager.is_some()
+        {
+            if let Some(NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            })) = self
+                .netplay
+                .mode
+                .as_ref()
+                .filter(|_| self.host_resources_pending())
+            {
+                let prepared = prepared.clone();
+                let (sender, receiver) = mpsc::channel();
+                match thread::Builder::new()
+                    .name("lc-pack-host-resources".to_string())
+                    .spawn(move || {
+                        let result = prepared.complete_pending_resources().map_err(|error| {
+                            NetworkStartError::Other(format!("host packing failed: {error}"))
+                        });
+                        let _ = sender.send(result);
+                    }) {
+                    Ok(_) => self.netplay.pending_host_preparation = Some(receiver),
+                    Err(error) => {
+                        return self.fail_deferred_network_host_resources(format!(
+                            "Unable to start resource packing: {error}"
+                        ))
+                    }
+                }
+            }
+        }
         let result = match self.netplay.pending_host_preparation.as_ref() {
             Some(receiver) => match receiver.try_recv() {
                 Ok(result) => Some(result),
@@ -5739,6 +5783,9 @@ impl GameApp {
         self.netplay.pending_host_preparation = None;
         let prepared = match result {
             Ok(prepared) => prepared,
+            Err(error) if self.host_resources_pending() => {
+                return self.fail_deferred_network_host_resources(error.to_string());
+            }
             Err(error) => {
                 return self.finish_startup_network_failure(
                     StartupNetworkPurpose::StagedHost,
@@ -5746,7 +5793,103 @@ impl GameApp {
                 );
             }
         };
-        self.begin_prepared_network_host_after_preparation(prepared)
+        if self.host_resources_pending() {
+            self.finish_deferred_network_host_resources(prepared)
+        } else {
+            self.begin_prepared_network_host_after_preparation(prepared)
+        }
+    }
+
+    fn fail_deferred_network_host_resources(&mut self, message: String) -> Result<(), EngineError> {
+        if let Some(network) = self.netplay.manager.as_ref() {
+            let _ = network.set_join_allowed(false);
+            let reason = LegacyCString::from_bytes(b"Host resource preparation failed".to_vec())
+                .unwrap_or_default();
+            let _ = network.fail_pending_join_data(reason);
+        }
+        self.finish_startup_network_failure(StartupNetworkPurpose::StagedHost, message)
+    }
+
+    fn finish_deferred_network_host_resources(
+        &mut self,
+        completed: PreparedHostBootstrap,
+    ) -> Result<(), EngineError> {
+        let Some(NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        })) = self.netplay.mode.as_mut()
+        else {
+            return Ok(());
+        };
+        let resources = completed
+            .host_config()
+            .resource_files
+            .iter()
+            .filter(|resource| {
+                prepared.host_config().resource_files.iter().any(|old| {
+                    old.core.id == resource.core.id
+                        && !old.core.loadable
+                        && old.ownership == clonk_network::ResourceFileOwnership::Temporary
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(mut snapshot) = self
+            .netplay
+            .host_join_snapshot
+            .clone()
+            .or_else(|| prepared.host_config().initial_join_snapshot.clone())
+        else {
+            return self.fail_deferred_network_host_resources(
+                "host completion lost its JoinData".to_string(),
+            );
+        };
+        PreparedHostBootstrap::update_snapshot_resource_cores(&mut snapshot, &resources);
+        let result = self
+            .netplay
+            .manager
+            .as_ref()
+            .ok_or_else(|| "host completion lost its transport".to_string())
+            .and_then(|network| {
+                network
+                    .complete_deferred_resources(snapshot.clone(), resources.clone())
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = result {
+            return self.fail_deferred_network_host_resources(error);
+        }
+        if let Err(error) = prepared.install_completed_resources(completed) {
+            return self.fail_deferred_network_host_resources(error.to_string());
+        }
+        if let Some(reference) =
+            self.netplay
+                .advertised_game_reference
+                .as_ref()
+                .and_then(|reference| {
+                    reference
+                        .replacing_parameters(snapshot.parameters.clone())
+                        .ok()
+                })
+        {
+            if let Some(advertiser) = self.netplay.game_advertiser.as_ref() {
+                if let Err(error) = advertiser.update_exact(&reference) {
+                    tracing::warn!(%error, "completed host reference update failed");
+                }
+            }
+            self.netplay.advertised_game_reference = Some(reference);
+        }
+        self.netplay.host_join_snapshot = Some(snapshot);
+        for resource in resources {
+            self.netplay
+                .admission_resources
+                .register_lobby_resource(&resource.core);
+            self.netplay
+                .admission_resources
+                .mark_complete_with_locality(resource.core.id, resource.path, true);
+            self.register_classic_lobby_resource(&resource.core, 100);
+        }
+        self.sync_classic_lobby_resource_ready();
+        Ok(())
     }
 
     /// Why this client must not join the advertised game, if it must not.

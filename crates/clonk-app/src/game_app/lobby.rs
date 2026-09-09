@@ -3092,6 +3092,9 @@ impl GameApp {
     }
 
     fn prepare_network_lobby_countdown(&mut self) -> Result<bool, EngineError> {
+        if self.host_resources_pending() {
+            return Ok(false);
+        }
         if self.lobby.classic_host.is_some() {
             if let Some(overrides) = self
                 .netplay
@@ -4733,7 +4736,8 @@ impl GameApp {
     }
 
     pub(crate) fn sync_classic_lobby_resource_ready(&mut self) {
-        let ready = self.netplay.admission_resources.lobby_ready_available();
+        let ready = !self.host_resources_pending()
+            && self.netplay.admission_resources.lobby_ready_available();
         let context_ready = self.netplay.staged_host_scenario.is_some()
             || self.netplay.pending_join_data.is_some()
             || self.catalog_host_preload_scenario().is_some();

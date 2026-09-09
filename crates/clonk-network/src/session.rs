@@ -7487,6 +7487,51 @@ mod tests {
         assert!(retained_path.is_file());
     }
 
+    #[tokio::test]
+    async fn failed_host_packing_removes_clients_that_already_received_deferred_join_data() {
+        let (outbound, mut outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.deferred_resource_cores = true;
+        let reason = c4(b"Host resource preparation failed");
+        assert_eq!(
+            fail_host_pending_join_data(reason.clone(), &mut state).await,
+            1
+        );
+        assert!(state.removing_clients.contains(&7) || !state.clients.contains_key(&7));
+        let remove = std::iter::from_fn(|| outbound_rx.try_recv().ok())
+            .find_map(|message| {
+                let HostOutboundMessage::Message(ControlMessage::Packet {
+                    delivery: ControlDelivery::Sync,
+                    data,
+                }) = message
+                else {
+                    return None;
+                };
+                match decode_control_entry_payload(&data).ok()? {
+                    clonk_engine::ControlPacket::ClientRemove(remove) => Some(remove),
+                    _ => None,
+                }
+            })
+            .expect("packing failure must send a synchronized removal");
+        assert_eq!(remove.reason, reason);
+        assert_eq!(remove.by_client, 0);
+    }
+
+    #[test]
+    fn completing_host_packing_preserves_live_lobby_parameters() {
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        state.deferred_resource_cores = true;
+        let packed = state.join_snapshot.clone().unwrap();
+        let live = state.join_snapshot.as_mut().unwrap();
+        live.parameters.random_seed = 123;
+        live.parameters.max_players = 4;
+        live.parameters.league = c4(b"Live league");
+        let expected = live.clone();
+        complete_host_deferred_resources(packed, Vec::new(), &mut state).test_value();
+        assert_eq!(state.join_snapshot, Some(expected));
+    }
+
     #[test]
     fn rejected_round_restart_preserves_the_live_host_state() {
         let (outbound, _outbound_rx) = HostOutboundSender::channel();
@@ -8265,7 +8310,7 @@ mod tests {
         )
         .test_value();
 
-        let backend = state.backend.test_value();
+        let backend = state.backend.as_ref().test_value();
         assert_eq!(backend.path(core.id), Some(local_dynamic.as_path()));
         assert_eq!(backend.core(core.id), Some(&core));
     }
@@ -8509,6 +8554,193 @@ mod tests {
 
         shutdown_tx.send(()).test_value();
         client_loop.await.test_value();
+    }
+
+    #[test]
+    fn dropping_a_client_before_upgrade_removes_its_temporary_directory_image() {
+        let directories = SessionResourceDirectories::new();
+        let source = directories.root.join("Objects.c4d");
+        fs::create_dir_all(&source).test_value();
+        fs::write(source.join("Names.txt"), b"objects").test_value();
+        let mut core = nonloadable_core(
+            crate::HostResourceType::Definitions as u8,
+            7,
+            b"Objects.c4d",
+        );
+        core.contents_crc = clonk_resources::Group::open(&source)
+            .unwrap()
+            .contents_crc()
+            .unwrap();
+        let mut state = empty_client_resource_state(1, directories.client.clone());
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(core.id, vec![source.clone()]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        state
+            .resolve_and_add_bootstrap_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                &core,
+            )
+            .test_value();
+        let packed = state
+            .backend
+            .as_ref()
+            .unwrap()
+            .path(core.id)
+            .unwrap()
+            .to_path_buf();
+        assert!(packed.is_file());
+        drop(state);
+        assert!(
+            !packed.exists(),
+            "an abandoned deferred join must release its temporary standalone"
+        );
+        assert!(source.is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_missing_deferred_resource_waits_then_starts_downloading() {
+        // Stock AddLoad refuses non-loadable cores (src/C4Network2Res.cpp:1500-1505).
+        // Only an explicit port pending announcement permits waiting instead.
+        let directories = SessionResourceDirectories::new();
+        let mut state = empty_client_resource_state(1, directories.client.clone());
+        let core = nonloadable_core(
+            crate::HostResourceType::Definitions as u8,
+            7,
+            b"Missing.c4d",
+        );
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &crate::ClientBootstrapLocalCandidates::default(),
+            directories.client.clone(),
+        );
+        assert!(state
+            .resolve_and_add_bootstrap_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                &core
+            )
+            .is_err());
+        state.deferred_resource_cores.insert(core.id, core.clone());
+        state
+            .resolve_and_add_bootstrap_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                &core,
+            )
+            .test_value();
+        assert!(!state.backend.as_ref().unwrap().is_complete(core.id));
+        let mut finished = core;
+        finished.loadable = true;
+        finished.file_size = 10;
+        finished.chunk_size = crate::STOCK_CHUNK_SIZE;
+        state
+            .apply_resource_upgrade(crate::ResourceUpgradePacket {
+                pending: false,
+                cores: vec![finished.clone()],
+            })
+            .test_value();
+        let backend = state.backend.as_ref().unwrap();
+        assert_eq!(backend.core(finished.id), Some(&finished));
+        assert!(!backend.is_complete(finished.id));
+        assert!(backend.path(finished.id).unwrap().is_file());
+        assert!(state.deferred_resource_cores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_host_upgrade_makes_a_directory_standalone_servable() {
+        // SetByCore matches ContentsCRC (src/C4Network2Res.cpp:448), while
+        // GetStandalone's size/CRC check decides chunk serving (:553-560).
+        let directories = SessionResourceDirectories::new();
+        let source = directories.root.join("Objects.c4d");
+        fs::create_dir_all(&source).test_value();
+        fs::write(source.join("Names.txt"), b"objects").test_value();
+        let publication = crate::build_host_resource_core(
+            &source,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Definitions,
+                7,
+                c4(b"Objects.c4d"),
+                "",
+            ),
+        )
+        .test_value();
+        let mut announced = publication.core.clone();
+        announced.loadable = false;
+        announced.file_size = u32::MAX;
+        announced.file_crc = 0;
+        announced.chunk_size = 0;
+        let mut state = empty_client_resource_state(1, directories.client.clone());
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(7, vec![source]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        state
+            .resolve_and_add_bootstrap_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                &announced,
+            )
+            .test_value();
+        state.retain_resource_resolver(resolver);
+        let original_path = state
+            .backend
+            .as_ref()
+            .unwrap()
+            .path(7)
+            .unwrap()
+            .to_path_buf();
+        let (stream, _commands, mut events, shutdown, task) =
+            start_test_client_loop_with_state(65536, 8, 32, BTreeMap::new(), state);
+        let mut host = crate::ControlTransport::new(stream);
+        host.send_message(ControlMessage::ResourceUpgrade(
+            crate::ResourceUpgradePacket {
+                pending: false,
+                cores: vec![publication.core.clone()],
+            },
+        ))
+        .await
+        .test_value();
+        loop {
+            if let Some(ClientEvent::ResourceComplete { core, path, .. }) =
+                timeout(EVENT_WAIT, events.recv()).await.test_value()
+            {
+                if core.loadable {
+                    assert_eq!(core, publication.core);
+                    assert_eq!(
+                        path, original_path,
+                        "upgrade must retain the frozen packed image"
+                    );
+                    break;
+                }
+            }
+        }
+        host.send_message(ControlMessage::Resource(ResourcePacket::Request(
+            crate::ResourceRequestPacket {
+                resource_id: 7,
+                chunk: 0,
+            },
+        )))
+        .await
+        .test_value();
+        loop {
+            if let ControlMessage::Resource(ResourcePacket::Data(chunk)) =
+                timeout(EVENT_WAIT, host.read_message())
+                    .await
+                    .test_value()
+                    .test_value()
+            {
+                assert_eq!(chunk.resource_id, 7);
+                break;
+            }
+        }
+        shutdown.send(()).test_value();
+        task.await.test_value();
     }
 
     #[test]
@@ -14607,6 +14839,105 @@ mod tests {
         shutdown_test_session(client, host).await;
     }
 
+    #[tokio::test]
+    async fn a_deferred_join_downloads_missing_content_after_the_host_finishes() {
+        let directories = SessionResourceDirectories::new();
+        let source = directories.root.join("Objects.c4d");
+        fs::create_dir_all(&source).test_value();
+        fs::write(source.join("Names.txt"), b"objects").test_value();
+        let publication = crate::build_host_resource_core(
+            &source,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Definitions,
+                77,
+                c4(b"Objects.c4d"),
+                "",
+            ),
+        )
+        .test_value();
+        let finished = crate::HostedResourceFile {
+            core: publication.core.clone(),
+            path: publication.standalone_path.unwrap(),
+            ownership: crate::ResourceFileOwnership::Temporary,
+            binary_compatible: true,
+        };
+        let expected_bytes = fs::read(&finished.path).test_value();
+        let mut announced = finished.clone();
+        announced.core.loadable = false;
+        announced.core.file_size = u32::MAX;
+        announced.core.file_crc = u32::MAX;
+        announced.binary_compatible = false;
+        let (addr, listener) = bind_test_listener().await;
+        let mut config = HostConfig::default();
+        config
+            .initial_join_snapshot
+            .as_mut()
+            .unwrap()
+            .parameters
+            .game_resources = vec![announced.core.clone()];
+        config.initial_join_snapshot_deferred = true;
+        config.resource_directory = Some(directories.host.clone());
+        config.resource_files = vec![announced.clone()];
+        config.resource_registrations = vec![crate::ResourceRegistration::from_core(
+            &announced.core,
+            false,
+            false,
+        )];
+        let mut snapshot = config.initial_join_snapshot.clone().unwrap();
+        snapshot.parameters.game_resources = vec![finished.core.clone()];
+        let host = start_host(listener, config).await.test_value();
+        let mut config = ClientConfig::new("Alice", ParticipantKind::Player);
+        config.resource_directory = Some(directories.client.clone());
+        let mut client = timeout(EVENT_WAIT, connect_client(addr, config))
+            .await
+            .test_value()
+            .test_value();
+        assert!(!client.join_data.as_ref().unwrap().parameters.game_resources[0].loadable);
+        let mut events = client.take_event_receiver();
+        assert_eq!(
+            host.complete_deferred_resources(snapshot, vec![finished.clone()])
+                .await
+                .test_value(),
+            1
+        );
+        loop {
+            if let Some(ClientEvent::ResourceComplete {
+                resource_id: 77,
+                core,
+                path,
+                local,
+            }) = timeout(EVENT_WAIT, events.recv()).await.test_value()
+            {
+                assert!(!local);
+                assert_eq!(core, finished.core);
+                assert_eq!(fs::read(path).test_value(), expected_bytes);
+                break;
+            }
+        }
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test]
+    async fn a_capable_client_enters_the_lobby_before_host_packing_completes() {
+        let (addr, listener) = bind_test_listener().await;
+        let mut config = HostConfig::default();
+        config.initial_join_snapshot = Some(synthetic_join_snapshot(
+            config.local_core.clone(),
+            config.max_players,
+        ));
+        config.initial_join_snapshot_deferred = true;
+        let host = start_host(listener, config).await.test_value();
+        let client = timeout(
+            Duration::from_secs(1),
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player)),
+        )
+        .await
+        .test_value()
+        .test_value();
+        shutdown_test_session(client, host).await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_deferred_join_snapshot_withholds_join_data_until_the_packing_completes() {
         // A snapshot published before the host's exact deflates have run
@@ -14622,12 +14953,22 @@ mod tests {
         config.initial_join_snapshot = None;
         let mut host = start_host(listener, config).await.test_value();
         let mut host_events = host.take_event_receiver();
-        let client_task = tokio::spawn(connect_client(
-            addr,
-            ClientConfig::new("Alice", ParticipantKind::Player),
-        ));
+        let client_task = tokio::spawn(async move {
+            let mut transport =
+                crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
+            crate::run_client_connection_handshake(
+                &mut transport,
+                test_connection_request(test_client_core(-1, c4(b"Alice"), false), 0, false),
+            )
+            .await
+        });
 
         host.publish_deferred_join_snapshot(snapshot.clone())
+            .await
+            .test_value();
+
+        // Initial player publication and lobby edits must retain the gate.
+        host.update_join_snapshot(snapshot.clone())
             .await
             .test_value();
 
@@ -14656,7 +14997,8 @@ mod tests {
             .unwrap()
             .test_value();
 
-        shutdown_test_session(client, host).await;
+        assert_eq!(client.join_data.client_id, 1);
+        host.shutdown().await.test_value();
     }
 
     #[tokio::test(start_paused = true)]

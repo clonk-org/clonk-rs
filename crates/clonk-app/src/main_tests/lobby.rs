@@ -6447,8 +6447,17 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         host.test_update();
         main_assert!(
             Instant::now() < host_deadline,
-            "prepared host did not reach its lobby: {}",
-            host.status_text
+            "prepared host did not reach its lobby: {}; connection={}, worker={}, pending={}, diagnostics={:?}, dialogs={:?}",
+            host.status_text,
+            host.startup_network.connection.is_some(),
+            host.netplay.pending_host_preparation.is_some(),
+            host.host_resources_pending(),
+            host.startup_restart_diagnostics,
+            host.dialogs
+                .messages
+                .iter()
+                .map(|dialog| dialog.state.message())
+                .collect::<Vec<_>>()
         );
         thread::yield_now();
     }
@@ -6787,7 +6796,8 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
         app.startup.view,
     );
     let expected_title = app
-        .netplay.advertised_game_reference
+        .netplay
+        .advertised_game_reference
         .test_ref()
         .summary()
         .title
@@ -6843,9 +6853,9 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     main_assert!(lobby_rendered, "the queryable lobby must have rendered");
 
     while app.startup_network.connection.is_some()
-        || app.netplay.pending_host_preparation.is_some()
         || !app
-            .netplay.advertised_game_reference
+            .netplay
+            .advertised_game_reference
             .as_ref()
             .is_some_and(|reference| reference.summary().join_allowed)
     {
@@ -6889,6 +6899,30 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     );
     let joinable_elapsed = started.elapsed();
     eprintln!("selected ClonkMars host opened admission in {joinable_elapsed:?}");
+    main_assert!(
+        app.host_resources_pending(),
+        "admission must precede the ClonkMars deflate"
+    );
+    while app.netplay.pending_host_preparation.is_some() {
+        app.test_update();
+        main_assert!(
+            Instant::now() < deadline,
+            "packing did not finish: {}",
+            app.status_text
+        );
+        thread::yield_now();
+    }
+    main_assert!(!app.host_resources_pending());
+    if std::env::var_os("LLVM_PROFILE_FILE").is_none() {
+        main_assert!(
+            master_elapsed <= Duration::from_secs(1),
+            "public registration waited {master_elapsed:?}"
+        );
+        main_assert!(
+            joinable_elapsed <= Duration::from_secs(1),
+            "admission waited {joinable_elapsed:?}"
+        );
+    }
 }
 
 #[test]

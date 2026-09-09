@@ -1286,6 +1286,21 @@ where
         resource_directory.clone(),
     )
     .map_err(ClientError::Handshake)?;
+    let announced_resources = round_resource_cores(&join_data.dynamic, &join_data.parameters);
+    for core in bootstrap.pending_resource_cores {
+        if core.loadable
+            || announced_resources.get(&core.id) != Some(&core)
+            || resource_state
+                .deferred_resource_cores
+                .insert(core.id, core)
+                .is_some()
+        {
+            return Err(ClientError::Handshake(
+                "invalid pending resource announcement".to_string(),
+            )
+            .into());
+        }
+    }
     resource_state.initial_ready_checks = bootstrap.pending_ready_checks;
     resource_state.initial_lobby_countdowns = bootstrap.pending_lobby_countdowns;
     send_client_control_request(&mut transport, start_control_tick)

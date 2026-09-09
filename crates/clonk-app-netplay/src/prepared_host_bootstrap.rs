@@ -208,6 +208,8 @@ impl PreparedHostAdmissionReady {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PreparedHostUseError {
+    #[error("the exact host resources are still being prepared")]
+    ResourcesPending,
     #[error("the prepared host resources were already claimed by a launch")]
     HostAlreadyLaunched,
     #[error("the prepared host scenario was already claimed by a launch")]
@@ -268,9 +270,9 @@ impl Drop for PreparedTemporaryFiles {
     }
 }
 
-/// A host that is completely materialized but has not opened sockets or
-/// admission. Fields stay private so an unprepared `HostConfig` cannot be
-/// confused with this lifecycle state.
+/// A frozen host identity, optionally awaiting exact resource packing.
+/// Pending identities can open admission, but cannot yield an engine launch
+/// until their packed inputs have been installed.
 #[derive(Debug, Clone)]
 pub struct PreparedHostBootstrap {
     host_config: HostConfig,
@@ -316,6 +318,22 @@ pub struct PreparedHostBootstrap {
     league_generated_landscape_loader: Option<PreparedLeagueGeneratedLandscapeLoader>,
     reusable_standalones: Vec<ReusableStandalone>,
     lifetime: Arc<PreparedHostLifetime>,
+    pending_resource_packing: Arc<Mutex<Option<PendingPreparedHostResources>>>,
+}
+
+/// Owned work which may run only after the network identity is published.
+#[derive(Debug)]
+struct PendingPreparedHostResources {
+    publication: HostInitialResourcePublication,
+    packing: clonk_network::PendingHostResourcePacking,
+    install_roots: Vec<PathBuf>,
+    executable_root: PathBuf,
+    scenario_origin: Option<String>,
+    languages: Vec<String>,
+    language_packs: LanguagePacks,
+    global_system_scripts: Vec<(String, String)>,
+    is_save_game: bool,
+    retry_generated_landscape_seed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -467,6 +485,129 @@ impl PreparedLocalPlayerIdentity {
 }
 
 impl PreparedHostBootstrap {
+    pub fn resources_pending(&self) -> bool {
+        self.host_config.initial_join_snapshot_deferred
+    }
+
+    /// Completes the frozen publication on a worker, retaining its packed
+    /// entry order for InitDefs/InitMaterialTexture (src/C4Game.cpp:901-977).
+    pub fn complete_pending_resources(mut self) -> Result<Self, PrepareHostBootstrapError> {
+        let mut pending = self
+            .pending_resource_packing
+            .lock()
+            .take()
+            .ok_or(PrepareHostBootstrapError::ResourcePackingAlreadyClaimed)?;
+        pending
+            .publication
+            .apply_completed_packing(pending.packing.complete()?);
+        let definition_groups =
+            published_game_resource_groups(&pending.publication, HostResourceType::Definitions)?;
+        let material_groups =
+            published_game_resource_groups(&pending.publication, HostResourceType::Material)?;
+        let scenario_group = frozen_published_scenario_group(&pending.publication)?;
+        let resolver = InstallRootDefinitionResolver {
+            roots: &pending.install_roots,
+            executable_root: pending.executable_root,
+            scenario_origin: pending.scenario_origin,
+            language_packs: &pending.language_packs,
+            staged_definitions: Mutex::new(HashMap::new()),
+        };
+        let graphics_groups = resolver
+            .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_groups)?;
+        let mut retained = self.lifetime.scenario.lock();
+        let scenario = retained
+            .as_mut()
+            .ok_or(PrepareHostBootstrapError::LeagueScenarioAlreadyClaimed)?;
+        let loader = PreparedLeagueGeneratedLandscapeLoader {
+            scenario_group,
+            definition_groups: definition_groups.clone(),
+            material_groups: material_groups.clone(),
+            graphics_groups,
+            languages: pending.languages,
+            language_packs: pending.language_packs,
+            global_system_scripts: pending.global_system_scripts,
+            reload_generated_landscape_for_league_start: !pending.is_save_game
+                && scenario.generated_landscape_seed_retry_applies(),
+        };
+        let parameters = &self
+            .host_config
+            .initial_join_snapshot
+            .as_ref()
+            .ok_or(PrepareHostBootstrapError::MissingJoinSnapshot)?
+            .parameters;
+        let league_reload =
+            self.league.is_some() && loader.reload_generated_landscape_for_league_start;
+        if pending.is_save_game || pending.retry_generated_landscape_seed || league_reload {
+            let random_seed = parameters.random_seed as u32;
+            let loaded = loader.load(random_seed)?;
+            if (pending.retry_generated_landscape_seed || league_reload)
+                && loaded.generated_landscape_requires_seed_retry()
+            {
+                return Err(
+                    PrepareHostBootstrapError::PublishedGeneratedLandscapeInvalid { random_seed },
+                );
+            }
+            *scenario = loaded;
+        } else {
+            scenario.rebind_network_definition_resource_projection(&definition_groups);
+        }
+        drop(retained);
+        self.material_resource_groups = material_groups;
+        self.league_generated_landscape_loader = Some(loader);
+        self.reusable_standalones.extend(std::mem::take(
+            &mut pending.publication.reusable_standalones,
+        ));
+        let mut finished_config = self.host_config.clone();
+        pending.publication.apply_to(&mut finished_config);
+        self.install_resource_cores(&finished_config);
+        self.host_config.initial_join_snapshot_deferred = false;
+        Ok(self)
+    }
+
+    /// Installs only the completed resource and engine inputs. Lobby edits,
+    /// league replies and the single launch token belong to the live host.
+    pub fn install_completed_resources(
+        &mut self,
+        completed: Self,
+    ) -> Result<(), PrepareHostBootstrapError> {
+        if completed.resources_pending()
+            || !self.resources_pending()
+            || !Arc::ptr_eq(&self.lifetime, &completed.lifetime)
+        {
+            return Err(PrepareHostBootstrapError::ResourceCompletionMismatch);
+        }
+        self.install_resource_cores(&completed.host_config);
+        self.material_resource_groups = completed.material_resource_groups;
+        self.league_generated_landscape_loader = completed.league_generated_landscape_loader;
+        self.reusable_standalones = completed.reusable_standalones;
+        self.host_config.initial_join_snapshot_deferred = false;
+        Ok(())
+    }
+
+    fn install_resource_cores(&mut self, completed: &HostConfig) {
+        if let Some(snapshot) = self.host_config.initial_join_snapshot.as_mut() {
+            Self::update_snapshot_resource_cores(snapshot, &completed.resource_files);
+        }
+        self.host_config.resource_files = completed.resource_files.clone();
+        self.host_config.resource_registrations = completed.resource_registrations.clone();
+    }
+
+    pub fn update_snapshot_resource_cores(
+        snapshot: &mut clonk_network::HostJoinSnapshot,
+        resources: &[clonk_network::HostedResourceFile],
+    ) {
+        for core in std::iter::once(&mut snapshot.parameters.scenario)
+            .chain(&mut snapshot.parameters.game_resources)
+        {
+            if let Some(resource) = resources
+                .iter()
+                .find(|resource| resource.core.id == core.id)
+            {
+                *core = resource.core.clone();
+            }
+        }
+    }
+
     pub fn host_config(&self) -> &HostConfig {
         &self.host_config
     }
@@ -601,6 +742,9 @@ impl PreparedHostBootstrap {
     /// shares this one launch value, so entering the game cannot reopen a
     /// changed scenario source or start a second simulation from it.
     pub fn claim_scenario(&self) -> Result<Scenario, PreparedHostUseError> {
+        if self.resources_pending() {
+            return Err(PreparedHostUseError::ResourcesPending);
+        }
         self.lifetime
             .scenario
             .lock()
@@ -611,6 +755,9 @@ impl PreparedHostBootstrap {
     /// Claims the same single scenario launch token together with the frozen
     /// post-publication inputs needed by post-lobby InitGame.
     pub fn claim_scenario_load(&self) -> Result<PreparedHostScenarioLoad, PreparedHostUseError> {
+        if self.resources_pending() {
+            return Err(PreparedHostUseError::ResourcesPending);
+        }
         let retained = self
             .lifetime
             .scenario
@@ -1037,6 +1184,7 @@ impl PreparedHostBootstrap {
             local_player_alternate_colors_by_resource: HashMap::new(),
             pending_initial_league_players: None,
             league_generated_landscape_loader: None,
+            pending_resource_packing: Arc::new(Mutex::new(None)),
             reusable_standalones: Vec::new(),
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),
@@ -1050,6 +1198,10 @@ impl PreparedHostBootstrap {
 
 #[derive(Debug, Error)]
 pub enum PrepareHostBootstrapError {
+    #[error("completed resources do not belong to this pending host")]
+    ResourceCompletionMismatch,
+    #[error("the pending resource packing was already claimed")]
+    ResourcePackingAlreadyClaimed,
     #[error("the selected local player could not be admitted into the scenario player slots")]
     LocalPlayerAdmissionRejected,
     #[error("initial local player attributes could not be resolved: {0}")]
@@ -1450,6 +1602,37 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
     global_system_scripts: &[(String, String)],
     team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
 ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+    prepare_host_bootstrap_impl(
+        spec,
+        staged_scenario,
+        global_system_scripts,
+        team_assignment_oracle,
+        false,
+    )
+}
+
+pub(crate) fn prepare_deferred_host_bootstrap_with_staged_scenario_and_team_assignment_oracle(
+    spec: PreparedHostBootstrapSpec<'_>,
+    staged_scenario: Option<Scenario>,
+    global_system_scripts: &[(String, String)],
+    team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
+) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+    prepare_host_bootstrap_impl(
+        spec,
+        staged_scenario,
+        global_system_scripts,
+        team_assignment_oracle,
+        true,
+    )
+}
+
+fn prepare_host_bootstrap_impl(
+    spec: PreparedHostBootstrapSpec<'_>,
+    staged_scenario: Option<Scenario>,
+    global_system_scripts: &[(String, String)],
+    team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
+    defer_packing: bool,
+) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
     validate_inputs(&spec)?;
     let scenario_group = open_group_path(spec.scenario_path).map_err(|source| {
         PrepareHostBootstrapError::ScenarioGroup {
@@ -1822,7 +2005,7 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
             virtual_group_bytes: None,
         },
     )?;
-    let mut publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+    let publication_spec = HostInitialResourcePublicationSpec {
         network_directory: spec.network_directory.to_path_buf(),
         group_maker: group_maker.clone(),
         max_load_file_size: spec.config.max_load_file_size,
@@ -1839,7 +2022,14 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         parameters,
         dynamic_tick,
         reusable_standalones: spec.reusable_standalones.to_vec(),
-    })?;
+    };
+    let (mut publication, pending_packing) = if defer_packing {
+        let deferred = clonk_network::publish_deferred_host_initial_resources(publication_spec)?;
+        let packing = (!deferred.packing.is_empty()).then_some(deferred.packing);
+        (deferred.publication, packing)
+    } else {
+        (publish_host_initial_resources(publication_spec)?, None)
+    };
     let reusable_standalones = std::mem::take(&mut publication.reusable_standalones);
     // Publication has transferred ownership of generated standalones. Arm
     // their cleanup before any post-publication reopen/reload can fail.
@@ -1850,54 +2040,61 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         .map(|resource| resource.path.clone())
         .collect();
     let temporary_files = PreparedTemporaryFiles::new(temporary_files);
-    // C++'s pre-publication OpenScenario only establishes metadata and probes
-    // the definition groups. Retain the exact published rows for post-lobby
-    // InitDefs/InitMaterialTexture after Parameters.RandomSeed is frozen.
-    let definition_groups =
-        published_game_resource_groups(&publication, HostResourceType::Definitions)?;
-    let material_resource_groups =
-        published_game_resource_groups(&publication, HostResourceType::Material)?;
-    let published_scenario_group = frozen_published_scenario_group(&publication)?;
-    let graphics_groups = definition_resolver.resolve_graphics_groups_with_definition_roots(
-        &published_scenario_group,
-        &definition_groups,
-    )?;
-    // SetNetRes can collapse a selected definition onto the scenario row or
-    // repeat a System/Material row as a definition. Reflect those final rows
-    // in the retained OpenScenario projection without running InitDefs,
-    // scripts, materials and landscape before the lobby.
-    scenario.rebind_network_definition_resource_projection(&definition_groups);
-    // Retain the exact post-publication loader through the lobby. C++ runs
-    // the shared InitGame phases only after DoLobby unless a lobby preload
-    // completed them first (src/C4Game.cpp:438-457,2004-2042).
-    let league_generated_landscape_loader = Some(PreparedLeagueGeneratedLandscapeLoader {
-        scenario_group: published_scenario_group,
-        definition_groups: definition_groups.clone(),
-        material_groups: material_resource_groups.clone(),
-        graphics_groups: graphics_groups.clone(),
-        languages: spec.languages.to_vec(),
-        language_packs: spec.language_packs.clone(),
-        global_system_scripts: global_system_scripts.to_vec(),
-        reload_generated_landscape_for_league_start: !is_save_game
-            && scenario.generated_landscape_seed_retry_applies(),
-    });
-    // Savegames and fresh generated-landscape retries are the pre-lobby
-    // exceptions. A save must retain its serialized landscape; a retry has
-    // already changed synchronized Parameters and must reproduce that accepted
-    // map. Ordinary scenarios stay at OpenScenario until GO, matching native
-    // DoLobby ordering and avoiding a full InitGame load on admission.
-    if is_save_game || retry_generated_landscape_seed {
-        let random_seed = publication.join_snapshot.parameters.random_seed as u32;
-        scenario = league_generated_landscape_loader
-            .as_ref()
-            .expect("the post-publication loader was just installed")
-            .load(random_seed)?;
-        if retry_generated_landscape_seed && scenario.generated_landscape_requires_seed_retry() {
-            return Err(
-                PrepareHostBootstrapError::PublishedGeneratedLandscapeInvalid { random_seed },
-            );
+    let (material_resource_groups, league_generated_landscape_loader) = if pending_packing.is_some()
+    {
+        (Vec::new(), None)
+    } else {
+        // C++'s pre-publication OpenScenario only establishes metadata and probes
+        // the definition groups. Retain the exact published rows for post-lobby
+        // InitDefs/InitMaterialTexture after Parameters.RandomSeed is frozen.
+        let definition_groups =
+            published_game_resource_groups(&publication, HostResourceType::Definitions)?;
+        let material_resource_groups =
+            published_game_resource_groups(&publication, HostResourceType::Material)?;
+        let published_scenario_group = frozen_published_scenario_group(&publication)?;
+        let graphics_groups = definition_resolver.resolve_graphics_groups_with_definition_roots(
+            &published_scenario_group,
+            &definition_groups,
+        )?;
+        // SetNetRes can collapse a selected definition onto the scenario row or
+        // repeat a System/Material row as a definition. Reflect those final rows
+        // in the retained OpenScenario projection without running InitDefs,
+        // scripts, materials and landscape before the lobby.
+        scenario.rebind_network_definition_resource_projection(&definition_groups);
+        // Retain the exact post-publication loader through the lobby. C++ runs
+        // the shared InitGame phases only after DoLobby unless a lobby preload
+        // completed them first (src/C4Game.cpp:438-457,2004-2042).
+        let league_generated_landscape_loader = Some(PreparedLeagueGeneratedLandscapeLoader {
+            scenario_group: published_scenario_group,
+            definition_groups: definition_groups.clone(),
+            material_groups: material_resource_groups.clone(),
+            graphics_groups: graphics_groups.clone(),
+            languages: spec.languages.to_vec(),
+            language_packs: spec.language_packs.clone(),
+            global_system_scripts: global_system_scripts.to_vec(),
+            reload_generated_landscape_for_league_start: !is_save_game
+                && scenario.generated_landscape_seed_retry_applies(),
+        });
+        // Savegames and fresh generated-landscape retries are the pre-lobby
+        // exceptions. A save must retain its serialized landscape; a retry has
+        // already changed synchronized Parameters and must reproduce that accepted
+        // map. Ordinary scenarios stay at OpenScenario until GO, matching native
+        // DoLobby ordering and avoiding a full InitGame load on admission.
+        if is_save_game || retry_generated_landscape_seed {
+            let random_seed = publication.join_snapshot.parameters.random_seed as u32;
+            scenario = league_generated_landscape_loader
+                .as_ref()
+                .expect("the post-publication loader was just installed")
+                .load(random_seed)?;
+            if retry_generated_landscape_seed && scenario.generated_landscape_requires_seed_retry()
+            {
+                return Err(
+                    PrepareHostBootstrapError::PublishedGeneratedLandscapeInvalid { random_seed },
+                );
+            }
         }
-    }
+        (material_resource_groups, league_generated_landscape_loader)
+    };
     let mut published_index = 0;
     let published_local_players = local_players
         .iter()
@@ -2002,6 +2199,18 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
             ((**core).clone(), path)
         })
         .collect();
+    let pending_resource_packing = pending_packing.map(|packing| PendingPreparedHostResources {
+        publication: publication.clone(),
+        packing,
+        install_roots: spec.install_roots.to_vec(),
+        executable_root: definition_executable_root.clone(),
+        scenario_origin: loader_head.origin().map(str::to_owned),
+        languages: spec.languages.to_vec(),
+        language_packs: spec.language_packs.clone(),
+        global_system_scripts: global_system_scripts.to_vec(),
+        is_save_game,
+        retry_generated_landscape_seed,
+    });
     let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
     let mut host_config = HostConfig {
         max_players,
@@ -2022,10 +2231,12 @@ pub(crate) fn prepare_host_bootstrap_with_staged_scenario_and_team_assignment_or
         local_resource_roots: spec.install_roots.to_vec(),
         ..HostConfig::default()
     };
+    host_config.initial_join_snapshot_deferred = pending_resource_packing.is_some();
     publication.apply_to(&mut host_config);
     let temporary_files = temporary_files.into_lifetime_paths();
 
     Ok(PreparedHostBootstrap {
+        pending_resource_packing: Arc::new(Mutex::new(pending_resource_packing)),
         host_config,
         initial_game: game,
         scenario_defaults,
@@ -2926,6 +3137,7 @@ mod definition_root_graphics_tests {
             local_player_alternate_colors_by_resource: HashMap::new(),
             pending_initial_league_players: None,
             league_generated_landscape_loader: None,
+            pending_resource_packing: Arc::new(Mutex::new(None)),
             reusable_standalones: Vec::new(),
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),

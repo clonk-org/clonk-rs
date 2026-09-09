@@ -867,7 +867,7 @@ pub enum HostCommand {
     },
     PublishJoinSnapshot {
         snapshot: Box<HostJoinSnapshot>,
-        deferred: bool,
+        deferred: Option<bool>,
     },
     CompleteDeferredResources {
         snapshot: Box<HostJoinSnapshot>,
@@ -1234,7 +1234,13 @@ impl HostHandle {
     }
 
     pub async fn publish_join_snapshot(&self, snapshot: HostJoinSnapshot) -> Result<(), HostError> {
-        self.publish_join_snapshot_with_deferral(snapshot, false)
+        self.publish_join_snapshot_with_deferral(snapshot, Some(false))
+            .await
+    }
+
+    /// Refreshes live lobby settings without completing pending resource packing.
+    pub async fn update_join_snapshot(&self, snapshot: HostJoinSnapshot) -> Result<(), HostError> {
+        self.publish_join_snapshot_with_deferral(snapshot, None)
             .await
     }
 
@@ -1253,14 +1259,14 @@ impl HostHandle {
         &self,
         snapshot: HostJoinSnapshot,
     ) -> Result<(), HostError> {
-        self.publish_join_snapshot_with_deferral(snapshot, true)
+        self.publish_join_snapshot_with_deferral(snapshot, Some(true))
             .await
     }
 
     async fn publish_join_snapshot_with_deferral(
         &self,
         snapshot: HostJoinSnapshot,
-        deferred: bool,
+        deferred: Option<bool>,
     ) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::PublishJoinSnapshot {
@@ -1335,7 +1341,8 @@ impl HostHandle {
     }
 
     /// Emergency-removes every accepted client for which JoinData has not
-    /// been sent. Removal is a host-authored synchronized control, not a raw
+    /// been sent, or whose resource publication is still pending. Removal is a
+    /// host-authored synchronized control, not a raw
     /// transport close.
     pub async fn fail_pending_join_data(
         &self,

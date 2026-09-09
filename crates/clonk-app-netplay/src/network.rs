@@ -3330,6 +3330,11 @@ enum NetworkCommand {
     RemoveRuntimeDynamic {
         completion: Sender<std::result::Result<bool, String>>,
     },
+    CompleteDeferredResources {
+        snapshot: Box<clonk_network::HostJoinSnapshot>,
+        resources: Vec<clonk_network::HostedResourceFile>,
+        completion: Sender<std::result::Result<usize, String>>,
+    },
     FailPendingJoinData {
         reason: clonk_engine::LegacyCString,
         completion: Sender<std::result::Result<usize, String>>,
@@ -4847,6 +4852,28 @@ impl NetworkManager {
             .map_err(|message| anyhow!(message))
     }
 
+    pub fn complete_deferred_resources(
+        &self,
+        snapshot: clonk_network::HostJoinSnapshot,
+        resources: Vec<clonk_network::HostedResourceFile>,
+    ) -> Result<usize> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!("only the host may complete resources"));
+        }
+        let (completion, completed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::CompleteDeferredResources {
+                snapshot: Box::new(snapshot),
+                resources,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting completed resources"))?;
+        completed
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before completing resources"))?
+            .map_err(|error| anyhow!(error))
+    }
+
     pub fn fail_pending_join_data(&self, reason: clonk_engine::LegacyCString) -> Result<usize> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!("only the network host may fail pending JoinData"));
@@ -5601,6 +5628,7 @@ impl NetworkManager {
         Some(result)
     }
 
+    /// Refreshes lobby parameters while retaining any pending resource publication.
     pub fn publish_join_snapshot(&self, snapshot: HostJoinSnapshot) -> Result<()> {
         if self.local_client_id != HOST_CLIENT_ID {
             return Err(anyhow!("only the network host may publish JoinData"));
@@ -7305,6 +7333,14 @@ async fn run_host_worker_with_voice_enabled(
                         .map_err(|error| error.to_string());
                         let _ = completion.send(result);
                     }
+                    NetworkCommand::CompleteDeferredResources { snapshot, resources, completion } => {
+                        let result = await_host_operation_while_forwarding_events(
+                            host.complete_deferred_resources(*snapshot, resources),
+                            &mut host_events, local_owner, &event_tx, &telemetry_tx,
+                            &mut player_info_echo_provenance, &netpuncher_state,
+                        ).await?.map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
                     NetworkCommand::FailPendingJoinData { reason, completion } => {
                         let result = await_host_operation_while_forwarding_events(
                             host.fail_pending_join_data(reason),
@@ -8033,7 +8069,7 @@ async fn run_host_worker_with_voice_enabled(
                         }
                     }
                     NetworkCommand::PublishJoinSnapshot { snapshot } => {
-                        host.publish_join_snapshot(snapshot)
+                        host.update_join_snapshot(snapshot)
                             .await
                             .map_err(|error| anyhow!("host JoinData update failed: {error}"))?;
                     }
@@ -8870,7 +8906,8 @@ async fn run_client_worker_with_voice_enabled(
                         NetworkCommand::Execute { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
-                        NetworkCommand::FailPendingJoinData { completion, .. } => {
+                        NetworkCommand::CompleteDeferredResources { completion, .. }
+                        | NetworkCommand::FailPendingJoinData { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
                         NetworkCommand::PublishPlayerResource { completion, .. } => {
@@ -9014,7 +9051,8 @@ async fn run_client_worker_with_voice_enabled(
                     NetworkCommand::Execute { completion, .. } => {
                         let _ = completion.send(Ok(false));
                     }
-                    NetworkCommand::FailPendingJoinData { completion, .. } => {
+                    NetworkCommand::CompleteDeferredResources { completion, .. }
+                        | NetworkCommand::FailPendingJoinData { completion, .. } => {
                         let _ = completion.send(Err(
                             "client attempted to fail host pending JoinData".to_string(),
                         ));

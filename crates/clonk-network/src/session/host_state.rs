@@ -8,6 +8,7 @@ use super::*;
 #[derive(Debug)]
 pub(crate) struct ClientSetup {
     pub(crate) join_data: JoinDataEnvelope,
+    pub(crate) pending_resources: Option<crate::ResourceUpgradePacket>,
     pub(crate) addresses: Vec<crate::AddressPacket>,
     /// Oldest-first raw `CID_Message` controls queued after JoinData.
     pub(crate) lobby_chat_history: Vec<Vec<u8>>,
@@ -1389,6 +1390,13 @@ pub(crate) fn complete_host_deferred_resources(
     if !state.deferred_resource_cores {
         return Err("host has no deferred resource publication to complete".to_string());
     }
+    let expected = round_resource_cores(&snapshot.dynamic, &snapshot.parameters);
+    if resources
+        .iter()
+        .any(|resource| expected.get(&resource.core.id) != Some(&resource.core))
+    {
+        return Err("completed resource files disagree with their snapshot".to_string());
+    }
     if state.resource_backend.is_none() && !resources.is_empty() {
         return Err("host has no filesystem resource backend".to_string());
     }
@@ -1438,8 +1446,36 @@ pub(crate) fn complete_host_deferred_resources(
     let cores = resources
         .into_iter()
         .map(|resource| resource.core)
-        .collect();
-    state.join_snapshot = Some(snapshot);
+        .collect::<Vec<_>>();
+    // A player, team or league response may have changed the lobby while the
+    // worker packed. Completion owns resource identities only.
+    if let Some(snapshot) = state.join_snapshot.as_mut() {
+        for current in std::iter::once(&mut snapshot.parameters.scenario)
+            .chain(&mut snapshot.parameters.game_resources)
+        {
+            if let Some(core) = cores.iter().find(|core| core.id == current.id) {
+                *current = core.clone();
+            }
+        }
+    }
+    for registration in &mut state.config.resource_registrations {
+        if let Some(core) = cores
+            .iter()
+            .find(|core| core.id == registration.resource_id)
+        {
+            *registration = crate::ResourceRegistration::from_core(core, core.loadable, false);
+        }
+    }
+    if let Some(snapshot) = state.config.initial_join_snapshot.as_mut() {
+        for current in std::iter::once(&mut snapshot.parameters.scenario)
+            .chain(&mut snapshot.parameters.game_resources)
+        {
+            if let Some(core) = cores.iter().find(|core| core.id == current.id) {
+                *current = core.clone();
+            }
+        }
+    }
+    state.config.initial_join_snapshot_deferred = false;
     state.deferred_resource_cores = false;
     Ok(cores)
 }
