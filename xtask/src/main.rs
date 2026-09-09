@@ -1,6 +1,7 @@
 mod chaos;
 mod compat_profile;
 mod components;
+mod content_distribution;
 mod manifest;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -1434,17 +1435,18 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     copy_tracked_directory(&paths.repo_root, Path::new("planet"), &planet_dst)?;
 
     let content_dst = package_dir.join("content");
-    match content_manifest_roots(&content_src)? {
-        Some(roots) => copy_listed_packs(&content_src, &roots, &content_dst)?,
-        None => copy_tracked_directory(&content_src, Path::new(""), &content_dst)?,
-    }
-
-    for pack in CONTENT_GAME_PACKS {
-        let destination = content_dst.join(pack);
-        if !directory_contains_file(&destination)? {
-            bail!(
-                "required authorized game pack {pack} did not reach the package; it must be tracked in the content submodule"
-            );
+    if let Some(policy) = content_distribution_policy(&content_src)? {
+        copy_distributed_content(&content_src, &policy, &content_dst)?;
+    } else {
+        match content_manifest_roots(&content_src)? {
+            Some(roots) => copy_listed_packs(&content_src, &roots, &content_dst)?,
+            None => copy_tracked_directory(&content_src, Path::new(""), &content_dst)?,
+        }
+        // Historical pins predate per-scope distribution decisions.
+        for pack in CONTENT_GAME_PACKS {
+            if !directory_contains_file(&content_dst.join(pack))? {
+                bail!("required authorized game pack {pack} did not reach the package; it must be tracked in the content submodule");
+            }
         }
     }
 
@@ -2035,15 +2037,58 @@ fn copy_tracked_directory(repository: &Path, directory: &Path, dst: &Path) -> Re
 /// still package the same way.
 const CONTENT_MANIFEST_LOCATIONS: [&str; 2] = ["packs.toml", ".github/packs.toml"];
 
-/// The data-root entries the content repository's `packs.toml` lists, when
-/// the pinned content carries one.
-///
-/// This is the list `pack-content` in the content repository builds
-/// `content.zip` from, read from the same file, so an installer and an
-/// in-place update cannot disagree about which files exist. `None` is a pin
-/// from before the manifest existed, which `copy_tracked_directory` still
-/// packages by the deny list in `is_runtime_package_path` and
-/// `NON_RUNTIME_ROOT_ENTRIES`.
+/// Read explicit decisions when present; only historical pins may fall back
+/// to root membership. Partial policies must fail instead of dropping rules.
+fn content_distribution_policy(
+    content_src: &Path,
+) -> Result<Option<content_distribution::Distribution>> {
+    let Some(path) = CONTENT_MANIFEST_LOCATIONS
+        .iter()
+        .map(|name| content_src.join(name))
+        .find(|path| path.is_file())
+    else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(path)?;
+    let document: toml::Table = text.parse()?;
+    let has_decisions = document
+        .get("packs")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|packs| packs.values().any(|pack| pack.get("rights").is_some()));
+    if document.contains_key("distribution") || has_decisions {
+        Ok(Some(content_distribution::Distribution::parse(&text)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn copy_distributed_content(
+    repository: &Path,
+    policy: &content_distribution::Distribution,
+    dst: &Path,
+) -> Result<()> {
+    let candidates = if repository.join(".git").exists() {
+        tracked_files(repository, Path::new("."))?
+    } else {
+        walked_files(repository)?
+    };
+    let mut files = Vec::new();
+    for path in candidates {
+        if !is_safe_relative_path(&path) {
+            bail!("unsafe content path {}", path.display());
+        }
+        if fs::symlink_metadata(repository.join(&path))?.is_file() {
+            files.push(path_to_zip_string(&path));
+        }
+    }
+    for path in policy.select(&files)? {
+        copy_file(&repository.join(&path), &dst.join(&path))?;
+    }
+    Ok(())
+}
+
+/// Root membership for content pins predating explicit distribution decisions.
+/// Pins predating the manifest itself use the historical runtime deny list.
 fn content_manifest_roots(content_src: &Path) -> Result<Option<BTreeSet<String>>> {
     CONTENT_MANIFEST_LOCATIONS
         .iter()
@@ -3634,6 +3679,65 @@ bytes = "preserve"
                 "unlisted path leaked into package: {relative}"
             );
         }
+    }
+
+    #[test]
+    fn distribution_policy_excludes_nested_content_and_packages_notices() {
+        let (_temp, paths) = package_fixture();
+        write_content_manifest(&paths, "packs.toml");
+        let content = paths.repo_root.join("content");
+        write_fixture(&content.join("CONTENT-NOTICES.md"), b"content notices");
+        write_fixture(&content.join("LICENSE"), b"licence evidence");
+        write_fixture(
+            &content.join("ClonkMars.c4f/Keep.c4s/Scenario.txt"),
+            b"retained",
+        );
+        let manifest_path = content.join("packs.toml");
+        let mut document: toml::Table =
+            fs::read_to_string(&manifest_path).unwrap().parse().unwrap();
+        document.insert(
+            "distribution".into(),
+            toml::Value::Table(toml::Table::from_iter([
+                ("version".into(), toml::Value::Integer(1)),
+                (
+                    "notice".into(),
+                    toml::Value::String("CONTENT-NOTICES.md".into()),
+                ),
+            ])),
+        );
+        for (path, fields) in document.get_mut("packs").unwrap().as_table_mut().unwrap() {
+            let fields = fields.as_table_mut().unwrap();
+            fields.insert(
+                "rights".into(),
+                toml::Value::String(
+                    if path.ends_with("/Test.c4s") {
+                        "excluded"
+                    } else {
+                        "licensed"
+                    }
+                    .into(),
+                ),
+            );
+            fields.insert(
+                "reason".into(),
+                toml::Value::String("fixture exclusion".into()),
+            );
+            fields.insert("license".into(), toml::Value::String("MIT".into()));
+            fields.insert(
+                "evidence".into(),
+                toml::Value::Array(vec![toml::Value::String("LICENSE".into())]),
+            );
+        }
+        fs::write(&manifest_path, toml::to_string(&document).unwrap()).unwrap();
+        let package = assemble_package_layout(&paths).unwrap();
+        assert!(!package.join("content/ClonkMars.c4f/Test.c4s").exists());
+        assert!(package
+            .join("content/ClonkMars.c4f/Keep.c4s/Scenario.txt")
+            .exists());
+        assert_eq!(
+            fs::read(package.join("content/CONTENT-NOTICES.md")).unwrap(),
+            b"content notices"
+        );
     }
 
     /// The content repository kept its manifest under `.github/` before its own
