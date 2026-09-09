@@ -4,6 +4,17 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-09-09
+
+### Features
+
+- Retain startup dirty-region redraw ownership (#1605)
+- Announce host resources before the exact deflate (#1604)
+
+### Testing
+
+- Compare live landscape state in shadow diff (#1601)
+
 ## [0.25.0] - 2026-09-08
 
 ### Bug fixes
