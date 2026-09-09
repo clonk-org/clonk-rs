@@ -620,6 +620,46 @@ pub(crate) struct PreparedDirectoryStandalone {
     pub(crate) packed: Option<Vec<u8>>,
 }
 
+/// A source directory that has been traversed and hashed but not yet packed.
+///
+/// The exact deflate is the whole cost of publishing an unpacked definition,
+/// and everything a peer needs to recognise content it already has is decided
+/// before it: `C4Network2Res::SetByCore` compares the contents CRC and nothing
+/// else (src/C4Network2Res.cpp:448). Holding the traversal open lets the
+/// publication announce that CRC first and pack afterwards, and packing *this*
+/// snapshot rather than re-reading the directory is what keeps the two halves
+/// describing the same bytes.
+#[derive(Debug)]
+pub(crate) struct DirectoryStandaloneSnapshot {
+    contents_crc: u32,
+    source_size: u64,
+    image: DirectoryStandaloneImage,
+}
+
+#[derive(Debug)]
+enum DirectoryStandaloneImage {
+    /// Over `MaxLoadFileSize`, so no image is produced at all.
+    Oversize,
+    /// Recorded by an earlier round of this session and still valid.
+    Reused(Vec<u8>),
+    Pending(Box<MutableGroup>),
+}
+
+impl DirectoryStandaloneSnapshot {
+    pub(crate) fn pack(self) -> Result<PreparedDirectoryStandalone, HostResourceCoreError> {
+        let packed = match self.image {
+            DirectoryStandaloneImage::Oversize => None,
+            DirectoryStandaloneImage::Reused(image) => Some(image),
+            DirectoryStandaloneImage::Pending(group) => Some(group.pack()?),
+        };
+        Ok(PreparedDirectoryStandalone {
+            contents_crc: self.contents_crc,
+            source_size: self.source_size,
+            packed,
+        })
+    }
+}
+
 /// A standalone this host published for a source directory in an earlier
 /// round.
 ///
@@ -663,6 +703,15 @@ pub(crate) fn prepare_directory_standalone(
     max_source_size: Option<u64>,
     reusable_standalones: &[ReusableStandalone],
 ) -> Result<PreparedDirectoryStandalone, HostResourceCoreError> {
+    snapshot_directory_standalone(path, group_maker, max_source_size, reusable_standalones)?.pack()
+}
+
+pub(crate) fn snapshot_directory_standalone(
+    path: &Path,
+    group_maker: &[u8],
+    max_source_size: Option<u64>,
+    reusable_standalones: &[ReusableStandalone],
+) -> Result<DirectoryStandaloneSnapshot, HostResourceCoreError> {
     let filename = path
         .file_name()
         .map(|filename| clonk_resources::path_to_legacy_bytes(Path::new(filename)))
@@ -670,20 +719,22 @@ pub(crate) fn prepare_directory_standalone(
     let snapshot = mutable_directory_snapshot(path, filename, group_maker)?;
     let contents_crc = snapshot.group.contents_crc();
     let source_size = snapshot.source_size;
-    let packed = if max_source_size.is_some_and(|limit| source_size > limit) {
-        None
+    let image = if max_source_size.is_some_and(|limit| source_size > limit) {
+        DirectoryStandaloneImage::Oversize
     } else {
         reusable_standalones
             .iter()
             .find(|previous| previous.describes_snapshot(path, contents_crc, source_size))
             .and_then(ReusableStandalone::image)
-            .map_or_else(|| snapshot.group.pack(), Ok)
-            .map(Some)?
+            .map_or_else(
+                || DirectoryStandaloneImage::Pending(Box::new(snapshot.group)),
+                DirectoryStandaloneImage::Reused,
+            )
     };
-    Ok(PreparedDirectoryStandalone {
+    Ok(DirectoryStandaloneSnapshot {
         contents_crc,
         source_size,
-        packed,
+        image,
     })
 }
 
