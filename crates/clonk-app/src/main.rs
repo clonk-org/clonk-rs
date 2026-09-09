@@ -3142,6 +3142,8 @@ impl GameApp {
                 mode: network_mode,
                 league_auth_session: None,
                 pending_host_preparation: None,
+                #[cfg(test)]
+                hold_host_resource_packing: false,
                 classic_direct_reference_query: None,
                 pending_join: None,
                 staged_host_scenario: None,

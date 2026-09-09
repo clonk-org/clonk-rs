@@ -5748,6 +5748,10 @@ impl GameApp {
                 .as_ref()
                 .filter(|_| self.host_resources_pending())
             {
+                #[cfg(test)]
+                if self.netplay.hold_host_resource_packing {
+                    return Ok(());
+                }
                 let prepared = prepared.clone();
                 let (sender, receiver) = mpsc::channel();
                 match thread::Builder::new()
