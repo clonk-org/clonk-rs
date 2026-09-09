@@ -106,6 +106,7 @@ zbus = { version = "5", default-features = false, features = ["async-io", "block
 windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_TextServices"] }
 
 [dev-dependencies]
+clonk-test-support = { path = "../clonk-test-support" }
 # The app test suite drives NetworkManager and the object-menu parity mutator
 # through the netplay/menus crates' test stubs; the features stand in for the
 # `#[cfg(test)]` gates that covered them before the crate splits and stay out

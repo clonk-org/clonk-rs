@@ -2,13 +2,13 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct CaptionScrollState {
+pub struct CaptionScrollState {
     last_change: Option<Instant>,
     position: i32,
     direction: i8,
 }
 
-pub(crate) fn advance_caption_scroll(
+pub fn advance_caption_scroll(
     state: &Cell<CaptionScrollState>,
     now: Instant,
     max_scroll: i32,

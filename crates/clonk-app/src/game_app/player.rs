@@ -1559,7 +1559,7 @@ impl GameApp {
                 self.netplay.host_join_snapshot.as_mut(),
             ) {
                 snapshot.parameters.teams =
-                    clonk_network::join_team_list_snapshot(assignment.teams().clone());
+                    clonk_app_netplay::join_team_list_snapshot(assignment.teams().clone());
             }
             self.publish_updated_host_join_snapshot();
         }
@@ -1633,7 +1633,7 @@ impl GameApp {
                 self.netplay.host_join_snapshot.as_mut(),
             ) {
                 snapshot.parameters.teams =
-                    clonk_network::join_team_list_snapshot(assignment.teams().clone());
+                    clonk_app_netplay::join_team_list_snapshot(assignment.teams().clone());
             }
             self.publish_updated_host_join_snapshot();
         }
@@ -1826,7 +1826,7 @@ impl GameApp {
 
         if let Some((metadata, updates)) = exact_metadata {
             let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
-            let snapshot = clonk_network::join_team_list_snapshot(metadata);
+            let snapshot = clonk_app_netplay::join_team_list_snapshot(metadata);
             self.engine.set_teams(runtime_teams.clone());
             if let Some(prepared) = self
                 .scenario_lifecycle

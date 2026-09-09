@@ -1,10 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{Ipv6Addr, SocketAddr, TcpStream};
 
-use clonk_engine::{
-    ClientCoreControlData, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
-};
 use clonk_network::{
     encode_host_game_reference_response, encode_league_end_request, encode_league_start_request,
     encode_league_update_request, parse_reference_response, ClientPlayerInfosSnapshot,
@@ -13,6 +9,10 @@ use clonk_network::{
     JoinTeamListSnapshot, JoinTeamSnapshot, LeagueEndRecord, LeagueHeartbeat, LeagueHostSession,
     LeagueReferenceRequestEncodeError, NetpuncherGameIds, NetworkAddress, NetworkGameAdvertiser,
     NetworkGameAdvertiserConfig, NetworkGameReference, NetworkProtocol, PlayerInfoListSnapshot,
+};
+use clonk_protocol::{
+    ClientCoreControlData, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
+    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
 };
 
 #[test]

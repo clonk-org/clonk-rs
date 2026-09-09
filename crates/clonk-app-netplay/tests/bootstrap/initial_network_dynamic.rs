@@ -1,13 +1,15 @@
 use std::env;
 use std::path::PathBuf;
 
+use clonk_app_netplay::{
+    compose_initial_network_dynamic, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
+};
 use clonk_engine::scenario::LegacyDefinitionResolver;
 use clonk_engine::{
     parse_initial_network_game_data, ClientCoreControlData, InitialNetworkGameData, LegacyCString,
     Scenario, ScenarioError,
 };
 use clonk_network::{
-    compose_initial_network_dynamic, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
     InitialNetworkParametersError, InitialNetworkScenarioDefaults, JoinClientRegistrySnapshot,
     JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope, JoinTeamListSnapshot,
     PlayerInfoListSnapshot,

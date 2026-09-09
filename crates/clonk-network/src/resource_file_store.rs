@@ -6,7 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use clonk_engine::NetworkResourceCore;
+use clonk_protocol::NetworkResourceCore;
 
 const MAX_TEMP_SUFFIX: u32 = 999;
 

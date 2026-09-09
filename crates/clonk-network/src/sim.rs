@@ -1447,8 +1447,8 @@ fn dialup_control_body(tick: u32) -> Vec<u8> {
         client_id: 1,
         tick,
         timestamp_ms: 0,
-        controls: vec![clonk_engine::ControlPacket::PlayerControl(
-            clonk_engine::PlayerControlData {
+        controls: vec![clonk_protocol::ControlPacket::PlayerControl(
+            clonk_protocol::PlayerControlData {
                 player: 0,
                 command: 1,
                 data: 0,
@@ -2186,8 +2186,8 @@ mod dialup_control_tests {
         assert_eq!((frame.client_id, frame.tick), (1, 7));
         assert_eq!(
             frame.controls,
-            vec![clonk_engine::ControlPacket::PlayerControl(
-                clonk_engine::PlayerControlData {
+            vec![clonk_protocol::ControlPacket::PlayerControl(
+                clonk_protocol::PlayerControlData {
                     player: 0,
                     command: 1,
                     data: 0,

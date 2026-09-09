@@ -1,7 +1,7 @@
-use clonk_engine::NetworkResourceCore;
 use clonk_network::{
     ChunkWriteOutcome, ResourceFileOwnership, ResourceFileStore, ResourceFileStoreError,
 };
+use clonk_protocol::NetworkResourceCore;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

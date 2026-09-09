@@ -80,6 +80,18 @@ The frontend's inline unit surface likewise lives in
 `clonk-frontend-unit-tests`; `clonk-frontend` retains the opt-in
 `dev_feedback_render` integration target and the optimized production library.
 
+Shared components have their own smaller test targets: `clonk-protocol` owns
+control packets and binary record framing, `clonk-gui` owns text editing and IME
+composition, and `clonk-app-core` owns deferred configuration and session policy.
+The extracted codec, editor, and deferred-write tests now live with those
+components. Shared group, font, and object fixtures live in `clonk-test-support`.
+
+Ordinary `clonk-network` builds and tests do not depend on the engine. The
+registry-backed transport load probes run in `clonk-network-integration-tests`
+with their existing `network_load_24::` names; the benchmark driver selects this
+target automatically. Scenario bootstrap adapters and their integration tests
+belong to `clonk-app-netplay` (`--test bootstrap`).
+
 Do not run `cargo clean` between feedback cycles. Cargo's local artifact and
 incremental caches are valuable to the edit-test loop. CI disables incremental
 compilation because its build cache is reused between clean runners instead.

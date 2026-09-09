@@ -2,14 +2,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use clonk_engine::LegacyCString;
 use clonk_network::{
     publish_deferred_host_initial_resources, publish_host_initial_resources, HostConfig,
     HostInitialResourcePublicationSpec, HostInitialResourceSource, HostResourceType,
-    InitialNetworkDynamic, InitialNetworkDynamicEntry, JoinClientRegistrySnapshot,
-    JoinGameParametersEnvelope, JoinTeamListSnapshot, PlayerInfoListSnapshot,
-    ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket, ResourceTransferBackend,
+    JoinClientRegistrySnapshot, JoinGameParametersEnvelope, JoinTeamListSnapshot,
+    PlayerInfoListSnapshot, ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket,
+    ResourceTransferBackend,
 };
+use clonk_network::{InitialNetworkDynamic, InitialNetworkDynamicEntry};
+use clonk_protocol::LegacyCString;
 use clonk_resources::{c4group_file_crc, MutableGroup};
 use sha1::{Digest, Sha1};
 

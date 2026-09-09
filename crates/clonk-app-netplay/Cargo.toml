@@ -47,3 +47,7 @@ tempfile = "3.8"
 # netplay-crate runs share one Tokio fingerprint with the app and workspace
 # gates.
 tokio = { version = "1.32", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+
+[[test]]
+name = "bootstrap"
+path = "tests/bootstrap/main.rs"

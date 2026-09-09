@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clonk_engine::{ClientCoreControlData, LegacyCString};
+use clonk_protocol::{ClientCoreControlData, LegacyCString};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -23,7 +23,7 @@ pub struct ClientConnectionHandshake {
     pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
     pub join_data: JoinDataEnvelope,
-    pub pending_resource_cores: Vec<clonk_engine::NetworkResourceCore>,
+    pub pending_resource_cores: Vec<clonk_protocol::NetworkResourceCore>,
     /// Kept empty for API compatibility. C++ may receive resource packets
     /// before JoinData, but its resource list is still empty and ignores them;
     /// periodic discovery restarts negotiation after registration
@@ -1357,7 +1357,7 @@ mod tests {
 
     use std::{collections::BTreeMap, time::Duration};
 
-    use clonk_engine::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
+    use clonk_protocol::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
     use tokio::io::{duplex, AsyncWriteExt};
     use tokio::sync::mpsc;
     use tokio::time::{advance, timeout};
@@ -2526,7 +2526,7 @@ mod tests {
             .send(AdmissionDecision::Accept {
                 peer_core: assigned_core.clone(),
                 before_reply: vec![ConnectionAction::EmitDirectClientJoin(
-                    clonk_engine::ClientJoinControlData {
+                    clonk_protocol::ClientJoinControlData {
                         core: assigned_core,
                         by_client: 0,
                     },
@@ -2928,8 +2928,8 @@ mod tests {
             .await
             .unwrap();
         let direct_control = crate::encode_control_entry_payload(
-            &clonk_engine::ControlPacket::ActivateGameGoalMenu(
-                clonk_engine::ActivateGameGoalMenuControlData {
+            &clonk_protocol::ControlPacket::ActivateGameGoalMenu(
+                clonk_protocol::ActivateGameGoalMenuControlData {
                     player: 0,
                     by_client: 0,
                 },

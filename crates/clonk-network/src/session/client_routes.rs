@@ -2162,7 +2162,7 @@ mod udp_outbox_tests {
         let (close, close_rx) = watch::channel(None);
         close.send_replace(Some(crate::ConnectionReply {
             ok: false,
-            message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
+            message: clonk_protocol::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
             wrong_password: false,
             port_protocol: false,
         }));

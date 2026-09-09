@@ -1,15 +1,15 @@
 use std::time::Duration;
 
-use clonk_engine::{
-    ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
-    ControlPlayerInfoEntry, PlayerControlData, SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
-    CLIENT_UPDATE_SET_OBSERVER,
-};
 use clonk_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, ClientConfig, ClientEvent,
     ControlDelivery, ControlPacket, HostConfig, HostEvent, LegacyControlFrame, NetworkStatus,
     ParticipantKind, PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID, NETWORK_STATE_GO,
+};
+use clonk_protocol::{
+    ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
+    ControlPlayerInfoEntry, PlayerControlData, SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
+    CLIENT_UPDATE_SET_OBSERVER,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;

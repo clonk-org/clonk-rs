@@ -27,6 +27,7 @@ clonk-script = { path = "../clonk-script" }
 tracing = "0.1"
 
 [dev-dependencies]
+clonk-test-support = { path = "../clonk-test-support" }
 # Keep clonk-engine's property-test dependencies in this test graph so focused
 # menu-crate runs share one clonk-engine fingerprint with the workspace gate.
 clonk-app-core = { path = "../clonk-app-core", features = ["test-support"] }

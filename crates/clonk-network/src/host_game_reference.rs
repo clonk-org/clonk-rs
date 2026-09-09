@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::{SocketAddr, SocketAddrV6};
 
-use clonk_engine::{
+use clonk_protocol::{
     ClientCoreControlData, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
     PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
@@ -1122,7 +1122,7 @@ fn team_distribution_name(value: u8) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use clonk_engine::{ControlPlayerInfoEntry, LegacyCString};
+    use clonk_protocol::{ControlPlayerInfoEntry, LegacyCString};
 
     use super::*;
 

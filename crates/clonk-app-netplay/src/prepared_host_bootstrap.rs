@@ -12,6 +12,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::{
+    compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
+    join_team_list_snapshot, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
+    InitialNetworkMetadataError,
+};
 use clonk_engine::player_file::PlayerFile;
 use clonk_engine::scenario::{
     LegacyDefinitionResolver, ScenarioGameParameterValues, ScenarioLoaderHead, ScenarioLobbyIdEntry,
@@ -26,18 +31,16 @@ use clonk_engine::{
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 use clonk_network::{
-    compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
-    join_team_list_snapshot, publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
-    HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
-    HostInitialResourcePublication, HostInitialResourcePublicationError,
-    HostInitialResourcePublicationSpec, HostInitialResourceSource, HostResourceType,
-    InitialNetworkDynamicError, InitialNetworkDynamicSpec, InitialNetworkMetadataError,
-    InitialNetworkScenarioDefaults, JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry,
-    JoinGameParametersEnvelope, JoinTeamListSnapshot, LeagueHttpTransportConfig,
-    LeagueStartResponse, NetworkAddress, NetworkGameReference, NetworkProtocol, NetworkStatus,
-    PlayerInfoListSnapshot, ResourceFileOwnership, ReusableStandalone, CURRENT_GAME_BUILD,
-    CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
-    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
+    publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig, HostGameReference,
+    HostGameReferenceError, HostGameReferenceMetadata, HostInitialResourcePublication,
+    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
+    HostInitialResourceSource, HostResourceType, InitialNetworkScenarioDefaults,
+    JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope,
+    JoinTeamListSnapshot, LeagueHttpTransportConfig, LeagueStartResponse, NetworkAddress,
+    NetworkGameReference, NetworkProtocol, NetworkStatus, PlayerInfoListSnapshot,
+    ResourceFileOwnership, ReusableStandalone, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
+    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+    NETWORK_STATE_PAUSE,
 };
 use clonk_resources::{decode_legacy_script_text, localize_script_source_with_components};
 use clonk_resources::{Group, GroupError, LanguagePacks};

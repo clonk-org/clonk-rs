@@ -16,6 +16,8 @@ publish.workspace = true
 test-support = []
 
 [dependencies]
+clonk-resources = { path = "../clonk-resources" }
+tracing = "0.1"
 clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine" }
 clonk-frontend = { path = "../clonk-frontend" }

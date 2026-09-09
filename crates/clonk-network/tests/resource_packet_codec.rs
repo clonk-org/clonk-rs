@@ -5,7 +5,7 @@ use crate::resource_packet::{
     ResourceStatusPacket, DISCOVER_RESOURCE_ID_CAPACITY, MAX_STOCK_DISCOVER_RESOURCE_IDS,
     MAX_STOCK_RESOURCE_DATA_BYTES,
 };
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_protocol::{LegacyCString, NetworkResourceCore};
 
 #[test]
 fn cpp_resource_discover_vector_uses_packed_count_and_native_ids() {

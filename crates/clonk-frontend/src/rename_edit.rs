@@ -5,8 +5,6 @@
 //! and selected, invalid submissions refocus and reselect the text, and a
 //! host-provided focus token is returned when editing finishes.
 
-use std::ops::Range;
-
 use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Rect, Surface};
 
@@ -16,13 +14,7 @@ use crate::classic_gui::{draw_3d_frame, draw_engine_box, IntRect};
 /// the terminator (`src/C4GuiEdit.cpp:49,170-171`).
 pub const RENAME_EDIT_MAX_BYTES: usize = 254;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RenameEditCursorOperation {
-    Left,
-    Right,
-    Home,
-    End,
-}
+pub use clonk_gui::edit::CursorOperation as RenameEditCursorOperation;
 
 /// Request emitted when Enter or focus loss finishes the current input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,12 +162,8 @@ impl<Focus> RenameEdit<Focus> {
         self.blink_ticks = 0;
     }
 
-    pub fn selection_range(&self) -> Option<Range<usize>> {
-        (self.anchor != self.caret).then(|| {
-            let start = self.anchor.min(self.caret);
-            let end = self.anchor.max(self.caret);
-            start..end
-        })
+    pub fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        clonk_gui::edit::selection_range(self.anchor, self.caret)
     }
 
     pub fn selected_text(&self) -> Option<&str> {
@@ -189,133 +177,29 @@ impl<Focus> RenameEdit<Focus> {
     }
 
     pub fn delete_selection(&mut self) -> bool {
-        let Some(range) = self.selection_range() else {
+        if !clonk_gui::edit::EditBuffer::new(&mut self.text, &mut self.caret, &mut self.anchor)
+            .delete_selection()
+        {
             return false;
-        };
-        let start = range.start;
-        self.text.replace_range(range, "");
-        self.caret = start;
-        self.anchor = start;
+        }
         self.blink_ticks = 0;
         true
     }
 
     pub fn insert_text(&mut self, text: &str) -> bool {
         self.delete_selection();
-        let available = RENAME_EDIT_MAX_BYTES.saturating_sub(self.text.len());
-        let mut sanitized = String::new();
-        for character in text.chars() {
-            if character.is_control() {
-                continue;
-            }
-            let character = if character == '|' { '¦' } else { character };
-            if sanitized.len() + character.len_utf8() > available {
-                break;
-            }
-            sanitized.push(character);
+        let inserted =
+            clonk_gui::edit::EditBuffer::new(&mut self.text, &mut self.caret, &mut self.anchor)
+                .insert_sanitized(text, RENAME_EDIT_MAX_BYTES);
+        if inserted {
+            self.blink_ticks = 0;
         }
-        if sanitized.is_empty() {
-            return false;
-        }
-        self.text.insert_str(self.caret, &sanitized);
-        self.caret += sanitized.len();
-        self.anchor = self.caret;
-        self.blink_ticks = 0;
-        true
-    }
-
-    fn previous_boundary(&self, at: usize) -> usize {
-        self.text[..at]
-            .char_indices()
-            .next_back()
-            .map(|(index, _)| index)
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self, at: usize) -> usize {
-        self.text[at..]
-            .chars()
-            .next()
-            .map(|character| at + character.len_utf8())
-            .unwrap_or(self.text.len())
-    }
-
-    fn is_word_spacer(character: char) -> bool {
-        character.is_ascii() && !character.is_ascii_alphanumeric() && character != '_'
-    }
-
-    fn word_target(&self, direction: i32) -> usize {
-        if direction < 0 {
-            let mut cursor = self.caret;
-            let mut nonspace_found = false;
-            while cursor > 0 {
-                let previous = self.previous_boundary(cursor);
-                let character = self.text[previous..cursor]
-                    .chars()
-                    .next()
-                    .expect("non-empty character slice");
-                if Self::is_word_spacer(character) {
-                    if nonspace_found {
-                        break;
-                    }
-                } else {
-                    nonspace_found = true;
-                }
-                cursor = previous;
-            }
-            cursor
-        } else {
-            let mut cursor = self.caret;
-            let mut space_found = false;
-            while cursor < self.text.len() {
-                let next = self.next_boundary(cursor);
-                let character = self.text[cursor..next]
-                    .chars()
-                    .next()
-                    .expect("non-empty character slice");
-                if Self::is_word_spacer(character) {
-                    space_found = true;
-                } else if space_found {
-                    break;
-                }
-                cursor = next;
-            }
-            cursor
-        }
+        inserted
     }
 
     pub fn move_cursor(&mut self, operation: RenameEditCursorOperation, ctrl: bool, shift: bool) {
-        if self.selection_range().is_some() && !shift {
-            self.anchor = self.caret;
-        }
-        let old_caret = self.caret;
-        let target = match operation {
-            RenameEditCursorOperation::Left => {
-                if ctrl {
-                    self.word_target(-1)
-                } else {
-                    self.previous_boundary(self.caret)
-                }
-            }
-            RenameEditCursorOperation::Right => {
-                if ctrl {
-                    self.word_target(1)
-                } else {
-                    self.next_boundary(self.caret)
-                }
-            }
-            RenameEditCursorOperation::Home => 0,
-            RenameEditCursorOperation::End => self.text.len(),
-        };
-        if shift {
-            if self.selection_range().is_none() {
-                self.anchor = old_caret;
-            }
-            self.caret = target;
-        } else {
-            self.caret = target;
-            self.anchor = target;
-        }
+        clonk_gui::edit::EditBuffer::new(&mut self.text, &mut self.caret, &mut self.anchor)
+            .move_cursor(operation, ctrl, shift);
         self.blink_ticks = 0;
     }
 
@@ -323,37 +207,26 @@ impl<Focus> RenameEdit<Focus> {
         if self.delete_selection() {
             return true;
         }
-        if shift || self.caret == 0 {
-            return false;
+        let changed =
+            clonk_gui::edit::EditBuffer::new(&mut self.text, &mut self.caret, &mut self.anchor)
+                .erase(true, ctrl, shift);
+        if changed {
+            self.blink_ticks = 0;
         }
-        let start = if ctrl {
-            self.word_target(-1)
-        } else {
-            self.previous_boundary(self.caret)
-        };
-        self.text.replace_range(start..self.caret, "");
-        self.caret = start;
-        self.anchor = start;
-        self.blink_ticks = 0;
-        true
+        changed
     }
 
     pub fn delete(&mut self, ctrl: bool, shift: bool) -> bool {
         if self.delete_selection() {
             return true;
         }
-        if shift || self.caret == self.text.len() {
-            return false;
+        let changed =
+            clonk_gui::edit::EditBuffer::new(&mut self.text, &mut self.caret, &mut self.anchor)
+                .erase(false, ctrl, shift);
+        if changed {
+            self.blink_ticks = 0;
         }
-        let end = if ctrl {
-            self.word_target(1)
-        } else {
-            self.next_boundary(self.caret)
-        };
-        self.text.replace_range(self.caret..end, "");
-        self.anchor = self.caret;
-        self.blink_ticks = 0;
-        true
+        changed
     }
 
     pub fn tick_blink(&mut self) -> bool {
@@ -399,67 +272,12 @@ impl<Focus> RenameEdit<Focus> {
         self.dragging = false;
     }
 
-    pub fn select_word_at(&mut self, mut position: usize) {
-        position = position.min(self.text.len());
-        if position < self.text.len() {
-            let next = self.next_boundary(position);
-            let character = self.text[position..next]
-                .chars()
-                .next()
-                .expect("non-empty character slice");
-            if Self::is_word_spacer(character) {
-                if position == 0 {
-                    return;
-                }
-                let previous = self.previous_boundary(position);
-                let character = self.text[previous..position]
-                    .chars()
-                    .next()
-                    .expect("non-empty character slice");
-                if Self::is_word_spacer(character) {
-                    return;
-                }
-                position = previous;
-            }
-        } else if position > 0 {
-            let previous = self.previous_boundary(position);
-            let character = self.text[previous..position]
-                .chars()
-                .next()
-                .expect("non-empty character slice");
-            if Self::is_word_spacer(character) {
-                return;
-            }
-            position = previous;
-        } else {
+    pub fn select_word_at(&mut self, position: usize) {
+        let Some(range) = clonk_gui::edit::word_selection(&self.text, position) else {
             return;
-        }
-        let mut start = position;
-        while start > 0 {
-            let previous = self.previous_boundary(start);
-            let character = self.text[previous..start]
-                .chars()
-                .next()
-                .expect("non-empty character slice");
-            if Self::is_word_spacer(character) {
-                break;
-            }
-            start = previous;
-        }
-        let mut end = self.next_boundary(position);
-        while end < self.text.len() {
-            let next = self.next_boundary(end);
-            let character = self.text[end..next]
-                .chars()
-                .next()
-                .expect("non-empty character slice");
-            if Self::is_word_spacer(character) {
-                break;
-            }
-            end = next;
-        }
-        self.anchor = start;
-        self.caret = end;
+        };
+        self.anchor = range.start;
+        self.caret = range.end;
         self.dragging = false;
         self.blink_ticks = 0;
     }

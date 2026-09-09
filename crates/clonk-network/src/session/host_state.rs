@@ -19,7 +19,7 @@ pub(crate) enum HostLoopMessage {
     ClientAccepted {
         connection_id: u32,
         remote_connection_id: u32,
-        core: clonk_engine::ClientCoreControlData,
+        core: clonk_protocol::ClientCoreControlData,
         peer_is_port: bool,
         peer_addr: SocketAddr,
         protocol: crate::NetworkProtocol,
@@ -110,7 +110,7 @@ pub(crate) struct HostState {
     pub(crate) peer_capability_waiters: Vec<PeerCapabilityWaiter>,
     pub(crate) control_send_time_epoch: u64,
     pub(crate) closed_routes: crate::post_mortem::ClosedConnectionRouter,
-    pub(crate) pending_sync: Vec<clonk_engine::ControlPacket>,
+    pub(crate) pending_sync: Vec<clonk_protocol::ControlPacket>,
     pub(crate) status_barrier: StatusBarrier,
     pub(crate) last_chase_target_update: Option<tokio::time::Instant>,
     pub(crate) game_started: bool,
@@ -131,7 +131,7 @@ pub(crate) struct HostState {
     pub(crate) peer_capabilities: crate::PeerCapabilityRegistry,
     pub(crate) async_control_wait: Option<AsyncControlWait>,
     pub(crate) admission: HostAdmission,
-    pub(crate) client_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    pub(crate) client_cores: BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     pub(crate) client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
     pub(crate) netpuncher_game_ids: NetpuncherGameIds,
     pub(crate) pending_kinds: BTreeMap<i32, ParticipantKind>,
@@ -145,7 +145,7 @@ pub(crate) struct HostState {
     pub(crate) deferred_resource_cores: bool,
     pub(crate) resource_catalog: crate::ResourceCatalog,
     pub(crate) resource_backend: Option<crate::ResourceTransferBackend>,
-    pub(crate) published_player_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    pub(crate) published_player_sources: BTreeMap<PathBuf, clonk_protocol::NetworkResourceCore>,
     pub(crate) published_player_local_paths: BTreeMap<PathBuf, PathBuf>,
     pub(crate) resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     pub(crate) resource_epoch: Instant,
@@ -190,7 +190,7 @@ impl HostState {
 }
 
 fn validate_host_round_resource_cores(snapshot: &HostJoinSnapshot) -> Result<(), String> {
-    let mut cores_by_id = BTreeMap::<i32, clonk_engine::NetworkResourceCore>::new();
+    let mut cores_by_id = BTreeMap::<i32, clonk_protocol::NetworkResourceCore>::new();
     let external_player_cores = snapshot
         .parameters
         .player_infos
@@ -199,9 +199,9 @@ fn validate_host_round_resource_cores(snapshot: &HostJoinSnapshot) -> Result<(),
         .flat_map(|client| &client.players)
         .filter_map(|player| {
             let flags = player.flags;
-            (flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED == 0
-                && flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0
-                && flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE == 0)
+            (flags & clonk_protocol::PLAYER_INFO_FLAG_REMOVED == 0
+                && flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE != 0
+                && flags & clonk_protocol::PLAYER_INFO_FLAG_IN_SCENARIO_FILE == 0)
                 .then_some(player.resource.as_ref())
                 .flatten()
         });
@@ -245,7 +245,7 @@ pub(crate) fn validate_host_round_config(config: &HostConfig) -> Result<(), Stri
             ));
         }
     }
-    if snapshot.dynamic.resource_type == clonk_engine::NETWORK_RESOURCE_TYPE_NULL {
+    if snapshot.dynamic.resource_type == clonk_protocol::NETWORK_RESOURCE_TYPE_NULL {
         return Err("restarted round has no loadable dynamic".to_string());
     }
     let start_tick = i32::try_from(config.start_tick)
@@ -279,16 +279,16 @@ pub(crate) struct PreparedHostRoundConfig {
     coordinator: ControlCoordinator,
     resource_catalog: crate::ResourceCatalog,
     resource_backend: Option<crate::ResourceTransferBackend>,
-    published_player_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    published_player_sources: BTreeMap<PathBuf, clonk_protocol::NetworkResourceCore>,
     published_player_local_paths: BTreeMap<PathBuf, PathBuf>,
     resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     join_snapshot: Option<HostJoinSnapshot>,
-    client_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    client_cores: BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
 }
 
 pub(crate) fn configured_player_resource_local_path(
     source_path: &Path,
-    core: &clonk_engine::NetworkResourceCore,
+    core: &clonk_protocol::NetworkResourceCore,
     resource_files: &[crate::HostedResourceFile],
 ) -> PathBuf {
     if source_path.is_dir() || !source_path.exists() {
@@ -564,7 +564,7 @@ pub(crate) fn install_host_round_config(
     Ok(())
 }
 
-fn host_round_resources(config: &HostConfig) -> BTreeMap<i32, clonk_engine::NetworkResourceCore> {
+fn host_round_resources(config: &HostConfig) -> BTreeMap<i32, clonk_protocol::NetworkResourceCore> {
     let mut resources = config
         .initial_join_snapshot
         .as_ref()
@@ -1215,14 +1215,14 @@ pub(crate) fn resource_traffic_class(packet: &ResourcePacket) -> ConnectionTraff
 }
 
 pub(crate) fn update_derived_resource_sources(
-    sources: &mut BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    sources: &mut BTreeMap<PathBuf, clonk_protocol::NetworkResourceCore>,
     events: &[crate::ResourceTransferEvent],
 ) {
     update_derived_resource_sources_with_paths(sources, None, events);
 }
 
 pub(crate) fn update_derived_resource_sources_with_paths(
-    sources: &mut BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    sources: &mut BTreeMap<PathBuf, clonk_protocol::NetworkResourceCore>,
     mut local_paths: Option<&mut BTreeMap<PathBuf, PathBuf>>,
     events: &[crate::ResourceTransferEvent],
 ) {
@@ -1252,7 +1252,7 @@ pub(crate) fn update_derived_resource_sources_with_paths(
 const MAX_RUNTIME_DYNAMIC_SUFFIX: u32 = 999;
 
 pub(crate) struct PublishedRuntimeDynamic {
-    pub(crate) core: clonk_engine::NetworkResourceCore,
+    pub(crate) core: clonk_protocol::NetworkResourceCore,
     pub(crate) previous_dynamic_id: Option<i32>,
 }
 
@@ -1386,7 +1386,7 @@ pub(crate) fn complete_host_deferred_resources(
     snapshot: HostJoinSnapshot,
     resources: Vec<crate::HostedResourceFile>,
     state: &mut HostState,
-) -> Result<Vec<clonk_engine::NetworkResourceCore>, String> {
+) -> Result<Vec<clonk_protocol::NetworkResourceCore>, String> {
     if !state.deferred_resource_cores {
         return Err("host has no deferred resource publication to complete".to_string());
     }
@@ -1485,7 +1485,7 @@ pub(crate) fn remove_host_runtime_dynamic(state: &mut HostState) -> Result<bool,
         state.dynamic_required_clients.clear();
         return Ok(false);
     };
-    if snapshot.dynamic.resource_type == clonk_engine::NETWORK_RESOURCE_TYPE_NULL {
+    if snapshot.dynamic.resource_type == clonk_protocol::NETWORK_RESOURCE_TYPE_NULL {
         state.dynamic_required_clients.clear();
         return Ok(false);
     }
@@ -1496,7 +1496,7 @@ pub(crate) fn remove_host_runtime_dynamic(state: &mut HostState) -> Result<bool,
         ));
     }
     let resource_id = snapshot.dynamic.id;
-    snapshot.dynamic = clonk_engine::NetworkResourceCore::default();
+    snapshot.dynamic = clonk_protocol::NetworkResourceCore::default();
     snapshot.dynamic_tick = -1;
     state.dynamic_required_clients.clear();
     mark_host_resource_removed(resource_id, state);
@@ -1581,7 +1581,7 @@ fn materialize_runtime_dynamic(
 fn runtime_dynamic_wire_name(
     template: &str,
     materialized_path: &Path,
-) -> Result<clonk_engine::LegacyCString, String> {
+) -> Result<clonk_protocol::LegacyCString, String> {
     let basename = materialized_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1594,7 +1594,7 @@ fn runtime_dynamic_wire_name(
     let mut wire_name = Vec::with_capacity(prefix_length + basename.len());
     wire_name.extend_from_slice(&template.as_bytes()[..prefix_length]);
     wire_name.extend_from_slice(basename.as_bytes());
-    clonk_engine::LegacyCString::from_bytes(wire_name)
+    clonk_protocol::LegacyCString::from_bytes(wire_name)
         .ok_or_else(|| "runtime dynamic wire name contains a NUL".to_string())
 }
 
@@ -1733,7 +1733,7 @@ pub(crate) fn finish_host_resource_derive(
     state: &mut HostState,
 ) -> Result<
     (
-        clonk_engine::NetworkResourceCore,
+        clonk_protocol::NetworkResourceCore,
         Vec<crate::ResourceTransferEvent>,
     ),
     String,

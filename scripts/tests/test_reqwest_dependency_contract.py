@@ -94,9 +94,9 @@ class ReqwestDependencyContractTests(unittest.TestCase):
             ],
         )
 
-    def test_contract_covers_all_31_workspace_members(self):
+    def test_contract_covers_all_workspace_members(self):
         covered_members = set(workspace_members())
-        self.assertEqual((len(covered_members), SURFACE in covered_members), (31, True))
+        self.assertEqual((len(covered_members), SURFACE in covered_members), (34, True))
 
     def test_direct_consumers_use_reqwest_013_with_the_ring_rustls_backend(self):
         expected_features = {

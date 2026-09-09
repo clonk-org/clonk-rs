@@ -1,0 +1,24 @@
+[package]
+name = "clonk-network-integration-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"
+
+[dev-dependencies]
+clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+clonk-network = { path = "../clonk-network" }
+clonk-protocol = { path = "../clonk-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

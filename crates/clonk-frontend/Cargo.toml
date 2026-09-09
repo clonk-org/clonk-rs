@@ -36,6 +36,7 @@ rayon = "1.11.0"
 criterion = { version = "0.8", optional = true, default-features = false, features = ["cargo_bench_support"] }
 
 [dev-dependencies]
+clonk-test-support = { path = "../clonk-test-support" }
 # Same feature set as clonk-engine's image dep: a diverging dev-dep request makes
 # the test graph compile a second 18-codec flavor of image (openexr/webp/tiff).
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }

@@ -9,6 +9,7 @@ members = [
     "crates/clonk-engine-unit-tests",
     "crates/clonk-engine-integration-tests",
     "crates/clonk-engine-core",
+    "crates/clonk-protocol",
     "crates/clonk-app",
     "crates/clonk-app-core",
     "crates/clonk-app-menus",
@@ -23,7 +24,9 @@ members = [
     "crates/clonk-launcher-shell",
     "crates/clonk-audio",
     "crates/clonk-network",
+    "crates/clonk-network-integration-tests",
     "crates/clonk-gui",
+    "crates/clonk-test-support",
     "crates/clonk-platform",
     "crates/clonk-game",
     "crates/clonk-scaling",
@@ -165,3 +168,7 @@ opt-level = 1
 # without restoring the level-3 compiler tail.
 [profile.test.package.clonk-frontend-unit-tests]
 opt-level = 1
+
+# Retain the former network harness optimization for the extracted load probes.
+[profile.test.package.clonk-network-integration-tests]
+opt-level = 0

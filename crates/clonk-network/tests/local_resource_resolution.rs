@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clonk_engine::NetworkResourceCore;
 use clonk_network::{
     build_host_resource_core, encode_resource_packet, resolve_local_resource,
     resolve_local_resource_with_group_maker, HostResourceCoreSpec, HostResourceType,
     LocalResourceResolution, ResourceCatalogAction, ResourceDiscoverPacket, ResourceFileOwnership,
     ResourcePacket, ResourceTransferBackend, ResourceTransferEvent, PID_NET_RES_STATUS,
 };
+use clonk_protocol::NetworkResourceCore;
 use clonk_resources::{c4group_file_crc, compress_c4group_image, Group, MutableGroup};
 
 #[test]

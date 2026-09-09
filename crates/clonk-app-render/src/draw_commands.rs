@@ -680,10 +680,7 @@ pub fn build_cursor_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clonk_engine::ComponentList;
-    use clonk_engine::{
-        ActionState, CommandStackSnapshot, ObjectId, PlayerState, SimulationSnapshot, Vector2,
-    };
+    use clonk_engine::{ObjectId, PlayerState, SimulationSnapshot, Vector2};
     use std::collections::{HashMap, HashSet};
 
     struct StubContext {
@@ -751,72 +748,9 @@ mod tests {
 
     fn object(id: u64, definition_id: &str) -> ObjectSnapshot {
         ObjectSnapshot {
-            id: ObjectId::new(id),
-            definition_id: definition_id.to_string(),
-            custom_name: None,
-            position: Vector2::new(100, 100),
-            velocity: Vector2::ZERO,
-            rotation: 0,
-            energy: 100,
-            need_energy: false,
-            construction: FULL_CON,
-            damage: 0,
-            magic_energy: 0,
-            magic_capacity: 0,
-            action: ActionState::default(),
-            direction: Default::default(),
-            command_direction: Default::default(),
-            action_procedure: None,
-            effects: Vec::new(),
-            vertices: Vec::new(),
-            current_shape: None,
-            current_fire_top: None,
-            contact_density: 50,
-            own_vertices: None,
-            vertex_contacts: Vec::new(),
-            solid_mask_override: None,
-            container: None,
-            layer: None,
-            visibility: 0,
-            blit_mode: 0,
-            color: 0,
-            color_modulation: 0,
-            picture_rect: Default::default(),
-            contents: Vec::new(),
-            components: ComponentList::new(),
-            component_order: Vec::new(),
-            status: Default::default(),
             owner: 0,
             controller: 0,
-            category: clonk_engine::DEFAULT_CATEGORY,
-            crew_member: true,
-            plr_view_range: 0,
-            selected: false,
-            alive: true,
-            base_graphics: None,
-            graphics_overlays: Vec::new(),
-            draw_transform: None,
-            command_queue: Vec::new(),
-            command_stack: CommandStackSnapshot::default(),
-            local_vars: HashMap::new(),
-            in_liquid: false,
-            mobile: false,
-            ocf: 0,
-            timer: 0,
-            own_mass: 0,
-            on_fire: false,
-            fire_phase: 0,
-            fire_caused_by: -1,
-            info_physical: None,
-            temporary_physical: None,
-            physical_changes: Vec::new(),
-            breath: 0,
-            last_energy_loss_cause: -1,
-            base: -1,
-            fixed_position: None,
-            fixed_velocity: None,
-            rotation_velocity: None,
-            fixed_rotation: None,
+            ..clonk_test_support::make_object(id, definition_id, Vector2::new(100, 100))
         }
     }
 

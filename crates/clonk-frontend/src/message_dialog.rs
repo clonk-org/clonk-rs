@@ -1918,20 +1918,7 @@ mod tests {
         image: ImageData,
     }
 
-    fn unit_width_font(characters: &str) -> ClonkFont {
-        let mut font = ClonkFont::new(3);
-        font.h_space = 0;
-        for character in characters.chars() {
-            font.add_glyph(
-                character,
-                clonk_graphics::clonk_font::GlyphCell {
-                    width: 1,
-                    pixels: vec![Color::opaque(255, 255, 255); 4],
-                },
-            );
-        }
-        font
-    }
+    use clonk_test_support::unit_width_font;
 
     impl FontImageProvider for TestFontImages {
         fn font_image(&self, tag: &str) -> Option<clonk_graphics::clonk_font::FontImageRef<'_>> {

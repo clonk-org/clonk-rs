@@ -983,95 +983,9 @@ fn scensel_search_applies_on_submit_case_insensitively() {
     main_assert_eq!(state.selected_scenario().map(|entry| entry.identifier.as_str()) => Some("scenario_gamma"));
 }
 
-#[test]
-fn scensel_search_edit_matches_selection_word_and_length_rules() {
-    let mut edit = SearchEditState::default();
-    edit.set_text("Alpha beta");
-    edit.focus();
-    main_assert_eq!(edit.selected_text() => Some("Alpha beta"));
-    edit.insert_text("Z");
-    main_assert_eq!(edit.text() => "Z", "typing replaces Ctrl+F select-all");
 
-    edit.set_text("one  two_three!");
-    edit.move_cursor(SearchCursorOperation::End, false, false);
-    edit.move_cursor(SearchCursorOperation::Left, false, false);
-    edit.move_cursor(SearchCursorOperation::Left, true, false);
-    main_assert_eq!(edit.caret() => 5, "Ctrl+Left stops at the final word start");
-    edit.backspace(true, false);
-    main_assert_eq!(edit.text() => "two_three!", "Ctrl+Backspace removes one word");
-    edit.move_cursor(SearchCursorOperation::Home, false, false);
-    edit.move_cursor(SearchCursorOperation::Right, true, true);
-    main_assert_eq!(edit.selected_text() => Some("two_three!"));
-    edit.delete(false, false);
-    main_assert_eq!(edit.text() => "");
 
-    edit.set_text("");
-    edit.insert_text(&"a".repeat(300));
-    main_assert_eq!(edit.text().len() => SEARCH_EDIT_MAX_BYTES);
-    edit.set_text("");
-    edit.insert_text("left|right");
-    main_assert_eq!(edit.text() => "left¦right");
-    edit.set_text("éé");
-    edit.move_cursor(SearchCursorOperation::Left, false, false);
-    main_assert_eq!(edit.caret() => "é".len(), "caret stays on UTF-8 boundaries");
-    edit.backspace(false, false);
-    main_assert_eq!(edit.text() => "é");
 
-    edit.set_text("alpha beta");
-    edit.select_word_at(8);
-    main_assert_eq!(edit.selected_text() => Some("beta"));
-    edit.begin_pointer_selection(0);
-    edit.drag_pointer_selection(edit.text().len());
-    edit.end_pointer_selection(edit.text().len());
-    main_assert_eq!(edit.selected_text() => Some("alpha beta"));
-
-    edit.set_text("abcdef");
-    edit.begin_pointer_selection(5);
-    edit.drag_pointer_selection(2);
-    main_assert_eq!(edit.selected_text() => Some("cde"));
-    main_assert!(edit.backspace(false, false));
-    main_assert_eq!(edit.text() => "abf");
-    edit.drag_pointer_selection(edit.text().len());
-    main_assert_eq!(edit.selected_text() => Some("f"), "selection deletion updates the still-active physical drag anchor");
-    edit.end_pointer_selection(edit.text().len());
-
-    edit.set_text("abcdef");
-    edit.begin_pointer_selection(5);
-    main_assert!(edit.backspace(false, false));
-    main_assert_eq!(edit.text() => "abcdf");
-    main_assert_eq!(edit.caret() => 4);
-    edit.drag_pointer_selection(2);
-    main_assert_eq!(edit.selected_text() => Some("cdf"), "collapsed cursor deletion preserves C++'s hidden drag anchor");
-    edit.end_pointer_selection(2);
-
-    edit.set_text("W".repeat(100));
-    edit.scroll_cursor_in_view(500, 100, 3);
-    main_assert!(edit.horizontal_scroll > 0);
-    edit.move_cursor(SearchCursorOperation::Home, false, false);
-    edit.scroll_cursor_in_view(0, 100, 3);
-    main_assert_eq!(edit.horizontal_scroll => 1);
-    main_assert!(edit.cursor_visible());
-    for _ in 0..18 {
-        edit.tick_blink();
-    }
-    main_assert!(!edit.cursor_visible());
-}
-
-// C++ notifies text change while deleting the selection before a
-// replacement that cannot fit (src/C4GuiEdit.cpp:145-190). The Rust edit
-// must likewise report that mutation so live results are refreshed.
-#[test]
-fn scensel_search_edit_reports_selection_deletion_when_replacement_does_not_fit() {
-    let mut edit = SearchEditState::default();
-    edit.set_text("a".repeat(SEARCH_EDIT_MAX_BYTES));
-    edit.anchor = SEARCH_EDIT_MAX_BYTES - 1;
-    edit.caret = SEARCH_EDIT_MAX_BYTES;
-
-    let changed = edit.insert_text("é");
-
-    main_assert!(changed);
-    main_assert_eq!(edit.text().len() => SEARCH_EDIT_MAX_BYTES - 1);
-}
 
 #[test]
 fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {

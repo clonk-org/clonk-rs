@@ -1075,16 +1075,16 @@ pub(crate) fn retry_unreached_status_after_disconnect(
 }
 
 async fn queue_disconnected_client_remove(
-    core: &clonk_engine::ClientCoreControlData,
+    core: &clonk_protocol::ClientCoreControlData,
     state: &mut HostState,
 ) {
     let reason =
-        clonk_engine::LegacyCString::from_bytes(b"disconnected".to_vec()).unwrap_or_default();
+        clonk_protocol::LegacyCString::from_bytes(b"disconnected".to_vec()).unwrap_or_default();
     queue_host_client_remove(core, reason, state).await;
 }
 
 pub(crate) async fn fail_host_pending_join_data(
-    reason: clonk_engine::LegacyCString,
+    reason: clonk_protocol::LegacyCString,
     state: &mut HostState,
 ) -> usize {
     let pending = state
@@ -1110,17 +1110,17 @@ pub(crate) async fn fail_host_pending_join_data(
 }
 
 async fn queue_host_client_remove(
-    core: &clonk_engine::ClientCoreControlData,
-    reason: clonk_engine::LegacyCString,
+    core: &clonk_protocol::ClientCoreControlData,
+    reason: clonk_protocol::LegacyCString,
     state: &mut HostState,
 ) {
-    let Ok(data) = crate::encode_control_entry_payload(&clonk_engine::ControlPacket::ClientRemove(
-        clonk_engine::ClientRemoveControlData {
+    let Ok(data) = crate::encode_control_entry_payload(
+        &clonk_protocol::ControlPacket::ClientRemove(clonk_protocol::ClientRemoveControlData {
             client_id: core.client_id,
             reason,
             by_client: 0,
-        },
-    )) else {
+        }),
+    ) else {
         return;
     };
     broadcast_packet(ControlDelivery::Sync, data, None, state).await;
@@ -1230,7 +1230,7 @@ const LOBBY_CHAT_HISTORY_MAX_BYTES: usize = 4096;
 /// lookup on the ordinary client execution path without touching lockstep.
 fn retain_lobby_chat_message(
     delivery: ControlDelivery,
-    control: &clonk_engine::ControlPacket,
+    control: &clonk_protocol::ControlPacket,
     data: &[u8],
     state: &mut HostState,
 ) {
@@ -1238,10 +1238,10 @@ fn retain_lobby_chat_message(
         && state.status_barrier.status.state == NETWORK_STATE_LOBBY
         && matches!(
             control,
-            clonk_engine::ControlPacket::Message(message)
+            clonk_protocol::ControlPacket::Message(message)
                 if matches!(
                     message.message_type,
-                    clonk_engine::MESSAGE_TYPE_NORMAL | clonk_engine::MESSAGE_TYPE_ME
+                    clonk_protocol::MESSAGE_TYPE_NORMAL | clonk_protocol::MESSAGE_TYPE_ME
                 )
         );
     if !retain {
@@ -1278,75 +1278,83 @@ pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<
     })?;
     for control in controls {
         let (name, author) = match control {
-            clonk_engine::ControlPacket::ClientJoin(control) => {
+            clonk_protocol::ControlPacket::ClientJoin(control) => {
                 ("CID_ClientJoin", control.by_client)
             }
-            clonk_engine::ControlPacket::ClientUpdate(control) => {
+            clonk_protocol::ControlPacket::ClientUpdate(control) => {
                 ("CID_ClientUpdate", control.by_client)
             }
-            clonk_engine::ControlPacket::ClientRemove(control) => {
+            clonk_protocol::ControlPacket::ClientRemove(control) => {
                 ("CID_ClientRemove", control.by_client)
             }
-            clonk_engine::ControlPacket::PlayerInfo(control) => ("CID_PlrInfo", control.by_client),
-            clonk_engine::ControlPacket::JoinPlayer(control) => ("CID_JoinPlr", control.by_client),
-            clonk_engine::ControlPacket::PlayerSelect(control) => {
+            clonk_protocol::ControlPacket::PlayerInfo(control) => {
+                ("CID_PlrInfo", control.by_client)
+            }
+            clonk_protocol::ControlPacket::JoinPlayer(control) => {
+                ("CID_JoinPlr", control.by_client)
+            }
+            clonk_protocol::ControlPacket::PlayerSelect(control) => {
                 ("CID_PlrSelect", control.by_client)
             }
-            clonk_engine::ControlPacket::PlayerControl(control) => {
+            clonk_protocol::ControlPacket::PlayerControl(control) => {
                 ("CID_PlrControl", control.by_client)
             }
-            clonk_engine::ControlPacket::PlayerCommand(control) => {
+            clonk_protocol::ControlPacket::PlayerCommand(control) => {
                 ("CID_PlrCommand", control.by_client)
             }
-            clonk_engine::ControlPacket::Script(script) => ("CID_Script", script.by_client),
-            clonk_engine::ControlPacket::MessageBoardAnswer(answer) => {
+            clonk_protocol::ControlPacket::Script(script) => ("CID_Script", script.by_client),
+            clonk_protocol::ControlPacket::MessageBoardAnswer(answer) => {
                 ("CID_MessageBoardAnswer", answer.by_client)
             }
-            clonk_engine::ControlPacket::Message(message) => ("CID_Message", message.by_client),
-            clonk_engine::ControlPacket::CustomCommand(command) => {
+            clonk_protocol::ControlPacket::Message(message) => ("CID_Message", message.by_client),
+            clonk_protocol::ControlPacket::CustomCommand(command) => {
                 ("CID_CustomCommand", command.by_client)
             }
-            clonk_engine::ControlPacket::EmMoveObject(control) => {
+            clonk_protocol::ControlPacket::EmMoveObject(control) => {
                 ("CID_EMMoveObj", control.by_client)
             }
-            clonk_engine::ControlPacket::EmDrawTool(control) => {
+            clonk_protocol::ControlPacket::EmDrawTool(control) => {
                 ("CID_EMDrawTool", control.by_client)
             }
-            clonk_engine::ControlPacket::EmDropDef(control) => ("CID_EMDropDef", control.by_client),
-            clonk_engine::ControlPacket::ActivateGameGoalMenu(control) => {
+            clonk_protocol::ControlPacket::EmDropDef(control) => {
+                ("CID_EMDropDef", control.by_client)
+            }
+            clonk_protocol::ControlPacket::ActivateGameGoalMenu(control) => {
                 ("CID_ActivateGameGoalMenu", control.by_client)
             }
-            clonk_engine::ControlPacket::ToggleHostility(control) => {
+            clonk_protocol::ControlPacket::ToggleHostility(control) => {
                 ("CID_ToggleHostility", control.by_client)
             }
-            clonk_engine::ControlPacket::ActivateGameGoalRule(control) => {
+            clonk_protocol::ControlPacket::ActivateGameGoalRule(control) => {
                 ("CID_ActivateGameGoalRule", control.by_client)
             }
-            clonk_engine::ControlPacket::SetPlayerTeam(control) => {
+            clonk_protocol::ControlPacket::SetPlayerTeam(control) => {
                 ("CID_SetPlayerTeam", control.by_client)
             }
-            clonk_engine::ControlPacket::EliminatePlayer(control) => {
+            clonk_protocol::ControlPacket::EliminatePlayer(control) => {
                 ("CID_EliminatePlayer", control.by_client)
             }
-            clonk_engine::ControlPacket::RemovePlayer(remove) => {
+            clonk_protocol::ControlPacket::RemovePlayer(remove) => {
                 ("CID_RemovePlr", remove.by_client)
             }
-            clonk_engine::ControlPacket::Set(set) => ("CID_Set", set.by_client),
-            clonk_engine::ControlPacket::Vote(vote) => ("CID_Vote", vote.by_client),
-            clonk_engine::ControlPacket::VoteEnd(vote) => ("CID_VoteEnd", vote.by_client),
-            clonk_engine::ControlPacket::InitScenarioPlayer(control) => {
+            clonk_protocol::ControlPacket::Set(set) => ("CID_Set", set.by_client),
+            clonk_protocol::ControlPacket::Vote(vote) => ("CID_Vote", vote.by_client),
+            clonk_protocol::ControlPacket::VoteEnd(vote) => ("CID_VoteEnd", vote.by_client),
+            clonk_protocol::ControlPacket::InitScenarioPlayer(control) => {
                 ("CID_InitScenarioPlayer", control.by_client)
             }
-            clonk_engine::ControlPacket::SurrenderPlayer(control) => {
+            clonk_protocol::ControlPacket::SurrenderPlayer(control) => {
                 ("CID_SurrenderPlayer", control.by_client)
             }
-            clonk_engine::ControlPacket::Synchronize(control) => {
+            clonk_protocol::ControlPacket::Synchronize(control) => {
                 ("CID_Synchronize", control.by_client)
             }
-            clonk_engine::ControlPacket::SyncCheck(control) => ("CID_SyncCheck", control.by_client),
+            clonk_protocol::ControlPacket::SyncCheck(control) => {
+                ("CID_SyncCheck", control.by_client)
+            }
             // DebugRec has no inherited C4ControlPacket body, so the outer
             // authenticated contribution is its only author identity.
-            clonk_engine::ControlPacket::DebugRecord(_) => continue,
+            clonk_protocol::ControlPacket::DebugRecord(_) => continue,
             _ => continue,
         };
         if author != expected_author {
@@ -1556,7 +1564,7 @@ async fn dispatch_packet(
                 }
             };
             if expected_author == HOST_CLIENT_ID as i32 {
-                if let clonk_engine::ControlPacket::ClientRemove(remove) = &control {
+                if let clonk_protocol::ControlPacket::ClientRemove(remove) = &control {
                     if remove.by_client == HOST_CLIENT_ID as i32 {
                         if let Ok(client_id) = ClientId::try_from(remove.client_id) {
                             if state.client_cores.contains_key(&remove.client_id)
@@ -1620,7 +1628,7 @@ async fn dispatch_packet(
             let mut local_data = data.clone();
             let mut prompt_player_resource_discovery = Vec::new();
             retain_lobby_chat_message(delivery, &control, &data, state);
-            if let clonk_engine::ControlPacket::PlayerInfo(info) = &mut control {
+            if let clonk_protocol::ControlPacket::PlayerInfo(info) = &mut control {
                 let resource_owner = info.client_id;
                 let resource_owner_client_id = ClientId::try_from(resource_owner).ok();
                 let resource_owner_is_authorized =
@@ -1707,43 +1715,42 @@ async fn dispatch_packet(
 pub(crate) fn authenticated_single_control(
     data: &[u8],
     expected_author: i32,
-) -> Result<clonk_engine::ControlPacket, String> {
+) -> Result<clonk_protocol::ControlPacket, String> {
     let control = decode_control_entry_payload(data)
         .map_err(|error| format!("invalid single control packet: {error}"))?;
     let author = match &control {
-        clonk_engine::ControlPacket::ClientJoin(data) => data.by_client,
-        clonk_engine::ControlPacket::ClientUpdate(data) => data.by_client,
-        clonk_engine::ControlPacket::ClientRemove(data) => data.by_client,
-        clonk_engine::ControlPacket::PlayerSelect(data) => data.by_client,
-        clonk_engine::ControlPacket::PlayerControl(data) => data.by_client,
-        clonk_engine::ControlPacket::PlayerCommand(data) => data.by_client,
-        clonk_engine::ControlPacket::Script(data) => data.by_client,
-        clonk_engine::ControlPacket::MessageBoardAnswer(data) => data.by_client,
-        clonk_engine::ControlPacket::Message(data) => data.by_client,
-        clonk_engine::ControlPacket::CustomCommand(data) => data.by_client,
-        clonk_engine::ControlPacket::EmMoveObject(data) => data.by_client,
-        clonk_engine::ControlPacket::EmDrawTool(data) => data.by_client,
-        clonk_engine::ControlPacket::EmDropDef(data) => data.by_client,
-        clonk_engine::ControlPacket::ActivateGameGoalMenu(data) => data.by_client,
-        clonk_engine::ControlPacket::ToggleHostility(data) => data.by_client,
-        clonk_engine::ControlPacket::ActivateGameGoalRule(data) => data.by_client,
-        clonk_engine::ControlPacket::SetPlayerTeam(data) => data.by_client,
-        clonk_engine::ControlPacket::EliminatePlayer(data) => data.by_client,
-        clonk_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
-        clonk_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
-        clonk_engine::ControlPacket::Synchronize(data) => data.by_client,
-        clonk_engine::ControlPacket::SyncCheck(data) => data.by_client,
-        clonk_engine::ControlPacket::JoinPlayer(data) => data.by_client,
-        clonk_engine::ControlPacket::RemovePlayer(data) => data.by_client,
-        clonk_engine::ControlPacket::PlayerInfo(data) => data.by_client,
-        clonk_engine::ControlPacket::Vote(data) | clonk_engine::ControlPacket::VoteEnd(data) => {
-            data.by_client
-        }
-        clonk_engine::ControlPacket::Set(data) => data.by_client,
+        clonk_protocol::ControlPacket::ClientJoin(data) => data.by_client,
+        clonk_protocol::ControlPacket::ClientUpdate(data) => data.by_client,
+        clonk_protocol::ControlPacket::ClientRemove(data) => data.by_client,
+        clonk_protocol::ControlPacket::PlayerSelect(data) => data.by_client,
+        clonk_protocol::ControlPacket::PlayerControl(data) => data.by_client,
+        clonk_protocol::ControlPacket::PlayerCommand(data) => data.by_client,
+        clonk_protocol::ControlPacket::Script(data) => data.by_client,
+        clonk_protocol::ControlPacket::MessageBoardAnswer(data) => data.by_client,
+        clonk_protocol::ControlPacket::Message(data) => data.by_client,
+        clonk_protocol::ControlPacket::CustomCommand(data) => data.by_client,
+        clonk_protocol::ControlPacket::EmMoveObject(data) => data.by_client,
+        clonk_protocol::ControlPacket::EmDrawTool(data) => data.by_client,
+        clonk_protocol::ControlPacket::EmDropDef(data) => data.by_client,
+        clonk_protocol::ControlPacket::ActivateGameGoalMenu(data) => data.by_client,
+        clonk_protocol::ControlPacket::ToggleHostility(data) => data.by_client,
+        clonk_protocol::ControlPacket::ActivateGameGoalRule(data) => data.by_client,
+        clonk_protocol::ControlPacket::SetPlayerTeam(data) => data.by_client,
+        clonk_protocol::ControlPacket::EliminatePlayer(data) => data.by_client,
+        clonk_protocol::ControlPacket::InitScenarioPlayer(data) => data.by_client,
+        clonk_protocol::ControlPacket::SurrenderPlayer(data) => data.by_client,
+        clonk_protocol::ControlPacket::Synchronize(data) => data.by_client,
+        clonk_protocol::ControlPacket::SyncCheck(data) => data.by_client,
+        clonk_protocol::ControlPacket::JoinPlayer(data) => data.by_client,
+        clonk_protocol::ControlPacket::RemovePlayer(data) => data.by_client,
+        clonk_protocol::ControlPacket::PlayerInfo(data) => data.by_client,
+        clonk_protocol::ControlPacket::Vote(data)
+        | clonk_protocol::ControlPacket::VoteEnd(data) => data.by_client,
+        clonk_protocol::ControlPacket::Set(data) => data.by_client,
         // C4ControlDebugRec contains only its opaque StdBuf. The authenticated
         // control envelope is therefore its sole author identity.
-        clonk_engine::ControlPacket::DebugRecord(_) => expected_author,
-        clonk_engine::ControlPacket::Unknown { .. } => {
+        clonk_protocol::ControlPacket::DebugRecord(_) => expected_author,
+        clonk_protocol::ControlPacket::Unknown { .. } => {
             return Err("unsupported single control packet".to_string());
         }
     };
@@ -1755,17 +1762,17 @@ pub(crate) fn authenticated_single_control(
     Ok(control)
 }
 
-pub(crate) fn control_requires_host_ingress(control: &clonk_engine::ControlPacket) -> bool {
+pub(crate) fn control_requires_host_ingress(control: &clonk_protocol::ControlPacket) -> bool {
     matches!(
         control,
-        clonk_engine::ControlPacket::ClientJoin(_)
-            | clonk_engine::ControlPacket::ClientUpdate(_)
-            | clonk_engine::ControlPacket::ClientRemove(_)
-            | clonk_engine::ControlPacket::VoteEnd(_)
-            | clonk_engine::ControlPacket::EliminatePlayer(_)
-            | clonk_engine::ControlPacket::Synchronize(_)
-            | clonk_engine::ControlPacket::RemovePlayer(_)
-            | clonk_engine::ControlPacket::PlayerInfo(_)
+        clonk_protocol::ControlPacket::ClientJoin(_)
+            | clonk_protocol::ControlPacket::ClientUpdate(_)
+            | clonk_protocol::ControlPacket::ClientRemove(_)
+            | clonk_protocol::ControlPacket::VoteEnd(_)
+            | clonk_protocol::ControlPacket::EliminatePlayer(_)
+            | clonk_protocol::ControlPacket::Synchronize(_)
+            | clonk_protocol::ControlPacket::RemovePlayer(_)
+            | clonk_protocol::ControlPacket::PlayerInfo(_)
     )
 }
 
@@ -1852,19 +1859,19 @@ async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
 }
 
 async fn apply_host_membership_controls(
-    controls: &[clonk_engine::ControlPacket],
+    controls: &[clonk_protocol::ControlPacket],
     state: &mut HostState,
 ) {
     for control in controls {
         match control {
-            clonk_engine::ControlPacket::ClientUpdate(update)
+            clonk_protocol::ControlPacket::ClientUpdate(update)
                 if update.by_client == HOST_CLIENT_ID as i32 =>
             {
                 let Ok(client_id) = ClientId::try_from(update.client_id) else {
                     continue;
                 };
                 match update.update_type {
-                    clonk_engine::CLIENT_UPDATE_ACTIVATE => {
+                    clonk_protocol::CLIENT_UPDATE_ACTIVATE => {
                         let activated = update.data != 0;
                         if let Some(core) = state.client_cores.get_mut(&update.client_id) {
                             core.activated = activated;
@@ -1882,7 +1889,7 @@ async fn apply_host_membership_controls(
                             coordination_unregister(client_id, state).await;
                         }
                     }
-                    clonk_engine::CLIENT_UPDATE_SET_OBSERVER => {
+                    clonk_protocol::CLIENT_UPDATE_SET_OBSERVER => {
                         if let Some(core) = state.client_cores.get_mut(&update.client_id) {
                             core.activated = false;
                             core.observer = true;
@@ -1898,7 +1905,7 @@ async fn apply_host_membership_controls(
                     _ => {}
                 }
             }
-            clonk_engine::ControlPacket::ClientRemove(remove)
+            clonk_protocol::ControlPacket::ClientRemove(remove)
                 if remove.by_client == HOST_CLIENT_ID as i32 =>
             {
                 apply_host_client_remove(remove.client_id, state).await;
@@ -1957,7 +1964,7 @@ async fn close_removed_client_connections(client_id: ClientId, state: &mut HostS
     let barrier_effects = state.status_barrier.remove_remote(client_id);
     let reply = crate::ConnectionReply {
         ok: false,
-        message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+        message: clonk_protocol::LegacyCString::from_bytes(b"removing client".to_vec())
             .unwrap_or_default(),
         wrong_password: false,
         port_protocol: false,

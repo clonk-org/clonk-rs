@@ -50,7 +50,7 @@ pub struct ControlPacket {
 struct ControlPacketDecodeCache(Arc<OnceLock<CachedControlList>>);
 
 struct CachedControlList {
-    controls: Vec<clonk_engine::ControlPacket>,
+    controls: Vec<clonk_protocol::ControlPacket>,
     consumed: usize,
 }
 
@@ -104,7 +104,7 @@ impl ControlPacket {
 
     pub(crate) fn decoded_control_list(
         &self,
-    ) -> Result<(&[clonk_engine::ControlPacket], usize), crate::LegacyControlError> {
+    ) -> Result<(&[clonk_protocol::ControlPacket], usize), crate::LegacyControlError> {
         if let Some(decoded) = self.decoded.0.get() {
             return Ok((&decoded.controls, decoded.consumed));
         }
@@ -121,7 +121,7 @@ impl ControlPacket {
 
     pub(crate) fn prime_decoded_control_list(
         &self,
-        controls: Vec<clonk_engine::ControlPacket>,
+        controls: Vec<clonk_protocol::ControlPacket>,
         consumed: usize,
     ) {
         let _ = self.decoded.0.set(CachedControlList { controls, consumed });

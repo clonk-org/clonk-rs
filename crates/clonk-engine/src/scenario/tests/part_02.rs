@@ -975,43 +975,7 @@
     /// Builds the raw on-disk image of a tiny C4Group. This is intentionally
     /// local to scenario tests so nested DefinitionPath traversal is exercised
     /// through the real packed-group reader rather than a mock resolver.
-    fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
-        const HEADER_SIZE: usize = 204;
-        const ENTRY_SIZE: usize = 316;
-        const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
-
-        fn put_i32(buffer: &mut [u8], offset: usize, value: i32) {
-            buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        }
-
-        let mut header = [0_u8; HEADER_SIZE];
-        header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
-        put_i32(&mut header, 28, 1);
-        put_i32(&mut header, 32, 2);
-        put_i32(&mut header, 36, i32::try_from(entries.len()).test_value());
-        for byte in &mut header {
-            *byte ^= 237;
-        }
-        for chunk in header.chunks_exact_mut(3) {
-            chunk.swap(0, 2);
-        }
-
-        let mut image = header.to_vec();
-        let mut data_offset = 0_usize;
-        for (name, child, data) in entries {
-            let mut entry = [0_u8; ENTRY_SIZE];
-            entry[..name.len()].copy_from_slice(name.as_bytes());
-            put_i32(&mut entry, 264, i32::from(*child));
-            put_i32(&mut entry, 268, i32::try_from(data.len()).test_value());
-            put_i32(&mut entry, 276, i32::try_from(data_offset).test_value());
-            image.extend_from_slice(&entry);
-            data_offset += data.len();
-        }
-        for (_, _, data) in entries {
-            image.extend_from_slice(data);
-        }
-        image
-    }
+    use clonk_test_support::packed_test_group;
 
     /// Wraps a raw packed-group fixture in the standalone-file gzip envelope.
     /// Child entries stay raw because packed mother groups open them in place.

@@ -1,3 +1,15 @@
+mod initial_network_dynamic;
+mod initial_network_metadata;
+
+pub use initial_network_dynamic::{
+    compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
+    InitialNetworkDynamicError, InitialNetworkDynamicSpec,
+};
+pub use initial_network_metadata::{
+    fill_scenario_derived_join_parameters, initial_network_scenario_defaults,
+    join_team_list_snapshot, InitialNetworkMetadataError,
+};
+
 pub mod client_network_scenario;
 pub mod client_start_barrier;
 pub mod configured_client_players;

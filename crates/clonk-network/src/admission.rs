@@ -1,5 +1,5 @@
 use crate::{ConnectionReply, ConnectionRequest};
-use clonk_engine::{ClientCoreControlData, ClientJoinControlData, LegacyCString};
+use clonk_protocol::{ClientCoreControlData, ClientJoinControlData, LegacyCString};
 use std::collections::BTreeSet;
 
 /// One C4Network2IO connection's acceptance phase
@@ -18,10 +18,10 @@ pub enum ConnectionAction {
     SendRequest(ConnectionRequest),
     SendReply(ConnectionReply),
     EmitDirectClientJoin(ClientJoinControlData),
-    RegisterHost(clonk_engine::ClientCoreControlData),
+    RegisterHost(clonk_protocol::ClientCoreControlData),
     AssociatePeer(ClientCoreControlData),
     Close {
-        message: clonk_engine::LegacyCString,
+        message: clonk_protocol::LegacyCString,
         wrong_password: bool,
     },
 }
@@ -32,7 +32,7 @@ pub enum ConnectionAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmissionDecision {
     Accept {
-        peer_core: clonk_engine::ClientCoreControlData,
+        peer_core: clonk_protocol::ClientCoreControlData,
         before_reply: Vec<ConnectionAction>,
         message: LegacyCString,
     },
@@ -416,7 +416,7 @@ impl LegacyConnection {
         if !self.conn_sent {
             self.status = ConnectionStatus::Closed;
             return vec![ConnectionAction::Close {
-                message: clonk_engine::LegacyCString::default(),
+                message: clonk_protocol::LegacyCString::default(),
                 wrong_password: false,
             }];
         }
@@ -445,7 +445,7 @@ impl LegacyConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clonk_engine::{ClientCoreControlData, LegacyCString};
+    use clonk_protocol::{ClientCoreControlData, LegacyCString};
 
     const CPP_COMPATIBILITY_BUILD: i32 = crate::CURRENT_GAME_BUILD + 2;
 

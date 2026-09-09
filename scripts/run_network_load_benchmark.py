@@ -1064,7 +1064,7 @@ def _integration_test_artifacts(cargo_stdout: str) -> list[dict[str, Any]]:
     if len(unique_candidates) != 1:
         raise BenchmarkFailure(
             "Cargo reported "
-            f"{len(unique_candidates)} clonk-network integration test binaries"
+            f"{len(unique_candidates)} clonk-network-integration-tests integration test binaries"
         )
     return list(unique_candidates.values())
 
@@ -1670,7 +1670,7 @@ def build_test_binary(
         "test",
         "--locked",
         "-p",
-        "clonk-network",
+        "clonk-network-integration-tests",
         "--test",
         "integration",
         "--profile",

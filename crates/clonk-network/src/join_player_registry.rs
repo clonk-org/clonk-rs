@@ -1,4 +1,4 @@
-use clonk_engine::{
+use clonk_protocol::{
     ControlPlayerInfoEntry, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -246,7 +246,7 @@ fn ensure_encode_count(count: usize) -> Result<i32, LegacyEncodeError> {
 
 #[cfg(test)]
 mod tests {
-    use clonk_engine::{
+    use clonk_protocol::{
         LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
         PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
     };

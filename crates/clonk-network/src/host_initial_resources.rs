@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_protocol::{LegacyCString, NetworkResourceCore};
 use thiserror::Error;
 
 use crate::host_resource_core::{

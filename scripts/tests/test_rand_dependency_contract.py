@@ -60,7 +60,7 @@ class RandDependencyContractTests(unittest.TestCase):
             pathlib.Path(member) / "Cargo.toml"
             for member in manifest("Cargo.toml")["workspace"]["members"]
         }
-        self.assertEqual(len(workspace_manifests), 31)
+        self.assertEqual(len(workspace_manifests), 34)
         self.assertIn(
             pathlib.Path("crates/clonk-surface/Cargo.toml"), workspace_manifests
         )

@@ -1,4 +1,4 @@
-use clonk_engine::{
+use clonk_protocol::{
     parse_control_ini, BinaryControlRecord, ControlPacket as EngineControlPacket,
     ControlParseError, RCT_CTRL, RCT_CTRL_PKT, RCT_END, RCT_FRAME,
 };
@@ -145,7 +145,7 @@ pub enum ControlRecordRewriteError {
     #[error("control record could not be encoded: {0}")]
     Encode(#[from] LegacyEncodeError),
     #[error("control record could not be written as classic text: {0}")]
-    Text(#[from] clonk_engine::ControlIniEncodeError),
+    Text(#[from] clonk_protocol::ControlIniEncodeError),
 }
 
 /// Incremental parser for a C++ `CtrlRec.c4b` stream.
@@ -923,7 +923,7 @@ fn append_record_text_buffer(output: &mut Vec<u8>, name: &str, value: &[u8]) {
 /// Encode already-decoded chunks as C++ `CtrlRec.txt` data.
 pub fn encode_control_record_text(
     chunks: &[ControlRecordChunk],
-) -> Result<Vec<u8>, clonk_engine::ControlIniEncodeError> {
+) -> Result<Vec<u8>, clonk_protocol::ControlIniEncodeError> {
     let mut output = Vec::new();
     for chunk in chunks {
         output.extend_from_slice(b"[Rec]\r\n");
@@ -932,21 +932,21 @@ pub fn encode_control_record_text(
             ControlRecordChunk::Controls { controls, .. } => {
                 append_record_text_value(&mut output, "Type", RCT_CTRL);
                 for control in controls {
-                    clonk_engine::append_control_packet_ini(
+                    clonk_protocol::append_control_packet_ini(
                         &mut output,
                         control,
                         2,
-                        clonk_engine::ControlIniPacketMode::IdPacketSection,
+                        clonk_protocol::ControlIniPacketMode::IdPacketSection,
                     )?;
                 }
             }
             ControlRecordChunk::ControlPacket { control, .. } => {
                 append_record_text_value(&mut output, "Type", RCT_CTRL_PKT);
-                clonk_engine::append_control_packet_ini(
+                clonk_protocol::append_control_packet_ini(
                     &mut output,
                     control,
                     0,
-                    clonk_engine::ControlIniPacketMode::Inline,
+                    clonk_protocol::ControlIniPacketMode::Inline,
                 )?;
             }
             ControlRecordChunk::Frame { .. } => {
@@ -1049,7 +1049,7 @@ impl ControlRecordPlayback {
 
 #[cfg(test)]
 mod tests {
-    use clonk_engine::{
+    use clonk_protocol::{
         DebugRecordControlData, LegacyCString, PlayerControlData, ScriptControlData,
         ScriptStrictness, SynchronizeControlData, COM_RIGHT,
     };

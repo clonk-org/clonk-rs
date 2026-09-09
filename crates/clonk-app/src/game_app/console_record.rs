@@ -1064,11 +1064,11 @@ impl GameApp {
         let scenario_metadata = scenario_data
             .initial_network_scenario_metadata()
             .map_err(|error| error.to_string())?;
-        let defaults = clonk_network::initial_network_scenario_defaults(&scenario_metadata)
+        let defaults = clonk_app_netplay::initial_network_scenario_defaults(&scenario_metadata)
             .map_err(|error| error.to_string())?;
         let teams = scenario_data
             .initial_network_team_metadata()
-            .map(clonk_network::join_team_list_snapshot)
+            .map(clonk_app_netplay::join_team_list_snapshot)
             .map_err(|error| error.to_string())?;
         let empty_players = clonk_network::PlayerInfoListSnapshot::default();
         let legacy_text = |text: &[u8]| {

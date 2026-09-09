@@ -337,12 +337,12 @@ pub struct HostConfig {
     pub straggler_patience: u32,
     pub max_players: usize,
     pub start_tick: Tick,
-    pub local_core: clonk_engine::ClientCoreControlData,
+    pub local_core: clonk_protocol::ClientCoreControlData,
     /// Process-wide `Config.General.Name` used by C4Group rewrites. This is
     /// independent of the network-visible local client name.
-    pub group_maker: clonk_engine::LegacyCString,
+    pub group_maker: clonk_protocol::LegacyCString,
     pub initial_status: NetworkStatus,
-    pub password: clonk_engine::LegacyCString,
+    pub password: clonk_protocol::LegacyCString,
     pub allow_join: bool,
     /// Optional C4NetIOUDP listener. TCP remains available through the
     /// separately prepared listener passed to the host startup API.
@@ -378,7 +378,7 @@ pub struct HostConfig {
     pub resource_files: Vec<HostedResourceFile>,
     /// Original local player source paths and the cores published for them.
     /// C++ searches these before allocating another NRT_Player.
-    pub player_resource_sources: Vec<(PathBuf, clonk_engine::NetworkResourceCore)>,
+    pub player_resource_sources: Vec<(PathBuf, clonk_protocol::NetworkResourceCore)>,
     /// C++ resource search roots retained for later authoritative PlayerInfo
     /// resources announced after JoinData.
     pub local_resource_roots: Vec<PathBuf>,
@@ -386,7 +386,7 @@ pub struct HostConfig {
 
 #[derive(Debug, Clone)]
 pub struct HostedResourceFile {
-    pub core: clonk_engine::NetworkResourceCore,
+    pub core: clonk_protocol::NetworkResourceCore,
     pub path: PathBuf,
     pub ownership: crate::ResourceFileOwnership,
     pub binary_compatible: bool,
@@ -395,16 +395,16 @@ pub struct HostedResourceFile {
 /// The synchronized dynamic/resource state frozen into a host's JoinData.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostJoinSnapshot {
-    pub dynamic: clonk_engine::NetworkResourceCore,
+    pub dynamic: clonk_protocol::NetworkResourceCore,
     pub dynamic_tick: i32,
     pub parameters: crate::JoinGameParametersEnvelope,
 }
 
 impl Default for HostConfig {
     fn default() -> Self {
-        let name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec())
+        let name = clonk_protocol::LegacyCString::from_bytes(b"Host".to_vec())
             .expect("static host name is NUL-free");
-        let local_core = clonk_engine::ClientCoreControlData {
+        let local_core = clonk_protocol::ClientCoreControlData {
             client_id: 0,
             activated: true,
             observer: false,
@@ -425,7 +425,7 @@ impl Default for HostConfig {
             local_core: local_core.clone(),
             group_maker: local_core.name.clone(),
             initial_status: NetworkStatus::new(NETWORK_STATE_LOBBY, 0, -1),
-            password: clonk_engine::LegacyCString::default(),
+            password: clonk_protocol::LegacyCString::default(),
             allow_join: true,
             udp_bind_address: None,
             netpuncher_addresses: Vec::new(),
@@ -456,13 +456,13 @@ pub struct ClientMeshPuncherConfig {
 pub struct ClientConfig {
     pub name: String,
     pub nick: String,
-    pub group_maker: clonk_engine::LegacyCString,
+    pub group_maker: clonk_protocol::LegacyCString,
     pub kind: ParticipantKind,
     /// Build advertised during `PID_Conn` and expected from every peer in the
     /// target game. Reference-backed joins set this from the host reference;
     /// unresolved direct joins retain [`CURRENT_GAME_BUILD`].
     pub compatibility_build: i32,
-    pub password: clonk_engine::LegacyCString,
+    pub password: clonk_protocol::LegacyCString,
     pub resource_directory: Option<PathBuf>,
     pub bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates,
     pub local_system_path: Option<PathBuf>,
@@ -487,7 +487,7 @@ impl ClientConfig {
     pub fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
         let name = name.into();
         let group_maker = clonk_resources::encode_legacy_script_text(&name)
-            .and_then(clonk_engine::LegacyCString::from_bytes)
+            .and_then(clonk_protocol::LegacyCString::from_bytes)
             .unwrap_or_default();
         Self {
             nick: name.clone(),
@@ -495,7 +495,7 @@ impl ClientConfig {
             group_maker,
             kind,
             compatibility_build: CURRENT_GAME_BUILD,
-            password: clonk_engine::LegacyCString::default(),
+            password: clonk_protocol::LegacyCString::default(),
             resource_directory: Some(default_client_resource_directory()),
             bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates::default(),
             local_system_path: None,
@@ -513,7 +513,7 @@ impl ClientConfig {
         self
     }
 
-    pub fn with_password(mut self, password: clonk_engine::LegacyCString) -> Self {
+    pub fn with_password(mut self, password: clonk_protocol::LegacyCString) -> Self {
         self.password = password;
         self
     }
@@ -528,7 +528,7 @@ impl ClientConfig {
         self
     }
 
-    pub fn with_group_maker(mut self, group_maker: clonk_engine::LegacyCString) -> Self {
+    pub fn with_group_maker(mut self, group_maker: clonk_protocol::LegacyCString) -> Self {
         self.group_maker = group_maker;
         self
     }
@@ -625,12 +625,12 @@ pub(crate) async fn bind_client_mesh_tcp_listener(
 /// this placeholder and must publish real scenario/dynamic resource cores
 /// before admitting peers; these synthetic cores cannot boot a stock client.
 pub(crate) fn synthetic_join_snapshot(
-    local_core: clonk_engine::ClientCoreControlData,
+    local_core: clonk_protocol::ClientCoreControlData,
     max_players: usize,
 ) -> HostJoinSnapshot {
     let empty_players = crate::PlayerInfoListSnapshot::default();
     HostJoinSnapshot {
-        dynamic: clonk_engine::NetworkResourceCore {
+        dynamic: clonk_protocol::NetworkResourceCore {
             resource_type: 2,
             id: 1,
             derived_id: -1,
@@ -638,7 +638,7 @@ pub(crate) fn synthetic_join_snapshot(
             file_size: 1,
             file_crc: 0,
             contents_crc: 0,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec())
+            filename: clonk_protocol::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec())
                 .expect("static dynamic resource name is NUL-free"),
             ..Default::default()
         },
@@ -655,10 +655,10 @@ pub(crate) fn synthetic_join_snapshot(
             auto_frame_skip: false,
             rules: Vec::new(),
             goals: Vec::new(),
-            league_address: clonk_engine::LegacyCString::default(),
-            title: clonk_engine::LegacyCString::from_bytes(b"No title".to_vec())
+            league_address: clonk_protocol::LegacyCString::default(),
+            title: clonk_protocol::LegacyCString::from_bytes(b"No title".to_vec())
                 .expect("static title is NUL-free"),
-            scenario: clonk_engine::NetworkResourceCore {
+            scenario: clonk_protocol::NetworkResourceCore {
                 resource_type: 1,
                 id: 2,
                 derived_id: -1,
@@ -666,7 +666,7 @@ pub(crate) fn synthetic_join_snapshot(
                 file_size: 1,
                 file_crc: 0,
                 contents_crc: 0,
-                filename: clonk_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
+                filename: clonk_protocol::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
                     .expect("static scenario resource name is NUL-free"),
                 ..Default::default()
             },
@@ -738,7 +738,7 @@ pub enum HostEvent {
     },
     ResourceComplete {
         resource_id: i32,
-        core: clonk_engine::NetworkResourceCore,
+        core: clonk_protocol::NetworkResourceCore,
         path: PathBuf,
         local: bool,
     },
@@ -746,7 +746,7 @@ pub enum HostEvent {
         resource_id: i32,
     },
     ResourceDeriveUnsupported {
-        core: clonk_engine::NetworkResourceCore,
+        core: clonk_protocol::NetworkResourceCore,
     },
     ClientJoined {
         client_id: ClientId,
@@ -776,7 +776,7 @@ pub enum HostEvent {
     },
     SyncScheduled {
         control_tick: Tick,
-        controls: Vec<clonk_engine::ControlPacket>,
+        controls: Vec<clonk_protocol::ControlPacket>,
     },
     ExecSync {
         control_tick: Tick,
@@ -878,13 +878,13 @@ pub enum HostCommand {
         dynamic: Box<crate::LiveNetworkDynamic>,
         synchronized_control_tick: Tick,
         parameters: Box<crate::JoinGameParametersEnvelope>,
-        completion: oneshot::Sender<Result<clonk_engine::NetworkResourceCore, String>>,
+        completion: oneshot::Sender<Result<clonk_protocol::NetworkResourceCore, String>>,
     },
     RemoveRuntimeDynamic {
         completion: oneshot::Sender<Result<bool, String>>,
     },
     FailPendingJoinData {
-        reason: clonk_engine::LegacyCString,
+        reason: clonk_protocol::LegacyCString,
         completion: oneshot::Sender<usize>,
     },
     PublishPlayerResource {
@@ -899,7 +899,7 @@ pub enum HostCommand {
     },
     FinishResourceDerive {
         derivation: crate::ResourceDerivation,
-        completion: oneshot::Sender<Result<clonk_engine::NetworkResourceCore, String>>,
+        completion: oneshot::Sender<Result<clonk_protocol::NetworkResourceCore, String>>,
     },
     SetJoinAllowed {
         allowed: bool,
@@ -911,7 +911,7 @@ pub enum HostCommand {
         completion: oneshot::Sender<Vec<RuntimeNetworkClientState>>,
     },
     SetPassword {
-        password: Option<clonk_engine::LegacyCString>,
+        password: Option<clonk_protocol::LegacyCString>,
         completion: oneshot::Sender<()>,
     },
     InitNetpunchers {
@@ -1309,7 +1309,7 @@ impl HostHandle {
         dynamic: crate::LiveNetworkDynamic,
         synchronized_control_tick: Tick,
         parameters: crate::JoinGameParametersEnvelope,
-    ) -> Result<clonk_engine::NetworkResourceCore, HostError> {
+    ) -> Result<clonk_protocol::NetworkResourceCore, HostError> {
         let (completion, published) = oneshot::channel();
         self.command_tx
             .send(HostCommand::PublishRuntimeDynamic {
@@ -1346,7 +1346,7 @@ impl HostHandle {
     /// transport close.
     pub async fn fail_pending_join_data(
         &self,
-        reason: clonk_engine::LegacyCString,
+        reason: clonk_protocol::LegacyCString,
     ) -> Result<usize, HostError> {
         let (completion, removed) = oneshot::channel();
         self.command_tx
@@ -1359,7 +1359,7 @@ impl HostHandle {
     pub async fn publish_player_resource(
         &self,
         request: crate::ClientPlayerResourceRequest,
-    ) -> Result<clonk_engine::NetworkResourceCore, HostError> {
+    ) -> Result<clonk_protocol::NetworkResourceCore, HostError> {
         self.publish_player_resource_with_path(request)
             .await
             .map(|publication| publication.core)
@@ -1411,7 +1411,7 @@ impl HostHandle {
     pub async fn finish_resource_derive(
         &self,
         derivation: crate::ResourceDerivation,
-    ) -> Result<clonk_engine::NetworkResourceCore, HostError> {
+    ) -> Result<clonk_protocol::NetworkResourceCore, HostError> {
         let (completion, finished) = oneshot::channel();
         self.command_tx
             .send(HostCommand::FinishResourceDerive {
@@ -1440,7 +1440,7 @@ impl HostHandle {
 
     pub async fn set_password(
         &self,
-        password: Option<clonk_engine::LegacyCString>,
+        password: Option<clonk_protocol::LegacyCString>,
     ) -> Result<(), HostError> {
         let (completion, applied) = oneshot::channel();
         self.command_tx
@@ -1656,7 +1656,7 @@ pub enum ClientError {
     Connect(#[from] io::Error),
     #[error("host rejected the client password: {message:?}")]
     WrongPassword {
-        message: clonk_engine::LegacyCString,
+        message: clonk_protocol::LegacyCString,
     },
     #[error("handshake rejected: {0}")]
     Handshake(String),
@@ -1720,7 +1720,7 @@ pub enum ClientEvent {
     },
     SyncScheduled {
         control_tick: Tick,
-        controls: Vec<clonk_engine::ControlPacket>,
+        controls: Vec<clonk_protocol::ControlPacket>,
     },
     ExecSync {
         control_tick: Tick,
@@ -1732,7 +1732,7 @@ pub enum ClientEvent {
     },
     ResourceComplete {
         resource_id: i32,
-        core: clonk_engine::NetworkResourceCore,
+        core: clonk_protocol::NetworkResourceCore,
         path: PathBuf,
         local: bool,
     },
@@ -1740,7 +1740,7 @@ pub enum ClientEvent {
         resource_id: i32,
     },
     ResourceDeriveUnsupported {
-        core: clonk_engine::NetworkResourceCore,
+        core: clonk_protocol::NetworkResourceCore,
     },
     LeagueRoundResults {
         packet: crate::LeagueRoundResultsPacket,
@@ -1956,7 +1956,7 @@ impl ClientHandle {
     pub async fn publish_player_resource(
         &self,
         request: crate::ClientPlayerResourceRequest,
-    ) -> Result<clonk_engine::NetworkResourceCore, ClientError> {
+    ) -> Result<clonk_protocol::NetworkResourceCore, ClientError> {
         self.publish_player_resource_with_path(request)
             .await
             .map(|publication| publication.core)

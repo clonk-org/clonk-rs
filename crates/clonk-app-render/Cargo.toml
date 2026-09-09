@@ -25,6 +25,7 @@ wgpu = "30"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"], optional = true }
 
 [dev-dependencies]
+clonk-test-support = { path = "../clonk-test-support" }
 # Keep clonk-engine's property-test dependencies in this test graph so focused
 # render-crate runs share one clonk-engine fingerprint with the workspace gate.
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }

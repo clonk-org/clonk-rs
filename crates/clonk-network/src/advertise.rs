@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clonk_engine::LegacyCString;
+use clonk_protocol::LegacyCString;
 use socket2::{Protocol, Type};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

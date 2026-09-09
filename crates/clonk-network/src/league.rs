@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use clonk_engine::{
+use clonk_protocol::{
     ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
     CLIENT_PLAYER_INFO_FLAG_UPDATED, NETWORK_RESOURCE_TYPE_NULL, PLAYER_INFO_FLAG_ATTRIBUTES_FIXED,
@@ -634,7 +634,7 @@ impl LeagueJoinResponse {
     pub fn apply_auth_check(
         &self,
         league: &LegacyCString,
-        player: &mut clonk_engine::ControlPlayerInfoEntry,
+        player: &mut clonk_protocol::ControlPlayerInfoEntry,
     ) -> bool {
         let selected = self
             .leagues
@@ -1788,7 +1788,7 @@ mod tests {
         PlayerInfoListIniError,
     };
     use crate::{ClientPlayerInfosSnapshot, LeagueRoundPlayerStatus};
-    use clonk_engine::{
+    use clonk_protocol::{
         ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
         CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
         CLIENT_PLAYER_INFO_FLAG_UPDATED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
@@ -2104,7 +2104,7 @@ FBID=feedback id\r\n",
         // and a nonempty AUID, then JoinLocalPlayer carries that exact token
         // to the host (src/C4League.cpp:423-448;
         // src/C4Network2.cpp:2680-2688).
-        let mut player = clonk_engine::ControlPlayerInfoEntry::default();
+        let mut player = clonk_protocol::ControlPlayerInfoEntry::default();
         let success =
             decode_league_auth_response(b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\n");
         assert!(success.apply_player_auth(&mut player));
@@ -2533,7 +2533,7 @@ RankSymbol=2,9\r\n\
 ProgressData=\"other\",\"level=3\"\r\n\
 ClanTag= {<i>TAG</i>{ \r\n",
         );
-        let mut player = clonk_engine::ControlPlayerInfoEntry {
+        let mut player = clonk_protocol::ControlPlayerInfoEntry {
             auth_id: legacy(b"one-use-token"),
             ..Default::default()
         };

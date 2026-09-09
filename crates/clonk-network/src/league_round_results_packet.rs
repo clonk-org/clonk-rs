@@ -1,7 +1,7 @@
 use crate::legacy::{
     append_c_string, append_int32, append_raw_i32, append_raw_u32, LegacyControlError, Reader,
 };
-use clonk_engine::LegacyCString;
+use clonk_protocol::LegacyCString;
 
 pub const PID_LEAGUE_ROUND_RESULTS: u8 = 0x17;
 const MAX_ROUND_RESULT_PLAYERS: usize = 5_000;

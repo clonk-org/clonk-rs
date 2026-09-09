@@ -1,4 +1,4 @@
-use clonk_engine::LegacyCString;
+use clonk_protocol::LegacyCString;
 
 /// Applies C++'s byte-exact `VAL_NameNoEmpty` transformation.
 pub fn validate_name_no_empty(value: LegacyCString) -> LegacyCString {

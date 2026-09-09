@@ -1,4 +1,4 @@
-use clonk_engine::LegacyCString;
+use clonk_protocol::LegacyCString;
 
 use crate::legacy::{
     append_c_string, append_int32, append_raw_i32, append_raw_u32, LegacyControlError,

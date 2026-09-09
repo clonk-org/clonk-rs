@@ -2727,7 +2727,7 @@ impl GameApp {
         };
 
         let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
-        let team_snapshot = clonk_network::join_team_list_snapshot(metadata);
+        let team_snapshot = clonk_app_netplay::join_team_list_snapshot(metadata);
         self.engine.set_teams(runtime_teams.clone());
         if let Some(prepared) = self
             .scenario_lifecycle
