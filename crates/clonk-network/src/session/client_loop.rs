@@ -1881,6 +1881,11 @@ pub(crate) async fn run_client_loop_with_routes(
                 };
                 match result {
                     Ok(ControlMessage::PortCapabilities(_)) => {}
+                    // This build does not announce
+                    // `PortCapabilities::DEFERRED_RESOURCE_CORES`, so no host
+                    // it joined may send one. Acting on an unsolicited core
+                    // rewrite would let any peer redirect a resource transfer.
+                    Ok(ControlMessage::ResourceUpgrade(_)) => {}
                     // This fence is client-to-host only. A peer cannot release
                     // another retained client's quarantine.
                     Ok(ControlMessage::RoundRestartAck { .. }) => {}

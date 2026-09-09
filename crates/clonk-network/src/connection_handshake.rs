@@ -657,6 +657,8 @@ where
             // client's fresh JoinData has been installed.
             ControlMessage::RoundRestartAck { .. } => continue,
             ControlMessage::ControlWaitAttribution(_) => continue,
+            // The cores it upgrades only exist once JoinData has been installed.
+            ControlMessage::ResourceUpgrade(_) => continue,
             ControlMessage::JoinData(join_data) => {
                 let remote_connection_id = connection.remote_connection_id().ok_or(
                     ConnectionHandshakeError::ReducerInvariant(
@@ -852,6 +854,7 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::HostRestartLobby { .. } => crate::PID_PORT_HOST_RESTART_LOBBY,
         ControlMessage::RoundRestartAck { .. } => crate::PID_PORT_ROUND_RESTART_ACK,
         ControlMessage::ControlWaitAttribution(_) => crate::PID_PORT_CONTROL_WAIT_ATTRIBUTION,
+        ControlMessage::ResourceUpgrade(_) => crate::PID_PORT_RESOURCE_UPGRADE,
         ControlMessage::Ping(_) => 0x00,
         ControlMessage::Pong(_) => 0x01,
         ControlMessage::ConnectionRequest(_) => 0x02,
@@ -1248,6 +1251,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::HostRestartLobby { .. } => "PID_PortHostRestartLobby",
         ControlMessage::RoundRestartAck { .. } => "PID_PortRoundRestartAck",
         ControlMessage::ControlWaitAttribution(_) => "PID_PortControlWaitAttribution",
+        ControlMessage::ResourceUpgrade(_) => "PID_PortResourceUpgrade",
         ControlMessage::Ping(_) => "PID_Ping",
         ControlMessage::Pong(_) => "PID_Pong",
         ControlMessage::ConnectionRequest(_) => "PID_Conn",

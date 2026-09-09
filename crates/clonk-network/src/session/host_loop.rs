@@ -467,6 +467,7 @@ pub(crate) async fn run_host(
         netpuncher_game_ids: NetpuncherGameIds { ipv4: 0, ipv6: 0 },
         pending_kinds: BTreeMap::new(),
         join_snapshot: config.initial_join_snapshot.clone(),
+        deferred_resource_cores: config.initial_join_snapshot_deferred,
         dynamic_required_clients: BTreeSet::new(),
         resource_catalog,
         resource_backend,
@@ -879,7 +880,7 @@ pub(crate) async fn run_host(
                     }
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
-                    HostCommand::PublishJoinSnapshot(snapshot) => {
+                    HostCommand::PublishJoinSnapshot { snapshot, deferred } => {
                         if state
                             .join_snapshot
                             .as_ref()
@@ -888,7 +889,29 @@ pub(crate) async fn run_host(
                             state.dynamic_required_clients.clear();
                         }
                         state.join_snapshot = Some(*snapshot);
+                        state.deferred_resource_cores = deferred;
                         publish_pending_join_data(&mut state).await;
+                    }
+                    HostCommand::CompleteDeferredResources {
+                        snapshot,
+                        resources,
+                        completion,
+                    } => {
+                        let result = complete_host_deferred_resources(
+                            *snapshot,
+                            resources,
+                            &mut state,
+                        );
+                        match result {
+                            Ok(cores) => {
+                                let upgraded = send_resource_upgrades(&cores, &mut state).await;
+                                publish_pending_join_data(&mut state).await;
+                                let _ = completion.send(Ok(upgraded));
+                            }
+                            Err(error) => {
+                                let _ = completion.send(Err(error));
+                            }
+                        }
                     }
                     HostCommand::PublishRuntimeDynamic {
                         dynamic,
@@ -1668,6 +1691,21 @@ fn build_client_setup(
     let Some(mut snapshot) = state.join_snapshot.clone() else {
         return Ok(None);
     };
+    // A deferred snapshot announces directory-backed resources without the
+    // transfer identity their deflate has yet to produce. A peer that cannot
+    // take the later upgrade waits for the packed snapshot instead: giving it
+    // one would either fail its join outright
+    // (src/C4Network2Res.cpp:1500-1505) or, worse, leave it loading an unpacked
+    // directory in `readdir` order after `GetStandalone` declines the
+    // non-loadable core (src/C4Network2Res.cpp:582).
+    if state.deferred_resource_cores
+        && !state.peer_capabilities.peer_supports(
+            client_id as i32,
+            crate::PortCapabilities::DEFERRED_RESOURCE_CORES,
+        )
+    {
+        return Ok(None);
+    }
     let current_tick = i32::try_from(state.game_control_tick).unwrap_or(i32::MAX);
     if snapshot.dynamic.resource_type == clonk_engine::NETWORK_RESOURCE_TYPE_NULL
         || snapshot.dynamic_tick < current_tick
@@ -1695,6 +1733,45 @@ fn build_client_setup(
         addresses,
         lobby_chat_history,
     }))
+}
+
+/// Hands every peer that already holds deferred cores their finished ones.
+///
+/// Only a peer that announced `DEFERRED_RESOURCE_CORES` can hold them, and only
+/// such a peer can parse the upgrade, so the two conditions are the same one.
+async fn send_resource_upgrades(
+    cores: &[clonk_engine::NetworkResourceCore],
+    state: &mut HostState,
+) -> usize {
+    if cores.is_empty() {
+        return 0;
+    }
+    let packet = crate::ResourceUpgradePacket {
+        cores: cores.to_vec(),
+    };
+    let recipients = state
+        .clients
+        .iter()
+        .filter(|(_, client)| client.join_data_sent)
+        .map(|(client_id, _)| *client_id)
+        .filter(|client_id| {
+            state.peer_capabilities.peer_supports(
+                *client_id as i32,
+                crate::PortCapabilities::DEFERRED_RESOURCE_CORES,
+            )
+        })
+        .collect::<Vec<_>>();
+    recipients
+        .into_iter()
+        .filter(|client_id| {
+            try_send_host_message(
+                state,
+                *client_id,
+                ConnectionTrafficClass::Message,
+                ControlMessage::ResourceUpgrade(packet.clone()),
+            )
+        })
+        .count()
 }
 
 fn mark_join_data_sent(client_id: ClientId, state: &mut HostState) {

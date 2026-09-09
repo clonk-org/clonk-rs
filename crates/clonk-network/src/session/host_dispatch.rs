@@ -221,7 +221,10 @@ pub(crate) async fn handle_client_message(
         ControlMessage::HostRestarting { .. }
         | ControlMessage::HostRestartLobby { .. }
         | ControlMessage::RoundRestartAck { .. }
-        | ControlMessage::ControlWaitAttribution(_) => {}
+        | ControlMessage::ControlWaitAttribution(_)
+        // Only the host owns resource identity; a client claiming to upgrade a
+        // core has nothing this host would act on.
+        | ControlMessage::ResourceUpgrade(_) => {}
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
                 let _ = route.outbound.try_send(ControlMessage::Pong(packet));

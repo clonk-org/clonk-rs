@@ -364,6 +364,11 @@ pub struct HostConfig {
     /// Peers that do not opt in remain compatible with the stock C++ protocol.
     pub voice_enabled: bool,
     pub initial_join_snapshot: Option<HostJoinSnapshot>,
+    /// Whether [`Self::initial_join_snapshot`] announces directory-backed
+    /// resources before their exact deflate has run. While it does, JoinData is
+    /// withheld from every peer that has not announced
+    /// [`crate::PortCapabilities::DEFERRED_RESOURCE_CORES`].
+    pub initial_join_snapshot_deferred: bool,
     /// Resources in C++ publication order. `ResourceCatalog::register`
     /// prepends each entry, reproducing the linked-list discovery order.
     pub resource_registrations: Vec<crate::ResourceRegistration>,
@@ -409,6 +414,7 @@ impl Default for HostConfig {
         };
         Self {
             compat_profile_legacy: false,
+            initial_join_snapshot_deferred: false,
             backlog_limit: 256,
             resync_interval: Duration::from_millis(200),
             resync_cooldown: Duration::from_secs(2),
@@ -859,7 +865,15 @@ pub enum HostCommand {
     ExecSync {
         control_tick: Tick,
     },
-    PublishJoinSnapshot(Box<HostJoinSnapshot>),
+    PublishJoinSnapshot {
+        snapshot: Box<HostJoinSnapshot>,
+        deferred: bool,
+    },
+    CompleteDeferredResources {
+        snapshot: Box<HostJoinSnapshot>,
+        resources: Vec<HostedResourceFile>,
+        completion: oneshot::Sender<Result<usize, String>>,
+    },
     PublishRuntimeDynamic {
         dynamic: Box<crate::LiveNetworkDynamic>,
         synchronized_control_tick: Tick,
@@ -1220,10 +1234,66 @@ impl HostHandle {
     }
 
     pub async fn publish_join_snapshot(&self, snapshot: HostJoinSnapshot) -> Result<(), HostError> {
+        self.publish_join_snapshot_with_deferral(snapshot, false)
+            .await
+    }
+
+    /// Publishes a snapshot whose directory-backed cores are still waiting on
+    /// their exact deflate.
+    ///
+    /// The host becomes referenceable and admits connections immediately, but
+    /// only a peer that announced
+    /// [`crate::PortCapabilities::DEFERRED_RESOURCE_CORES`] is given JoinData
+    /// before [`Self::complete_deferred_resources`] lands. A stock peer must
+    /// never receive a deferred core: without the content it refuses the core
+    /// outright (`src/C4Network2Res.cpp:1500-1505`), and with the content as a
+    /// directory it skips `GetStandalone` (`src/C4Network2Res.cpp:582`) and
+    /// loads its own `readdir` order, which decides material slots.
+    pub async fn publish_deferred_join_snapshot(
+        &self,
+        snapshot: HostJoinSnapshot,
+    ) -> Result<(), HostError> {
+        self.publish_join_snapshot_with_deferral(snapshot, true)
+            .await
+    }
+
+    async fn publish_join_snapshot_with_deferral(
+        &self,
+        snapshot: HostJoinSnapshot,
+        deferred: bool,
+    ) -> Result<(), HostError> {
         self.command_tx
-            .send(HostCommand::PublishJoinSnapshot(Box::new(snapshot)))
+            .send(HostCommand::PublishJoinSnapshot {
+                snapshot: Box::new(snapshot),
+                deferred,
+            })
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Replaces the deferred snapshot with the packed one, re-registers every
+    /// completed resource so the host can serve its chunks, upgrades the cores
+    /// of peers that already joined, and releases the peers held back.
+    ///
+    /// Returns how many peers were sent an upgrade.
+    pub async fn complete_deferred_resources(
+        &self,
+        snapshot: HostJoinSnapshot,
+        resources: Vec<HostedResourceFile>,
+    ) -> Result<usize, HostError> {
+        let (completion, completed) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::CompleteDeferredResources {
+                snapshot: Box::new(snapshot),
+                resources,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        completed
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
     }
 
     /// Publishes the dynamic produced at a synchronized runtime-join save

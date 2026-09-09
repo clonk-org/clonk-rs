@@ -61,6 +61,22 @@ impl std::fmt::Display for ResourceUpgradeCodecError {
 
 impl std::error::Error for ResourceUpgradeCodecError {}
 
+/// Frames the packet with its ID, as it goes on the wire.
+pub(crate) fn encode_resource_upgrade(
+    packet: &ResourceUpgradePacket,
+) -> Result<Vec<u8>, ResourceUpgradeCodecError> {
+    let mut wire = vec![PID_PORT_RESOURCE_UPGRADE];
+    wire.extend(encode_resource_upgrade_payload(packet)?);
+    Ok(wire)
+}
+
+pub(crate) fn decode_resource_upgrade(wire: &[u8]) -> Option<ResourceUpgradePacket> {
+    if wire.first().copied()? != PID_PORT_RESOURCE_UPGRADE {
+        return None;
+    }
+    decode_resource_upgrade_payload(wire.get(1..)?).ok()
+}
+
 pub fn encode_resource_upgrade_payload(
     packet: &ResourceUpgradePacket,
 ) -> Result<Vec<u8>, ResourceUpgradeCodecError> {
@@ -114,6 +130,7 @@ fn read_u32(rest: &mut &[u8]) -> Result<u32, ResourceUpgradeCodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PID_PORT_CAPABILITIES;
 
     fn loadable_core(id: i32) -> NetworkResourceCore {
         NetworkResourceCore {
@@ -127,6 +144,17 @@ mod tests {
             filename: clonk_engine::LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_framed_resource_upgrade_round_trips_through_its_packet_id() {
+        let packet = ResourceUpgradePacket {
+            cores: vec![loadable_core(1)],
+        };
+        let wire = encode_resource_upgrade(&packet).unwrap();
+        assert_eq!(wire.first(), Some(&PID_PORT_RESOURCE_UPGRADE));
+        assert_eq!(decode_resource_upgrade(&wire), Some(packet));
+        assert_eq!(decode_resource_upgrade(&[PID_PORT_CAPABILITIES]), None);
     }
 
     #[test]
