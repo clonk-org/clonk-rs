@@ -236,15 +236,13 @@ jobs:
           path: target/release-prebuild/${{ matrix.artifact }}
           key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
 
-      # cache/save reports service failures as warnings. A lookup-only restore
-      # makes this producer row fail, so "re-run failed jobs" recreates it.
+      # A dropped save fails this producer row, so "re-run failed jobs"
+      # recreates it; the verifier polls so a propagating index does not.
       - name: Verify the packaging tool handoff
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/verify-cache-handoff
         with:
           path: target/release-prebuild/${{ matrix.artifact }}
           key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
-          fail-on-cache-miss: true
-          lookup-only: true
 
   # Native runtime rows preserve the release profile, targets, dependency
   # caches and Windows ThinLTO/runtime validation used by release-build.yml.
@@ -414,9 +412,7 @@ jobs:
           key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
 
       - name: Verify the runtime handoff
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/verify-cache-handoff
         with:
           path: target/release-prebuild/${{ matrix.artifact }}
           key: release-prebuild-${{ matrix.artifact }}-${{ inputs.source-sha }}-${{ github.run_id }}
-          fail-on-cache-miss: true
-          lookup-only: true

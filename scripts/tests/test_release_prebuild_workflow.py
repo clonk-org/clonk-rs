@@ -165,9 +165,14 @@ class ReleasePrebuildWorkflowTests(unittest.TestCase):
 
         self.assertEqual(declared, expected)
         self.assertEqual(workflow.count("uses: actions/cache/save@"), 2)
-        self.assertEqual(workflow.count("uses: actions/cache/restore@"), 3)
-        self.assertEqual(workflow.count("lookup-only: true"), 2)
-        self.assertEqual(workflow.count("fail-on-cache-miss: true"), 2)
+        # One restore is left: the ThinLTO warm start. Each handoff is verified
+        # through the retrying composite action instead of a bare lookup.
+        self.assertEqual(workflow.count("uses: actions/cache/restore@"), 1)
+        self.assertEqual(workflow.count("lookup-only: true"), 0)
+        self.assertEqual(workflow.count("fail-on-cache-miss: true"), 0)
+        self.assertEqual(
+            workflow.count("uses: ./.github/actions/verify-cache-handoff"), 2
+        )
         self.assertEqual(workflow.count("name: Hand off the"), 2)
         self.assertEqual(workflow.count("path: ${{ matrix.artifact_dir }}"), 0)
         self.assertEqual(workflow.count("path: target/release-prebuild/${{ matrix.artifact }}"), 4)
