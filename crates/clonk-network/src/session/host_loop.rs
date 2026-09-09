@@ -889,7 +889,9 @@ pub(crate) async fn run_host(
                             state.dynamic_required_clients.clear();
                         }
                         state.join_snapshot = Some(*snapshot);
-                        state.deferred_resource_cores = deferred;
+                        if let Some(deferred) = deferred {
+                            state.deferred_resource_cores = deferred;
+                        }
                         publish_pending_join_data(&mut state).await;
                     }
                     HostCommand::CompleteDeferredResources {
@@ -1655,9 +1657,15 @@ fn enqueue_client_setup_prefix(
 ) -> Result<(), String> {
     let ClientSetup {
         join_data,
+        pending_resources,
         addresses,
         lobby_chat_history,
     } = setup;
+    if let Some(packet) = pending_resources {
+        outbound
+            .try_send(ControlMessage::ResourceUpgrade(packet))
+            .map_err(|_| "accepted route closed while announcing deferred resources".to_string())?;
+    }
     outbound
         .try_send(ControlMessage::JoinData(Box::new(join_data)))
         .map_err(|_| "accepted route closed while queueing JoinData".to_string())?;
@@ -1728,8 +1736,24 @@ fn build_client_setup(
     } else {
         Vec::new()
     };
+    let pending_resources = state
+        .deferred_resource_cores
+        .then(|| crate::ResourceUpgradePacket {
+            pending: true,
+            cores: state
+                .config
+                .resource_files
+                .iter()
+                .filter(|resource| {
+                    !resource.core.loadable
+                        && resource.ownership == crate::ResourceFileOwnership::Temporary
+                })
+                .map(|resource| resource.core.clone())
+                .collect(),
+        });
     Ok(Some(ClientSetup {
         join_data,
+        pending_resources,
         addresses,
         lobby_chat_history,
     }))
@@ -1747,6 +1771,7 @@ async fn send_resource_upgrades(
         return 0;
     }
     let packet = crate::ResourceUpgradePacket {
+        pending: false,
         cores: cores.to_vec(),
     };
     let recipients = state
@@ -1943,6 +1968,18 @@ pub(crate) async fn publish_pending_join_data(state: &mut HostState) {
                 continue;
             }
         };
+        if let Some(packet) = setup.pending_resources {
+            if !send_host_message(
+                state,
+                client_id,
+                ConnectionTrafficClass::Message,
+                ControlMessage::ResourceUpgrade(packet),
+            )
+            .await
+            {
+                continue;
+            }
+        }
         if !send_host_message(
             state,
             client_id,

@@ -243,7 +243,7 @@ impl ResourceTransferBackend {
             return Err(ResourceTransferError::MissingCore(resource_id));
         }
         self.catalog.forget_resource(resource_id);
-        if core.loadable {
+        if core.loadable && binary_compatible {
             self.files
                 .register_local_complete(&core, &path, ownership)?;
         }

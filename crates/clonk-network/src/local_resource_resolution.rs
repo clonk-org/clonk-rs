@@ -110,6 +110,28 @@ impl LocalResourceMatch {
         }
     }
 
+    /// Reclassifies the retained image without reopening the mutable directory.
+    pub(crate) fn with_completed_core(mut self, core: NetworkResourceCore) -> Self {
+        let path = self.path().to_path_buf();
+        let compatible = core.loadable
+            && fs::metadata(&path)
+                .ok()
+                .zip(file_crc(&path).ok())
+                .is_some_and(|(metadata, crc)| {
+                    metadata.len() == u64::from(core.file_size) && crc == core.file_crc
+                });
+        if compatible {
+            self.standalone = LocalResourceStandalone::BinaryCompatible {
+                path,
+                ownership: self
+                    .standalone_ownership()
+                    .unwrap_or(ResourceFileOwnership::Persistent),
+            };
+        }
+        self.core = core;
+        self
+    }
+
     /// Registers either the verified standalone or the logical-only local source.
     pub fn register(
         self,

@@ -116,7 +116,12 @@ impl PortCapabilities {
 
     /// Everything this build knows how to do.
     pub fn supported() -> Self {
-        Self::from_bits(Self::ROUND_RESTART_V2 | Self::VOICE_CHAT | Self::CONTROL_WAIT_ATTRIBUTION)
+        Self::from_bits(
+            Self::ROUND_RESTART_V2
+                | Self::VOICE_CHAT
+                | Self::CONTROL_WAIT_ATTRIBUTION
+                | Self::DEFERRED_RESOURCE_CORES,
+        )
     }
 
     /// Whether a peer announcing `peer` may join a host announcing `self`.
@@ -482,10 +487,11 @@ mod tests {
                 0x70, // Vocabulary version 1, little-endian u16.
                 0x01, 0x00,
                 // Bits, little-endian u32: ROUND_RESTART_V2 (1 << 6) |
-                // VOICE_CHAT (1 << 5) | CONTROL_WAIT_ATTRIBUTION (1 << 4).
+                // VOICE_CHAT (1 << 5) | CONTROL_WAIT_ATTRIBUTION (1 << 4) |
+                // DEFERRED_RESOURCE_CORES (1 << 9).
                 // Bit 3 is retired and stays clear — see the retired-capability
                 // test above.
-                0x70, 0x00, 0x00, 0x00,
+                0x70, 0x02, 0x00, 0x00,
             ],
             "the bare announcement moved; an older peer reads these offsets",
         );
@@ -498,7 +504,7 @@ mod tests {
             .with_voice_cookie(crate::voice::VoiceRouteCookie::from_bytes(cookie))
             .with_voice_public_key(public_key);
 
-        let mut expected = vec![0x70, 0x01, 0x00, 0x70, 0x00, 0x00, 0x00];
+        let mut expected = vec![0x70, 0x01, 0x00, 0x70, 0x02, 0x00, 0x00];
         expected.extend_from_slice(&cookie);
         expected.extend_from_slice(&public_key);
         assert_eq!(
@@ -513,7 +519,7 @@ mod tests {
             encode_port_capabilities(
                 PortCapabilities::supported().with_voice_public_key(public_key)
             ),
-            vec![0x70, 0x01, 0x00, 0x70, 0x00, 0x00, 0x00],
+            vec![0x70, 0x01, 0x00, 0x70, 0x02, 0x00, 0x00],
             "a public key without its cookie must not reach the wire",
         );
     }
@@ -617,7 +623,8 @@ mod tests {
             PortCapabilities::supported().bits(),
             PortCapabilities::VOICE_CHAT
                 | PortCapabilities::CONTROL_WAIT_ATTRIBUTION
-                | PortCapabilities::ROUND_RESTART_V2,
+                | PortCapabilities::ROUND_RESTART_V2
+                | PortCapabilities::DEFERRED_RESOURCE_CORES,
             "the advertised mask must name exactly the implemented extensions"
         );
     }

@@ -613,6 +613,8 @@ pub(crate) struct ClientResourceState {
     pub(crate) backend: Option<crate::ResourceTransferBackend>,
     pub(crate) local_resource_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
     pub(crate) host_peer_id: i32,
+    pending_local_resources: BTreeMap<i32, crate::LocalResourceMatch>,
+    pub(crate) deferred_resource_cores: BTreeMap<i32, clonk_engine::NetworkResourceCore>,
     pub(crate) initial_complete_resources: Vec<(clonk_engine::NetworkResourceCore, PathBuf, bool)>,
     pub(crate) initial_packets: Vec<ResourcePacket>,
     pub(crate) initial_controls: Vec<ControlPacket>,
@@ -1160,6 +1162,18 @@ pub(crate) fn load_authoritative_player_resources(
     loaded
 }
 
+impl Drop for ClientResourceState {
+    fn drop(&mut self) {
+        // A logical-only standalone is not yet owned by the transfer store.
+        // Keep it alive through upgrades, and release it even on cancellation.
+        for local in self.pending_local_resources.values() {
+            if local.standalone_ownership() == Some(crate::ResourceFileOwnership::Temporary) {
+                let _ = std::fs::remove_file(local.path());
+            }
+        }
+    }
+}
+
 impl ClientResourceState {
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
@@ -1169,6 +1183,8 @@ impl ClientResourceState {
             backend: None,
             local_resource_sources: BTreeMap::new(),
             host_peer_id: 0,
+            pending_local_resources: BTreeMap::new(),
+            deferred_resource_cores: BTreeMap::new(),
             initial_complete_resources: Vec::new(),
             initial_packets: Vec::new(),
             initial_controls: Vec::new(),
@@ -1211,6 +1227,8 @@ impl ClientResourceState {
             backend,
             local_resource_sources: BTreeMap::new(),
             host_peer_id,
+            pending_local_resources: BTreeMap::new(),
+            deferred_resource_cores: BTreeMap::new(),
             initial_complete_resources: Vec::new(),
             initial_packets,
             initial_controls,
@@ -1373,6 +1391,12 @@ impl ClientResourceState {
     }
 
     fn forget_bootstrap_resource(&mut self, resource_id: i32) {
+        if let Some(local) = self.pending_local_resources.remove(&resource_id) {
+            if local.standalone_ownership() == Some(crate::ResourceFileOwnership::Temporary) {
+                let _ = std::fs::remove_file(local.path());
+            }
+        }
+        self.deferred_resource_cores.remove(&resource_id);
         self.catalog.forget_resource(resource_id);
         if let Some(backend) = self.backend.as_mut() {
             backend.forget_resource(resource_id);
@@ -1464,6 +1488,17 @@ impl ClientResourceState {
         )?;
         let retained_resources = round_resource_cores(&join_data.dynamic, &join_data.parameters);
         let retained_resource_ids = retained_resources.keys().copied().collect();
+        self.pending_local_resources.retain(|id, local| {
+            if retained_resources.get(id) == Some(local.core()) {
+                return true;
+            }
+            if local.standalone_ownership() == Some(crate::ResourceFileOwnership::Temporary) {
+                let _ = std::fs::remove_file(local.path());
+            }
+            false
+        });
+        self.deferred_resource_cores
+            .retain(|id, core| retained_resources.get(id) == Some(core));
         self.catalog.retain_resource_ids(&retained_resource_ids);
         if let Some(backend) = self.backend.as_mut() {
             backend
@@ -1515,6 +1550,10 @@ impl ClientResourceState {
         if registration == ClientBootstrapRegistration::Registered {
             match &resource.source {
                 crate::ClientBootstrapResourceSource::Local(local) => {
+                    if !resource.core.loadable {
+                        self.pending_local_resources
+                            .insert(resource.core.id, local.clone());
+                    }
                     self.initial_complete_resources.push((
                         resource.core.clone(),
                         local.path().to_path_buf(),
@@ -1539,6 +1578,92 @@ impl ClientResourceState {
         Ok(registration)
     }
 
+    pub(crate) fn apply_resource_upgrade(
+        &mut self,
+        packet: crate::ResourceUpgradePacket,
+    ) -> Result<(), String> {
+        if packet.pending {
+            return Err("resource announcement arrived after JoinData".to_string());
+        }
+        let mut seen = BTreeSet::new();
+        for core in &packet.cores {
+            let old = self
+                .deferred_resource_cores
+                .get(&core.id)
+                .or_else(|| {
+                    self.backend
+                        .as_ref()
+                        .and_then(|backend| backend.core(core.id))
+                })
+                .or_else(|| self.catalog.resource_core(core.id))
+                .ok_or_else(|| format!("unannounced resource upgrade {}", core.id))?;
+            if !seen.insert(core.id)
+                || old.loadable
+                || old.id != core.id
+                || old.contents_crc != core.contents_crc
+                || old.resource_type != core.resource_type
+                || old.derived_id != core.derived_id
+                || old.filename != core.filename
+                || old.author != core.author
+            {
+                return Err(format!(
+                    "resource upgrade {} changed its announced identity",
+                    core.id
+                ));
+            }
+        }
+        if self
+            .deferred_resource_cores
+            .keys()
+            .any(|id| !seen.contains(id))
+        {
+            return Err("resource completion omitted an announced pending core".to_string());
+        }
+        for core in packet.cores {
+            self.deferred_resource_cores.remove(&core.id);
+            let Some(local) = self.pending_local_resources.get(&core.id).cloned() else {
+                let resolver = self.resource_resolver.clone();
+                let role = if core.resource_type == crate::HostResourceType::Scenario as u8 {
+                    crate::ClientBootstrapResourceRole::Scenario
+                } else {
+                    crate::ClientBootstrapResourceRole::GameResource
+                };
+                self.resolve_and_add_bootstrap_resource(&resolver, role, &core)?;
+                continue;
+            };
+            let local = local.with_completed_core(core.clone());
+            let compatible = local.binary_compatible();
+            if let Some(backend) = self.backend.as_mut() {
+                backend
+                    .upgrade_local_core(
+                        core.clone(),
+                        local.path(),
+                        local
+                            .standalone_ownership()
+                            .unwrap_or(crate::ResourceFileOwnership::Persistent),
+                        compatible,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            self.catalog.forget_resource(core.id);
+            self.catalog
+                .register(crate::ResourceRegistration::from_core(
+                    &core, compatible, false,
+                ));
+            self.initial_complete_resources
+                .push((core.clone(), local.path().to_path_buf(), true));
+            self.pending_local_resources.insert(core.id, local);
+            for existing in self
+                .local_resource_sources
+                .values_mut()
+                .filter(|existing| existing.id == core.id)
+            {
+                *existing = core.clone();
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn resolve_and_add_bootstrap_resource(
         &mut self,
         resolver: &crate::client_bootstrap::ClientBootstrapResolver,
@@ -1550,9 +1675,15 @@ impl ClientResourceState {
         if self.contains_bootstrap_resource(core.id) {
             return Ok(ClientBootstrapRegistration::AlreadyPresent);
         }
-        let resource = resolver
-            .resolve(role, core)
-            .map_err(|error| error.to_string())?;
+        let resource = match resolver.resolve(role, core) {
+            Ok(resource) => resource,
+            Err(crate::ClientBootstrapPlanError::MissingRequiredNonLoadable { .. })
+                if self.deferred_resource_cores.get(&core.id) == Some(core) =>
+            {
+                return Ok(ClientBootstrapRegistration::Registered);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         self.add_bootstrap_resource(&resource)
     }
 

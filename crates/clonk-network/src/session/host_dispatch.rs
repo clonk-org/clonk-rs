@@ -215,6 +215,9 @@ pub(crate) async fn handle_client_message(
                     .outbound
                     .try_send(ControlMessage::PortCapabilities(announcement));
             }
+            if state.deferred_resource_cores {
+                publish_pending_join_data(state).await;
+            }
         }
         // Only the host restarts a session. A client claiming to is either
         // confused or hostile; either way there is nothing to act on.
@@ -1084,8 +1087,14 @@ pub(crate) async fn fail_host_pending_join_data(
     reason: clonk_engine::LegacyCString,
     state: &mut HostState,
 ) -> usize {
-    let pending = pending_join_data_client_ids(&state.clients, &state.removing_clients)
-        .into_iter()
+    let pending = state
+        .clients
+        .iter()
+        .filter(|(client_id, client)| {
+            !state.removing_clients.contains(client_id)
+                && (!client.join_data_sent || state.deferred_resource_cores)
+        })
+        .map(|(client_id, _)| *client_id)
         .filter_map(|client_id| {
             state
                 .clients

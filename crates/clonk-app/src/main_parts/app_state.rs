@@ -2752,10 +2752,14 @@ pub(crate) struct NetplayState {
     /// persists LeagueAccount but deliberately keeps LeaguePassword only in
     /// memory, so never write this override through the INI helper.
     pub(crate) league_auth_session: Option<clonk_network::LeagueAuthRequestHead>,
-    /// Exact resource publication which continues after a host has entered its
-    /// closed-admission lobby. Once complete, the ordinary final host startup
-    /// path replaces the discoverable, closed-admission preliminary transport.
+    /// The first worker publishes the frozen network identity after the
+    /// preliminary listener opens. The second completes exact packed engine
+    /// inputs while the final host already admits capable peers.
     pub(crate) pending_host_preparation: Option<Receiver<PendingNetworkHostPreparationResult>>,
+    /// Keeps stage B pending while tests observe admission independently of
+    /// worker speed and frame scheduling. Released before verifying real packing.
+    #[cfg(test)]
+    pub(crate) hold_host_resource_packing: bool,
     pub(crate) classic_direct_reference_query: Option<ClassicDirectReferenceQuery>,
     /// Frozen C++-ordered address attempts retained across password prompts.
     pub(crate) pending_join: Option<ClientSettings>,

@@ -6447,8 +6447,17 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
         host.test_update();
         main_assert!(
             Instant::now() < host_deadline,
-            "prepared host did not reach its lobby: {}",
-            host.status_text
+            "prepared host did not reach its lobby: {}; connection={}, worker={}, pending={}, diagnostics={:?}, dialogs={:?}",
+            host.status_text,
+            host.startup_network.connection.is_some(),
+            host.netplay.pending_host_preparation.is_some(),
+            host.host_resources_pending(),
+            host.startup_restart_diagnostics,
+            host.dialogs
+                .messages
+                .iter()
+                .map(|dialog| dialog.state.message())
+                .collect::<Vec<_>>()
         );
         thread::yield_now();
     }
@@ -6754,6 +6763,9 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     scenario.title = "Chaos".to_string();
     scenario.path = Some(content.join("ClonkMars.c4f/03_Chaos.c4s"));
 
+    // Prove admission precedes packing without racing the deflate's completion
+    // on a slow frame. Release the hold below and run the actual packing too.
+    app.netplay.hold_host_resource_packing = true;
     let started = Instant::now();
     app.stage_network_host_scenario(
         scenario,
@@ -6787,7 +6799,8 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
         app.startup.view,
     );
     let expected_title = app
-        .netplay.advertised_game_reference
+        .netplay
+        .advertised_game_reference
         .test_ref()
         .summary()
         .title
@@ -6843,9 +6856,9 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     main_assert!(lobby_rendered, "the queryable lobby must have rendered");
 
     while app.startup_network.connection.is_some()
-        || app.netplay.pending_host_preparation.is_some()
         || !app
-            .netplay.advertised_game_reference
+            .netplay
+            .advertised_game_reference
             .as_ref()
             .is_some_and(|reference| reference.summary().join_allowed)
     {
@@ -6885,10 +6898,40 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     .test_value();
     main_assert!(
         joinable.join_allowed,
-        "the external reference must open only after exact preparation"
+        "the external reference must open while exact packing is held pending"
     );
     let joinable_elapsed = started.elapsed();
     eprintln!("selected ClonkMars host opened admission in {joinable_elapsed:?}");
+    main_assert!(
+        app.host_resources_pending(),
+        "admission must precede the ClonkMars deflate"
+    );
+    main_assert!(
+        app.netplay.pending_host_preparation.is_none(),
+        "the packing worker must remain held until admission was observed"
+    );
+    app.netplay.hold_host_resource_packing = false;
+    while app.host_resources_pending() {
+        app.test_update();
+        main_assert!(
+            Instant::now() < deadline,
+            "packing did not finish: {}",
+            app.status_text
+        );
+        thread::yield_now();
+    }
+    main_assert!(
+        matches!(
+            app.netplay.mode.as_ref(),
+            Some(NetworkMode::Host(HostSettings { prepared: Some(prepared), .. }))
+                if !prepared.resources_pending()
+        ),
+        "packing must complete successfully with the prepared host still active"
+    );
+    main_assert!(app.netplay.pending_host_preparation.is_none());
+    // clonk-org/clonk-rs#1603 retains the one-second reference-query budget.
+    // Later registration/admission measurements include rendering, event-loop
+    // polling and HTTP scheduling; their contract is the ordering proved above.
 }
 
 #[test]

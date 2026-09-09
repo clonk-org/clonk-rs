@@ -12,6 +12,11 @@
 //! This packet supplies them. It is port-only, so it may be sent only to a peer
 //! that announced [`crate::PortCapabilities::DEFERRED_RESOURCE_CORES`]; a stock
 //! peer is never given a deferred core in the first place.
+//!
+//! The count's high bit marks a pending announcement before JoinData. Clearing
+//! that bit supplies the completed cores, including resources whose final size
+//! leaves them non-loadable. Missing local content waits only for announced
+//! pending cores; ordinary non-loadable resources still fail admission.
 
 use clonk_engine::NetworkResourceCore;
 
@@ -35,13 +40,17 @@ pub const MAX_RESOURCE_UPGRADE_CORES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResourceUpgradePacket {
-    /// Finished cores, each replacing the announced one with the same ID.
+    /// True announces the cores still awaiting packing before JoinData.
+    /// False supplies their final transfer identities.
+    pub pending: bool,
+    /// Cores keep the same content identity and ID in both states.
     pub cores: Vec<NetworkResourceCore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceUpgradeCodecError {
     Truncated,
+    TrailingData,
     CoreCountOutOfRange(u32),
     Core(ResourcePacketCodecError),
 }
@@ -50,6 +59,7 @@ impl std::fmt::Display for ResourceUpgradeCodecError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Truncated => write!(formatter, "resource upgrade payload ended early"),
+            Self::TrailingData => write!(formatter, "resource upgrade payload has trailing data"),
             Self::CoreCountOutOfRange(count) => write!(
                 formatter,
                 "resource upgrade announces {count} cores, above the {MAX_RESOURCE_UPGRADE_CORES} limit"
@@ -84,6 +94,7 @@ pub fn encode_resource_upgrade_payload(
         .ok()
         .filter(|count| *count as usize <= MAX_RESOURCE_UPGRADE_CORES)
         .ok_or(ResourceUpgradeCodecError::CoreCountOutOfRange(u32::MAX))?;
+    let count = count | if packet.pending { 1 << 31 } else { 0 };
     let mut payload = count.to_ne_bytes().to_vec();
     for core in &packet.cores {
         let core = encode_resource_core_payload(core).map_err(ResourceUpgradeCodecError::Core)?;
@@ -101,7 +112,9 @@ pub fn decode_resource_upgrade_payload(
     payload: &[u8],
 ) -> Result<ResourceUpgradePacket, ResourceUpgradeCodecError> {
     let mut rest = payload;
-    let count = read_u32(&mut rest)?;
+    let header = read_u32(&mut rest)?;
+    let pending = header & (1 << 31) != 0;
+    let count = header & !(1 << 31);
     if count as usize > MAX_RESOURCE_UPGRADE_CORES {
         return Err(ResourceUpgradeCodecError::CoreCountOutOfRange(count));
     }
@@ -114,7 +127,10 @@ pub fn decode_resource_upgrade_payload(
         cores.push(decode_resource_core_payload(core).map_err(ResourceUpgradeCodecError::Core)?);
         rest = remainder;
     }
-    Ok(ResourceUpgradePacket { cores })
+    if !rest.is_empty() {
+        return Err(ResourceUpgradeCodecError::TrailingData);
+    }
+    Ok(ResourceUpgradePacket { pending, cores })
 }
 
 fn read_u32(rest: &mut &[u8]) -> Result<u32, ResourceUpgradeCodecError> {
@@ -149,6 +165,7 @@ mod tests {
     #[test]
     fn a_framed_resource_upgrade_round_trips_through_its_packet_id() {
         let packet = ResourceUpgradePacket {
+            pending: false,
             cores: vec![loadable_core(1)],
         };
         let wire = encode_resource_upgrade(&packet).unwrap();
@@ -160,6 +177,7 @@ mod tests {
     #[test]
     fn resource_upgrade_round_trips_every_announced_core() {
         let packet = ResourceUpgradePacket {
+            pending: false,
             cores: vec![loadable_core(0), loadable_core(3)],
         };
         let payload = encode_resource_upgrade_payload(&packet).unwrap();
@@ -172,7 +190,7 @@ mod tests {
         payload.extend_from_slice(&0_u32.to_ne_bytes());
         assert_eq!(
             decode_resource_upgrade_payload(&payload),
-            Err(ResourceUpgradeCodecError::CoreCountOutOfRange(u32::MAX))
+            Err(ResourceUpgradeCodecError::CoreCountOutOfRange(0x7fff_ffff))
         );
     }
 
@@ -185,5 +203,26 @@ mod tests {
             decode_resource_upgrade_payload(&payload),
             Err(ResourceUpgradeCodecError::Truncated)
         );
+    }
+
+    #[test]
+    fn resource_upgrade_rejects_trailing_data() {
+        let mut payload =
+            encode_resource_upgrade_payload(&ResourceUpgradePacket::default()).unwrap();
+        payload.push(1);
+        assert!(decode_resource_upgrade_payload(&payload).is_err());
+    }
+
+    #[test]
+    fn resource_upgrade_decodes_a_pending_publication() {
+        let packet = ResourceUpgradePacket {
+            pending: false,
+            cores: vec![loadable_core(1)],
+        };
+        let mut payload = encode_resource_upgrade_payload(&packet).unwrap();
+        payload[..4].copy_from_slice(&(0x8000_0000_u32 | 1).to_ne_bytes());
+        let decoded = decode_resource_upgrade_payload(&payload).unwrap();
+        assert!(decoded.pending);
+        assert_eq!(decoded.cores, packet.cores);
     }
 }

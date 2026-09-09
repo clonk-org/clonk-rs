@@ -1194,3 +1194,72 @@ fn deferred_publication_announces_contents_before_packing_and_completes_to_the_p
     };
     assert_eq!(cores(&publication), cores(&packed));
 }
+
+#[test]
+fn deferred_league_hashes_and_bytes_match_the_frozen_single_phase_publication() {
+    // CalculateSHA hashes the completed standalone (src/C4Network2Res.cpp:700-713),
+    // never the empty filename reservation from the pending announcement.
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "Scenario.c4s", "OracleHost", b"scenario");
+    let system = packed_source(&sources, "System.c4g", "OracleHost", b"system");
+    let definition = sources.join("Objects.c4d");
+    fs::create_dir_all(&definition).unwrap();
+    fs::write(definition.join("Names.txt"), b"frozen objects").unwrap();
+    let spec = |network: PathBuf| {
+        let mut parameters = base_parameters();
+        parameters.league_address = crate::c4(b"https://league.invalid/");
+        HostInitialResourcePublicationSpec {
+            network_directory: network,
+            group_maker: crate::c4(b"OracleHost"),
+            max_load_file_size: 100 * 1024 * 1024,
+            scenario: source(scenario.clone(), b"Scenario.c4s"),
+            definitions: vec![source(definition.clone(), b"Objects.c4d")],
+            system: source(system.clone(), b"System.c4g"),
+            materials: Vec::new(),
+            players: Vec::new(),
+            dynamic: composed_dynamic(),
+            dynamic_wire_name: crate::c4(b"Network/DynScenario.c4s"),
+            parameters,
+            dynamic_tick: 7,
+            reusable_standalones: Vec::new(),
+        }
+    };
+    let packed = publish_host_initial_resources(spec(directory.path().join("packed"))).unwrap();
+    let deferred =
+        publish_deferred_host_initial_resources(spec(directory.path().join("deferred"))).unwrap();
+    let mut publication = deferred.publication;
+    assert_eq!(
+        publication.join_snapshot.parameters.game_resources[0].file_sha,
+        None
+    );
+    assert!(packed.join_snapshot.parameters.game_resources[0]
+        .file_sha
+        .is_some());
+    fs::write(definition.join("Names.txt"), b"changed after announcement").unwrap();
+    publication.apply_completed_packing(deferred.packing.complete().unwrap());
+    assert_eq!(publication.join_snapshot, packed.join_snapshot);
+    assert_eq!(
+        publication.resource_registrations,
+        packed.resource_registrations
+    );
+    assert_eq!(
+        publication.resource_files.len(),
+        packed.resource_files.len()
+    );
+    for (actual, expected) in publication
+        .resource_files
+        .iter()
+        .zip(&packed.resource_files)
+    {
+        assert_eq!(actual.core, expected.core);
+        assert_eq!(actual.path.file_name(), expected.path.file_name());
+        assert_eq!(actual.ownership, expected.ownership);
+        assert_eq!(actual.binary_compatible, expected.binary_compatible);
+        assert_eq!(
+            fs::read(&actual.path).unwrap(),
+            fs::read(&expected.path).unwrap()
+        );
+    }
+}

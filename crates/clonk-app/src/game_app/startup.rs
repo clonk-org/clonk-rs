@@ -138,7 +138,8 @@ impl GameApp {
     pub(crate) fn startup_network_transition_active(&self) -> bool {
         self.mode != AppMode::Running
             && (self.startup_network.connection.is_some()
-                || self.netplay.pending_host_preparation.is_some())
+                || self.netplay.pending_host_preparation.is_some()
+                    && !self.host_resources_pending())
     }
 
     fn startup_network_join_progress_active(&self) -> bool {
