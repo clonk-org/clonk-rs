@@ -3548,9 +3548,9 @@ pub(crate) fn replay_control_record_chunks(
         .map_err(|error| format!("has an invalid CtrlRec.c4b stream: {error}"))
 }
 
-pub(crate) use clonk_gui::search_edit::{
-    SearchCursorOperation, SearchEditState, SEARCH_EDIT_MAX_BYTES,
-};
+#[cfg(test)]
+pub(crate) use clonk_gui::search_edit::SEARCH_EDIT_MAX_BYTES;
+pub(crate) use clonk_gui::search_edit::{SearchCursorOperation, SearchEditState};
 
 pub(crate) fn scensel_search_context_entries(
     edit: &SearchEditState,
