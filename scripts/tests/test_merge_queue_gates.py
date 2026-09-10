@@ -165,7 +165,7 @@ class MergeQueueGateTests(unittest.TestCase):
         self.assertIn("libasound2-dev libudev-dev", quality)
         self.assertIn(
             "uses: dtolnay/rust-toolchain@"
-            "f8be11a05b1d4f3fcebe6410cc16743212b999b0",
+            "ce678459e9fc7500d337468f904b95f1b5c10b5e",
             quality,
         )
         self.assertIn("components: clippy, rustfmt", quality)

@@ -747,7 +747,7 @@ class CiLatencyTests(unittest.TestCase):
         self.assertIn('if [[ -n "$APT_PACKAGES" ]]', linux)
         self.assertIn("scripts/install-apt-packages.sh", linux)
         self.assertIn("timeout-minutes: 10", linux)
-        self.assertIn("rustc 1.98.0", linux)
+        self.assertIn("rustc 1.98.1", linux)
         self.assertIn("id: preinstalled-rust", linux)
         self.assertIn("if: steps.preinstalled-rust.outputs.exact != 'true'", linux)
 
@@ -823,7 +823,7 @@ class CiLatencyTests(unittest.TestCase):
 
         pinned_toolchain = (
             "uses: dtolnay/rust-toolchain@"
-            "f8be11a05b1d4f3fcebe6410cc16743212b999b0"
+            "ce678459e9fc7500d337468f904b95f1b5c10b5e"
         )
         for job in (windows_smoke,):
             self.assertIn(pinned_toolchain, job)

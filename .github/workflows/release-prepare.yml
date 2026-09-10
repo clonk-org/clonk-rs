@@ -109,7 +109,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.release-app.outputs.token }}
 
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         if: steps.existing.outputs.open != 'true'
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2

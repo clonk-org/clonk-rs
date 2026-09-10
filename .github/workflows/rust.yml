@@ -50,7 +50,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
       - name: Look up the published Linux cache
         if: matrix.name == 'Linux'
@@ -208,7 +208,7 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+        uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
@@ -321,7 +321,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
@@ -361,7 +361,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
 
       # Release invokes this binary on the Windows host. Build its real release
       # graph here without serializing it ahead of the merge-critical runtime.
@@ -379,7 +379,7 @@ jobs:
           # Release preparation changes Cargo package versions without changing
           # bitcode. Key the trusted cache by compiler/config/source instead;
           # LLD independently hashes every input before reusing an entry.
-          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.0-llvm-22.1.8-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}
+          key: clonk-msvc-thinlto-v2-windows-x64-rustc-1.98.1-llvm-22.1.8-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'scripts/configure-msvc-runtime.sh', 'crates/**/*.rs') }}
 
       # Keep the shipped graph in its own write-capable cache action. Swatinem
       # cleans target in its post step, so nesting it with the landing-cache
