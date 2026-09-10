@@ -1183,7 +1183,7 @@ fn spawn_host_accept(
     route_tasks: &mut tokio::task::JoinSet<()>,
     stream: TcpStream,
     addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    local_core: clonk_protocol::ClientCoreControlData,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
     admission_tx: mpsc::Sender<HostAdmissionRequest>,
@@ -1218,7 +1218,7 @@ pub(crate) fn spawn_host_transport<S>(
     stream: S,
     addr: SocketAddr,
     protocol: crate::NetworkProtocol,
-    local_core: clonk_engine::ClientCoreControlData,
+    local_core: clonk_protocol::ClientCoreControlData,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
     admission_tx: mpsc::Sender<HostAdmissionRequest>,
@@ -1231,7 +1231,7 @@ pub(crate) fn spawn_host_transport<S>(
         let request = crate::ConnectionRequest {
             core: local_core,
             build: CURRENT_GAME_BUILD,
-            password: clonk_engine::LegacyCString::default(),
+            password: clonk_protocol::LegacyCString::default(),
             connection_id,
             port_protocol: true,
         };
@@ -1363,7 +1363,7 @@ pub(crate) async fn handle_host_admission_request(
         .is_ok_and(|client_id| state.removing_clients.contains(&client_id))
     {
         let _ = request.decision_tx.send(AdmissionDecision::Reject {
-            message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+            message: clonk_protocol::LegacyCString::from_bytes(b"removing client".to_vec())
                 .unwrap_or_default(),
             wrong_password: false,
         });
@@ -1390,7 +1390,7 @@ pub(crate) async fn handle_host_admission_request(
             }) =>
         {
             AdmissionDecision::Reject {
-                message: clonk_engine::LegacyCString::from_bytes(
+                message: clonk_protocol::LegacyCString::from_bytes(
                     b"secondary connection came from a different peer host".to_vec(),
                 )
                 .unwrap_or_default(),
@@ -1409,7 +1409,7 @@ pub(crate) async fn handle_host_admission_request(
         for action in std::mem::take(before_reply) {
             let ConnectionAction::EmitDirectClientJoin(join) = action else {
                 let _ = request.decision_tx.send(AdmissionDecision::Reject {
-                    message: clonk_engine::LegacyCString::from_bytes(
+                    message: clonk_protocol::LegacyCString::from_bytes(
                         b"invalid host admission action".to_vec(),
                     )
                     .unwrap_or_default(),
@@ -1424,9 +1424,9 @@ pub(crate) async fn handle_host_admission_request(
             state
                 .pending_kinds
                 .insert(join.core.client_id, requested_kind);
-            if let Ok(data) =
-                crate::encode_control_entry_payload(&clonk_engine::ControlPacket::ClientJoin(join))
-            {
+            if let Ok(data) = crate::encode_control_entry_payload(
+                &clonk_protocol::ControlPacket::ClientJoin(join),
+            ) {
                 let _ = broadcast_host_message(
                     state,
                     ConnectionTrafficClass::Message,
@@ -1470,7 +1470,7 @@ pub(crate) async fn handle_host_admission_request(
 pub(crate) async fn handle_client_accepted(
     connection_id: u32,
     remote_connection_id: u32,
-    core: clonk_engine::ClientCoreControlData,
+    core: clonk_protocol::ClientCoreControlData,
     peer_is_port: bool,
     peer_addr: SocketAddr,
     protocol: crate::NetworkProtocol,
@@ -1715,7 +1715,7 @@ fn build_client_setup(
         return Ok(None);
     }
     let current_tick = i32::try_from(state.game_control_tick).unwrap_or(i32::MAX);
-    if snapshot.dynamic.resource_type == clonk_engine::NETWORK_RESOURCE_TYPE_NULL
+    if snapshot.dynamic.resource_type == clonk_protocol::NETWORK_RESOURCE_TYPE_NULL
         || snapshot.dynamic_tick < current_tick
     {
         return Ok(None);
@@ -1764,7 +1764,7 @@ fn build_client_setup(
 /// Only a peer that announced `DEFERRED_RESOURCE_CORES` can hold them, and only
 /// such a peer can parse the upgrade, so the two conditions are the same one.
 async fn send_resource_upgrades(
-    cores: &[clonk_engine::NetworkResourceCore],
+    cores: &[clonk_protocol::NetworkResourceCore],
     state: &mut HostState,
 ) -> usize {
     if cores.is_empty() {

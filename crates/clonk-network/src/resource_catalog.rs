@@ -10,7 +10,7 @@ use crate::resource_packet::{
     ResourceChunkAvailability, ResourceChunkRange, ResourceDataPacket, ResourceDiscoverPacket,
     ResourcePacket, ResourceStatusPacket,
 };
-use clonk_engine::NetworkResourceCore;
+use clonk_protocol::NetworkResourceCore;
 
 /// Concurrent chunk requests to one peer for one file (C++
 /// `C4NetResMaxLoadPerPeerPerFile`).

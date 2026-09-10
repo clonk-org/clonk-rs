@@ -3510,11 +3510,11 @@ mod tests {
             ControlMessage::Ping(ping)
         );
 
-        let control = clonk_engine::ControlPacket::Message(clonk_engine::MessageControlData {
-            message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+        let control = clonk_protocol::ControlPacket::Message(clonk_protocol::MessageControlData {
+            message_type: clonk_protocol::MESSAGE_TYPE_NORMAL,
             player: 1,
             to_player: -1,
-            message: clonk_engine::LegacyCString::from_bytes(vec![b'x'; 1_600]).unwrap(),
+            message: clonk_protocol::LegacyCString::from_bytes(vec![b'x'; 1_600]).unwrap(),
             by_client: 1,
         });
         let data = crate::encode_control_entry_payload(&control).unwrap();

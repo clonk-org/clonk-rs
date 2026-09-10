@@ -685,7 +685,7 @@ fn handle_client_voice_media(
     media: crate::udp_session::ReliableUdpVoiceDatagram,
     transport: &ClientRouteManager,
     voice_events: &mpsc::Sender<crate::VoiceFrame>,
-    known_clients: &BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    known_clients: &BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     limiter: &mut crate::voice::VoiceIngressLimiter,
 ) {
     let Some((ingress_peer_id, receive_cipher)) = transport.authenticated_voice_ingress(media.peer)
@@ -770,9 +770,9 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
         BTreeMap::new(),
         BTreeMap::new(),
         ClientHandshakeRequestTemplate::new(
-            clonk_engine::ClientCoreControlData::default(),
+            clonk_protocol::ClientCoreControlData::default(),
             CURRENT_GAME_BUILD,
-            clonk_engine::LegacyCString::default(),
+            clonk_protocol::LegacyCString::default(),
         ),
         Arc::new(AtomicU32::new(1)),
         Vec::new(),
@@ -807,7 +807,7 @@ pub(crate) async fn run_client_loop_with_routes(
     mut shutdown_rx: oneshot::Receiver<()>,
     host_peer_addr: Option<SocketAddr>,
     mut client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
-    mut client_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    mut client_cores: BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     mut mesh_peers: BTreeMap<i32, crate::ClientMeshPeerState>,
     mesh_request_template: ClientHandshakeRequestTemplate,
     connection_ids: Arc<AtomicU32>,
@@ -830,7 +830,7 @@ pub(crate) async fn run_client_loop_with_routes(
     let mut client_performance = ClientPerformanceStats::new(CLIENT_BACKLOG_LIMIT);
     let mut next_control_request_at = resource_state.next_control_request_at;
     let mut peer_recovery_from_tick = None::<Tick>;
-    let mut pending_sync = Vec::<clonk_engine::ControlPacket>::new();
+    let mut pending_sync = Vec::<clonk_protocol::ControlPacket>::new();
     let mut received_controls = ReceivedControlDeduplicator::new(CLIENT_BACKLOG_LIMIT);
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
     let mut udp_retry_at = None::<tokio::time::Instant>;
@@ -1496,7 +1496,7 @@ pub(crate) async fn run_client_loop_with_routes(
                             .send_message(ControlMessage::ConnectionReply(
                                 crate::ConnectionReply {
                                     ok: false,
-                                    message: clonk_engine::LegacyCString::from_bytes(
+                                    message: clonk_protocol::LegacyCString::from_bytes(
                                         b"removing client".to_vec(),
                                     )
                                     .unwrap_or_default(),
@@ -2527,7 +2527,7 @@ pub(crate) async fn run_client_loop_with_routes(
                                     .unwrap_or_else(|| decode_control_entry_payload(&local_data));
                                 if let Ok(mut control) = decoded {
                                     let local_sources =
-                                        if let clonk_engine::ControlPacket::PlayerInfo(info) =
+                                        if let clonk_protocol::ControlPacket::PlayerInfo(info) =
                                             &mut control
                                         {
                                             let local_sources = resource_state
@@ -2978,14 +2978,14 @@ async fn dispatch_client_resource_events(
 
 fn apply_client_membership(
     client_addresses: &mut BTreeMap<i32, Vec<crate::NetworkAddress>>,
-    client_cores: &mut BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    client_cores: &mut BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     mesh_peers: &mut BTreeMap<i32, crate::ClientMeshPeerState>,
     resource_catalog: &mut crate::ResourceCatalog,
     resource_backend: Option<&mut crate::ResourceTransferBackend>,
-    control: &clonk_engine::ControlPacket,
+    control: &clonk_protocol::ControlPacket,
 ) -> Option<ClientId> {
     match control {
-        clonk_engine::ControlPacket::ClientJoin(join)
+        clonk_protocol::ControlPacket::ClientJoin(join)
             if join.by_client == HOST_CLIENT_ID as i32 =>
         {
             client_addresses.entry(join.core.client_id).or_default();
@@ -2993,7 +2993,7 @@ fn apply_client_membership(
             client_cores.insert(join.core.client_id, join.core.clone());
             None
         }
-        clonk_engine::ControlPacket::ClientRemove(remove)
+        clonk_protocol::ControlPacket::ClientRemove(remove)
             if remove.by_client == HOST_CLIENT_ID as i32 =>
         {
             client_addresses.remove(&remove.client_id);
@@ -3167,7 +3167,7 @@ mod tests {
             .send(ClientRouteCommand::Message(
                 ControlMessage::ConnectionReply(crate::ConnectionReply {
                     ok: false,
-                    message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+                    message: clonk_protocol::LegacyCString::from_bytes(b"removing client".to_vec())
                         .unwrap_or_default(),
                     wrong_password: false,
                     port_protocol: false,

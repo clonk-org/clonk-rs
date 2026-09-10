@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_protocol::{LegacyCString, NetworkResourceCore};
 
 /// `C4PacketType::PID_NetResDis` (`src/C4PacketBase.h:131-136`).
 pub const PID_NET_RES_DISCOVER: u8 = 0x30;

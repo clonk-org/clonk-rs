@@ -1,13 +1,13 @@
 #[cfg(not(target_endian = "little"))]
 compile_error!("the checked-in C++ control codec goldens require little-endian targets");
 
-use clonk_engine::{
-    ControlPacket as EngineControlPacket, JoinPlayerSource, CLIENT_UPDATE_ACTIVATE,
-    PLAYER_INFO_FLAG_HAS_RESOURCE,
-};
 use clonk_network::{
     decode_control_entry_payload, decode_control_payload, decode_player_info_update_payload,
     encode_control_entry_payload, encode_control_payload, encode_player_info_update_payload,
+};
+use clonk_protocol::{
+    ControlPacket as EngineControlPacket, JoinPlayerSource, CLIENT_UPDATE_ACTIVATE,
+    PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 
 #[test]
@@ -205,7 +205,7 @@ fn minimal_player_info_matches_cpp_control_codec() {
     };
     assert_eq!(player.name.as_bytes(), b"P");
     assert_eq!(player.id, 7);
-    assert_eq!(player.player_type, clonk_engine::PLAYER_INFO_TYPE_USER);
+    assert_eq!(player.player_type, clonk_protocol::PLAYER_INFO_TYPE_USER);
     assert_eq!((player.flags, player.team), (0, 0));
     assert_eq!(
         (player.color, player.original_color),

@@ -385,7 +385,7 @@ pub(crate) async fn wait_for_route_retirement(retire_rx: &mut watch::Receiver<bo
 #[derive(Debug)]
 pub(crate) struct ClientConnection {
     pub(crate) outbound: HostOutboundSender,
-    pub(crate) core: clonk_engine::ClientCoreControlData,
+    pub(crate) core: clonk_protocol::ClientCoreControlData,
     pub(crate) peer_addr: SocketAddr,
     pub(crate) join_data_sent: bool,
     pub(crate) join_data_needed_emitted: bool,
@@ -611,11 +611,12 @@ impl ControlSendTimeSnapshot {
 pub(crate) struct ClientResourceState {
     pub(crate) catalog: crate::ResourceCatalog,
     pub(crate) backend: Option<crate::ResourceTransferBackend>,
-    pub(crate) local_resource_sources: BTreeMap<PathBuf, clonk_engine::NetworkResourceCore>,
+    pub(crate) local_resource_sources: BTreeMap<PathBuf, clonk_protocol::NetworkResourceCore>,
     pub(crate) host_peer_id: i32,
     pending_local_resources: BTreeMap<i32, crate::LocalResourceMatch>,
-    pub(crate) deferred_resource_cores: BTreeMap<i32, clonk_engine::NetworkResourceCore>,
-    pub(crate) initial_complete_resources: Vec<(clonk_engine::NetworkResourceCore, PathBuf, bool)>,
+    pub(crate) deferred_resource_cores: BTreeMap<i32, clonk_protocol::NetworkResourceCore>,
+    pub(crate) initial_complete_resources:
+        Vec<(clonk_protocol::NetworkResourceCore, PathBuf, bool)>,
     pub(crate) initial_packets: Vec<ResourcePacket>,
     pub(crate) initial_controls: Vec<ControlPacket>,
     pub(crate) initial_ready_checks: Vec<ReadyCheckPacket>,
@@ -810,10 +811,10 @@ impl ClientControlState {
 
     pub(crate) fn apply_membership(
         &mut self,
-        control: &clonk_engine::ControlPacket,
+        control: &clonk_protocol::ControlPacket,
     ) -> Result<Vec<ControlPacket>, String> {
         match control {
-            clonk_engine::ControlPacket::ClientJoin(join)
+            clonk_protocol::ControlPacket::ClientJoin(join)
                 if join.by_client == HOST_CLIENT_ID as i32 =>
             {
                 let Ok(client_id) = ClientId::try_from(join.core.client_id) else {
@@ -825,22 +826,22 @@ impl ClientControlState {
                     Ok(Vec::new())
                 }
             }
-            clonk_engine::ControlPacket::ClientUpdate(update)
+            clonk_protocol::ControlPacket::ClientUpdate(update)
                 if update.by_client == HOST_CLIENT_ID as i32 =>
             {
                 let Ok(client_id) = ClientId::try_from(update.client_id) else {
                     return Ok(Vec::new());
                 };
                 match update.update_type {
-                    clonk_engine::CLIENT_UPDATE_ACTIVATE if update.data != 0 => {
+                    clonk_protocol::CLIENT_UPDATE_ACTIVATE if update.data != 0 => {
                         self.register(client_id)
                     }
-                    clonk_engine::CLIENT_UPDATE_ACTIVATE
-                    | clonk_engine::CLIENT_UPDATE_SET_OBSERVER => self.unregister(client_id),
+                    clonk_protocol::CLIENT_UPDATE_ACTIVATE
+                    | clonk_protocol::CLIENT_UPDATE_SET_OBSERVER => self.unregister(client_id),
                     _ => Ok(Vec::new()),
                 }
             }
-            clonk_engine::ControlPacket::ClientRemove(remove)
+            clonk_protocol::ControlPacket::ClientRemove(remove)
                 if remove.by_client == HOST_CLIENT_ID as i32 =>
             {
                 ClientId::try_from(remove.client_id)
@@ -982,7 +983,7 @@ pub(crate) enum ClientBootstrapRegistration {
 
 #[derive(Debug, Default)]
 pub(crate) struct LoadedAuthoritativePlayerResources {
-    pub(crate) local_sources: Vec<(PathBuf, clonk_engine::NetworkResourceCore)>,
+    pub(crate) local_sources: Vec<(PathBuf, clonk_protocol::NetworkResourceCore)>,
     pub(crate) newly_loading_resource_ids: Vec<i32>,
 }
 
@@ -1052,9 +1053,9 @@ fn resource_is_registered(
 }
 
 pub(crate) fn round_resource_cores(
-    dynamic: &clonk_engine::NetworkResourceCore,
+    dynamic: &clonk_protocol::NetworkResourceCore,
     parameters: &crate::JoinGameParametersEnvelope,
-) -> BTreeMap<i32, clonk_engine::NetworkResourceCore> {
+) -> BTreeMap<i32, clonk_protocol::NetworkResourceCore> {
     let mut resources = BTreeMap::new();
     for core in &parameters.game_resources {
         resources.insert(core.id, core.clone());
@@ -1067,9 +1068,9 @@ pub(crate) fn round_resource_cores(
         .flat_map(|client| &client.players)
     {
         let flags = player.flags;
-        if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
-            || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
-            || flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0
+        if flags & clonk_protocol::PLAYER_INFO_FLAG_REMOVED != 0
+            || flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+            || flags & clonk_protocol::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0
         {
             continue;
         }
@@ -1085,17 +1086,17 @@ pub(crate) fn load_authoritative_player_resources(
     resolver: &crate::client_bootstrap::ClientBootstrapResolver,
     catalog: &mut crate::ResourceCatalog,
     mut backend: Option<&mut crate::ResourceTransferBackend>,
-    info: &mut clonk_engine::PlayerInfoControlData,
+    info: &mut clonk_protocol::PlayerInfoControlData,
 ) -> LoadedAuthoritativePlayerResources {
     let mut loaded = LoadedAuthoritativePlayerResources::default();
     for player in &mut info.players {
         let flags = player.flags;
-        if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
-            || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+        if flags & clonk_protocol::PLAYER_INFO_FLAG_REMOVED != 0
+            || flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
         {
             continue;
         }
-        if flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+        if flags & clonk_protocol::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
             crate::client_bootstrap::clear_player_resource(player);
             continue;
         }
@@ -1382,7 +1383,7 @@ impl ClientResourceState {
         resource_is_registered(&self.catalog, self.backend.as_ref(), resource_id)
     }
 
-    fn bootstrap_resource_matches(&self, core: &clonk_engine::NetworkResourceCore) -> bool {
+    fn bootstrap_resource_matches(&self, core: &clonk_protocol::NetworkResourceCore) -> bool {
         self.backend
             .as_ref()
             .and_then(|backend| backend.core(core.id))
@@ -1411,7 +1412,7 @@ impl ClientResourceState {
         &mut self,
         resolver: &crate::client_bootstrap::ClientBootstrapResolver,
         role: crate::ClientBootstrapResourceRole,
-        core: &clonk_engine::NetworkResourceCore,
+        core: &clonk_protocol::NetworkResourceCore,
     ) -> Result<ClientBootstrapRegistration, String> {
         if self.contains_bootstrap_resource(core.id) {
             if self.bootstrap_resource_matches(core) {
@@ -1454,12 +1455,12 @@ impl ClientResourceState {
             .flat_map(|client| &mut client.players)
         {
             let flags = player.flags;
-            if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
-                || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+            if flags & clonk_protocol::PLAYER_INFO_FLAG_REMOVED != 0
+                || flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
             {
                 continue;
             }
-            if flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+            if flags & clonk_protocol::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
                 crate::client_bootstrap::clear_player_resource(player);
                 continue;
             }
@@ -1668,7 +1669,7 @@ impl ClientResourceState {
         &mut self,
         resolver: &crate::client_bootstrap::ClientBootstrapResolver,
         role: crate::ClientBootstrapResourceRole,
-        core: &clonk_engine::NetworkResourceCore,
+        core: &clonk_protocol::NetworkResourceCore,
     ) -> Result<ClientBootstrapRegistration, String> {
         // C4Network2ResList::AddByCore returns an existing ID before probing
         // local files or starting a download (src/C4Network2Res.cpp:1473-1477).
@@ -1689,8 +1690,8 @@ impl ClientResourceState {
 
     pub(crate) fn load_authoritative_player_resources(
         &mut self,
-        info: &mut clonk_engine::PlayerInfoControlData,
-    ) -> Vec<(PathBuf, clonk_engine::NetworkResourceCore)> {
+        info: &mut clonk_protocol::PlayerInfoControlData,
+    ) -> Vec<(PathBuf, clonk_protocol::NetworkResourceCore)> {
         let loaded = load_authoritative_player_resources(
             &self.resource_resolver,
             &mut self.catalog,
@@ -1739,7 +1740,7 @@ mod udp_sender_tests {
         let (close, close_rx) = watch::channel(None);
         let reply = crate::ConnectionReply {
             ok: false,
-            message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
+            message: clonk_protocol::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
             wrong_password: false,
             port_protocol: false,
         };
@@ -1764,7 +1765,7 @@ mod udp_sender_tests {
             HostOutboundSender::from_udp(crate::udp_session::ReliableUdpRouteSender::test_sender());
         let reply = crate::ConnectionReply {
             ok: false,
-            message: clonk_engine::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
+            message: clonk_protocol::LegacyCString::from_bytes(b"closed".to_vec()).unwrap(),
             wrong_password: false,
             port_protocol: false,
         };

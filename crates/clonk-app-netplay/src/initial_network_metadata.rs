@@ -5,7 +5,7 @@ use clonk_engine::{
 };
 use thiserror::Error;
 
-use crate::{
+use clonk_network::{
     InitialNetworkScenarioDefaults, JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope,
     JoinTeamListSnapshot, JoinTeamSnapshot,
 };

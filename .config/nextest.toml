@@ -107,5 +107,5 @@ priority = 60
 # without competing with the scenario tiers above; priority changes ordering,
 # not nextest's process isolation or concurrency.
 [[profile.default.overrides]]
-filter = '(package(clonk-network) and test(/^initial_network_dynamic::/)) or (package(xtask) and test(/^dev_check::tests::(base_collection_includes_committed_and_worktree_changes|git_collection_unions_staged_unstaged_untracked_and_rename_ends)$/))'
+filter = '(package(clonk-app-netplay) and test(/^initial_network_dynamic::/)) or (package(xtask) and test(/^dev_check::tests::(base_collection_includes_committed_and_worktree_changes|git_collection_unions_staged_unstaged_untracked_and_rename_ends)$/))'
 priority = 20

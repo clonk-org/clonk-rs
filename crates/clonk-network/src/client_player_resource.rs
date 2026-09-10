@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_protocol::{LegacyCString, NetworkResourceCore};
 use thiserror::Error;
 
 use crate::{

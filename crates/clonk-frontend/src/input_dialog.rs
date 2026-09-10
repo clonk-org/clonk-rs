@@ -5,6 +5,7 @@
 //! [`InputDialogAction::Accepted`] into the C++ callback's side effect and
 //! retain ownership of configuration, networking, and the modal stack.
 
+use clonk_gui::edit::{char_at, is_word_spacer, next_boundary, previous_boundary, truncate_utf8};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -1977,36 +1978,7 @@ impl InputDialogController {
     }
 
     fn word_boundary(&self, direction: i8) -> usize {
-        let mut position = self.caret;
-        let mut nonspace_found = false;
-        let mut space_found = false;
-        loop {
-            let next = if direction < 0 {
-                if position == 0 {
-                    break;
-                }
-                previous_boundary(&self.text, position)
-            } else {
-                if position >= self.text.len() {
-                    break;
-                }
-                next_boundary(&self.text, position)
-            };
-            let sample = if direction < 0 { next } else { position };
-            if is_word_spacer(char_at(&self.text, sample)) {
-                if nonspace_found && direction < 0 {
-                    break;
-                }
-                space_found = true;
-            } else {
-                if space_found && direction > 0 {
-                    break;
-                }
-                nonspace_found = true;
-            }
-            position = next;
-        }
-        position
+        clonk_gui::edit::word_boundary(&self.text, self.caret, direction)
     }
 
     fn ensure_cursor_in_view(&mut self, layout: &InputDialogLayout, font: &ClonkFont) {
@@ -2184,38 +2156,6 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
         && point.x < (rect.x + rect.w) as f32
         && point.y >= rect.y as f32
         && point.y < (rect.y + rect.h) as f32
-}
-
-fn truncate_utf8(text: &str, byte_limit: usize) -> &str {
-    let mut end = text.len().min(byte_limit);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
-fn previous_boundary(text: &str, position: usize) -> usize {
-    text[..position.min(text.len())]
-        .char_indices()
-        .next_back()
-        .map_or(0, |(index, _)| index)
-}
-
-fn next_boundary(text: &str, position: usize) -> usize {
-    if position >= text.len() {
-        return text.len();
-    }
-    position + text[position..].chars().next().map_or(0, char::len_utf8)
-}
-
-fn char_at(text: &str, position: usize) -> char {
-    text.get(position..)
-        .and_then(|tail| tail.chars().next())
-        .unwrap_or('\0')
-}
-
-fn is_word_spacer(character: char) -> bool {
-    character.is_ascii() && !character.is_ascii_alphanumeric() && character != '_'
 }
 
 fn draw_icon(

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 /// stores a `CFG_MaxString` escaped-string field differently from an unquoted
 /// scalar, so the store has to carry the distinction to the flush.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum DeferredValue {
+pub enum DeferredValue {
     /// An unquoted single-line scalar such as `"0"` or `"1"`.
     RawAscii(String),
     /// An escaped-string field (`C4Config.cpp:379`): `native` is what the
@@ -30,17 +30,17 @@ pub(crate) enum DeferredValue {
 
 impl DeferredValue {
     /// The writer this field needs, so both flush sites stay in step.
-    pub(crate) fn as_native(&self) -> clonk_app_netplay::NativeConfigValue<'_> {
+    pub fn as_native(&self) -> crate::native_config::NativeConfigValue<'_> {
         match self {
-            Self::RawAscii(value) => clonk_app_netplay::NativeConfigValue::RawAscii(value),
+            Self::RawAscii(value) => crate::native_config::NativeConfigValue::RawAscii(value),
             Self::CppEscaped { native, .. } => {
-                clonk_app_netplay::NativeConfigValue::CppEscapedString(native)
+                crate::native_config::NativeConfigValue::CppEscapedString(native)
             }
         }
     }
 
     /// What a reader of the live field would see this session.
-    pub(crate) fn as_text(&self) -> &str {
+    pub fn as_text(&self) -> &str {
         match self {
             Self::RawAscii(value) => value,
             Self::CppEscaped { text, .. } => text,
@@ -51,7 +51,7 @@ impl DeferredValue {
 /// Pending `(section, key) -> value` writes, in a deterministic order so a
 /// flush produces a stable file.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DeferredConfig {
+pub struct DeferredConfig {
     pending: BTreeMap<(String, String), DeferredValue>,
 }
 
@@ -59,7 +59,7 @@ impl DeferredConfig {
     /// Records a runtime change. A later change to the same key replaces the
     /// earlier one, so a toggle flipped twice writes once — or not at all, if
     /// it is flipped back to a value already on disk and the caller drops it.
-    pub(crate) fn set(
+    pub fn set(
         &mut self,
         section: impl Into<String>,
         key: impl Into<String>,
@@ -74,7 +74,7 @@ impl DeferredConfig {
     /// Records a runtime change to an escaped-string field, whose native bytes
     /// the flush must hand to `NativeConfigValue::CppEscapedString` rather than
     /// writing through unquoted.
-    pub(crate) fn set_escaped(
+    pub fn set_escaped(
         &mut self,
         section: impl Into<String>,
         key: impl Into<String>,
@@ -94,22 +94,22 @@ impl DeferredConfig {
     /// ones C++ also writes straight to the file — has just superseded it.
     /// Without this the stale in-memory value would keep outranking the newer
     /// file value for the rest of the session.
-    pub(crate) fn clear(&mut self, section: &str, key: &str) {
+    pub fn clear(&mut self, section: &str, key: &str) {
         self.pending.remove(&(section.to_owned(), key.to_owned()));
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.pending.len()
     }
 
     /// The pending value for a key, which is what the running session should
     /// read back rather than the stale file — C++ has one live `Config` field
     /// that its writer and every reader share.
-    pub(crate) fn get(&self, section: &str, key: &str) -> Option<&str> {
+    pub fn get(&self, section: &str, key: &str) -> Option<&str> {
         self.pending
             .get(&(section.to_owned(), key.to_owned()))
             .map(DeferredValue::as_text)
@@ -118,7 +118,7 @@ impl DeferredConfig {
     /// The pending writes as readable text, grouped by section, for a save
     /// surface that rewrites a whole `Config` rather than patching keys. Leaves
     /// the store intact: the caller drops it only once its write succeeded.
-    pub(crate) fn pending_by_section(&self) -> Vec<(String, Vec<(&str, &str)>)> {
+    pub fn pending_by_section(&self) -> Vec<(String, Vec<(&str, &str)>)> {
         let mut grouped: BTreeMap<String, Vec<(&str, &str)>> = BTreeMap::new();
         for ((section, key), value) in &self.pending {
             grouped
@@ -133,7 +133,7 @@ impl DeferredConfig {
     /// `persist_native_config_values` call each. Leaves the store empty, so a
     /// second flush is a no-op and an aborted run that never flushes discards
     /// everything — which is the point.
-    pub(crate) fn take_by_section(&mut self) -> Vec<(String, Vec<(String, DeferredValue)>)> {
+    pub fn take_by_section(&mut self) -> Vec<(String, Vec<(String, DeferredValue)>)> {
         let mut grouped: BTreeMap<String, Vec<(String, DeferredValue)>> = BTreeMap::new();
         for ((section, key), value) in std::mem::take(&mut self.pending) {
             grouped.entry(section).or_default().push((key, value));
@@ -142,10 +142,7 @@ impl DeferredConfig {
     }
 }
 
-#[cfg(all(
-    test,
-    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
-))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

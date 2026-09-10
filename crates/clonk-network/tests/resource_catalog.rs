@@ -9,7 +9,7 @@ use crate::resource_packet::{
     encode_resource_packet, ResourceChunkAvailability, ResourceChunkRange, ResourceDiscoverPacket,
     ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
 };
-use clonk_engine::NetworkResourceCore;
+use clonk_protocol::NetworkResourceCore;
 
 fn registration(resource_id: i32) -> ResourceRegistration {
     ResourceRegistration {

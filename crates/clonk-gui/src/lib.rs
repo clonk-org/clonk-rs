@@ -1,3 +1,8 @@
+pub mod caption_scroll;
+pub mod edit;
+pub mod ime;
+pub mod search_edit;
+
 mod scenario_browser;
 
 use clonk_graphics::{Color, TextFont};

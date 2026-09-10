@@ -2,6 +2,8 @@
 //! monolith so the extracted area crates (menus, netplay, render) and the
 //! app depend on this crate instead of on `main.rs`.
 
+pub mod config;
+pub mod deferred_config;
 pub mod menu_images;
 pub mod native_config;
 pub mod pictures;

@@ -18,7 +18,7 @@
 //! leaves them non-loadable. Missing local content waits only for announced
 //! pending cores; ordinary non-loadable resources still fail admission.
 
-use clonk_engine::NetworkResourceCore;
+use clonk_protocol::NetworkResourceCore;
 
 use crate::resource_packet::{
     decode_resource_core_payload, encode_resource_core_payload, ResourcePacketCodecError,
@@ -157,7 +157,7 @@ mod tests {
             file_crc: 0xdead_beef,
             chunk_size: crate::STOCK_CHUNK_SIZE,
             contents_crc: 0x0bad_f00d,
-            filename: clonk_engine::LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+            filename: clonk_protocol::LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
             ..Default::default()
         }
     }

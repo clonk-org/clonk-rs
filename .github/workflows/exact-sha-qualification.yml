@@ -114,7 +114,7 @@ jobs:
             timeout: 15
             artifact: remaining-2
             apt: libasound2-dev libxmp4
-            command: cargo llvm-cov --no-report nextest -p clonk-app-menus -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --features xtask/engine-tools --no-fail-fast --locked
+            command: cargo llvm-cov --no-report nextest -p clonk-app-menus -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-protocol -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-test-support -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-network-integration-tests -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --features xtask/engine-tools --no-fail-fast --locked
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

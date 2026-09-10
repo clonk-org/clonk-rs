@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use clonk_engine::NetworkResourceCore;
+use clonk_protocol::NetworkResourceCore;
 
 use crate::{
     build_host_resource_core, ChunkStoreOutcome, ChunkWriteOutcome, HostResourceCoreError,

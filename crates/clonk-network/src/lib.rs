@@ -19,7 +19,6 @@ mod host_resource_core;
 mod host_restart;
 mod http_backend;
 mod initial_network_dynamic;
-mod initial_network_metadata;
 mod initial_network_parameters;
 mod irc;
 mod join_client_registry;
@@ -73,7 +72,7 @@ pub use capabilities::{
     decode_port_capabilities, encode_port_capabilities, PeerCapabilityRegistry, PortCapabilities,
     PID_PORT_CAPABILITIES, PORT_CAPABILITY_VERSION,
 };
-pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
+pub use clonk_protocol::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 pub use control_latency::ControlLatencyEstimator;
 pub use control_wait::{
     ControlWaitAttribution, ControlWaitAttributionSnapshot, PID_PORT_CONTROL_WAIT_ATTRIBUTION,
@@ -148,14 +147,7 @@ pub use host_resource_core::{
     HostResourceType, ReusableStandalone, MAX_PLAYER_BIG_ICON_SIZE, STOCK_CHUNK_SIZE,
 };
 pub use http_backend::{HttpBackend, NETIO_HAPPY_EYEBALLS_TIMEOUT, NETIO_QUERY_TIMEOUT};
-pub use initial_network_dynamic::{
-    compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
-    InitialNetworkDynamicError, InitialNetworkDynamicSpec,
-};
-pub use initial_network_metadata::{
-    fill_scenario_derived_join_parameters, initial_network_scenario_defaults,
-    join_team_list_snapshot, InitialNetworkMetadataError,
-};
+pub use initial_network_dynamic::{InitialNetworkDynamic, InitialNetworkDynamicEntry};
 pub use initial_network_parameters::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
     InitialNetworkScenarioDefaults,

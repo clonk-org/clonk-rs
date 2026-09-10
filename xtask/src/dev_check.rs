@@ -585,9 +585,22 @@ fn plan_test_path(plan: &mut CheckPlan, path: &str, reason: &str) -> bool {
     let Some(package) = crate_package(&format!("{prefix}/src/lib.rs")) else {
         return false;
     };
-    // clonk-network disables Cargo's automatic integration targets and
-    // includes every tests/*.rs file from its single declared harness.
-    if package == "clonk-network" {
+    if package == "clonk-network" && tail == "network_load_24.rs" {
+        add_test_target(
+            plan,
+            "clonk-network-integration-tests",
+            "integration",
+            None,
+            reason,
+        );
+        return true;
+    }
+    // Both network packages disable Cargo's automatic integration targets
+    // and declare their harness as `integration`, including `tests/main.rs`.
+    if matches!(
+        package.as_str(),
+        "clonk-network" | "clonk-network-integration-tests"
+    ) {
         add_test_target(plan, &package, "integration", None, reason);
         return true;
     }
@@ -2013,29 +2026,34 @@ mod tests {
 
     #[test]
     fn declared_main_harness_owns_its_sibling_test_modules() {
-        // `crates/clonk-network/Cargo.toml` declares the sole `integration`
-        // target at `tests/main.rs`; sibling `.rs` files are modules in that
-        // harness, not standalone Cargo integration-test targets.
-        let plan = plan_for_paths(
-            &["crates/clonk-network/tests/initial_network_dynamic.rs"],
-            false,
-        );
-        assert!(plan.has_args(&[
-            "nextest",
-            "run",
-            "-p",
-            "clonk-network",
-            "--test",
-            "integration",
-        ]));
-        assert!(!plan.has_args(&[
-            "nextest",
-            "run",
-            "-p",
-            "clonk-network",
-            "--test",
-            "initial_network_dynamic",
-        ]));
+        for (path, package, nonexistent_target) in [
+            (
+                "crates/clonk-network/tests/initial_network_parameters.rs",
+                "clonk-network",
+                "initial_network_parameters",
+            ),
+            (
+                "crates/clonk-network/tests/network_load_24.rs",
+                "clonk-network-integration-tests",
+                "network_load_24",
+            ),
+            (
+                "crates/clonk-network-integration-tests/tests/main.rs",
+                "clonk-network-integration-tests",
+                "main",
+            ),
+        ] {
+            let plan = plan_for_paths(&[path], false);
+            assert!(plan.has_args(&["nextest", "run", "-p", package, "--test", "integration",]));
+            assert!(!plan.has_args(&[
+                "nextest",
+                "run",
+                "-p",
+                package,
+                "--test",
+                nonexistent_target,
+            ]));
+        }
     }
 
     #[test]

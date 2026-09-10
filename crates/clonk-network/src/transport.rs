@@ -24,7 +24,7 @@ use crate::resource_packet::{
     PID_NET_RES_STATUS,
 };
 use crate::{ClientId, ControlPacket, Tick};
-use clonk_engine::{ClientCoreControlData, LegacyCString, PlayerInfoUpdateRequest};
+use clonk_protocol::{ClientCoreControlData, LegacyCString, PlayerInfoUpdateRequest};
 use std::convert::TryFrom;
 use std::io;
 use std::mem::size_of;
@@ -1552,7 +1552,7 @@ mod tests {
         ResourcePacket, ResourcePacketCodecError, ResourceRequestPacket, ResourceStatusPacket,
     };
     use crate::{AddressPacket, NetworkAddress, NetworkProtocol};
-    use clonk_engine::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
+    use clonk_protocol::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
     use std::net::SocketAddr;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
@@ -1581,8 +1581,8 @@ mod tests {
             .resize(FRAME_HEADER_LEN + BODY_SIZE, 0x5a);
         transport.read_buf[FRAME_HEADER_LEN] = PID_CONTROL_PKT;
         transport.read_buf[FRAME_HEADER_LEN + 1] = u8::from(ControlDelivery::Direct);
-        let control = clonk_engine::ControlPacket::PlayerControl(
-            clonk_engine::PlayerControlData::new(1, 2, 3, 4),
+        let control = clonk_protocol::ControlPacket::PlayerControl(
+            clonk_protocol::PlayerControlData::new(1, 2, 3, 4),
         );
         let encoded_control = crate::encode_control_entry_payload(&control).unwrap();
         let control_start = FRAME_HEADER_LEN + 2;
@@ -2739,7 +2739,7 @@ mod tests {
             client_id: 3,
             start_control_tick: 17,
             status: NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1),
-            dynamic: clonk_engine::NetworkResourceCore::default(),
+            dynamic: clonk_protocol::NetworkResourceCore::default(),
             parameters: minimal_join_game_parameters(),
         };
         let expected_payload = crate::encode_join_data_envelope(&envelope).unwrap();
@@ -2768,7 +2768,7 @@ mod tests {
             client_id: 3,
             start_control_tick: 17,
             status: NetworkStatus::new(NETWORK_STATE_LOBBY, 1, -1),
-            dynamic: clonk_engine::NetworkResourceCore::default(),
+            dynamic: clonk_protocol::NetworkResourceCore::default(),
             parameters: minimal_join_game_parameters(),
         };
         let mut packet = vec![0x15];
@@ -2987,8 +2987,8 @@ mod tests {
             "pre-ingress validation must stop at PID_None before the suffix"
         );
 
-        let control = clonk_engine::ControlPacket::PlayerControl(
-            clonk_engine::PlayerControlData::new(1, 2, 3, 4),
+        let control = clonk_protocol::ControlPacket::PlayerControl(
+            clonk_protocol::PlayerControlData::new(1, 2, 3, 4),
         );
         let encoded_control = crate::encode_control_entry_payload(&control).unwrap();
         let mut body = vec![PID_CONTROL_PKT, u8::from(ControlDelivery::Direct)];

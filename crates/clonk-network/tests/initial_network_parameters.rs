@@ -1,9 +1,9 @@
-use clonk_engine::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
 use clonk_network::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
     InitialNetworkScenarioDefaults, JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry,
     JoinGameParametersEnvelope, JoinTeamListSnapshot, PlayerInfoListSnapshot,
 };
+use clonk_protocol::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
 
 #[test]
 fn cpp_oracle_serializes_initial_network_parameters_exactly() {

@@ -23,6 +23,7 @@ name = "frontend_inline"
 path = "../clonk-frontend/src/lib.rs"
 
 [dev-dependencies]
+clonk-test-support = { path = "../clonk-test-support" }
 anyhow = "1.0.102"
 freetype-rs = { version = "0.38.0", features = ["bundled"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }

@@ -1,4 +1,4 @@
-use clonk_engine::{
+use clonk_protocol::{
     ActivateGameGoalMenuControlData, ActivateGameGoalRuleControlData, ClientCoreControlData,
     ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, CustomCommandControlData,
@@ -2329,7 +2329,7 @@ mod tests {
         // strings, then inherited packed ByClient (src/C4Control.cpp:
         // 1056-1069,53-57).
         let expected = EngineControlPacket::EmDrawTool(EmDrawToolControlData {
-            action: clonk_engine::EMDT_RECT,
+            action: clonk_protocol::EMDT_RECT,
             mode: 130,
             x: 0x1122_3344,
             y: -2,
@@ -2465,7 +2465,7 @@ mod tests {
 
     #[test]
     fn em_move_object_rejects_invalid_count_after_strictness_check() {
-        let mut encoded = vec![CID_EM_MOVE_OBJECT, clonk_engine::EMMO_MOVE];
+        let mut encoded = vec![CID_EM_MOVE_OBJECT, clonk_protocol::EMMO_MOVE];
         encoded.extend(0_i32.to_ne_bytes());
         encoded.extend(0_i32.to_ne_bytes());
         encoded.extend((-1_i32).to_ne_bytes());
@@ -2581,7 +2581,7 @@ mod tests {
         // Private writes packed ToPlayer, followed by Message and ByClient
         // (src/C4Control.cpp:1252-1260,53-57).
         let normal = EngineControlPacket::Message(MessageControlData {
-            message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+            message_type: clonk_protocol::MESSAGE_TYPE_NORMAL,
             player: -4,
             to_player: -1,
             message: LegacyCString::from_bytes(b"hi\x80".to_vec()).expect("fixture is NUL-free"),
@@ -2687,7 +2687,7 @@ mod tests {
         let expected = EngineControlPacket::Script(ScriptControlData {
             target_object: -2,
             strictness: ScriptStrictness::Strict3,
-            script: clonk_engine::LegacyCString::from_bytes(b"1+2\x80".to_vec())
+            script: clonk_protocol::LegacyCString::from_bytes(b"1+2\x80".to_vec())
                 .expect("fixture is NUL-free"),
             by_client: 130,
         });
@@ -2858,7 +2858,7 @@ mod tests {
         // src/C4MainMenu.cpp:790-795; src/C4Control.cpp:1566-1570,53-57;
         // src/C4PacketBase.h:181).
         let expected =
-            EngineControlPacket::SurrenderPlayer(clonk_engine::SurrenderPlayerControlData {
+            EngineControlPacket::SurrenderPlayer(clonk_protocol::SurrenderPlayerControlData {
                 player: -4,
                 by_client: 7,
             });
@@ -2876,7 +2876,7 @@ mod tests {
         // CID_Vote (0x83) writes raw uint8 Type, raw bool Approve, native
         // int32 Data, then inherited packed ByClient (pristine 9ffa0a5d
         // src/C4PacketBase.h:151; src/C4Control.cpp:1446-1451,53-57).
-        let expected = EngineControlPacket::Vote(clonk_engine::VoteControlData {
+        let expected = EngineControlPacket::Vote(clonk_protocol::VoteControlData {
             vote_type: 1,
             approve: true,
             data: 7,
@@ -2896,7 +2896,7 @@ mod tests {
         // CID_VoteEnd (0x84) delegates to the identical C4ControlVote body
         // compiler (pristine 9ffa0a5d src/C4PacketBase.h:152;
         // src/C4Control.cpp:1517-1520,1446-1451,53-57).
-        let expected = EngineControlPacket::VoteEnd(clonk_engine::VoteControlData {
+        let expected = EngineControlPacket::VoteEnd(clonk_protocol::VoteControlData {
             vote_type: 1,
             approve: true,
             data: 7,
@@ -2916,7 +2916,7 @@ mod tests {
         // mkIntAdaptT<uint8_t> serializes the enum storage byte directly and
         // performs no range validation (pristine 9ffa0a5d
         // src/C4Control.cpp:1446-1451), so unknown values are wire-stable.
-        let expected = EngineControlPacket::Vote(clonk_engine::VoteControlData {
+        let expected = EngineControlPacket::Vote(clonk_protocol::VoteControlData {
             vote_type: 0xfe,
             approve: false,
             data: 7,
@@ -3181,8 +3181,8 @@ mod tests {
         let control = decode_control_entry_payload(&payload).expect("decode ClientJoin");
         assert_eq!(
             control,
-            EngineControlPacket::ClientJoin(clonk_engine::ClientJoinControlData {
-                core: clonk_engine::ClientCoreControlData {
+            EngineControlPacket::ClientJoin(clonk_protocol::ClientJoinControlData {
+                core: clonk_protocol::ClientCoreControlData {
                     client_id: 3,
                     activated: false,
                     observer: false,
@@ -3319,7 +3319,7 @@ mod tests {
 
         assert_eq!(
             control,
-            EngineControlPacket::Synchronize(clonk_engine::SynchronizeControlData {
+            EngineControlPacket::Synchronize(clonk_protocol::SynchronizeControlData {
                 save_player_files: true,
                 sync_clearance: true,
                 by_client: 0,
@@ -3412,7 +3412,7 @@ mod tests {
                 assert_eq!(join.info_id, 64);
                 assert_eq!(
                     join.source,
-                    clonk_engine::JoinPlayerSource::Embedded(vec![0xaa, 0x00, 0xcc])
+                    clonk_protocol::JoinPlayerSource::Embedded(vec![0xaa, 0x00, 0xcc])
                 );
                 assert_eq!(join.by_client, 4);
             }

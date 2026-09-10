@@ -1,4 +1,4 @@
-use clonk_engine::{LegacyCString, RCT_CTRL, RCT_CTRL_PKT, RCT_END, RCT_FRAME};
+use clonk_protocol::{LegacyCString, RCT_CTRL, RCT_CTRL_PKT, RCT_END, RCT_FRAME};
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use thiserror::Error;
 
@@ -315,7 +315,7 @@ pub enum LeagueRecordStreamError {
 /// carry the initial save and later resource files before the live CtrlRec
 /// chunks in the same uncompressed record stream.
 pub fn encode_league_stream_file_chunk(
-    filename: &clonk_engine::LegacyCString,
+    filename: &clonk_protocol::LegacyCString,
     file: &[u8],
 ) -> Result<Vec<u8>, LeagueRecordStreamError> {
     let file_len =
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn streamed_file_chunk_matches_cpp_binary_compiler_layout() {
-        let filename = clonk_engine::LegacyCString::from_bytes(b"Record.c4s".to_vec()).unwrap();
+        let filename = clonk_protocol::LegacyCString::from_bytes(b"Record.c4s".to_vec()).unwrap();
         let file = vec![0x5a; 130];
         let encoded = encode_league_stream_file_chunk(&filename, &file).unwrap();
 

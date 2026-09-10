@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use clonk_engine::NetworkResourceCore;
+use clonk_protocol::NetworkResourceCore;
 use clonk_resources::{compress_c4group_image, Group, GroupError, MutableGroupError};
 use thiserror::Error;
 

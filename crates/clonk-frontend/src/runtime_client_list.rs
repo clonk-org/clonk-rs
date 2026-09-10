@@ -3215,22 +3215,8 @@ mod tests {
     use super::*;
     use crate::context_menu::{ClassicTooltipTracker, CLASSIC_TOOLTIP_DELAY};
     use crate::game_lobby::{core_runtime_option_rows, LobbyOptionLabels};
-    use clonk_graphics::Color;
 
-    fn unit_width_font(characters: &str) -> ClonkFont {
-        let mut font = ClonkFont::new(3);
-        font.h_space = 0;
-        for character in characters.chars() {
-            font.add_glyph(
-                character,
-                clonk_graphics::clonk_font::GlyphCell {
-                    width: 1,
-                    pixels: vec![Color::opaque(255, 255, 255); 4],
-                },
-            );
-        }
-        font
-    }
+    use clonk_test_support::unit_width_font;
 
     fn options(host: bool) -> Vec<LobbyOptionRow> {
         core_runtime_option_rows(host, host, false, &LobbyOptionLabels::default(), 1, 4, true)

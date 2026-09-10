@@ -4008,11 +4008,7 @@ fn classic_configured_language_sequence_from_config(
     Ok(codes)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RuntimeHelpCharset {
-    Windows1252,
-    Utf8,
-}
+pub(crate) use clonk_app_core::config::RuntimeHelpCharset;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeLanguageTable {

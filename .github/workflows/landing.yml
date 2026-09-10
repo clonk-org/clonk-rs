@@ -344,11 +344,11 @@ jobs:
               exit "$failed"
             artifact: engine-and-frontend-units
           - name: remaining workspace 1/2
-            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app-core -p clonk-app-netplay -p clonk-network -p clonk-network-integration-tests -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
             artifact: remaining-1
           - name: remaining workspace 2/2
             apt: libasound2-dev libxmp4 mesa-vulkan-drivers
-            command: cargo nextest run -p clonk-app-menus -p clonk-app-render -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
+            command: cargo nextest run -p clonk-app-menus -p clonk-app-render -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-protocol -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-test-support -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --no-fail-fast --locked
             artifact: remaining-2
           - name: workspace quality
             apt: libasound2-dev libudev-dev python3-pil
@@ -627,7 +627,7 @@ jobs:
               failed=0
               cargo nextest run -p clonk-game -p clonk-c4group -p clonk-platform -p clonk-core --locked --no-fail-fast || failed=1
               cargo nextest run -p clonk-logging --test crash_log_descriptor --locked || failed=1
-              cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings || failed=1
+              cargo clippy --profile test --no-deps -p clonk-game -p clonk-c4group -p clonk-logging -p clonk-network -p clonk-network-integration-tests -p clonk-platform -p clonk-core --all-targets --locked -- -D warnings || failed=1
               exit "$failed"
           # The network lib-test is the longest hot Windows compile and remains
           # independent. Quality shares the shorter runtime package graph so

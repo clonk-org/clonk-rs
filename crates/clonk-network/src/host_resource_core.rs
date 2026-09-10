@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clonk_engine::{LegacyCString, NetworkResourceCore};
+use clonk_protocol::{LegacyCString, NetworkResourceCore};
 use clonk_resources::{Group, GroupError, MutableGroup, MutableGroupError};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
@@ -1156,7 +1156,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
 
-    use clonk_engine::LegacyCString;
+    use clonk_protocol::LegacyCString;
     use clonk_resources::{c4group_file_crc, Group};
 
     use super::{

@@ -21,7 +21,7 @@ mod chunky;
 pub mod command;
 #[doc(hidden)]
 pub mod compat;
-mod control;
+use clonk_protocol::control;
 mod control_execution;
 mod definition;
 pub mod developer_components;

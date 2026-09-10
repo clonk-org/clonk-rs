@@ -1595,7 +1595,7 @@ impl GameApp {
             let metadata = assignment.teams().clone();
             (
                 runtime_teams_from_initial_metadata(&metadata),
-                clonk_network::join_team_list_snapshot(metadata),
+                clonk_app_netplay::join_team_list_snapshot(metadata),
             )
         });
         let runtime_teams = if let Some((runtime_teams, snapshot)) = exact_teams {

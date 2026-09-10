@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use clonk_engine::{ClientCoreControlData, LegacyCString};
+use clonk_protocol::{ClientCoreControlData, LegacyCString};
 use thiserror::Error;
 
 use crate::legacy::{JoinDataIdListEntry, JoinGameParametersEnvelope};

@@ -40,6 +40,7 @@ name = "snapshot_definition_allocations"
 path = "tests/snapshot_definition_allocations.rs"
 
 [dev-dependencies]
+clonk-test-support = { path = "../clonk-test-support" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -49,6 +50,7 @@ clonk-core = { path = "../clonk-core" }
 # focused engine-then-app runs two separate optimized clonk-engine artifacts.
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 clonk-engine-core = { path = "../clonk-engine-core" }
+clonk-protocol = { path = "../clonk-protocol" }
 clonk-platform = { path = "../clonk-platform" }
 clonk-resources = { path = "../clonk-resources" }
 clonk-script = { path = "../clonk-script" }

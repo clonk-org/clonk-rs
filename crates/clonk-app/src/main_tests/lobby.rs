@@ -3835,7 +3835,7 @@ fn joined_lobby_roster_routes_and_retains_classic_interactions() {
             players: vec![free_restore],
         }],
     };
-    snapshot.parameters.teams = clonk_network::join_team_list_snapshot(set_control_test_metadata(
+    snapshot.parameters.teams = clonk_app_netplay::join_team_list_snapshot(set_control_test_metadata(
         false,
         vec![
             set_control_test_team(2, vec![41], 1),
@@ -4296,7 +4296,7 @@ fn joined_roster_double_click_is_roster_scoped() {
             players: vec![chooser.clone(), companion.clone()],
         }],
     };
-    snapshot.parameters.teams = clonk_network::join_team_list_snapshot(set_control_test_metadata(
+    snapshot.parameters.teams = clonk_app_netplay::join_team_list_snapshot(set_control_test_metadata(
         false,
         vec![
             set_control_test_team(1, vec![31], 0),

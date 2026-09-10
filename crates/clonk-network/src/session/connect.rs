@@ -99,7 +99,7 @@ struct ClientPostJoinResourceConfig {
     local_system_path: Option<PathBuf>,
     trusted_local_system_path: Option<PathBuf>,
     resource_directory: Option<PathBuf>,
-    group_maker: clonk_engine::LegacyCString,
+    group_maker: clonk_protocol::LegacyCString,
     #[cfg(test)]
     client_name: Vec<u8>,
 }
@@ -172,12 +172,12 @@ impl ClientPostJoinResourceBootstrap {
             .flat_map(|client| &mut client.players)
         {
             let flags = player.flags;
-            if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
-                || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+            if flags & clonk_protocol::PLAYER_INFO_FLAG_REMOVED != 0
+                || flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
             {
                 continue;
             }
-            if flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+            if flags & clonk_protocol::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
                 crate::client_bootstrap::clear_player_resource(player);
                 continue;
             }
@@ -1151,7 +1151,7 @@ where
             )
         })
         .and_then(|bytes| {
-            clonk_engine::LegacyCString::from_bytes(bytes).ok_or_else(|| {
+            clonk_protocol::LegacyCString::from_bytes(bytes).ok_or_else(|| {
                 ClientError::Handshake("client name contains an interior NUL".to_string())
             })
         })?;
@@ -1162,11 +1162,11 @@ where
             )
         })
         .and_then(|bytes| {
-            clonk_engine::LegacyCString::from_bytes(bytes).ok_or_else(|| {
+            clonk_protocol::LegacyCString::from_bytes(bytes).ok_or_else(|| {
                 ClientError::Handshake("client nick contains an interior NUL".to_string())
             })
         })?;
-    let local_core = clonk_engine::ClientCoreControlData {
+    let local_core = clonk_protocol::ClientCoreControlData {
         client_id: -1,
         activated: matches!(kind, ParticipantKind::Player),
         observer: matches!(kind, ParticipantKind::Observer),
@@ -1607,7 +1607,7 @@ where
         ClientHandshakeRequestTemplate::new(
             assigned_local_core,
             compatibility_build,
-            clonk_engine::LegacyCString::default(),
+            clonk_protocol::LegacyCString::default(),
         ),
         connection_ids,
         mesh_interface_ids,
@@ -1655,16 +1655,16 @@ pub(crate) type PendingTcpClientRoute =
 
 #[derive(Clone)]
 pub(crate) struct ClientHandshakeRequestTemplate {
-    pub(crate) local_core: clonk_engine::ClientCoreControlData,
+    pub(crate) local_core: clonk_protocol::ClientCoreControlData,
     compatibility_build: i32,
-    password: clonk_engine::LegacyCString,
+    password: clonk_protocol::LegacyCString,
 }
 
 impl ClientHandshakeRequestTemplate {
     pub(crate) fn new(
-        local_core: clonk_engine::ClientCoreControlData,
+        local_core: clonk_protocol::ClientCoreControlData,
         compatibility_build: i32,
-        password: clonk_engine::LegacyCString,
+        password: clonk_protocol::LegacyCString,
     ) -> Self {
         Self {
             local_core,
@@ -1688,13 +1688,13 @@ pub(crate) enum ConnectedMeshRoute {
     Tcp {
         peer_id: ClientId,
         initiator_id: ClientId,
-        peer_core: clonk_engine::ClientCoreControlData,
+        peer_core: clonk_protocol::ClientCoreControlData,
         route: ConnectedClientRoute<TcpStream>,
     },
     Udp {
         peer_id: ClientId,
         initiator_id: ClientId,
-        peer_core: clonk_engine::ClientCoreControlData,
+        peer_core: clonk_protocol::ClientCoreControlData,
         route: ConnectedClientRoute<crate::ReliableUdpPeerStream>,
     },
 }
@@ -1710,7 +1710,7 @@ pub(crate) async fn connect_mesh_tcp_route(
     peer_id: ClientId,
     addr: SocketAddr,
     request_template: ClientHandshakeRequestTemplate,
-    expected_peer_core: clonk_engine::ClientCoreControlData,
+    expected_peer_core: clonk_protocol::ClientCoreControlData,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedMeshRoute, ClientError> {
@@ -1759,7 +1759,7 @@ pub(crate) async fn connect_mesh_udp_route(
     peer_id: ClientId,
     addr: SocketAddr,
     request_template: ClientHandshakeRequestTemplate,
-    expected_peer_core: clonk_engine::ClientCoreControlData,
+    expected_peer_core: clonk_protocol::ClientCoreControlData,
     connection_id: u32,
 ) -> Result<ConnectedMeshRoute, ClientError> {
     let initiator_id =
@@ -1816,7 +1816,7 @@ pub(crate) async fn connect_mesh_tcp_socket_route(
     socket: tokio::net::TcpSocket,
     addr: SocketAddr,
     request_template: ClientHandshakeRequestTemplate,
-    expected_peer_core: clonk_engine::ClientCoreControlData,
+    expected_peer_core: clonk_protocol::ClientCoreControlData,
     connection_id: u32,
     delay: Duration,
     io_statistics: crate::NetworkIoStatistics,
@@ -1883,7 +1883,7 @@ pub(crate) async fn accept_mesh_tcp_route(
     stream: TcpStream,
     peer_addr: SocketAddr,
     request_template: ClientHandshakeRequestTemplate,
-    canonical_peer_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    canonical_peer_cores: BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedMeshRoute, ClientError> {
@@ -1921,7 +1921,7 @@ pub(crate) async fn accept_mesh_tcp_route(
 pub(crate) async fn accept_mesh_udp_route(
     stream: crate::ReliableUdpPeerStream,
     request_template: ClientHandshakeRequestTemplate,
-    canonical_peer_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    canonical_peer_cores: BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     connection_id: u32,
 ) -> Result<ConnectedMeshRoute, ClientError> {
     stream
@@ -1996,7 +1996,7 @@ pub(crate) fn spawn_mesh_dial(
     active_dials: &mut BTreeSet<MeshDialKey>,
     peer_id: i32,
     attempt: crate::ClientMeshDialAttempt,
-    client_cores: &BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    client_cores: &BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     request_template: &ClientHandshakeRequestTemplate,
     connection_ids: &Arc<AtomicU32>,
     interface_ids: &[u32],
@@ -2121,7 +2121,7 @@ pub(crate) fn maybe_initiate_tcp_simultaneous_open(
     pending_sockets: &mut BTreeMap<i32, tokio::net::TcpSocket>,
     pending_routes: usize,
     routes: &mut ClientRouteManager,
-    local_core: &clonk_engine::ClientCoreControlData,
+    local_core: &clonk_protocol::ClientCoreControlData,
     peer_id: i32,
     attempt: crate::ClientMeshDialAttempt,
     local_puncher_address: Option<SocketAddr>,
@@ -2208,7 +2208,7 @@ pub(crate) fn add_connected_mesh_route(
 
 pub(crate) fn connected_mesh_route_matches_registry(
     route: &ConnectedMeshRoute,
-    registry: &BTreeMap<i32, clonk_engine::ClientCoreControlData>,
+    registry: &BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
 ) -> bool {
     let (peer_id, peer_core) = match route {
         ConnectedMeshRoute::Tcp {
@@ -2232,7 +2232,7 @@ pub(crate) struct ClientUdpReconnect {
     addr: SocketAddr,
     handle: crate::ReliableUdpSessionHandle,
     request_template: ClientHandshakeRequestTemplate,
-    expected_host_core: clonk_engine::ClientCoreControlData,
+    expected_host_core: clonk_protocol::ClientCoreControlData,
     connection_ids: Arc<AtomicU32>,
 }
 
@@ -2252,7 +2252,7 @@ impl ClientUdpReconnect {
 pub(crate) struct ClientTcpReconnect {
     addr: SocketAddr,
     request_template: ClientHandshakeRequestTemplate,
-    expected_host_core: clonk_engine::ClientCoreControlData,
+    expected_host_core: clonk_protocol::ClientCoreControlData,
     connection_ids: Arc<AtomicU32>,
     io_statistics: crate::NetworkIoStatistics,
 }
@@ -2297,7 +2297,7 @@ pub(crate) async fn await_pending_tcp_client_route(
 pub(crate) async fn connect_secondary_tcp_route(
     addr: SocketAddr,
     request_template: ClientHandshakeRequestTemplate,
-    expected_host_core: clonk_engine::ClientCoreControlData,
+    expected_host_core: clonk_protocol::ClientCoreControlData,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedClientRoute<TcpStream>, ClientError> {
@@ -2340,7 +2340,7 @@ pub(crate) async fn connect_secondary_udp_route(
     handle: crate::ReliableUdpSessionHandle,
     addr: SocketAddr,
     request_template: ClientHandshakeRequestTemplate,
-    expected_host_core: clonk_engine::ClientCoreControlData,
+    expected_host_core: clonk_protocol::ClientCoreControlData,
     connection_id: u32,
 ) -> Result<ConnectedClientRoute<crate::ReliableUdpPeerStream>, ClientError> {
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle.connect(addr))

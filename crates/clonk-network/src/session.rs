@@ -77,7 +77,7 @@ mod tests {
         decode_control_packet, encode_control_entry_payload, encode_control_packet,
         LegacyControlFrame, NetworkStatus, ParticipantKind, NETWORK_STATE_GO,
     };
-    use clonk_engine::{
+    use clonk_protocol::{
         ClientUpdateControlData, ControlPacket as EngineControlPacket, PlayerControlData,
         CLIENT_UPDATE_ACTIVATE,
     };
@@ -104,7 +104,7 @@ mod tests {
 
     macro_rules! network_core {
         ($($fields:tt)*) => {
-            clonk_engine::NetworkResourceCore {
+            clonk_protocol::NetworkResourceCore {
                 $($fields)*,
                 ..Default::default()
             }
@@ -139,8 +139,8 @@ mod tests {
             .test_value()
     }
 
-    fn c4(bytes: impl AsRef<[u8]>) -> clonk_engine::LegacyCString {
-        clonk_engine::LegacyCString::from_bytes(bytes.as_ref().to_vec())
+    fn c4(bytes: impl AsRef<[u8]>) -> clonk_protocol::LegacyCString {
+        clonk_protocol::LegacyCString::from_bytes(bytes.as_ref().to_vec())
             .expect("valid fixture CString")
     }
 
@@ -183,10 +183,10 @@ mod tests {
 
     fn test_client_core(
         client_id: i32,
-        name: clonk_engine::LegacyCString,
+        name: clonk_protocol::LegacyCString,
         lobby_ready: bool,
-    ) -> clonk_engine::ClientCoreControlData {
-        clonk_engine::ClientCoreControlData {
+    ) -> clonk_protocol::ClientCoreControlData {
+        clonk_protocol::ClientCoreControlData {
             client_id,
             activated: true,
             observer: false,
@@ -196,19 +196,22 @@ mod tests {
         }
     }
 
-    fn compatibility_test_core(client_id: i32, name: &[u8]) -> clonk_engine::ClientCoreControlData {
+    fn compatibility_test_core(
+        client_id: i32,
+        name: &[u8],
+    ) -> clonk_protocol::ClientCoreControlData {
         test_client_core(client_id, c4(name), false)
     }
 
     fn test_connection_request(
-        core: clonk_engine::ClientCoreControlData,
+        core: clonk_protocol::ClientCoreControlData,
         connection_id: u32,
         port_protocol: bool,
     ) -> crate::ConnectionRequest {
         crate::ConnectionRequest {
             core,
             build: CURRENT_GAME_BUILD,
-            password: clonk_engine::LegacyCString::default(),
+            password: clonk_protocol::LegacyCString::default(),
             connection_id,
             port_protocol,
         }
@@ -216,7 +219,7 @@ mod tests {
 
     fn test_connection_reply(
         ok: bool,
-        message: clonk_engine::LegacyCString,
+        message: clonk_protocol::LegacyCString,
         port_protocol: bool,
     ) -> crate::ConnectionReply {
         crate::ConnectionReply {
@@ -311,7 +314,7 @@ mod tests {
         snapshot: F,
     ) where
         S: AsyncRead + AsyncWrite + Unpin,
-        F: FnOnce(&clonk_engine::ClientCoreControlData) -> HostJoinSnapshot,
+        F: FnOnce(&clonk_protocol::ClientCoreControlData) -> HostJoinSnapshot,
     {
         let host_core = test_client_core(0, c4(b"Host"), false);
         let request = test_connection_request(host_core.clone(), 9, false);
@@ -1237,7 +1240,7 @@ mod tests {
     fn host_state_with_pending_accept(
         connection_id: u32,
         client_id: ClientId,
-    ) -> (HostState, clonk_engine::ClientCoreControlData) {
+    ) -> (HostState, clonk_protocol::ClientCoreControlData) {
         let (seed_outbound, _seed_receiver) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(client_id, seed_outbound);
         let core = compatibility_test_core(client_id as i32, b"Joining peer");
@@ -4649,7 +4652,7 @@ mod tests {
         let host = start_host(listener, config).await.test_value();
         let client = connect_test_player(address, "Alice").await;
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
-            clonk_engine::ClientRemoveControlData {
+            clonk_protocol::ClientRemoveControlData {
                 client_id: i32::try_from(client.client_id()).unwrap(),
                 reason: c4(b"removed"),
                 by_client: HOST_CLIENT_ID as i32,
@@ -4698,7 +4701,7 @@ mod tests {
         while removing_events.try_recv().is_ok() {}
         while retained_events.try_recv().is_ok() {}
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
-            clonk_engine::ClientRemoveControlData {
+            clonk_protocol::ClientRemoveControlData {
                 client_id: i32::try_from(removing_id).unwrap(),
                 reason: c4(b"removed"),
                 by_client: HOST_CLIENT_ID as i32,
@@ -6064,7 +6067,7 @@ mod tests {
             ConnectionLivenessState::new_accepted_system(),
         );
         udp.send_message(ControlMessage::ConnectionRequest(test_connection_request(
-            clonk_engine::ClientCoreControlData::default(),
+            clonk_protocol::ClientCoreControlData::default(),
             99,
             false,
         )))
@@ -7436,9 +7439,9 @@ mod tests {
             clients: vec![crate::ClientPlayerInfosSnapshot {
                 client_id: 1,
                 flags: 0,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                players: vec![clonk_protocol::ControlPlayerInfoEntry {
                     id: 1,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                     resource: Some(retained_player.clone()),
                     ..Default::default()
                 }],
@@ -7508,7 +7511,7 @@ mod tests {
                     return None;
                 };
                 match decode_control_entry_payload(&data).ok()? {
-                    clonk_engine::ControlPacket::ClientRemove(remove) => Some(remove),
+                    clonk_protocol::ControlPacket::ClientRemove(remove) => Some(remove),
                     _ => None,
                 }
             })
@@ -7594,9 +7597,9 @@ mod tests {
         snapshot.parameters.player_infos.clients = vec![crate::ClientPlayerInfosSnapshot {
             client_id: client_id as i32,
             flags: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+            players: vec![clonk_protocol::ControlPlayerInfoEntry {
                 id: 1,
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(colliding_player),
                 ..Default::default()
             }],
@@ -7691,15 +7694,15 @@ mod tests {
             client_id: client_id as i32,
             flags: 0,
             players: vec![
-                clonk_engine::ControlPlayerInfoEntry {
+                clonk_protocol::ControlPlayerInfoEntry {
                     id: 1,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                     resource: Some(shared_player_resource.clone()),
                     ..Default::default()
                 },
-                clonk_engine::ControlPlayerInfoEntry {
+                clonk_protocol::ControlPlayerInfoEntry {
                     id: 2,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                     resource: Some(shared_player_resource),
                     ..Default::default()
                 },
@@ -7903,7 +7906,7 @@ mod tests {
             .push(crate::ClientPlayerInfosSnapshot {
                 client_id: stale_client_id,
                 flags: 0,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                players: vec![clonk_protocol::ControlPlayerInfoEntry {
                     id: 88,
                     ..Default::default()
                 }],
@@ -7939,7 +7942,7 @@ mod tests {
         let restore = crate::ClientPlayerInfosSnapshot {
             client_id: -1,
             flags: 0,
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
+            players: vec![clonk_protocol::ControlPlayerInfoEntry {
                 id: 88,
                 savegame_player: 1,
                 ..Default::default()
@@ -8227,9 +8230,9 @@ mod tests {
             clients: vec![crate::ClientPlayerInfosSnapshot {
                 client_id: 7,
                 flags: 0,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                players: vec![clonk_protocol::ControlPlayerInfoEntry {
                     id: 1,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                     resource: Some(retained_player.clone()),
                     ..Default::default()
                 }],
@@ -8997,9 +9000,9 @@ mod tests {
             &candidates,
             directories.client.clone(),
         ));
-        let mut info = clonk_engine::PlayerInfoControlData {
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        let mut info = clonk_protocol::PlayerInfoControlData {
+            players: vec![clonk_protocol::ControlPlayerInfoEntry {
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(publication.core.clone()),
                 ..Default::default()
             }],
@@ -9226,7 +9229,7 @@ mod tests {
         run_client_connection_handshake(
             &mut peer,
             test_connection_request(
-                clonk_engine::ClientCoreControlData {
+                clonk_protocol::ClientCoreControlData {
                     client_id: -1,
                     name: peer_name.clone(),
                     nick: peer_name,
@@ -9538,9 +9541,9 @@ mod tests {
                 local_work_path.clone(),
             ),
         );
-        let mut local_info = clonk_engine::PlayerInfoControlData {
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        let mut local_info = clonk_protocol::PlayerInfoControlData {
+            players: vec![clonk_protocol::ControlPlayerInfoEntry {
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(valid_core.clone()),
                 ..Default::default()
             }],
@@ -9587,45 +9590,45 @@ mod tests {
         .test_value();
         let mut client_events = client.take_event_receiver();
 
-        let resource_player = |id: i32, flags: u16, core: clonk_engine::NetworkResourceCore| {
-            clonk_engine::ControlPlayerInfoEntry {
+        let resource_player = |id: i32, flags: u16, core: clonk_protocol::NetworkResourceCore| {
+            clonk_protocol::ControlPlayerInfoEntry {
                 id,
                 flags,
                 resource: Some(core),
                 ..Default::default()
             }
         };
-        let info = clonk_engine::PlayerInfoControlData::new(
+        let info = clonk_protocol::PlayerInfoControlData::new(
             1,
-            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            clonk_protocol::CLIENT_PLAYER_INFO_FLAG_INITIAL,
             vec![
                 resource_player(
                     1,
-                    clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                     valid_core.clone(),
                 ),
                 resource_player(
                     2,
-                    clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
-                        | clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                    clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | clonk_protocol::PLAYER_INFO_FLAG_REMOVED,
                     removed_core.clone(),
                 ),
                 resource_player(
                     3,
-                    clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
-                        | clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
+                    clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | clonk_protocol::PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
                     scenario_core,
                 ),
                 resource_player(
                     4,
-                    clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                     nonloadable_core,
                 ),
             ],
             0,
         );
         let encoded = crate::encode_control_entry_payload(
-            &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
+            &clonk_protocol::ControlPacket::PlayerInfo(info.clone()),
         )
         .test_value();
         host.submit_packet(ControlDelivery::Direct, encoded.clone())
@@ -9637,7 +9640,7 @@ mod tests {
         while delivered.is_none() || completed.is_none() {
             match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
                 Some(ClientEvent::Direct { data, .. }) => {
-                    if let Ok(clonk_engine::ControlPacket::PlayerInfo(actual)) =
+                    if let Ok(clonk_protocol::ControlPacket::PlayerInfo(actual)) =
                         decode_control_entry_payload(&data)
                     {
                         delivered = Some(actual);
@@ -9660,17 +9663,17 @@ mod tests {
         }
         let delivered = delivered.test_value();
         assert_ne!(
-            delivered.players[0].flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            delivered.players[0].flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
             0
         );
         assert_ne!(
-            delivered.players[1].flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            delivered.players[1].flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
             0,
             "removed players return before LoadResource mutates their flags"
         );
         for player in &delivered.players[2..] {
             assert_eq!(
-                player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                player.flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 0
             );
             assert_eq!(player.resource, None);
@@ -9688,7 +9691,7 @@ mod tests {
                 Some(ClientEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
-                        Ok(clonk_engine::ControlPacket::PlayerInfo(_))
+                        Ok(clonk_protocol::ControlPacket::PlayerInfo(_))
                     ) =>
                 {
                     break;
@@ -9754,12 +9757,12 @@ mod tests {
         .await
         .test_value();
         let mut client_events = client.take_event_receiver();
-        let info = clonk_engine::PlayerInfoControlData::new(
+        let info = clonk_protocol::PlayerInfoControlData::new(
             1,
-            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            vec![clonk_engine::ControlPlayerInfoEntry {
+            clonk_protocol::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_protocol::ControlPlayerInfoEntry {
                 id: 1,
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(core.clone()),
                 ..Default::default()
             }],
@@ -9767,7 +9770,7 @@ mod tests {
         );
         host.submit_packet(
             ControlDelivery::Direct,
-            crate::encode_control_entry_payload(&clonk_engine::ControlPacket::PlayerInfo(info))
+            crate::encode_control_entry_payload(&clonk_protocol::ControlPacket::PlayerInfo(info))
                 .unwrap(),
         )
         .await
@@ -9792,7 +9795,7 @@ mod tests {
                 Some(HostEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
-                        Ok(clonk_engine::ControlPacket::PlayerInfo(_))
+                        Ok(clonk_protocol::ControlPacket::PlayerInfo(_))
                     ) =>
                 {
                     panic!("host exposed PlayerInfo before its local resource completion");
@@ -9806,7 +9809,7 @@ mod tests {
                 Some(HostEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
-                        Ok(clonk_engine::ControlPacket::PlayerInfo(_))
+                        Ok(clonk_protocol::ControlPacket::PlayerInfo(_))
                     ) =>
                 {
                     break;
@@ -9898,12 +9901,12 @@ mod tests {
         .await
         .test_value();
         let mut client_events = client.take_event_receiver();
-        let info = clonk_engine::PlayerInfoControlData::new(
+        let info = clonk_protocol::PlayerInfoControlData::new(
             1,
-            clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-            vec![clonk_engine::ControlPlayerInfoEntry {
+            clonk_protocol::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            vec![clonk_protocol::ControlPlayerInfoEntry {
                 id: 1,
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(core.clone()),
                 ..Default::default()
             }],
@@ -9911,7 +9914,7 @@ mod tests {
         );
         host.submit_packet(
             ControlDelivery::Direct,
-            crate::encode_control_entry_payload(&clonk_engine::ControlPacket::PlayerInfo(info))
+            crate::encode_control_entry_payload(&clonk_protocol::ControlPacket::PlayerInfo(info))
                 .unwrap(),
         )
         .await
@@ -9933,7 +9936,7 @@ mod tests {
                 Some(ClientEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
-                        Ok(clonk_engine::ControlPacket::PlayerInfo(_))
+                        Ok(clonk_protocol::ControlPacket::PlayerInfo(_))
                     ) =>
                 {
                     panic!("client exposed PlayerInfo before its local resource completion");
@@ -9950,7 +9953,7 @@ mod tests {
                 Some(ClientEvent::Direct { data, .. })
                     if matches!(
                         decode_control_entry_payload(&data),
-                        Ok(clonk_engine::ControlPacket::PlayerInfo(_))
+                        Ok(clonk_protocol::ControlPacket::PlayerInfo(_))
                     ) =>
                 {
                     break;
@@ -10497,9 +10500,9 @@ mod tests {
             clients: vec![crate::ClientPlayerInfosSnapshot {
                 client_id: 0,
                 flags: 0,
-                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                players: vec![clonk_protocol::ControlPlayerInfoEntry {
                     id: 1,
-                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                     resource: Some(nonloadable_core(3, 9, b"Host.c4p")),
                     ..Default::default()
                 }],
@@ -10513,7 +10516,7 @@ mod tests {
         let join_data = client.take_join_data().test_value();
         let player = &join_data.parameters.player_infos.clients[0].players[0];
         assert_eq!(
-            player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            player.flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
             0
         );
         assert_eq!(player.resource, None);
@@ -10559,8 +10562,8 @@ mod tests {
     #[test]
     fn direct_client_join_authenticates_the_embedded_host_author() {
         let payload = encode_control_entry_payload(&EngineControlPacket::ClientJoin(
-            clonk_engine::ClientJoinControlData {
-                core: clonk_engine::ClientCoreControlData {
+            clonk_protocol::ClientJoinControlData {
+                core: clonk_protocol::ClientCoreControlData {
                     client_id: 3,
                     ..Default::default()
                 },
@@ -10575,9 +10578,9 @@ mod tests {
 
     #[test]
     fn mesh_peer_cannot_author_host_membership_controls() {
-        let remove = EngineControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
+        let remove = EngineControlPacket::ClientRemove(clonk_protocol::ClientRemoveControlData {
             client_id: 3,
-            reason: clonk_engine::LegacyCString::default(),
+            reason: clonk_protocol::LegacyCString::default(),
             by_client: 7,
         });
         let direct = encode_control_entry_payload(&remove).test_value();
@@ -10644,12 +10647,13 @@ mod tests {
     fn scenario_player_init_authenticates_the_selecting_client() {
         // PID_ControlPkt rejects a non-host packet whose embedded ByClient
         // differs from the authenticated connection (src/C4GameControlNetwork.cpp:478-490).
-        let control =
-            EngineControlPacket::InitScenarioPlayer(clonk_engine::InitScenarioPlayerControlData {
+        let control = EngineControlPacket::InitScenarioPlayer(
+            clonk_protocol::InitScenarioPlayerControlData {
                 team: 2,
                 player: 4,
                 by_client: 7,
-            });
+            },
+        );
         assert_single_control_author(&control, 7, 3);
     }
 
@@ -10710,26 +10714,26 @@ mod tests {
     fn queued_vote_and_player_script_controls_authenticate_frame_author() {
         let controls = |by_client| {
             vec![
-                EngineControlPacket::Vote(clonk_engine::VoteControlData {
-                    vote_type: clonk_engine::VOTE_TYPE_KICK,
+                EngineControlPacket::Vote(clonk_protocol::VoteControlData {
+                    vote_type: clonk_protocol::VOTE_TYPE_KICK,
                     approve: true,
                     data: 3,
                     by_client,
                 }),
-                EngineControlPacket::VoteEnd(clonk_engine::VoteControlData {
-                    vote_type: clonk_engine::VOTE_TYPE_KICK,
+                EngineControlPacket::VoteEnd(clonk_protocol::VoteControlData {
+                    vote_type: clonk_protocol::VOTE_TYPE_KICK,
                     approve: true,
                     data: 3,
                     by_client,
                 }),
                 EngineControlPacket::InitScenarioPlayer(
-                    clonk_engine::InitScenarioPlayerControlData {
+                    clonk_protocol::InitScenarioPlayerControlData {
                         team: 2,
                         player: 4,
                         by_client,
                     },
                 ),
-                EngineControlPacket::SurrenderPlayer(clonk_engine::SurrenderPlayerControlData {
+                EngineControlPacket::SurrenderPlayer(clonk_protocol::SurrenderPlayerControlData {
                     player: 4,
                     by_client,
                 }),
@@ -10761,7 +10765,7 @@ mod tests {
 
     #[test]
     fn remove_player_control_cannot_forge_host_author() {
-        let control = EngineControlPacket::RemovePlayer(clonk_engine::RemovePlayerControlData {
+        let control = EngineControlPacket::RemovePlayer(clonk_protocol::RemovePlayerControlData {
             player: 4,
             disconnected: false,
             by_client: 0,
@@ -10778,9 +10782,9 @@ mod tests {
 
     #[test]
     fn single_script_control_authenticates_embedded_author() {
-        let control = EngineControlPacket::Script(clonk_engine::ScriptControlData {
-            target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
-            strictness: clonk_engine::ScriptStrictness::Strict3,
+        let control = EngineControlPacket::Script(clonk_protocol::ScriptControlData {
+            target_object: clonk_protocol::SCRIPT_SCOPE_GLOBAL,
+            strictness: clonk_protocol::ScriptStrictness::Strict3,
             script: c4(b"1+2"),
             by_client: 7,
         });
@@ -10791,9 +10795,9 @@ mod tests {
     fn queued_script_control_cannot_forge_host_author() {
         assert_queued_control_author(
             |by_client| {
-                EngineControlPacket::Script(clonk_engine::ScriptControlData {
-                    target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
-                    strictness: clonk_engine::ScriptStrictness::Strict3,
+                EngineControlPacket::Script(clonk_protocol::ScriptControlData {
+                    target_object: clonk_protocol::SCRIPT_SCOPE_GLOBAL,
+                    strictness: clonk_protocol::ScriptStrictness::Strict3,
                     script: c4(b"1+2"),
                     by_client,
                 })
@@ -10804,20 +10808,21 @@ mod tests {
 
     #[test]
     fn single_message_board_answer_authenticates_embedded_author() {
-        let control =
-            EngineControlPacket::MessageBoardAnswer(clonk_engine::MessageBoardAnswerControlData {
+        let control = EngineControlPacket::MessageBoardAnswer(
+            clonk_protocol::MessageBoardAnswerControlData {
                 object: 42,
                 answer: c4(b"answer"),
                 player: 3,
                 by_client: 7,
-            });
+            },
+        );
         assert_single_control_author(&control, 7, 8);
     }
 
     #[test]
     fn single_message_control_authenticates_embedded_author() {
-        let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
-            message_type: clonk_engine::MESSAGE_TYPE_PRIVATE,
+        let control = EngineControlPacket::Message(clonk_protocol::MessageControlData {
+            message_type: clonk_protocol::MESSAGE_TYPE_PRIVATE,
             player: 3,
             to_player: 5,
             message: c4(b"secret"),
@@ -10833,8 +10838,8 @@ mod tests {
         // that was not present at send time would widen that audience.
         let (outbound, _receiver) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(7, outbound);
-        let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
-            message_type: clonk_engine::MESSAGE_TYPE_TEAM,
+        let control = EngineControlPacket::Message(clonk_protocol::MessageControlData {
+            message_type: clonk_protocol::MESSAGE_TYPE_TEAM,
             player: -1,
             to_player: -1,
             message: c4(b"team secret"),
@@ -10854,8 +10859,8 @@ mod tests {
         // must not turn those one-shot notices into replayable conversation.
         let (outbound, _receiver) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(7, outbound);
-        let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
-            message_type: clonk_engine::MESSAGE_TYPE_SYSTEM,
+        let control = EngineControlPacket::Message(clonk_protocol::MessageControlData {
+            message_type: clonk_protocol::MESSAGE_TYPE_SYSTEM,
             player: -1,
             to_player: -1,
             message: c4(b"network notice"),
@@ -10893,8 +10898,8 @@ mod tests {
         let (outbound, _receiver) = HostOutboundSender::channel();
         let mut state = host_state_with_test_route(7, outbound);
         for index in 0..=100 {
-            let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
-                message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+            let control = EngineControlPacket::Message(clonk_protocol::MessageControlData {
+                message_type: clonk_protocol::MESSAGE_TYPE_NORMAL,
                 player: -1,
                 to_player: -1,
                 message: c4(format!("message {index}").into_bytes()),
@@ -10919,8 +10924,8 @@ mod tests {
         for index in 0_u8..20 {
             let mut text = vec![b'x'; 239];
             text.push(b'a' + index);
-            let control = EngineControlPacket::Message(clonk_engine::MessageControlData {
-                message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+            let control = EngineControlPacket::Message(clonk_protocol::MessageControlData {
+                message_type: clonk_protocol::MESSAGE_TYPE_NORMAL,
                 player: -1,
                 to_player: -1,
                 message: c4(text),
@@ -10939,7 +10944,7 @@ mod tests {
         assert_queued_control_author(
             |by_client| {
                 EngineControlPacket::MessageBoardAnswer(
-                    clonk_engine::MessageBoardAnswerControlData {
+                    clonk_protocol::MessageBoardAnswerControlData {
                         object: 42,
                         answer: c4(b"answer"),
                         player: 3,
@@ -10953,12 +10958,13 @@ mod tests {
 
     #[test]
     fn single_custom_command_authenticates_embedded_author() {
-        let control = EngineControlPacket::CustomCommand(clonk_engine::CustomCommandControlData {
-            command: c4(b"push"),
-            argument: c4(b"argument"),
-            player: 3,
-            by_client: 7,
-        });
+        let control =
+            EngineControlPacket::CustomCommand(clonk_protocol::CustomCommandControlData {
+                command: c4(b"push"),
+                argument: c4(b"argument"),
+                player: 3,
+                by_client: 7,
+            });
         assert_single_control_author(&control, 7, 8);
     }
 
@@ -10966,7 +10972,7 @@ mod tests {
     fn queued_custom_command_cannot_forge_host_author() {
         assert_queued_control_author(
             |by_client| {
-                EngineControlPacket::CustomCommand(clonk_engine::CustomCommandControlData {
+                EngineControlPacket::CustomCommand(clonk_protocol::CustomCommandControlData {
                     command: c4(b"push"),
                     argument: c4(b"argument"),
                     player: 3,
@@ -10980,13 +10986,13 @@ mod tests {
     #[test]
     fn em_move_object_control_authenticates_direct_and_queued_authors() {
         let control = |by_client| {
-            EngineControlPacket::EmMoveObject(clonk_engine::EmMoveObjectControlData {
-                action: clonk_engine::EMMO_SCRIPT,
+            EngineControlPacket::EmMoveObject(clonk_protocol::EmMoveObjectControlData {
+                action: clonk_protocol::EMMO_SCRIPT,
                 tx: -12,
                 ty: 34,
                 target_object: 42,
                 objects: vec![7, 9],
-                strictness: clonk_engine::ScriptStrictness::Strict2,
+                strictness: clonk_protocol::ScriptStrictness::Strict2,
                 script: c4(b"SetXDir(0)"),
                 by_client,
             })
@@ -10999,8 +11005,8 @@ mod tests {
     #[test]
     fn em_draw_tool_control_authenticates_direct_and_queued_authors() {
         let control = |by_client| {
-            EngineControlPacket::EmDrawTool(clonk_engine::EmDrawToolControlData {
-                action: clonk_engine::EMDT_LINE,
+            EngineControlPacket::EmDrawTool(clonk_protocol::EmDrawToolControlData {
+                action: clonk_protocol::EMDT_LINE,
                 mode: 3,
                 x: -12,
                 y: 34,
@@ -11021,7 +11027,7 @@ mod tests {
     #[test]
     fn em_drop_def_control_authenticates_direct_and_queued_authors() {
         let control = |by_client| {
-            EngineControlPacket::EmDropDef(clonk_engine::EmDropDefControlData {
+            EngineControlPacket::EmDropDef(clonk_protocol::EmDropDefControlData {
                 id: *b"HUT2",
                 x: -130,
                 y: 130,
@@ -11038,29 +11044,29 @@ mod tests {
         fn controls(by_client: i32) -> [EngineControlPacket; 5] {
             [
                 EngineControlPacket::ActivateGameGoalMenu(
-                    clonk_engine::ActivateGameGoalMenuControlData {
+                    clonk_protocol::ActivateGameGoalMenuControlData {
                         player: 3,
                         by_client,
                     },
                 ),
-                EngineControlPacket::ToggleHostility(clonk_engine::ToggleHostilityControlData {
+                EngineControlPacket::ToggleHostility(clonk_protocol::ToggleHostilityControlData {
                     opponent: 4,
                     player: 3,
                     by_client,
                 }),
                 EngineControlPacket::ActivateGameGoalRule(
-                    clonk_engine::ActivateGameGoalRuleControlData {
+                    clonk_protocol::ActivateGameGoalRuleControlData {
                         object: 42,
                         player: 3,
                         by_client,
                     },
                 ),
-                EngineControlPacket::SetPlayerTeam(clonk_engine::SetPlayerTeamControlData {
+                EngineControlPacket::SetPlayerTeam(clonk_protocol::SetPlayerTeamControlData {
                     team: 5,
                     player: 3,
                     by_client,
                 }),
-                EngineControlPacket::EliminatePlayer(clonk_engine::EliminatePlayerControlData {
+                EngineControlPacket::EliminatePlayer(clonk_protocol::EliminatePlayerControlData {
                     player: 3,
                     by_client,
                 }),
@@ -11142,7 +11148,7 @@ mod tests {
         let request_template = ClientHandshakeRequestTemplate::new(
             local_core.clone(),
             CPP_COMPATIBILITY_BUILD,
-            clonk_engine::LegacyCString::default(),
+            clonk_protocol::LegacyCString::default(),
         );
 
         let (address, listener) = bind_test_listener().await;
@@ -11203,7 +11209,7 @@ mod tests {
         let request_template = ClientHandshakeRequestTemplate::new(
             alice,
             CPP_COMPATIBILITY_BUILD,
-            clonk_engine::LegacyCString::default(),
+            clonk_protocol::LegacyCString::default(),
         );
         let bob_id = ClientId::try_from(bob.client_id).test_value();
 
@@ -11267,7 +11273,7 @@ mod tests {
         let request_template = ClientHandshakeRequestTemplate::new(
             alice,
             CPP_COMPATIBILITY_BUILD,
-            clonk_engine::LegacyCString::default(),
+            clonk_protocol::LegacyCString::default(),
         );
         let known_peers = BTreeMap::from([(bob.client_id, bob)]);
 
@@ -11331,7 +11337,7 @@ mod tests {
         let request_template = ClientHandshakeRequestTemplate::new(
             alice,
             CPP_COMPATIBILITY_BUILD,
-            clonk_engine::LegacyCString::default(),
+            clonk_protocol::LegacyCString::default(),
         );
         let (address, listener) = bind_test_listener().await;
         let peer = tokio::spawn(async move {
@@ -11785,7 +11791,7 @@ mod tests {
         assert_eq!(host.connected_clients().await, vec![client_id]);
         while host_events.try_recv().is_ok() {}
 
-        let remove = EngineControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
+        let remove = EngineControlPacket::ClientRemove(clonk_protocol::ClientRemoveControlData {
             client_id: i32::try_from(client_id).test_value(),
             reason: c4(b"voted out"),
             by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
@@ -11836,7 +11842,7 @@ mod tests {
             request_route(&mut delayed, i32::try_from(client_id).test_value(), 29).await;
         assert!(admission.ok);
 
-        let remove = EngineControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
+        let remove = EngineControlPacket::ClientRemove(clonk_protocol::ClientRemoveControlData {
             client_id: i32::try_from(client_id).test_value(),
             reason: c4(b"voted out"),
             by_client: i32::try_from(HOST_CLIENT_ID).test_value(),
@@ -13100,7 +13106,7 @@ mod tests {
         let mut transport = crate::ControlTransport::new(stream);
         let name = c4(b"Alice");
         let request = test_connection_request(
-            clonk_engine::ClientCoreControlData {
+            clonk_protocol::ClientCoreControlData {
                 client_id: -1,
                 name: name.clone(),
                 nick: name,
@@ -13354,7 +13360,7 @@ mod tests {
         resource_type: u8,
         id: i32,
         filename: &[u8],
-    ) -> clonk_engine::NetworkResourceCore {
+    ) -> clonk_protocol::NetworkResourceCore {
         network_core!(resource_type,
         id,
         derived_id: -1,
@@ -13960,7 +13966,7 @@ mod tests {
                 .send(AdmissionDecision::Accept {
                     peer_core: assigned,
                     before_reply: Vec::new(),
-                    message: clonk_engine::LegacyCString::default(),
+                    message: clonk_protocol::LegacyCString::default(),
                 })
                 .test_value();
         });
@@ -13981,7 +13987,7 @@ mod tests {
         client
             .send_message(ControlMessage::ConnectionReply(test_connection_reply(
                 true,
-                clonk_engine::LegacyCString::default(),
+                clonk_protocol::LegacyCString::default(),
                 false,
             )))
             .await
@@ -14728,8 +14734,8 @@ mod tests {
             }
         }
 
-        let message = clonk_engine::MessageControlData {
-            message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+        let message = clonk_protocol::MessageControlData {
+            message_type: clonk_protocol::MESSAGE_TYPE_NORMAL,
             player: -1,
             to_player: -1,
             message: c4(b"during delayed join"),
@@ -15368,9 +15374,9 @@ mod tests {
             state.backend.as_ref().test_value().core(core.id),
             Some(&core)
         );
-        let mut info = clonk_engine::PlayerInfoControlData {
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        let mut info = clonk_protocol::PlayerInfoControlData {
+            players: vec![clonk_protocol::ControlPlayerInfoEntry {
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(core.clone()),
                 ..Default::default()
             }],
@@ -15382,8 +15388,8 @@ mod tests {
             .is_empty());
 
         assert_eq!(
-            info.players[0].flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
-            clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+            info.players[0].flags & clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE
         );
         assert_eq!(info.players[0].resource, Some(core));
     }
@@ -15436,9 +15442,9 @@ mod tests {
             &candidates,
             directories.client.clone(),
         ));
-        let mut info = clonk_engine::PlayerInfoControlData {
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        let mut info = clonk_protocol::PlayerInfoControlData {
+            players: vec![clonk_protocol::ControlPlayerInfoEntry {
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(publication.core.clone()),
                 ..Default::default()
             }],
@@ -15505,9 +15511,9 @@ mod tests {
             &candidates,
             directories.client.clone(),
         ));
-        let mut info = clonk_engine::PlayerInfoControlData {
-            players: vec![clonk_engine::ControlPlayerInfoEntry {
-                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        let mut info = clonk_protocol::PlayerInfoControlData {
+            players: vec![clonk_protocol::ControlPlayerInfoEntry {
+                flags: clonk_protocol::PLAYER_INFO_FLAG_HAS_RESOURCE,
                 resource: Some(publication.core.clone()),
                 ..Default::default()
             }],
@@ -15540,7 +15546,7 @@ mod tests {
                 client_id,
                 ClientConnection {
                     outbound,
-                    core: clonk_engine::ClientCoreControlData {
+                    core: clonk_protocol::ClientCoreControlData {
                         client_id: client_id as i32,
                         ..Default::default()
                     },
@@ -15670,7 +15676,7 @@ mod tests {
                 other => panic!("expected direct ClientJoin for Beta, got {other:?}"),
             }
         };
-        let clonk_engine::ControlPacket::ClientJoin(join) =
+        let clonk_protocol::ControlPacket::ClientJoin(join) =
             decode_control_entry_payload(&data).test_value()
         else {
             panic!("direct packet was not ClientJoin");
@@ -15697,8 +15703,8 @@ mod tests {
         let mut host_events = host.take_event_receiver();
         let source = connect_test_player(addr, "Source").await;
         let source_id = source.client_id();
-        let message = clonk_engine::MessageControlData {
-            message_type: clonk_engine::MESSAGE_TYPE_NORMAL,
+        let message = clonk_protocol::MessageControlData {
+            message_type: clonk_protocol::MESSAGE_TYPE_NORMAL,
             player: -1,
             to_player: -1,
             message: c4(b"before join"),
@@ -17477,7 +17483,7 @@ mod tests {
         let name = c4(b"HalfJoin");
         failed
             .send_message(ControlMessage::ConnectionRequest(test_connection_request(
-                clonk_engine::ClientCoreControlData {
+                clonk_protocol::ClientCoreControlData {
                     client_id: -1,
                     name: name.clone(),
                     nick: name,
@@ -17625,7 +17631,7 @@ mod tests {
         let name = c4(b"HalfJoin");
         failed
             .send_message(ControlMessage::ConnectionRequest(test_connection_request(
-                clonk_engine::ClientCoreControlData {
+                clonk_protocol::ClientCoreControlData {
                     client_id: -1,
                     name: name.clone(),
                     nick: name,
@@ -18984,8 +18990,8 @@ mod tests {
         let mut host_transport = crate::ControlTransport::new(host_stream);
         let name = c4(b"Beta");
         let direct = encode_control_entry_payload(&EngineControlPacket::ClientJoin(
-            clonk_engine::ClientJoinControlData {
-                core: clonk_engine::ClientCoreControlData {
+            clonk_protocol::ClientJoinControlData {
+                core: clonk_protocol::ClientCoreControlData {
                     client_id: 2,
                     name: name.clone(),
                     nick: name,
@@ -19047,7 +19053,7 @@ mod tests {
             );
         let mut host_transport = crate::ControlTransport::new(host_stream);
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
-            clonk_engine::ClientRemoveControlData {
+            clonk_protocol::ClientRemoveControlData {
                 client_id: 2,
                 reason: c4(b"left"),
                 by_client: 0,
@@ -19423,8 +19429,8 @@ mod tests {
 
         for (client_id, name) in [(0, b"Host".as_slice()), (1, b"Local".as_slice())] {
             let name = c4(name);
-            let join = EngineControlPacket::ClientJoin(clonk_engine::ClientJoinControlData {
-                core: clonk_engine::ClientCoreControlData {
+            let join = EngineControlPacket::ClientJoin(clonk_protocol::ClientJoinControlData {
+                core: clonk_protocol::ClientCoreControlData {
                     client_id,
                     activated: true,
                     observer: false,
@@ -19836,7 +19842,7 @@ mod tests {
         let name = c4(b"Alice");
         transport
             .send_message(ControlMessage::ConnectionRequest(test_connection_request(
-                clonk_engine::ClientCoreControlData {
+                clonk_protocol::ClientCoreControlData {
                     client_id,
                     activated: true,
                     observer: false,

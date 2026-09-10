@@ -1,4 +1,4 @@
-use clonk_engine::ClientCoreControlData;
+use clonk_protocol::ClientCoreControlData;
 
 use crate::legacy::{
     append_c_string, append_raw_i32, append_uint32, LegacyControlError, LegacyEncodeError, Reader,
@@ -114,7 +114,7 @@ fn canonical_clients(clients: Vec<ClientCoreControlData>) -> Vec<ClientCoreContr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clonk_engine::LegacyCString;
+    use clonk_protocol::LegacyCString;
 
     fn string(value: &[u8]) -> LegacyCString {
         LegacyCString::from_bytes(value.to_vec()).unwrap()

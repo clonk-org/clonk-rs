@@ -44,6 +44,7 @@ class LowRiskDependencyContractTests(unittest.TestCase):
             "crates/clonk-graphics/Cargo.toml",
             "crates/clonk-network/Cargo.toml",
             "crates/clonk-platform/Cargo.toml",
+            "crates/clonk-protocol/Cargo.toml",
             "crates/clonk-resources/Cargo.toml",
             "crates/clonk-script/Cargo.toml",
             "crates/clonk-update-net/Cargo.toml",

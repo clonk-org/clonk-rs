@@ -3027,7 +3027,7 @@ fn random_team_count_mutates_host_directly_and_tracks_distribution() {
     let mut snapshot = clonk_network::HostConfig::default()
         .initial_join_snapshot
         .test_value();
-    snapshot.parameters.teams = clonk_network::join_team_list_snapshot(metadata.clone());
+    snapshot.parameters.teams = clonk_app_netplay::join_team_list_snapshot(metadata.clone());
     app.netplay.host_join_snapshot = Some(snapshot);
     app.players.team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
     app.players.infos.replace_snapshot(

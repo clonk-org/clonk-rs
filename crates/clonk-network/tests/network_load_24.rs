@@ -1,20 +1,20 @@
+use clonk_engine::ControlPlayerInfoRegistry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clonk_engine::{
-    ClientUpdateControlData, ControlPacket as EngineControlPacket, ControlPlayerInfoEntry,
-    ControlPlayerInfoRegistry, LegacyCString, PlayerControlData, CLIENT_PLAYER_INFO_FLAG_INITIAL,
-    CLIENT_UPDATE_ACTIVATE,
-};
 use clonk_network::{
     connect_client, connect_dual_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, ClientConfig, ClientEvent, ClientHandle,
     ClientPlayerInfosSnapshot, ControlDelivery, ControlPacket, HostConfig, HostEvent,
     LegacyControlFrame, NetworkProtocol, NetworkStatus, ParticipantKind, PlayerInfoListSnapshot,
     Tick, NETWORK_STATE_GO,
+};
+use clonk_protocol::{
+    ClientUpdateControlData, ControlPacket as EngineControlPacket, ControlPlayerInfoEntry,
+    LegacyCString, PlayerControlData, CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_UPDATE_ACTIVATE,
 };
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -1554,7 +1554,7 @@ fn player_info_registry_from_snapshot(
     registry.replace_snapshot(
         snapshot.last_player_id,
         snapshot.clients.iter().map(|client| {
-            clonk_engine::PlayerInfoControlData::new(
+            clonk_protocol::PlayerInfoControlData::new(
                 client.client_id,
                 client.flags,
                 client.players.clone(),
@@ -1567,7 +1567,7 @@ fn player_info_registry_from_snapshot(
 
 fn apply_observed_player_info(
     registry: &mut ControlPlayerInfoRegistry,
-    info: clonk_engine::PlayerInfoControlData,
+    info: clonk_protocol::PlayerInfoControlData,
 ) {
     if let Some(last_player_id) = info.players.iter().map(|player| player.id).max() {
         registry.reserve_player_ids_through(last_player_id);
@@ -2854,7 +2854,7 @@ fn every_synthetic_client_roster_requires_all_twenty_four_player_infos() {
     // before it is sent (oracle src/C4Network2.cpp:1850-1860).
     let mut roster = ControlPlayerInfoRegistry::default();
     for client_id in 1..PLAYER_COUNT as i32 {
-        roster.apply(clonk_engine::PlayerInfoControlData {
+        roster.apply(clonk_protocol::PlayerInfoControlData {
             client_id,
             players: vec![ControlPlayerInfoEntry {
                 id: client_id,
@@ -2868,7 +2868,7 @@ fn every_synthetic_client_roster_requires_all_twenty_four_player_infos() {
     }
     assert!(!has_exact_synthetic_roster(&roster));
 
-    roster.apply(clonk_engine::PlayerInfoControlData {
+    roster.apply(clonk_protocol::PlayerInfoControlData {
         client_id: PLAYER_COUNT as i32,
         players: vec![ControlPlayerInfoEntry {
             id: PLAYER_COUNT as i32,
@@ -2887,7 +2887,7 @@ fn every_synthetic_client_roster_requires_all_twenty_four_player_infos() {
     roster.replace_snapshot(
         PLAYER_COUNT as i32,
         rows.into_iter().map(|(client_id, flags, players)| {
-            clonk_engine::PlayerInfoControlData::new(
+            clonk_protocol::PlayerInfoControlData::new(
                 client_id,
                 flags,
                 players,

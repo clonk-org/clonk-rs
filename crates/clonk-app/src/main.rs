@@ -129,7 +129,7 @@ mod console_viewport_windows;
 mod console_window_position;
 mod control_options;
 mod cpu_target;
-mod deferred_config;
+use clonk_app_core::deferred_config;
 mod desktop_notification;
 mod developer_component_editor;
 mod developer_console_save;
@@ -7371,7 +7371,7 @@ impl GameApp {
                 }
                 if let Some((metadata, updates)) = host_team_update {
                     let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
-                    let team_snapshot = clonk_network::join_team_list_snapshot(metadata);
+                    let team_snapshot = clonk_app_netplay::join_team_list_snapshot(metadata);
                     self.engine.set_teams(runtime_teams.clone());
                     if let Some(prepared) = self
                         .scenario_lifecycle
@@ -7469,7 +7469,7 @@ impl GameApp {
                 }
                 if let Some((metadata, updates)) = host_team_update {
                     let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
-                    let team_snapshot = clonk_network::join_team_list_snapshot(metadata);
+                    let team_snapshot = clonk_app_netplay::join_team_list_snapshot(metadata);
                     self.engine.set_teams(runtime_teams.clone());
                     if let Some(prepared) = self
                         .scenario_lifecycle

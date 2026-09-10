@@ -3,13 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use clonk_engine::NetworkResourceCore;
 use clonk_network::{
     HostResourceType, ResourceCatalogAction, ResourceDataPacket, ResourceDiscoverPacket,
     ResourceFileOwnership, ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
     ResourceTransferBackend, ResourceTransferEvent, RESOURCE_MAX_LOADS,
     RESOURCE_MAX_LOAD_PER_PEER_IN_GAME, RESOURCE_MAX_LOAD_PER_PEER_PER_FILE,
 };
+use clonk_protocol::NetworkResourceCore;
 
 fn core(
     resource_id: i32,

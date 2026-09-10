@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use clonk_engine::{
+use clonk_protocol::{
     LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
     PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_REMOVED,
 };
@@ -554,7 +554,7 @@ impl ClientBootstrapPlanner {
     }
 }
 
-pub(crate) fn clear_player_resource(player: &mut clonk_engine::ControlPlayerInfoEntry) {
+pub(crate) fn clear_player_resource(player: &mut clonk_protocol::ControlPlayerInfoEntry) {
     player.flags &= !PLAYER_INFO_FLAG_HAS_RESOURCE;
     // C++ retains a private stale ResCore, but excludes it from every later
     // serialization. Rust represents that wire-visible state with None
@@ -651,7 +651,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use clonk_engine::{ControlPlayerInfoEntry, LegacyCString, PLAYER_INFO_FLAG_HAS_RESOURCE};
+    use clonk_protocol::{ControlPlayerInfoEntry, LegacyCString, PLAYER_INFO_FLAG_HAS_RESOURCE};
 
     use super::*;
     use crate::{

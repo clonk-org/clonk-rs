@@ -1654,22 +1654,8 @@ mod tests {
     use super::*;
     use crate::classic_gui::ClassicGuiSkin;
     use crate::test_support::{endeavour_font_set, load_graphics_png, standard_gamma};
-    use clonk_graphics::Color;
 
-    fn unit_width_font(characters: &str) -> ClonkFont {
-        let mut font = ClonkFont::new(3);
-        font.h_space = 0;
-        for character in characters.chars() {
-            font.add_glyph(
-                character,
-                clonk_graphics::clonk_font::GlyphCell {
-                    width: 1,
-                    pixels: vec![Color::opaque(255, 255, 255); 4],
-                },
-            );
-        }
-        font
-    }
+    use clonk_test_support::unit_width_font;
 
     fn entries(count: usize) -> Vec<DefinitionSelEntry> {
         (0..count)
