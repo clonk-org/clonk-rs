@@ -49,6 +49,7 @@ sets of tests. Verify the copies with:
 cmp xtask/src/content_distribution.rs /path/to/clonk-rs-content/tools/pack-content/src/distribution.rs
 ```
 
-This work is local only. The engine content pin remains unchanged. The content
-candidate and engine changes are in separate local worktrees for review; no
-publication or contact with rights holders is required to prepare them.
+The engine content pin remains unchanged. The content candidate and engine
+changes are submitted in separate pull requests for review. The inventory was
+prepared locally without contacting rights holders or requesting additional
+permission; existing release archives remain unchanged.
