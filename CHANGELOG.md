@@ -4,6 +4,23 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-09-10
+
+### Continuous integration
+
+- Poll the cache handoff verification while the index propagates (#1611)
+
+### Features
+
+- Open host admission before exact resource packing (#1610)
+- Retain startup dirty-region redraw ownership (#1605)
+- Announce host resources before the exact deflate (#1604)
+
+### Testing
+
+- Pin the tooltip clock in the startup cursor damage assertions (#1609)
+- Compare live landscape state in shadow diff (#1601)
+
 ## [0.25.0] - 2026-09-08
 
 ### Bug fixes
