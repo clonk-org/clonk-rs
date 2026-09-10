@@ -534,10 +534,72 @@ index 9e83e51f0..c41cb3ba0 100644
  
  	void OnUserClose(C4GUI::Control *btn) // user presses close btn: Usually close dlg with abort
 diff --git a/src/C4GuiEdit.cpp b/src/C4GuiEdit.cpp
-index 198dc6549..d923fa4b1 100644
+index 198dc6549..3a4e33261 100644
 --- a/src/C4GuiEdit.cpp
 +++ b/src/C4GuiEdit.cpp
-@@ -633,6 +633,20 @@ void Edit::DrawElement(C4FacetEx &cgo)
+@@ -25,6 +25,7 @@
+ #include <C4FullScreen.h>
+ #include <C4LoaderScreen.h>
+ #include <C4Application.h>
++#include <C4Startup.h>
+ 
+ #include <cstring>
+ 
+@@ -139,7 +140,7 @@ void Edit::Deselect()
+ 	// reset selection
+ 	iSelectionStart = iSelectionEnd = 0;
+ 	// cursor might have moved: ensure it is shown
+-	dwLastInputTime = timeGetTime();
++	dwLastInputTime = C4PresentationCapture::GuiEditTime(timeGetTime());
+ }
+ 
+ void Edit::DeleteSelection()
+@@ -151,7 +152,7 @@ void Edit::DeleteSelection()
+ 	// adjust cursor pos
+ 	if (iCursorPos > iSelBegin) iCursorPos = (std::max)(iSelBegin, iCursorPos - iSelEnd + iSelBegin);
+ 	// cursor might have moved: ensure it is shown
+-	dwLastInputTime = timeGetTime();
++	dwLastInputTime = C4PresentationCapture::GuiEditTime(timeGetTime());
+ 	// nothing selected
+ 	iSelectionStart = iSelectionEnd = iSelBegin;
+ 	OnTextChange();
+@@ -182,7 +183,7 @@ bool Edit::InsertText(const C4NullableStringView text, bool fUser)
+ 		// advance cursor
+ 		iCursorPos += iTextLen;
+ 		// cursor moved: ensure it is shown
+-		dwLastInputTime = timeGetTime();
++		dwLastInputTime = C4PresentationCapture::GuiEditTime(timeGetTime());
+ 		ScrollCursorInView();
+ 	}
+ 	OnTextChange();
+@@ -439,7 +440,7 @@ bool Edit::KeyCursorOp(C4KeyCodeEx key, CursorOperation op)
+ 			iCursorPos += iMoveLength;
+ 	}
+ 	// show cursor
+-	dwLastInputTime = timeGetTime();
++	dwLastInputTime = C4PresentationCapture::GuiEditTime(timeGetTime());
+ 	ScrollCursorInView();
+ 	// operation recognized
+ 	return true;
+@@ -542,7 +543,7 @@ void Edit::OnGetFocus(bool fByMouse)
+ 	// select all
+ 	iSelectionStart = 0; iSelectionEnd = iCursorPos = SLen(Text);
+ 	// begin with a flashing cursor
+-	dwLastInputTime = timeGetTime();
++	dwLastInputTime = C4PresentationCapture::GuiEditTime(timeGetTime());
+ }
+ 
+ void Edit::OnLooseFocus()
+@@ -611,7 +612,7 @@ void Edit::DrawElement(C4FacetEx &cgo)
+ 	// draw edit text
+ 	lpDDraw->TextOut(pDrawText, *pFont, 1.0f, cgo.Surface, rcClientRect.x + cgo.TargetX - iXScroll, iY0 + cgo.TargetY - 1, dwFontClr, ALeft, false);
+ 	// draw cursor
+-	if (HasDrawFocus() && !(((dwLastInputTime - timeGetTime()) / 500) % 2))
++	if (HasDrawFocus() && !(((dwLastInputTime - C4PresentationCapture::GuiEditTime(timeGetTime())) / 500) % 2))
+ 	{
+ 		char cAtCursor = pDrawText[iCursorPos]; pDrawText[iCursorPos] = 0; int32_t w, h, wc;
+ 		pFont->GetTextExtent(pDrawText, w, h, false);
+@@ -633,6 +634,20 @@ void Edit::DrawElement(C4FacetEx &cgo)
  	}
  }
  
@@ -991,10 +1053,10 @@ index f6d50fece..91243d00f 100644
  
  void Randomize3();
 diff --git a/src/C4Startup.cpp b/src/C4Startup.cpp
-index 9542728ef..353b03214 100644
+index 9542728ef..cdb481c90 100644
 --- a/src/C4Startup.cpp
 +++ b/src/C4Startup.cpp
-@@ -26,9 +26,1301 @@
+@@ -26,9 +26,1311 @@
  #include <C4StartupOptionsDlg.h>
  #include <C4StartupAboutDlg.h>
  #include <C4StartupPlrSelDlg.h>
@@ -2102,6 +2164,16 @@ index 9542728ef..353b03214 100644
 +		return RuntimeCapture.mode != RuntimeMode::None && RuntimeCapture.spec && RuntimeCapture.spec->stateFrame > 0;
 +	}
 +
++	uint32_t GuiEditTime(const uint32_t liveTime)
++	{
++		// The lobby checkpoint is defined by render ordinal, not wall time.
++		// Freeze both focus/input timestamps and draw timestamps so C4GUI::Edit's
++		// unmodified blink expression observes the initial focused phase even
++		// when a slow capture runner crosses a 500 ms blink boundary.
++		return RuntimeCapture.mode != RuntimeMode::None && RuntimeCapture.spec &&
++			RuntimeCapture.spec->type == RuntimeCase::NetworkLobby ? 0 : liveTime;
++	}
++
 +	void ConfigureRuntime()
 +	{
 +		const char *discover = std::getenv("CLONK_PRESENTATION_DISCOVER");
@@ -2296,7 +2368,7 @@ index 9542728ef..353b03214 100644
  
  bool C4StartupGraphics::LoadFile(C4FacetExID &rToFct, const char *szFilename)
  {
-@@ -149,6 +1437,241 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
+@@ -149,6 +1451,241 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
  	pInstance = this;
  }
  
@@ -2538,7 +2610,7 @@ index 9542728ef..353b03214 100644
  C4Startup::~C4Startup()
  {
  	pInstance = nullptr;
-@@ -269,6 +1792,8 @@ bool C4Startup::DoStartup()
+@@ -269,6 +1806,8 @@ bool C4Startup::DoStartup()
  	delete pLastDlg; pLastDlg = nullptr;
  	delete pCurrDlg; pCurrDlg = nullptr;
  
@@ -2547,7 +2619,7 @@ index 9542728ef..353b03214 100644
  	// start with the last dlg that was shown - at first startup main dialog
  	if (!SwitchDialog(eLastDlgID)) return false;
  
-@@ -370,9 +1895,19 @@ void C4Startup::Unload()
+@@ -370,9 +1909,19 @@ void C4Startup::Unload()
  
  bool C4Startup::Execute()
  {
@@ -2568,7 +2640,7 @@ index 9542728ef..353b03214 100644
  	bool fResult = pStartup->DoStartup();
  	return fResult;
 diff --git a/src/C4Startup.h b/src/C4Startup.h
-index 65d33045c..ef6ec3026 100644
+index 65d33045c..2d4adb2f6 100644
 --- a/src/C4Startup.h
 +++ b/src/C4Startup.h
 @@ -22,6 +22,9 @@
@@ -2581,7 +2653,7 @@ index 65d33045c..ef6ec3026 100644
  #define C4CFN_StartupBackgroundMain "LoaderGoldmine1"
  
  // special colors for startup designs
-@@ -90,6 +93,49 @@ public:
+@@ -90,6 +93,50 @@ public:
  	C4StartupDlg(const char *szTitle) : C4GUI::FullscreenDialog(szTitle, nullptr) {}
  };
  
@@ -2619,6 +2691,7 @@ index 65d33045c..ef6ec3026 100644
 +	// Audited capture controller for the seven direct-scenario presentation
 +	// checkpoints. Discovery uses the same typed trigger and never writes files.
 +	bool OwnsRuntimeClock();
++	uint32_t GuiEditTime(uint32_t liveTime);
 +	void ConfigureRuntime();
 +	void OnInitProgress(int32_t progress);
 +	bool BeforeGameExecute();
@@ -2631,7 +2704,7 @@ index 65d33045c..ef6ec3026 100644
  class C4Startup
  {
  public:
-@@ -103,8 +149,20 @@ public:
+@@ -103,8 +150,20 @@ public:
  
  private:
  	bool fInStartup, fAborted, fLastDlgWasBack;
@@ -2652,7 +2725,7 @@ index 65d33045c..ef6ec3026 100644
  
  	C4StartupDlg *pLastDlg, *pCurrDlg; // startup dlg that is currently shown, and dialog that was last shown
  
-@@ -115,6 +173,8 @@ protected:
+@@ -115,6 +174,8 @@ protected:
  
  	bool DoStartup(); // run main dlg
  	class C4StartupDlg *SwitchDialog(DialogID eToDlg, bool fFade = true); // do transition to another dialog
@@ -2661,7 +2734,7 @@ index 65d33045c..ef6ec3026 100644
  
  	friend class C4StartupMainDlg;
  	friend class C4StartupNetDlg;
-@@ -128,6 +188,7 @@ public:
+@@ -128,6 +189,7 @@ public:
  	static void Unload(); // make sure startup data is destroyed
  	static bool Execute(); // run startup - return false if game is to be closed
  	static bool SetStartScreen(const char *szScreen); // set screen that is shown first by case insensitive identifier
@@ -2766,7 +2839,7 @@ index bba8ec716..6b8acaffa 100644
  	virtual bool HasBackground() override { return true; }
  };
 diff --git a/src/C4StartupMainDlg.cpp b/src/C4StartupMainDlg.cpp
-index 45c9ebe0f..27b949d23 100644
+index 45c9ebe0f..3f944a6b0 100644
 --- a/src/C4StartupMainDlg.cpp
 +++ b/src/C4StartupMainDlg.cpp
 @@ -33,6 +33,7 @@

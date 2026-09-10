@@ -4949,3 +4949,208 @@ fn load_install_definitions_discovers_mixed_case_objects_group() {
 
     reset_cached_app_paths();
 }
+
+fn client_scenario_art_join_data() -> clonk_network::JoinDataEnvelope {
+    let mut snapshot = clonk_network::HostConfig::default()
+        .initial_join_snapshot
+        .test_value();
+    snapshot.parameters.scenario.id = 70;
+    snapshot.parameters.scenario.loadable = true;
+    snapshot.dynamic.id = 71;
+    snapshot.dynamic.loadable = true;
+    snapshot.parameters.game_resources.clear();
+    netresources_fixture!(join_envelope: 7,
+        clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_LOBBY, 2, -1),
+        snapshot.dynamic, snapshot.parameters)
+}
+
+fn client_scenario_art_app(paths: &AppPaths) -> (GameApp, network::NetworkEventSender) {
+    let mut app = new_menu_app_with_paths(800, 600, paths);
+    let (manager, events) = NetworkManager::test_stub_for_client_id(7);
+    app.netplay.manager = Some(manager);
+    app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
+    app.startup.view = StartupView::NetworkLobby;
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    (app, events)
+}
+
+#[test]
+fn downloaded_client_scenario_art_replaces_the_lobby_and_loading_backdrop() {
+    // The requested presentation extension deliberately replaces the loader
+    // C++ retains from before joining (C4Game.cpp:370-381,400-417).
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let directory = tempdir();
+    image::save_buffer(
+        directory.path().join("LoaderClient.png"),
+        &[17, 34, 51, 255].repeat(16 * 16),
+        16,
+        16,
+        image::ColorType::Rgba8,
+    )
+    .test_value();
+    let scenario_path = directory.path().join("Downloaded.c4s");
+    let mut scenario = MutableGroup::new("Downloaded.c4s");
+    scenario
+        .add_file(
+            "Scenario.txt",
+            b"[Head]\nTitle=Client art\nLoader=LoaderClient.png\n".to_vec(),
+        )
+        .test_value();
+    scenario
+        .add_file(
+            "LoaderClient.png",
+            fs::read(directory.path().join("LoaderClient.png")).test_value(),
+        )
+        .test_value();
+    fs::write(&scenario_path, scenario.pack().test_value()).test_value();
+
+    for resource_first in [false, true] {
+        let (mut app, events) = client_scenario_art_app(&paths);
+        let join_data = client_scenario_art_join_data();
+        let core = join_data.parameters.scenario.clone();
+        let complete = || NetworkEvent::ResourceComplete {
+            resource_id: core.id,
+            core: core.clone(),
+            path: scenario_path.clone(),
+            local: resource_first,
+        };
+        if resource_first {
+            events.send(complete()).test_value();
+            app.test_network_events();
+        } else {
+            events
+                .send(NetworkEvent::JoinData(join_data.clone()))
+                .test_value();
+            app.test_network_events();
+        }
+        let before = app.loader.screen.test_ref().state().clone();
+        let fonts = app.loader.screen.test_ref().resources().fonts().clone();
+        if resource_first {
+            events.send(NetworkEvent::JoinData(join_data)).test_value();
+        } else {
+            events.send(complete()).test_value();
+        }
+        app.test_network_events();
+        main_assert_eq!(app.loader.screen.test_ref().selection().selected_filename() => "LoaderClient.png");
+        main_assert_eq!(app.loader.screen.test_ref().state() => &before);
+        main_assert!(Arc::ptr_eq(
+            app.loader.screen.test_ref().resources().fonts(),
+            &fonts
+        ));
+        main_assert_eq!(app.startup.view => StartupView::NetworkLobby);
+        let mut surface =
+            clonk_graphics::Surface::new(16, 16, clonk_graphics::PixelFormat::Rgba8888);
+        app.loader.screen.test_ref().render_background(
+            &mut surface,
+            app.loader.render_config.test_value(),
+            None,
+        );
+        main_assert_eq!(surface.get_pixel(8, 8) => Some(clonk_graphics::Color::opaque(17, 34, 51)));
+
+        let mut frame = vec![0; 800 * 600 * 4];
+        app.test_render(&mut frame);
+        let mut expected_frame = Surface::new(800, 600, PixelFormat::Rgba8888);
+        app.loader.screen.test_ref().render_background(
+            &mut expected_frame,
+            app.loader.render_config.test_value(),
+            Some(&app.startup_fragment_gamma()),
+        );
+        let corner = expected_frame.get_pixel(0, 0).test_value();
+        main_assert_eq!(&frame[..4] => &[corner.r, corner.g, corner.b, corner.a]);
+
+        // Once installed, the decoded image survives repeated completion and
+        // the Go barrier even if its source is no longer readable.
+        let retained_path = directory.path().join("Retained.c4s");
+        fs::rename(&scenario_path, &retained_path).test_value();
+        events.send(complete()).test_value();
+        events
+            .send(NetworkEvent::StatusRequested(
+                clonk_network::NetworkStatus::new(clonk_network::NETWORK_STATE_GO, 2, 23),
+            ))
+            .test_value();
+        app.test_network_events();
+        main_assert_eq!(app.mode => AppMode::Loading);
+        main_assert_eq!(app.loader.screen.test_ref().selection().selected_filename() => "LoaderClient.png");
+        app.loader.screen.test_ref().render_background(
+            &mut surface,
+            app.loader.render_config.test_value(),
+            None,
+        );
+        main_assert_eq!(surface.get_pixel(8, 8) => Some(clonk_graphics::Color::opaque(17, 34, 51)));
+        fs::rename(&retained_path, &scenario_path).test_value();
+
+        app.reinitialize_startup_loader_screen();
+        main_assert_eq!(app.loader.screen.test_ref().selection().context() => clonk_frontend::loader_screen::LoaderContext::Startup);
+    }
+}
+
+#[test]
+fn downloaded_skies_of_fire_uses_installed_fantasy_folder_art() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let (mut app, events) = client_scenario_art_app(&paths);
+    let directory = tempdir();
+    let scenario_path = directory.path().join("DownloadedSkies.c4s");
+    let mut scenario = MutableGroup::new("DownloadedSkies.c4s");
+    scenario
+        .add_file(
+            "Scenario.txt",
+            include_bytes!("../../../../content/Fantasy.c4f/SkiesOfFire.c4s/Scenario.txt").to_vec(),
+        )
+        .test_value();
+    fs::write(&scenario_path, scenario.pack().test_value()).test_value();
+    let join_data = client_scenario_art_join_data();
+    let core = join_data.parameters.scenario.clone();
+    events.send(NetworkEvent::JoinData(join_data)).test_value();
+    events
+        .send(NetworkEvent::ResourceComplete {
+            resource_id: core.id,
+            core,
+            path: scenario_path,
+            local: false,
+        })
+        .test_value();
+    app.test_network_events();
+    main_assert!(app
+        .loader
+        .screen
+        .test_ref()
+        .selection()
+        .selected_filename()
+        .starts_with("LoaderFantasy"));
+    main_assert_eq!(app.loader.screen.test_ref().selection().context() => clonk_frontend::loader_screen::LoaderContext::Scenario);
+}
+
+#[test]
+fn unreadable_client_scenario_art_keeps_the_existing_loader() {
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let (mut app, events) = client_scenario_art_app(&paths);
+    let directory = tempdir();
+    fs::write(
+        directory.path().join("Scenario.txt"),
+        "[Head]\nLoader=LoaderBroken.png\n",
+    )
+    .test_value();
+    fs::write(directory.path().join("LoaderBroken.png"), b"broken").test_value();
+    let join_data = client_scenario_art_join_data();
+    let core = join_data.parameters.scenario.clone();
+    let selection = app.loader.screen.test_ref().selection().clone();
+    events.send(NetworkEvent::JoinData(join_data)).test_value();
+    events
+        .send(NetworkEvent::ResourceComplete {
+            resource_id: core.id,
+            core,
+            path: directory.path().to_path_buf(),
+            local: false,
+        })
+        .test_value();
+    app.test_network_events();
+    main_assert_eq!(app.loader.screen.test_ref().selection() => &selection);
+    main_assert!(app.loader.error.is_none());
+    main_assert_eq!(app.mode => AppMode::Menu);
+}

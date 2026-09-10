@@ -230,6 +230,12 @@ fresh processes per engine and screen. Each receipt binds the executable,
 source/content trees, native config, player, network fixture, locale, scenario,
 frame/trigger and synchronized and presentation RNG ledgers.
 
+The network-lobby checkpoint freezes the native edit-control clock for both
+focus/input timestamps and drawing. Its render ordinal therefore captures the
+initial focused caret phase independently of runner speed; the C++ blink
+expression and pixel comparison remain unchanged. Other capture cases and
+ordinary execution continue to use the live clock.
+
 On macOS with `LEGACYCLONK_ORACLE_ROOT` pointing at the pinned checkout, create
 and accept a candidate from a clean committed revision with:
 

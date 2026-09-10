@@ -2851,6 +2851,43 @@ impl GameApp {
         }
     }
 
+    /// Refresh only the artwork once the admitted scenario is available. C++
+    /// initializes the client loader before joining (C4Game.cpp:370-381) and
+    /// leaves it unchanged in DoLobby. This presentation extension gives clients
+    /// the scenario/Origin loader search without moving InitFonts or GameRes
+    /// refresh earlier, and retains the image through the Go transition.
+    fn refresh_client_scenario_loader(&mut self) {
+        if !matches!(self.netplay.mode, Some(NetworkMode::Client(_))) {
+            return;
+        }
+        let Some(join_data) = self.netplay.pending_join_data.as_ref() else {
+            return;
+        };
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        let Some(loader) = self.loader.screen.as_mut() else {
+            return;
+        };
+        let core = &join_data.parameters.scenario;
+        let Some(path) = self.netplay.admission_resources.complete_path(core.id) else {
+            return;
+        };
+        let resource = (core.clone(), path.to_path_buf());
+        if self.loader.client_scenario_resource.as_ref() == Some(&resource) {
+            return;
+        }
+        // A failed optional artwork refresh keeps the valid startup loader.
+        // Cache the attempt too: unrelated resource arrivals must not repeatedly
+        // decode a broken image or consume presentation randomness.
+        self.loader.client_scenario_resource = Some(resource);
+        if let Err(error) = load_client_scenario_artwork(path, paths)
+            .and_then(|(selection, background)| loader.replace_loader(selection, background))
+        {
+            tracing::warn!(%error, "client scenario artwork unavailable");
+        }
+    }
+
     pub(crate) fn prepare_client_network_scenario_if_ready(&mut self) -> Result<(), EngineError> {
         if let Err(error) = self.try_prepare_client_network_scenario() {
             tracing::error!(%error, "failed to prepare client network scenario");
@@ -4458,6 +4495,7 @@ impl GameApp {
                             }
                             self.mode = AppMode::Loading;
                         }
+                        self.refresh_client_scenario_loader();
                         self.sync_network_lobby_game_option_state();
                         self.sync_classic_lobby_roster();
                         self.sync_classic_lobby_resource_ready();
@@ -5186,6 +5224,7 @@ impl GameApp {
                         // network overloading C4GraphicsResource::Init stays
                         // re-callable for (C4GraphicsResource.cpp:285-291).
                         self.refresh_network_overloaded_gui_resources(&core)?;
+                        self.refresh_client_scenario_loader();
                         self.prepare_client_network_scenario_if_ready()?;
                         if self.netplay.manager.is_none() {
                             break;

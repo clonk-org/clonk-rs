@@ -1696,6 +1696,7 @@ impl GameApp {
                     self.startup.about_dialog.as_ref(),
                     self.startup.view,
                     network_lobby,
+                    self.loader.screen.as_ref().zip(self.loader.render_config),
                     self.startup.view_flags,
                     &mut self.menu_backdrop_cache,
                     defer_native_main_text && !fade_was_active,

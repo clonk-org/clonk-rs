@@ -1,1 +1,2 @@
 parity/bridge/oracle-weather.patch -whitespace
+parity/oracle/presentation_capture.patch -whitespace

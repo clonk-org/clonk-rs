@@ -5569,6 +5569,29 @@ pub(crate) fn build_startup_loader(
     })
 }
 
+/// Select the admitted client's artwork without changing its active GUI resources.
+pub(crate) fn load_client_scenario_artwork(
+    path: &Path,
+    paths: &AppPaths,
+) -> Result<(LoaderSelection, ImageData)> {
+    let group = open_group_path_for_folder_map(path)?;
+    let head = load_classic_scenario_loader_head(&group, paths)?;
+    let scenario = FrontendScenario {
+        path: Some(path.to_path_buf()),
+        ..FrontendScenario::fallback()
+    };
+    let (registrations, _) =
+        client_network_gui_registrations(&scenario, &group, &head, &[], paths)?;
+    let tier = highest_loader_tier(&registrations)?;
+    let graphics = main_graphics_group(paths)?;
+    let specification = head.loader().configured_specification();
+    let selected = select_loader_with_safe_random(&tier, &graphics, specification)?;
+    Ok((
+        LoaderSelection::scenario(specification, selected.presentation_filename())?,
+        decode_selected_loader(&selected)?,
+    ))
+}
+
 pub(crate) fn build_scenario_loader(
     scenario: &FrontendScenario,
     definition_load: &ScenarioDefinitionLoad,
