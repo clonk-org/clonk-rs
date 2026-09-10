@@ -4966,7 +4966,8 @@ fn client_scenario_art_join_data() -> clonk_network::JoinDataEnvelope {
 
 fn client_scenario_art_app(paths: &AppPaths) -> (GameApp, network::NetworkEventSender) {
     let mut app = new_menu_app_with_paths(800, 600, paths);
-    let events = install_client_network_stub(&mut app, 7);
+    let (manager, events) = NetworkManager::test_stub_for_client_id(7);
+    app.netplay.manager = Some(manager);
     app.netplay.mode = Some(NetworkMode::Client(client_network_settings()));
     app.startup.view = StartupView::NetworkLobby;
     app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
