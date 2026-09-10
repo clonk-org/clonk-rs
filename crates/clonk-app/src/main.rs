@@ -3381,6 +3381,7 @@ impl GameApp {
                 join_edit_last_click: None,
             },
             loader: LoaderScreenState {
+                client_scenario_resource: None,
                 screen: loader_screen,
                 error: loader_error,
                 render_config: Some(LoaderRenderConfig::scale_one(

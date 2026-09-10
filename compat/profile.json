@@ -643,6 +643,20 @@
       "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
     },
     {
+      "id": "pres-client-scenario-art",
+      "area": "presentation",
+      "summary": "Network clients refresh the lobby and loading backdrop from the admitted scenario and installed Origin folders. C++ keeps the loader selected before joining. Only the image changes; progress, logs, fonts, GUI refresh timing and synchronized simulation are retained.",
+      "cited_in": [
+        "crates/clonk-app/src/game_app/network.rs:2854",
+        "crates/clonk-app/src/main_tests/net_resources.rs"
+      ],
+      "cpp_reference": "C4Game.cpp:370-381,400-417",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "clonk-org/clonk-rs#1602"
+    },
+    {
       "id": "pres-detail-governor",
       "area": "presentation",
       "summary": "A presentation-detail governor drops fire-particle drawing and gamma steps automatically from measured cost; C++ exposes the same two steps (FireParticles, DisableGamma) only as static config. The governor skips the draw of a burning object's flames rather than stopping emission, so the engine's particle list is untouched and clients at different detail levels stay in lockstep.",

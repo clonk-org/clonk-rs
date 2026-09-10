@@ -960,6 +960,7 @@ pub(crate) fn render_startup_frame(
     about_dialog: Option<&clonk_frontend::startup_about_dlg::AboutDlgState>,
     view: StartupView,
     network_lobby: Option<&mut NetworkLobbyState>,
+    network_lobby_loader: Option<(&LoaderScreen, LoaderRenderConfig)>,
     flags: StartupViewFlags,
     backdrop: &mut StartupBackdropCache,
     defer_native_main_text: bool,
@@ -1142,6 +1143,9 @@ pub(crate) fn render_startup_frame(
                     if assets.game_lobby_resources().is_ok()
                         && assets.game_option_resources().is_ok() =>
                 {
+                    if let Some((loader, config)) = network_lobby_loader {
+                        loader.render_background(surface, config, Some(gamma));
+                    }
                     lobby.render_classic(
                         surface,
                         assets,

@@ -2238,6 +2238,8 @@ impl StartupNetworkState {
 /// pending until one real presentation accepts it. `GameApp` composes it
 /// as `loader`.
 pub(crate) struct LoaderScreenState {
+    /// Avoid reselecting artwork on repeated resource and JoinData events.
+    pub(crate) client_scenario_resource: Option<(clonk_engine::NetworkResourceCore, PathBuf)>,
     /// Exact C4LoaderScreen selected for the currently active startup or
     /// scenario load. A missing screen is paired with `loader_error` and is
     /// always a logged typed boundary, never a generic pane.

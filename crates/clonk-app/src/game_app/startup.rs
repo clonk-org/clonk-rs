@@ -4796,6 +4796,7 @@ impl GameApp {
             self.startup.about_dialog.as_ref(),
             self.startup.view,
             None,
+            None,
             self.startup.view_flags,
             &mut self.menu_backdrop_cache,
             false,
@@ -5756,6 +5757,7 @@ impl GameApp {
     /// (`src/C4GraphicsSystem.cpp:301-311`); a failure is fatal there and is
     /// reported here through the same loader boundary the initial launch uses.
     pub(crate) fn reinitialize_startup_loader_screen(&mut self) {
+        self.loader.client_scenario_resource = None;
         let Some(paths) = self.app_paths.as_ref() else {
             // Path-less state fixtures have no install to re-init from.
             self.loader.screen = None;
