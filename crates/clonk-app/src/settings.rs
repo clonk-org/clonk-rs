@@ -49,6 +49,9 @@ impl VoiceActivationMode {
 pub use clonk_app_core::config::{
     resolve_compat_profile, session_control_mode, session_fair_crew_strength,
     session_game_tick_delay_ms, session_max_load_file_size, session_shared_bases, CompatProfile,
+};
+#[cfg(test)]
+pub use clonk_app_core::config::{
     CPP_CONTROL_MODE_DECENTRAL, CPP_INGAME_GAME_TICK_DELAY_MS, CPP_MAX_LOAD_FILE_SIZE,
     DEFAULT_MAX_LOAD_FILE_SIZE,
 };

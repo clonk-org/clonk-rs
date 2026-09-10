@@ -8,7 +8,7 @@ scenario or replay checks:
 git submodule update --init --recursive
 ```
 
-The workspace and CI pin Rust 1.98.0; CI pins cargo-nextest 0.9.91. Rustup
+The workspace and CI pin Rust 1.98.1; CI pins cargo-nextest 0.9.91. Rustup
 selects the checked-in toolchain automatically, which keeps local and CI
 diagnostics comparable. Repository script tests require Python 3.11 or newer.
 
