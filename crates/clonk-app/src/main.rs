@@ -9751,11 +9751,8 @@ impl GameApp {
         // (C4PlayerList.cpp:281, LanguageUS.txt:1222).
         let join_line = self
             .engine
-            .snapshot()
-            .players
-            .iter()
-            .find(|state| state.id == self.players.local_owner)
-            .map(|state| player_join_board_line(&state.name));
+            .player(self.players.local_owner)
+            .map(|player| player_join_board_line(player.name()));
         if let Some(line) = join_line {
             let line = self.timestamp_log_line(line);
             self.enqueue_control_message_board_line(line);
