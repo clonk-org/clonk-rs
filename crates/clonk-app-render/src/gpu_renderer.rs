@@ -2632,6 +2632,8 @@ pub struct RetainedGpuRenderer {
     health: RetainedGpuHealthMonitor,
     texture_epoch: u64,
     textures: HashMap<GpuTextureId, CachedTexture>,
+    texture_live_scratch: HashSet<GpuTextureId>,
+    texture_replaced_scratch: HashSet<GpuTextureId>,
     quad_bind_groups: HashMap<QuadBindingKey, wgpu::BindGroup>,
     object_bind_groups: HashMap<ObjectBindingKey, wgpu::BindGroup>,
     landscape_bind_groups: HashMap<LandscapeBindingKey, wgpu::BindGroup>,
@@ -3240,6 +3242,8 @@ impl RetainedGpuRenderer {
             landscape_instance_scratch: Vec::new(),
             solid_rect_instance_scratch: Vec::new(),
             draw_call_scratch: Vec::new(),
+            texture_live_scratch: HashSet::new(),
+            texture_replaced_scratch: HashSet::new(),
             composition: None,
             last_presented_monitor_gamma: None,
             presentation_reducer: None,
@@ -4198,8 +4202,11 @@ impl RetainedGpuRenderer {
         queue: &wgpu::Queue,
         resources: &[GpuTextureResource],
     ) -> Result<(), GpuRendererError> {
-        let mut live = HashSet::with_capacity(resources.len());
-        let mut replaced = HashSet::new();
+        let live = &mut self.texture_live_scratch;
+        let replaced = &mut self.texture_replaced_scratch;
+        live.clear();
+        replaced.clear();
+        live.reserve(resources.len());
         let pending_shader_landscape = self
             .shader_landscape
             .then(|| self.pending_shader_landscape.as_ref().map(|(id, _)| *id))
@@ -4324,20 +4331,21 @@ impl RetainedGpuRenderer {
                 }
             }
         }
-        let retained = self.textures.keys().copied().collect::<HashSet<_>>();
-        self.quad_bind_groups
-            .retain(|key, _| retained.contains(&key.texture) && !replaced.contains(&key.texture));
+        let retained = &self.textures;
+        self.quad_bind_groups.retain(|key, _| {
+            retained.contains_key(&key.texture) && !replaced.contains(&key.texture)
+        });
         self.object_bind_groups.retain(|key, _| {
             [Some(key.texture), key.owner_texture]
                 .into_iter()
                 .flatten()
-                .all(|id| retained.contains(&id) && !replaced.contains(&id))
+                .all(|id| retained.contains_key(&id) && !replaced.contains(&id))
         });
         self.landscape_bind_groups.retain(|key, _| {
             [Some(key.base), key.mask, key.liquid]
                 .into_iter()
                 .flatten()
-                .all(|id| retained.contains(&id) && !replaced.contains(&id))
+                .all(|id| retained.contains_key(&id) && !replaced.contains(&id))
         });
         Ok(())
     }
@@ -14455,6 +14463,26 @@ mod tests {
                  {pixel:?} (coverage implies red {expected})"
             );
         }
+    }
+
+    #[test]
+    fn warm_texture_synchronization_does_not_allocate() {
+        gpu_or_skip!(
+            device,
+            queue,
+            "warm texture synchronization allocation check"
+        );
+        let mut renderer = test_renderer(&device, &queue);
+        let resources = (0..24)
+            .map(|_| rgba_resource(GpuTextureId::fresh(), [255; 4]))
+            .collect::<Vec<_>>();
+        renderer.sync_textures(&device, &queue, &resources).unwrap();
+        let allocations = crate::test_allocations::count(|| {
+            for _ in 0..64 {
+                renderer.sync_textures(&device, &queue, &resources).unwrap();
+            }
+        });
+        assert_eq!(allocations, 0, "unchanged texture frames reuse bookkeeping");
     }
 
     #[test]
