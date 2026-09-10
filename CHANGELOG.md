@@ -4,6 +4,12 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1] - 2026-09-10
+
+### Refactoring
+
+- Isolate protocol and shared application components (#1613)
+
 ## [0.26.0] - 2026-09-10
 
 ### Continuous integration
