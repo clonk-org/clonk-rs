@@ -48,6 +48,8 @@ mod sim_session;
 mod statistics;
 mod stats;
 mod status;
+#[cfg(test)]
+mod test_allocations;
 mod transport;
 mod udp;
 mod udp_runtime;
