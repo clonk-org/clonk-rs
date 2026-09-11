@@ -679,6 +679,49 @@ pub(crate) fn blend_prepared_sprite_fragment(
     blend_prepared_sprite_fragment_target(surface, x, y, source, blit, gamma);
 }
 
+/// Borrow the clipped destination once per sprite. Sampling still uses the
+/// original destination coordinates and the same byte-exact compositor.
+pub(crate) fn rasterize_sprite_region(
+    surface: &mut Surface,
+    region: SurfaceRect,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+    mut sample: impl FnMut(i32, i32) -> Option<(PreparedSpriteFragment, SpriteBlitState)>,
+) {
+    if surface.rasterize_rgba_rows(region, |x, y, pixels| {
+        for (column, pixel) in pixels.iter_mut().enumerate() {
+            let Some((fragment, blit)) = sample(x as i32 + column as i32, y as i32) else {
+                continue;
+            };
+            if fragment.alpha() == 0.0 {
+                continue;
+            }
+            let output = composite_sprite_fragment(
+                fragment,
+                Color::new(pixel[0], pixel[1], pixel[2], pixel[3]),
+                blit,
+                gamma,
+            );
+            *pixel = [output.r, output.g, output.b, output.a];
+        }
+    }) {
+        return;
+    }
+    // Unsupported retained sprites can still fall back to captured fragments;
+    // keep recording those instead of touching the deferred pixel plane.
+    let Some(region) = region.intersection(surface.bounds()) else {
+        return;
+    };
+    for y in region.y..region.y + region.height as i32 {
+        for x in region.x..region.x + region.width as i32 {
+            if let Some((fragment, blit)) =
+                sample(x, y).filter(|(fragment, _)| fragment.alpha() != 0.0)
+            {
+                blend_prepared_sprite_fragment(surface, x as u32, y as u32, fragment, blit, gamma);
+            }
+        }
+    }
+}
+
 pub(crate) fn blend_prepared_sprite_fragment_target<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
     x: u32,

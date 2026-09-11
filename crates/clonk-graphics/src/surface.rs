@@ -1071,6 +1071,37 @@ impl Surface {
         Arc::make_mut(self.data.get_mut())
     }
 
+    /// Rasterize clipped RGBA rows with one copy-on-write and dirty-region
+    /// update for the draw. Returns false during GPU capture so callers can
+    /// retain their command-recording path without allocating a pixel plane.
+    pub fn rasterize_rgba_rows(
+        &mut self,
+        region: Rect,
+        mut rasterize: impl FnMut(u32, u32, &mut [[u8; 4]]),
+    ) -> bool {
+        if self.is_gpu_scene_capture_active() {
+            return false;
+        }
+        let Some(region) = region.intersection(self.clip_bounds()) else {
+            return true;
+        };
+        if region.width == 0 || region.height == 0 {
+            return true;
+        }
+        self.mark_gpu_dirty(region);
+        let stride = self.stride;
+        let start = region.y as usize * stride;
+        let end = start + region.height as usize * stride;
+        let first = region.x as usize * 4;
+        let last = first + region.width as usize * 4;
+        let data = Arc::make_mut(self.data.get_mut());
+        for (row, bytes) in data[start..end].chunks_exact_mut(stride).enumerate() {
+            let (pixels, _) = bytes[first..last].as_chunks_mut::<4>();
+            rasterize(region.x as u32, region.y as u32 + row as u32, pixels);
+        }
+        true
+    }
+
     pub fn snapshot(&self) -> SurfaceSnapshot {
         SurfaceSnapshot::from_surface(self)
     }
@@ -2064,6 +2095,50 @@ impl SurfaceDrawTarget for Surface {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rasterized_rows_clip_and_preserve_shared_pixels() {
+        use super::{Color, PixelFormat, Rect, Surface};
+
+        // A row borrow must retain the owned surface's clipping and COW
+        // guarantees, including partially offscreen draw rectangles.
+        let mut surface = Surface::new(6, 4, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(1, 2, 3));
+        let unchanged = surface.clone();
+        surface.set_clip(Rect::new(2, 1, 3, 2));
+        let mut rows = Vec::new();
+        assert!(
+            surface.rasterize_rgba_rows(Rect::new(-1, -1, 5, 8), |x, y, pixels| {
+                rows.push((x, y, pixels.len()));
+                pixels.fill([4, 5, 6, 7]);
+            })
+        );
+        assert_eq!(rows, [(2, 1, 2), (2, 2, 2)]);
+        for y in 0..4 {
+            for x in 0..6 {
+                let expected = if (2..4).contains(&x) && (1..3).contains(&y) {
+                    Color::new(4, 5, 6, 7)
+                } else {
+                    Color::opaque(1, 2, 3)
+                };
+                assert_eq!(surface.get_pixel(x, y), Some(expected));
+                assert_eq!(unchanged.get_pixel(x, y), Some(Color::opaque(1, 2, 3)));
+            }
+        }
+    }
+
+    #[test]
+    fn rasterized_rows_leave_gpu_capture_to_the_caller() {
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        let revision = surface.gpu_revision;
+        assert!(!surface.rasterize_rgba_rows(surface.bounds(), |_, _, _| {
+            panic!("GPU capture must not borrow software pixels");
+        }));
+        assert_eq!(surface.gpu_revision, revision);
+        assert!(!surface.data.is_allocated());
+        assert!(surface.is_gpu_scene_capture_active());
+    }
+
     use super::*;
     use crate::clonk_font::{CapturedFontImage, ClonkFontRole, TextAlign};
     use crate::color::Color;

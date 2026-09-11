@@ -2035,6 +2035,115 @@ mod tests {
     }
 
     #[test]
+    fn translucent_image_strip_batches_writes_without_changing_blending() {
+        // Gamma lookup precedes alpha blending (StdGL.cpp:1081-1087,
+        // 1246-1255); exercise every opacity with independent RGB ramps.
+        let image = ImageData::new(
+            16,
+            16,
+            (0..=255_u8).flat_map(|a| [a, 255 - a, 73, a]).collect(),
+        );
+        let ramp = clonk_graphics::GammaRamp::from_control_points([0x102030, 0x608090, 0xd0e0f0]);
+        for gamma in [None, Some(&ramp)] {
+            let mut surface = Surface::new(20, 20, PixelFormat::Rgba8888);
+            surface.fill(Color::new(201, 102, 53, 137));
+            surface.set_clip(SurfaceRect::new(1, 2, 15, 14));
+            let mut expected = surface.clone();
+            for y in 0..16 {
+                for x in 0..16 {
+                    let alpha = (y * 16 + x) as u8;
+                    blend_prepared_sprite_fragment(
+                        &mut expected,
+                        x,
+                        y + 1,
+                        PreparedSpriteFragment::Legacy(Color::new(alpha, 255 - alpha, 73, alpha)),
+                        SpriteBlitState::normal(),
+                        gamma,
+                    );
+                }
+            }
+            let before = surface.gpu_texture_resource().revision;
+            draw_image_strip(&mut surface, 0, 1, &image, 0, 0, 16, 16, gamma);
+            front_assert_eq! {surface.pixels() => expected.pixels()};
+            front_assert_eq! {surface.gpu_texture_resource().revision - before => 1};
+        }
+    }
+
+    #[test]
+    fn software_object_faces_batch_writes_with_exact_clipped_pixels() {
+        // Preserve DrawFace's source facet (C4Object.cpp:440-467) and the
+        // primary clipper bounds (StdDDraw2.cpp:584-597).
+        let image = ImageData::new(8, 8, [71, 133, 219, 127].repeat(64));
+        let source = FloatSourceRect::scaled(SourceRect::new(0, 0, 8, 8), 1.0);
+        let rect = GuiRect::new(2.0, 3.0, 8.0, 8.0);
+        let blit = SpriteBlitState::normal();
+        let expected = composite_sprite_fragment(
+            prepare_runtime_sprite_sample(
+                &image,
+                None,
+                &source,
+                false,
+                2.5,
+                2.5,
+                BlitSampling::Nearest,
+                None,
+                blit,
+            )
+            .test_value(),
+            Color::new(17, 29, 43, 137),
+            blit,
+            None,
+        );
+        for transformed in [false, true] {
+            let mut surface = Surface::new(16, 16, PixelFormat::Rgba8888);
+            surface.fill(Color::new(17, 29, 43, 137));
+            surface.set_clip(SurfaceRect::new(4, 4, 3, 3));
+            let before = surface.gpu_texture_resource().revision;
+            if transformed {
+                draw_object_image_region_transformed_float_source(
+                    &mut surface,
+                    (2.0, 3.0, 8.0, 8.0),
+                    &GraphicsTransform::identity(),
+                    &image,
+                    None,
+                    &source,
+                    BlitSampling::Nearest,
+                    false,
+                    None,
+                    blit,
+                    None,
+                    None,
+                );
+            } else {
+                draw_object_image_region_float_source(
+                    &mut surface,
+                    &rect,
+                    &image,
+                    None,
+                    &source,
+                    BlitSampling::Nearest,
+                    false,
+                    None,
+                    blit,
+                    None,
+                    None,
+                );
+            }
+            for y in 0..16 {
+                for x in 0..16 {
+                    let color = if (4..7).contains(&x) && (4..7).contains(&y) {
+                        expected
+                    } else {
+                        Color::new(17, 29, 43, 137)
+                    };
+                    front_assert_eq! {surface.get_pixel(x, y) => Some(color)};
+                }
+            }
+            front_assert_eq! {surface.gpu_texture_resource().revision - before => 1};
+        }
+    }
+
+    #[test]
     fn draw_image_strip_gamma_uses_independent_rgb_tables() {
         // The blit shader samples three independent R16 gamma textures after
         // texture modulation (StdGL.cpp:1068-1087,1246-1263).
