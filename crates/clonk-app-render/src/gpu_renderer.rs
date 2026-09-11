@@ -3675,7 +3675,7 @@ impl RetainedGpuRenderer {
             texture_sync_finished
         };
         self.compose_shader_landscape(device, queue, encoder, &resources, shader_timestamp_writes)?;
-        self.last_stats.shader_landscape_draw_calls = shader_landscape_draw_calls;
+        let shader_landscape_draw_calls = self.last_stats.shader_landscape_draw_calls;
 
         let stream_started = Instant::now();
         let shader_encoding = stream_started.duration_since(command_encoding_started);
@@ -4167,6 +4167,7 @@ impl RetainedGpuRenderer {
         )?;
         let uploads = composer.last_uploads();
         let composed_texels = composer.last_composed_texels();
+        let draw_calls = composer.last_draw_calls;
 
         let byte_len = u64::from(extent[0]) * u64::from(extent[1]) * 4;
         self.textures.insert(
@@ -4188,6 +4189,7 @@ impl RetainedGpuRenderer {
         self.last_stats.shader_landscape_upload_calls += uploads.calls;
         self.last_stats.shader_landscape_upload_bytes += uploads.bytes;
         self.last_stats.shader_landscape_composed_texels += composed_texels;
+        self.last_stats.shader_landscape_draw_calls += draw_calls;
         if recreated {
             self.quad_bind_groups.clear();
             self.object_bind_groups.clear();
@@ -8180,6 +8182,135 @@ fn changed_rect(
     Some((rows, first..last + 1))
 }
 
+const MAX_LANDSCAPE_DIRTY_RECTS: usize = 8;
+
+/// Bounded stack storage keeps sparse landscape edits allocation-free. If a
+/// frame exceeds the limit, its covering rectangle remains a safe fallback.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LandscapeDirtyRects {
+    rects: [[u32; 4]; MAX_LANDSCAPE_DIRTY_RECTS],
+    len: usize,
+}
+
+fn rect_area([_, _, width, height]: [u32; 4]) -> u64 {
+    u64::from(width) * u64::from(height)
+}
+
+impl LandscapeDirtyRects {
+    fn single(rect: [u32; 4]) -> Self {
+        let mut regions = Self::default();
+        regions.add(rect);
+        regions
+    }
+
+    fn as_slice(&self) -> &[[u32; 4]] {
+        &self.rects[..self.len]
+    }
+
+    fn add(&mut self, mut rect: [u32; 4]) {
+        if rect_area(rect) == 0 {
+            return;
+        }
+        let mut index = 0;
+        while index < self.len {
+            let other = self.rects[index];
+            let combined = union_rect(rect, other);
+            let overlaps = rect[0] < other[0] + other[2]
+                && other[0] < rect[0] + rect[2]
+                && rect[1] < other[1] + other[3]
+                && other[1] < rect[1] + rect[3];
+            if overlaps || rect_area(combined) <= rect_area(rect) + rect_area(other) {
+                rect = combined;
+                self.rects.copy_within(index + 1..self.len, index);
+                self.len -= 1;
+                index = 0;
+            } else {
+                index += 1;
+            }
+        }
+        if self.len == MAX_LANDSCAPE_DIRTY_RECTS {
+            rect = self.as_slice().iter().copied().fold(rect, union_rect);
+            self.len = 0;
+        }
+        self.rects[self.len] = rect;
+        self.len += 1;
+    }
+}
+
+/// Tighten a candidate without copying its rows into a temporary image.
+fn changed_rect_inside(
+    previous: &[u8],
+    next: &[u8],
+    row_bytes: usize,
+    texel_bytes: usize,
+    [x, y, width, height]: [u32; 4],
+) -> Option<[u32; 4]> {
+    let row_span = |row: u32| {
+        let start = row as usize * row_bytes + x as usize * texel_bytes;
+        start..start + width as usize * texel_bytes
+    };
+    let row_differs = |row: &u32| previous[row_span(*row)] != next[row_span(*row)];
+    let first_y = (y..y + height).find(row_differs)?;
+    let last_y = (first_y..y + height).rev().find(row_differs)?;
+    let column_differs = |column: &u32| {
+        (first_y..=last_y).any(|row| {
+            let start = row as usize * row_bytes + *column as usize * texel_bytes;
+            previous[start..start + texel_bytes] != next[start..start + texel_bytes]
+        })
+    };
+    let first_x = (x..x + width).find(column_differs)?;
+    let last_x = (first_x..x + width).rev().find(column_differs)?;
+    Some([first_x, first_y, last_x - first_x + 1, last_y - first_y + 1])
+}
+
+fn changed_rectangles(
+    previous: &[u8],
+    next: &[u8],
+    row_bytes: usize,
+    texel_bytes: usize,
+) -> LandscapeDirtyRects {
+    let Some((rows, columns)) = changed_rect(previous, next, row_bytes, texel_bytes) else {
+        return LandscapeDirtyRects::default();
+    };
+    let mut regions = LandscapeDirtyRects::single([
+        columns.start as u32,
+        rows.start as u32,
+        columns.len() as u32,
+        rows.len() as u32,
+    ]);
+    if previous.len() != next.len() {
+        return regions;
+    }
+    let mut index = 0;
+    while index < regions.len && regions.len < MAX_LANDSCAPE_DIRTY_RECTS {
+        let rect = regions.rects[index];
+        let area = rect_area(rect);
+        if area < 1024 {
+            index += 1;
+            continue;
+        }
+        let axis = usize::from(rect[3] > rect[2]);
+        let mut left = rect;
+        left[axis + 2] /= 2;
+        let mut right = rect;
+        right[axis] += left[axis + 2];
+        right[axis + 2] -= left[axis + 2];
+        let tight =
+            |candidate| changed_rect_inside(previous, next, row_bytes, texel_bytes, candidate);
+        match (tight(left), tight(right)) {
+            (Some(left), Some(right)) if rect_area(left) + rect_area(right) + 256 < area / 2 => {
+                // Spend an extra staging write/scissor only for a substantial
+                // reduction. Dense changes retain the existing single write.
+                regions.rects[index] = left;
+                regions.rects[regions.len] = right;
+                regions.len += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    regions
+}
+
 /// What a retained composition's resources are shaped by. The planes are one
 /// texel per map pixel, so they follow the map extent and — because an absent
 /// shading plane composes from a 1x1 neutral texel — whether shading is on.
@@ -8233,6 +8364,7 @@ pub struct ShaderLandscapeComposer {
     last_uploads: ShaderLandscapeUploads,
     /// Output texels the last composition pass rewrote.
     last_composed_texels: u64,
+    last_draw_calls: usize,
 }
 
 /// One composition's GPU resources, kept across compositions.
@@ -8290,7 +8422,7 @@ impl RetainedShaderLandscape {
         uploads.add(match self.key.shading {
             true => shading,
             false => ShaderLandscapeUploads {
-                dirty: Some([0, 0, 0, 0]),
+                dirty: Some(LandscapeDirtyRects::default()),
                 ..shading
             },
         });
@@ -8460,45 +8592,53 @@ fn upload_changed_rows(
 ) -> ShaderLandscapeUploads {
     let texel_bytes = bytes_per_texel as usize;
     let row_bytes = extent[0] as usize * texel_bytes;
-    let Some((rows, columns)) = changed_rect(previous, next, row_bytes, texel_bytes) else {
+    let regions = changed_rectangles(previous, next, row_bytes, texel_bytes);
+    if regions.len == 0 {
         return ShaderLandscapeUploads::clean();
-    };
-    // The source keeps the plane's own stride and starts at the rectangle's
-    // first texel, so wgpu reads `width` texels out of each row rather than
-    // the whole one. `write_texture` has no 256-byte row alignment rule —
-    // that applies to buffer-to-texture copies.
-    let offset = rows.start * row_bytes + columns.start * texel_bytes;
-    let height = (rows.end - rows.start) as u32;
-    let width = (columns.end - columns.start) as u32;
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: view.texture(),
-            mip_level: 0,
-            origin: wgpu::Origin3d {
-                x: columns.start as u32,
-                y: rows.start as u32,
-                z: 0,
+    }
+    let mut uploaded_bytes = 0;
+    for &[x, y, width, height] in regions.as_slice() {
+        // The source keeps the plane's own stride and starts at the rectangle's
+        // first texel, so wgpu reads `width` texels out of each row rather than
+        // the whole one. `write_texture` has no 256-byte row alignment rule —
+        // that applies to buffer-to-texture copies.
+        let offset = y as usize * row_bytes + x as usize * texel_bytes;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: view.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
             },
-            aspect: wgpu::TextureAspect::All,
-        },
-        &next[offset..],
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(extent[0] * bytes_per_texel),
-            rows_per_image: Some(height),
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    previous.clear();
-    previous.extend_from_slice(next);
+            &next[offset..],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(extent[0] * bytes_per_texel),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        uploaded_bytes += u64::from(height) * u64::from(width) * texel_bytes as u64;
+        if previous.len() == next.len() {
+            for row in 0..height as usize {
+                let start = offset + row * row_bytes;
+                let span = start..start + width as usize * texel_bytes;
+                previous[span.clone()].copy_from_slice(&next[span]);
+            }
+        }
+    }
+    if previous.len() != next.len() {
+        previous.clear();
+        previous.extend_from_slice(next);
+    }
     ShaderLandscapeUploads {
-        calls: 1,
-        bytes: u64::from(height) * u64::from(width) * texel_bytes as u64,
-        dirty: Some([columns.start as u32, rows.start as u32, width, height]),
+        calls: regions.len,
+        bytes: uploaded_bytes,
+        dirty: Some(regions),
     }
 }
 
@@ -8507,22 +8647,27 @@ fn upload_changed_rows(
 struct ShaderLandscapeUploads {
     calls: usize,
     bytes: u64,
-    /// The map texels the uploads covered, as `(x, y, width, height)`.
+    /// The map rectangles the uploads covered, as `(x, y, width, height)`.
     ///
     /// `None` means "not known to be bounded" — a fresh composition, or a
     /// change whose effect is not confined to a rectangle — and the pass then
     /// composes everything.
-    dirty: Option<[u32; 4]>,
+    dirty: Option<LandscapeDirtyRects>,
 }
 
 impl ShaderLandscapeUploads {
-    /// Accumulates another upload's cost and widens the dirty rectangle to
-    /// cover both. An unbounded contribution makes the union unbounded.
+    /// Accumulates upload cost and bounded damage. A catalogue or uniform
+    /// change remains unbounded even when its own upload is small.
     fn add(&mut self, other: Self) {
         self.calls += other.calls;
         self.bytes += other.bytes;
         self.dirty = match (self.dirty, other.dirty) {
-            (Some(left), Some(right)) => Some(union_rect(left, right)),
+            (Some(mut left), Some(right)) => {
+                for rect in right.as_slice() {
+                    left.add(*rect);
+                }
+                Some(left)
+            }
             (Some(only), None) if other.calls == 0 => Some(only),
             (left, None) if other.calls == 0 => left,
             _ => None,
@@ -8534,7 +8679,7 @@ impl ShaderLandscapeUploads {
         Self {
             calls: 0,
             bytes: 0,
-            dirty: Some([0, 0, 0, 0]),
+            dirty: Some(LandscapeDirtyRects::default()),
         }
     }
 }
@@ -8628,6 +8773,7 @@ impl ShaderLandscapeComposer {
             retained: None,
             last_uploads: ShaderLandscapeUploads::default(),
             last_composed_texels: 0,
+            last_draw_calls: 0,
         }
     }
 
@@ -8845,14 +8991,7 @@ impl ShaderLandscapeComposer {
         // what lies outside it means loading the attachment instead of
         // clearing it, which is sound exactly when the caller reused the
         // output it composed last time.
-        let scissor =
-            output_reused
-                .then_some(uploads.dirty)
-                .flatten()
-                .map(|[x, y, width, height]| {
-                    let detail = inputs.detail.max(1);
-                    [x * detail, y * detail, width * detail, height * detail]
-                });
+        let scissors = output_reused.then_some(uploads.dirty).flatten();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lc_gpu_shader_landscape_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -8860,7 +8999,7 @@ impl ShaderLandscapeComposer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: match scissor {
+                    load: match scissors {
                         Some(_) => wgpu::LoadOp::Load,
                         None => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     },
@@ -8874,13 +9013,29 @@ impl ShaderLandscapeComposer {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &retained.bind_group, &[]);
-        if let Some([x, y, width, height]) = scissor {
-            pass.set_scissor_rect(x, y, width, height);
+        if let Some(regions) = scissors {
+            let detail = inputs.detail.max(1);
+            for &[x, y, width, height] in regions.as_slice() {
+                pass.set_scissor_rect(x * detail, y * detail, width * detail, height * detail);
+                pass.draw(0..3, 0..1);
+            }
+        } else {
+            pass.draw(0..3, 0..1);
         }
-        pass.draw(0..3, 0..1);
         drop(pass);
-        self.last_composed_texels = match scissor {
-            Some([_, _, width, height]) => u64::from(width) * u64::from(height),
+        self.last_draw_calls = scissors.map_or(1, |regions| regions.len);
+        self.last_composed_texels = match scissors {
+            Some(regions) => {
+                let detail = u64::from(inputs.detail.max(1));
+                regions
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .map(rect_area)
+                    .sum::<u64>()
+                    * detail
+                    * detail
+            }
             None => {
                 let detail = u64::from(inputs.detail.max(1));
                 u64::from(inputs.extent[0]) * u64::from(inputs.extent[1]) * detail * detail
@@ -13837,6 +13992,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sparse_upload_regions_cover_every_changed_texel_with_bounded_writes() {
+        for texel_bytes in [1, 2, 4] {
+            let width = 256;
+            let previous = vec![0; width * width * texel_bytes];
+            let mut next = previous.clone();
+            let edits = (0..16)
+                .map(|index| ((index * 71 + 1) % width, (index * 43 + 2) % width))
+                .collect::<Vec<_>>();
+            for &(x, y) in &edits {
+                next[(y * width + x) * texel_bytes + texel_bytes - 1] = 1;
+            }
+            let regions = changed_rectangles(&previous, &next, width * texel_bytes, texel_bytes);
+            assert!(!regions.as_slice().is_empty());
+            assert!(regions.len <= MAX_LANDSCAPE_DIRTY_RECTS);
+            for (x, y) in edits {
+                assert!(
+                    regions.as_slice().iter().any(|&[rx, ry, rw, rh]| {
+                        (rx..rx + rw).contains(&(x as u32)) && (ry..ry + rh).contains(&(y as u32))
+                    }),
+                    "missing texel ({x}, {y}) in {regions:?}"
+                );
+            }
+            for &[x, y, rw, rh] in regions.as_slice() {
+                assert!(x + rw <= width as u32 && y + rh <= width as u32);
+            }
+            next.fill(1);
+            assert_eq!(
+                changed_rectangles(&previous, &next, width * texel_bytes, texel_bytes).as_slice(),
+                &[[0, 0, width as u32, width as u32]],
+                "dense changes should retain a single write"
+            );
+            assert!(
+                changed_rectangles(&next, &next, width * texel_bytes, texel_bytes)
+                    .as_slice()
+                    .is_empty()
+            );
+        }
+    }
+
     /// clonk-org/clonk-rs#273's third criterion — *extent/detail change,
     /// material reload, resize and device recreation invalidate exactly the
     /// resources they own* — as the decision that implements it, with no
@@ -14054,6 +14249,43 @@ mod tests {
             1,
             "a one-texel edit is one byte, not its whole row"
         );
+    }
+
+    #[test]
+    fn distant_landscape_edits_preserve_pixels_without_recomposing_the_gap() {
+        let (_runtime, _instance, _adapter, device, queue) =
+            test_wgpu_device("lc_gpu_sparse_landscape_edits", true).expect("GPU device");
+        let extent = [128, 128];
+        let base = GpuTextureId::fresh();
+        let scene = shader_landscape_scene_fixture(base, extent, extent, 1);
+        let plan = shader_landscape_plan_fixture(extent);
+        let mut renderer = test_renderer(&device, &queue);
+        renderer.set_shader_landscape(true);
+        renderer.set_landscape_detail(1);
+        renderer.set_pending_shader_landscape(Some((base, plan.clone())));
+        let _ = render_identity_readback(&mut renderer, &device, &queue, &scene);
+
+        let mut edited = plan;
+        for texel in [129, 126 * 128 + 126] {
+            edited.index_plane[texel] = u8::from(edited.index_plane[texel] == 0);
+        }
+        renderer.set_pending_shader_landscape(Some((base, edited.clone())));
+        let incremental = render_identity_readback(&mut renderer, &device, &queue, &scene);
+        let stats = renderer.last_stats();
+
+        let mut fresh = test_renderer(&device, &queue);
+        fresh.set_shader_landscape(true);
+        fresh.set_landscape_detail(1);
+        fresh.set_pending_shader_landscape(Some((base, edited)));
+        let complete = render_identity_readback(&mut fresh, &device, &queue, &scene);
+        assert_eq!(
+            incremental, complete,
+            "sparse composition must preserve every pixel"
+        );
+        assert_eq!(stats.shader_landscape_upload_bytes, 2);
+        assert_eq!(stats.shader_landscape_composed_texels, 2);
+        assert_eq!(stats.shader_landscape_draw_calls, 2);
+        assert!(stats.has_exact_draw_call_counts());
     }
 
     /// clonk-org/clonk-rs#273's third criterion, the half the reuse decision
