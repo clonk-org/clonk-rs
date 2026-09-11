@@ -4,6 +4,26 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-09-11
+
+### Bug fixes
+
+- Show scenario artwork for network clients (#1620)
+- Unblock the release on the rust 1.98.1 toolchain (#1619)
+
+### Features
+
+- Inventory content groups and honor distribution decisions (#1615)
+
+### Performance
+
+- Reduce rendering and script execution overhead (#1622)
+- Reduce runtime allocation and scenario loading overhead (#1614)
+
+### Refactoring
+
+- Isolate protocol and shared application components (#1613)
+
 ## [0.26.0] - 2026-09-10
 
 ### Continuous integration
