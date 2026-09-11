@@ -75,13 +75,29 @@ enum CompiledCallTarget {
     Script(CompiledScriptTarget),
     Method {
         failsafe: bool,
+        reference: bool,
     },
     LegacyConstant,
+    Builtin,
+    Missing {
+        error: Option<String>,
+    },
+    Global {
+        target: AstCallTarget,
+        failsafe: bool,
+    },
+}
+
+#[derive(Clone)]
+struct CompiledCallBinding {
+    target: CompiledCallTarget,
+    reference_parameters: u32,
 }
 
 #[derive(Clone)]
 enum CompiledHostTarget {
     Value(RegisteredHostFunction),
+    Reference(HostReferenceFunction),
 }
 
 #[derive(Clone)]
@@ -4111,6 +4127,7 @@ fn c4_map_operator_equal(left: &ValueMap, right: &ValueMap) -> bool {
         })
 }
 
+#[derive(Clone)]
 enum ReturnValue {
     Value(TrackedValue),
     Reference(LValueRef),
@@ -5200,7 +5217,7 @@ impl<'a> Vm<'a> {
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
         _object_reference_cells.register_environment(&env, self);
-        let value = self.evaluate(&expr, &mut env, 0)?;
+        let value = self.execute_direct_expression(expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
         }
@@ -5247,7 +5264,7 @@ impl<'a> Vm<'a> {
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
         _object_reference_cells.register_environment(&env, self);
-        let value = self.evaluate(&expr, &mut env, 0)?;
+        let value = self.execute_direct_expression(expr, &mut env, 0)?;
         if let Some(diagnostic) = &mut diagnostic {
             diagnostic.returned(&value);
         }
@@ -5255,8 +5272,8 @@ impl<'a> Vm<'a> {
     }
 
     /// Continuation-capable C4Aul DirectExec. The expression is wrapped in a
-    /// temporary one-statement function so the AST machine can retain every
-    /// operand and task after a host callback yields. The temporary function
+    /// temporary one-statement function so bytecode execution retains every
+    /// operand and instruction position after a host callback yields. The temporary function
     /// is borrowed for the initial run and is copied only by `suspend` when a
     /// continuation must outlive this call.
     pub(crate) fn direct_exec_with_cells_in_context_with_continuation(
@@ -5344,28 +5361,34 @@ impl<'a> Vm<'a> {
         }
         _object_reference_cells.register_environment(&env, self);
 
-        let function = Self::direct_exec_function(expr, strict_level);
-        let result = self.execute_ast_with_continuation(
-            &function,
-            None,
-            &mut env,
-            depth,
-            false,
-            None,
-            0,
-            0,
-            direct_exec_context,
-            None,
-        );
-        match result {
-            Ok(ControlFlow::Return(value)) => {
-                value.into_value_on_stack().map(ScriptCallOutcome::Complete)
-            }
-            Ok(ControlFlow::Normal) => Ok(ScriptCallOutcome::Complete(Value::Nil)),
-            Ok(ControlFlow::Break | ControlFlow::LoopContinue) => Err(RuntimeError::new(
-                "internal error: loop control escaped DirectExec",
-            )),
+        env.direct_exec_context = direct_exec_context;
+        match self.execute_direct_expression(expr, &mut env, depth) {
+            Ok(value) => Ok(ScriptCallOutcome::Complete(value)),
             Err(error) => self.script_call_outcome_from_error(error),
+        }
+    }
+
+    fn execute_direct_expression(
+        &self,
+        expr: Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        let function = Self::direct_exec_function(expr, env.strict_level);
+        let compiled = Arc::new(CompiledFunction::compile(&function).ok_or_else(|| {
+            RuntimeError::new("internal error: DirectExec expression did not compile")
+        })?);
+        let result =
+            compiled.execute(self, env, depth, &function, None, Arc::clone(&compiled), 0)?;
+        crate::execution_profile::record_compiled();
+        #[cfg(test)]
+        COMPILED_FUNCTION_EXECUTIONS.with(|count| count.set(count.get() + 1));
+        match result {
+            Some(ControlFlow::Return(value)) => value.into_value_on_stack(),
+            Some(ControlFlow::Normal) => Ok(Value::Nil),
+            _ => Err(RuntimeError::new(
+                "internal error: DirectExec did not return",
+            )),
         }
     }
 
@@ -5425,7 +5448,7 @@ impl<'a> Vm<'a> {
             }
         }
         _object_reference_cells.register_environment(&env, self);
-        let value = self.evaluate(&expr, &mut env, depth)?;
+        let value = self.execute_direct_expression(expr, &mut env, depth)?;
         diagnostic.returned(&value);
         Ok(value)
     }
@@ -6002,7 +6025,15 @@ impl<'a> Vm<'a> {
         let compiled_cache = function
             .compiled
             .get_or_init(|| CompiledFunctionCache::new(function));
-        let validated_cache = compiled_cache.validated(function, target.validate_compiled_source);
+        let rebuilt_cache;
+        let validated_cache =
+            match compiled_cache.validated(function, target.validate_compiled_source) {
+                Some(cache) => Some(cache),
+                None => {
+                    rebuilt_cache = CompiledFunctionCache::new(function);
+                    Some(&rebuilt_cache)
+                }
+            };
         let compiled = validated_cache.and_then(|cache| cache.compiled.as_ref());
         let cached_statements = validated_cache.map(|cache| &cache.body);
         // The callee's parameter bindings allocate C4Value cells while the
@@ -6124,7 +6155,7 @@ impl<'a> Vm<'a> {
         let result = if let Some(compiled) = compiled {
             match compiled.execute(
                 self,
-                &env,
+                &mut env,
                 depth,
                 function,
                 caller.clone(),
@@ -6879,7 +6910,7 @@ impl<'a> Vm<'a> {
     fn ast_global_call_target(&self, name: &str) -> AstCallTarget {
         if let Some(function) = self.engine_global_script_function(name) {
             return AstCallTarget::Script(CompiledScriptTarget {
-                function: Arc::new(function.clone()),
+                function: function.resolved_snapshot(),
                 validate_compiled_source: self.global_functions.is_some(),
             });
         }
@@ -10689,6 +10720,35 @@ impl<'a> Vm<'a> {
         let value = |value| ReturnValue::Value(TrackedValue::runtime(value));
         let result = match name {
             "this" => None,
+            "Par" if args.len() <= 1 => {
+                let index = args
+                    .first()
+                    .map(CallArg::read)
+                    .transpose()?
+                    .map(|value| match value {
+                        Value::Int(index) => Ok(index),
+                        Value::Nil => Ok(0),
+                        Value::Bool(flag) => Ok(i32::from(flag)),
+                        Value::RawBool(raw) => Ok(raw as u32 as i32),
+                        other => Err(RuntimeError::new(format!(
+                            "Par: index of type {}, int expected",
+                            other.type_name()
+                        ))),
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                let reference = usize::try_from(index)
+                    .ok()
+                    .filter(|index| *index < MAX_CALL_PARAMETERS)
+                    .and_then(|index| env.call_args.get(index))
+                    .map(Binding::lvalue)
+                    .unwrap_or_else(|| Binding::direct(Value::Nil).lvalue());
+                Some(if return_reference {
+                    ReturnValue::Reference(reference)
+                } else {
+                    ReturnValue::Value(reference.read_tracked()?)
+                })
+            }
             "Var" => {
                 let index = self.global_builtin_int_arg(name, args, 0)?;
                 let reference = self.tracked_cell(frame_slot_cell(&env.frame_locals, index));
@@ -13997,15 +14057,16 @@ enum PendingContinuation {
 struct CompiledContinuationFrame {
     function: Arc<Function>,
     compiled: Arc<CompiledFunction>,
-    call_targets: SmallVec<[CompiledCallTarget; 32]>,
+    call_targets: SmallVec<[CompiledCallBinding; 32]>,
     env: Environment,
     depth: usize,
     caller: Option<ScriptCallerContext>,
     returns_reference: bool,
     instruction: usize,
-    stack: SmallVec<[TrackedValue; 16]>,
+    stack: SmallVec<[ReturnValue; 16]>,
     registered_slots: SmallVec<[bool; 16]>,
     assignment_targets: SmallVec<[(usize, LValueRef); 4]>,
+    iterators: SmallVec<[CompiledIterator; 2]>,
     /// The callee's ten parameter slots plus hoisted function vars remain
     /// live across a C++ host boundary. Re-acquire them only while this
     /// continuation is executing; dropping a standalone suspension must not
@@ -14694,7 +14755,14 @@ impl ContinuationFrame {
                 } else {
                     frame.stack_value_stack.count()
                 };
-                frame.frame_value_stack + stack + frame.pending.total_value_stack_count()
+                frame.frame_value_stack
+                    + stack
+                    + frame
+                        .iterators
+                        .iter()
+                        .map(CompiledIterator::detached_value_stack_count)
+                        .sum::<usize>()
+                    + frame.pending.total_value_stack_count()
             }
             Self::Ast(frame) => {
                 frame.frame_value_stack
@@ -14739,6 +14807,9 @@ impl ContinuationFrame {
 impl CompiledContinuationFrame {
     fn detach_value_stack(&mut self) {
         self.stack_value_stack.detach();
+        for iterator in &mut self.iterators {
+            iterator.value_stack.detach();
+        }
         self.pending.detach_value_stack();
     }
 
@@ -14752,6 +14823,9 @@ impl CompiledContinuationFrame {
         }
         for (_, reference) in &mut self.assignment_targets {
             reference.clear_object_reference(object_id);
+        }
+        for iterator in &mut self.iterators {
+            iterator.clear_object_reference(object_id);
         }
         self.pending.clear_object_reference(object_id);
     }
@@ -16862,8 +16936,51 @@ enum CompiledPathSegment {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CompiledInstruction {
+    Error(String),
+    This,
     Literal(Literal),
     Load(usize),
+    LoadReference(usize),
+    LoadNamedReference(String),
+    SlotReference {
+        local: bool,
+    },
+    IndexReference {
+        embedded: Option<String>,
+        create: bool,
+    },
+    AppendReference,
+    Materialize,
+    Dereference,
+    LegacyParameters {
+        count: usize,
+        forward_rest: bool,
+    },
+    PropertyReference {
+        property: String,
+        assignment: bool,
+        create: bool,
+    },
+    StoreReference {
+        copy_result: bool,
+    },
+    InvalidAssignment {
+        operator: &'static str,
+    },
+    LoadArgument {
+        slot: usize,
+        site: usize,
+        index: usize,
+    },
+    JumpIfValueArgument {
+        site: usize,
+        index: usize,
+        target: usize,
+    },
+    MaterializeArgument {
+        site: usize,
+        index: usize,
+    },
     LoadName(String),
     LoadPath {
         slot: usize,
@@ -16883,14 +17000,19 @@ enum CompiledInstruction {
         operation: BinaryOp,
         operator: &'static str,
     },
+    CompoundReference {
+        operation: BinaryOp,
+        operator: &'static str,
+        copy_result: bool,
+    },
+    IncrementReference {
+        delta: i32,
+        return_old: bool,
+        copy_result: bool,
+    },
     IncrementSlot {
         slot: usize,
         delta: i32,
-    },
-    IncrementEffectSlot {
-        argument_count: usize,
-        delta: i32,
-        return_old: bool,
     },
     Call {
         site: usize,
@@ -16899,10 +17021,26 @@ enum CompiledInstruction {
     MakeProplist(usize),
     Pop,
     JumpAnd(usize),
+    JumpNotNil(usize),
+    JumpIfNotNil {
+        target: usize,
+        materialize: bool,
+    },
+    JumpIfNil(usize),
+    JumpIfGotoBound(usize),
     JumpOr(usize),
     JumpIfFalse(usize),
     Jump(usize),
     Return,
+    IteratorInit {
+        map: bool,
+    },
+    IteratorNext {
+        slot: usize,
+        value_slot: Option<usize>,
+        end: usize,
+    },
+    IteratorEnd,
     Finish,
 }
 
@@ -16914,17 +17052,61 @@ pub(crate) struct CompiledFunction {
     function_vars: Vec<String>,
     instructions: Vec<CompiledInstruction>,
     call_sites: Vec<CompiledCallSite>,
+    legacy_pin_instructions: Vec<bool>,
     max_stack: usize,
-    uses_effect_slots: bool,
     diagnostic_name: Arc<str>,
     diagnostic_source_name: Option<Arc<str>>,
 }
 
+struct CompiledIterator {
+    iterable: Value,
+    items: Vec<(Value, Option<Value>)>,
+    index: usize,
+    sweep_cursor: usize,
+    value_stack: ValueStackReservation,
+}
+
+impl CompiledIterator {
+    fn clear_object_reference(&mut self, object_id: u64) {
+        self.iterable.clear_object_reference(object_id);
+        for (item, value) in &mut self.items {
+            item.clear_object_reference(object_id);
+            if let Some(value) = value {
+                value.clear_object_reference(object_id);
+            }
+        }
+    }
+
+    fn apply_removals(&mut self) {
+        let current = object_reference_sweep_cursor();
+        if self.sweep_cursor == current {
+            return;
+        }
+        clear_value_for_object_reference_sweeps(&mut self.iterable, self.sweep_cursor);
+        for (item, value) in &mut self.items {
+            clear_value_for_object_reference_sweeps(item, self.sweep_cursor);
+            if let Some(value) = value {
+                clear_value_for_object_reference_sweeps(value, self.sweep_cursor);
+            }
+        }
+        self.sweep_cursor = current;
+    }
+
+    fn detached_value_stack_count(&self) -> usize {
+        if self.value_stack.is_attached() {
+            0
+        } else {
+            self.value_stack.count()
+        }
+    }
+}
+
 struct CompiledExecutionState {
     instruction: usize,
-    stack: SmallVec<[TrackedValue; 16]>,
+    stack: SmallVec<[ReturnValue; 16]>,
     registered_slots: SmallVec<[bool; 16]>,
     assignment_targets: SmallVec<[(usize, LValueRef); 4]>,
+    iterators: SmallVec<[CompiledIterator; 2]>,
     stack_value_stack: ValueStackReservation,
     pending: Option<PendingContinuation>,
     /// The embedding host may replace the value suggested by the native
@@ -16938,13 +17120,17 @@ struct CompiledExecutionState {
 struct CompiledCallSite {
     name: String,
     argument_count: usize,
+    forward_rest: bool,
+    reference_arguments: Vec<bool>,
+    return_reference: bool,
     kind: CompiledCallKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CompiledCallKind {
     Direct,
-    Method { failsafe: bool },
+    Method { failsafe: bool, reference: bool },
+    Global { failsafe: bool },
 }
 
 pub(crate) struct CompiledFunctionCache {
@@ -17244,18 +17430,15 @@ struct CompiledFunctionBuilder {
     instructions: Vec<CompiledInstruction>,
     call_sites: Vec<CompiledCallSite>,
     loops: Vec<CompiledLoopContext>,
+    legacy_pin_ranges: Vec<std::ops::Range<usize>>,
     stack_depth: usize,
     max_stack: usize,
-    uses_effect_slots: bool,
     strict_level: Option<u8>,
+    returns_reference: bool,
 }
 
 impl CompiledFunctionBuilder {
     fn new(function: &Function) -> Option<Self> {
-        if function.returns_reference || function.params.iter().any(|param| param.is_reference) {
-            return None;
-        }
-
         let mut builder = Self {
             slots: Vec::new(),
             bare_slots: FxHashMap::default(),
@@ -17264,10 +17447,11 @@ impl CompiledFunctionBuilder {
             instructions: Vec::new(),
             call_sites: Vec::new(),
             loops: Vec::new(),
+            legacy_pin_ranges: Vec::new(),
             stack_depth: 0,
             max_stack: 0,
-            uses_effect_slots: false,
             strict_level: function.strict_level,
+            returns_reference: function.returns_reference,
         };
 
         for parameter in &function.params {
@@ -17453,6 +17637,71 @@ impl CompiledFunctionBuilder {
         }
 
         match expression {
+            Expr::This => self.push_instruction(CompiledInstruction::This),
+            Expr::SafeNavigation { receiver, steps } => {
+                self.compile_set_no_ref_expression(receiver)?;
+                self.instructions.push(CompiledInstruction::Dereference);
+                let mut nil_jumps = Vec::new();
+                for step in steps {
+                    if step.nil_guard {
+                        nil_jumps.push(self.instructions.len());
+                        self.instructions
+                            .push(CompiledInstruction::JumpIfNil(usize::MAX));
+                    }
+                    match &step.operation {
+                        NavigationOperation::Index(index) => {
+                            let (embedded, operands) = match index {
+                                IndexOperand::EmbeddedString(key) => (Some(key.clone()), 1),
+                                IndexOperand::Dynamic(index) => {
+                                    self.compile_expression(index)?;
+                                    (None, 2)
+                                }
+                            };
+                            self.collection_instruction(
+                                operands,
+                                CompiledInstruction::IndexReference {
+                                    embedded,
+                                    create: false,
+                                },
+                            )?;
+                            self.instructions.push(CompiledInstruction::Materialize);
+                        }
+                        NavigationOperation::Property(property) => {
+                            self.instructions
+                                .push(CompiledInstruction::PropertyReference {
+                                    property: property.clone(),
+                                    assignment: false,
+                                    create: false,
+                                });
+                            self.instructions.push(CompiledInstruction::Materialize);
+                        }
+                        NavigationOperation::ArrayAppend => {
+                            self.instructions.push(CompiledInstruction::AppendReference)
+                        }
+                        NavigationOperation::MethodCall {
+                            name,
+                            args,
+                            is_optional,
+                            forward_rest,
+                        } => {
+                            self.compile_call(
+                                name,
+                                CompiledCallKind::Method {
+                                    failsafe: *is_optional,
+                                    reference: false,
+                                },
+                                args,
+                                *forward_rest,
+                                1,
+                            )?;
+                        }
+                    }
+                }
+                let end = self.instructions.len();
+                for jump in nil_jumps {
+                    self.instructions[jump] = CompiledInstruction::JumpIfNil(end);
+                }
+            }
             Expr::Literal(literal) => {
                 self.push_instruction(CompiledInstruction::Literal(literal.clone()));
             }
@@ -17460,11 +17709,23 @@ impl CompiledFunctionBuilder {
                 Some(slot) => self.push_instruction(CompiledInstruction::Load(slot)),
                 None => self.push_instruction(CompiledInstruction::LoadName(name.clone())),
             },
-            Expr::LegacyParameterList {
-                args,
-                forward_rest: false,
-            } if args.len() == 1 => {
-                self.compile_expression(&args[0])?;
+            Expr::LegacyParameterList { args, forward_rest } => {
+                let start = self.instructions.len();
+                if args.len() == 1 {
+                    self.compile_expression(&args[0])?;
+                } else {
+                    for argument in args {
+                        self.compile_reference_expression(argument)?;
+                    }
+                    self.collection_instruction(
+                        args.len(),
+                        CompiledInstruction::LegacyParameters {
+                            count: args.len(),
+                            forward_rest: *forward_rest,
+                        },
+                    )?;
+                }
+                self.legacy_pin_ranges.push(start..self.instructions.len());
             }
             Expr::Unary(operation, value) => {
                 self.compile_expression(value)?;
@@ -17475,61 +17736,29 @@ impl CompiledFunctionBuilder {
             | Expr::PostIncrement(value)
             | Expr::PreDecrement(value)
             | Expr::PostDecrement(value) => {
-                let Expr::Call {
-                    callee,
-                    args,
-                    is_optional: false,
-                    forward_rest: false,
-                } = value.as_ref()
-                else {
-                    return None;
-                };
-                if !matches!(callee.as_ref(), Expr::Variable(name) if name == "EffectVar") {
-                    return None;
-                }
-                for argument in args {
-                    self.compile_expression(argument)?;
-                }
-                self.uses_effect_slots = true;
                 let delta = if matches!(expression, Expr::PreIncrement(_) | Expr::PostIncrement(_))
                 {
                     1
                 } else {
                     -1
                 };
-                self.collection_instruction(
-                    args.len(),
-                    CompiledInstruction::IncrementEffectSlot {
-                        argument_count: args.len(),
-                        delta,
-                        return_old: matches!(
-                            expression,
-                            Expr::PostIncrement(_) | Expr::PostDecrement(_)
-                        ),
-                    },
+                self.compile_increment_expression(
+                    value,
+                    delta,
+                    matches!(expression, Expr::PostIncrement(_) | Expr::PostDecrement(_)),
+                    true,
                 )?;
             }
-            Expr::Binary(left, operation @ (BinaryOp::And | BinaryOp::Or), right)
-                if self.strict_level.unwrap_or(0) >= 2 =>
+            Expr::Binary(left, operation, right)
+                if matches!(operation, BinaryOp::NilCoalescing)
+                    || self.strict_level.unwrap_or(0) >= 2
+                        && matches!(operation, BinaryOp::And | BinaryOp::Or) =>
             {
-                self.compile_expression(left)?;
-                let short_circuit = self.instructions.len();
-                self.instructions.push(match operation {
-                    BinaryOp::And => CompiledInstruction::JumpAnd(usize::MAX),
-                    BinaryOp::Or => CompiledInstruction::JumpOr(usize::MAX),
-                    _ => unreachable!(),
-                });
-                self.stack_depth = self.stack_depth.checked_sub(1)?;
-                self.compile_expression(right)?;
-                let end = self.instructions.len();
-                self.instructions[short_circuit] = match operation {
-                    BinaryOp::And => CompiledInstruction::JumpAnd(end),
-                    BinaryOp::Or => CompiledInstruction::JumpOr(end),
-                    _ => unreachable!(),
-                };
+                self.compile_short_circuit(left, operation, right, false)?;
+                self.instructions.push(CompiledInstruction::Dereference);
             }
             Expr::Binary(left, operation, right)
-                if !matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) =>
+                if !matches!(operation, BinaryOp::NilCoalescing) =>
             {
                 self.compile_expression(left)?;
                 self.compile_expression(right)?;
@@ -17539,56 +17768,46 @@ impl CompiledFunctionBuilder {
                 callee,
                 args,
                 is_optional,
-                forward_rest: false,
+                forward_rest,
             } => {
                 let (name, kind, receiver_count) = match callee.as_ref() {
                     Expr::Variable(name) if !is_optional => (name, CompiledCallKind::Direct, 0),
                     Expr::Property(receiver, name) => {
-                        // Slot accessors can return live references; keep
-                        // those calls on the interpreter's reference path.
-                        if matches!(
-                            name.as_str(),
-                            "Var" | "Local" | "LocalN" | "EffectVar" | "SetLocal"
-                        ) {
-                            return None;
-                        }
                         self.compile_expression(receiver)?;
                         (
                             name,
                             CompiledCallKind::Method {
                                 failsafe: *is_optional,
+                                reference: false,
                             },
                             1,
                         )
                     }
                     _ => return None,
                 };
-                if kind == CompiledCallKind::Direct
-                    && matches!(
-                        name.as_str(),
-                        "inherited" | "_inherited" | "this" | "Par" | "SetLocal" | "SetGlobal"
-                    )
-                {
+                self.compile_call(name, kind, args, *forward_rest, receiver_count)?;
+            }
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => {
+                self.compile_expression(&Expr::Call {
+                    callee: Box::new(Expr::Property(
+                        Box::new(Expr::Literal(Literal::Nil)),
+                        name.clone(),
+                    )),
+                    args: args.clone(),
+                    is_optional: *failsafe,
+                    forward_rest: *forward_rest,
+                })?;
+                let CompiledInstruction::Call { site } = self.instructions.last()? else {
                     return None;
-                }
-                for argument in args {
-                    self.compile_expression(argument)?;
-                }
-                let site = self.call_sites.len();
-                self.call_sites.push(CompiledCallSite {
-                    name: name.clone(),
-                    argument_count: args.len(),
-                    kind,
-                });
-                if receiver_count != 0 {
-                    self.max_stack = self
-                        .max_stack
-                        .max(self.stack_depth - args.len() + MAX_CALL_PARAMETERS);
-                }
-                self.collection_instruction(
-                    args.len() + receiver_count,
-                    CompiledInstruction::Call { site },
-                )?;
+                };
+                self.call_sites[*site].kind = CompiledCallKind::Global {
+                    failsafe: *failsafe,
+                };
             }
             Expr::Array(elements) => {
                 for element in elements {
@@ -17609,41 +17828,337 @@ impl CompiledFunctionBuilder {
                     CompiledInstruction::MakeProplist(entries.len()),
                 )?;
             }
+            Expr::ArrayAppend(_) => {
+                self.compile_reference_expression(expression)?;
+                self.instructions.push(CompiledInstruction::Materialize);
+            }
+            Expr::ArrayAppendAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => match operation {
+                Some(operation) => {
+                    self.compile_compound_assignment(target, operation, operator, value, false)?
+                }
+                None => self.compile_reference_assignment(target, value, false)?,
+            },
+            Expr::Index(..) | Expr::Property(..) => {
+                self.compile_reference_expression_mode(expression, false)?;
+                self.instructions.push(CompiledInstruction::Materialize);
+            }
             Expr::Assignment(AssignmentTarget::Variable(name), value) => {
                 self.compile_assignment_expression(name, value, false)?;
+            }
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => {
+                self.compile_compound_assignment(target, operation, operator, value, false)?;
+            }
+            Expr::Assignment(target, value) => {
+                self.compile_reference_assignment(target, value, false)?;
             }
             _ => return None,
         }
         Some(())
     }
 
+    fn compile_call(
+        &mut self,
+        name: &str,
+        kind: CompiledCallKind,
+        args: &[Expr],
+        forward_rest: bool,
+        receiver_count: usize,
+    ) -> Option<()> {
+        let site = self.call_sites.len();
+        self.call_sites.push(CompiledCallSite {
+            name: name.to_owned(),
+            argument_count: args.len(),
+            forward_rest,
+            return_reference: false,
+            reference_arguments: args
+                .iter()
+                .map(Self::reference_argument_supported)
+                .collect(),
+            kind,
+        });
+        for (index, argument) in args.iter().enumerate() {
+            if let Expr::Variable(name) = argument {
+                if let Some(slot) = self.bare_slots.get(name).copied() {
+                    self.push_instruction(CompiledInstruction::LoadArgument { slot, site, index });
+                } else {
+                    self.compile_reference_expression(argument)?;
+                    self.instructions
+                        .push(CompiledInstruction::MaterializeArgument { site, index });
+                }
+            } else if matches!(argument, Expr::Call { .. } | Expr::GlobalCall { .. })
+                && Self::reference_argument_supported(argument)
+            {
+                self.compile_reference_expression(argument)?;
+                self.instructions
+                    .push(CompiledInstruction::MaterializeArgument { site, index });
+            } else if self.reference_argument_differs(argument)
+                && Self::reference_argument_supported(argument)
+            {
+                let start_depth = self.stack_depth;
+                let value_jump = self.instructions.len();
+                self.instructions
+                    .push(CompiledInstruction::JumpIfValueArgument {
+                        site,
+                        index,
+                        target: usize::MAX,
+                    });
+                self.compile_reference_expression(argument)?;
+                let end_jump = self.instructions.len();
+                self.instructions
+                    .push(CompiledInstruction::Jump(usize::MAX));
+                self.instructions[value_jump] = CompiledInstruction::JumpIfValueArgument {
+                    site,
+                    index,
+                    target: self.instructions.len(),
+                };
+                self.stack_depth = start_depth;
+                self.compile_expression(argument)?;
+                self.instructions[end_jump] = CompiledInstruction::Jump(self.instructions.len());
+            } else {
+                self.compile_expression(argument)?;
+            }
+        }
+        if receiver_count != 0 {
+            self.max_stack = self
+                .max_stack
+                .max(self.stack_depth - args.len() + MAX_CALL_PARAMETERS);
+        }
+        self.collection_instruction(
+            args.len() + receiver_count,
+            CompiledInstruction::Call { site },
+        )?;
+        Some(())
+    }
+
+    fn reference_argument_supported(expression: &Expr) -> bool {
+        matches!(
+            expression,
+            Expr::Variable(_)
+                | Expr::This
+                | Expr::Literal(_)
+                | Expr::Index(..)
+                | Expr::Property(..)
+                | Expr::Assignment(..)
+                | Expr::PreIncrement(_)
+                | Expr::PreDecrement(_)
+                | Expr::PostIncrement(_)
+                | Expr::PostDecrement(_)
+                | Expr::CompoundAssignment { .. }
+                | Expr::ArrayAppend(_)
+                | Expr::ArrayAppendAssignment { .. }
+                | Expr::Array(_)
+                | Expr::Proplist(_)
+                | Expr::Unary(..)
+                | Expr::Binary(..)
+                | Expr::GlobalCall { .. }
+                | Expr::SafeNavigation { .. }
+                | Expr::LegacyParameterList { .. }
+        ) || matches!(expression, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Variable(_) | Expr::Property(..)))
+    }
+
+    /// Emit a runtime reference/value branch only when the lowerings differ.
+    /// Duplicating arrays or arithmetic here would duplicate every nested call
+    /// site, growing the plan exponentially with nested value arguments.
+    fn reference_argument_differs(&self, expression: &Expr) -> bool {
+        match expression {
+            Expr::Variable(_)
+            | Expr::Call { .. }
+            | Expr::GlobalCall { .. }
+            | Expr::Property(..)
+            | Expr::Index(..)
+            | Expr::Assignment(..)
+            | Expr::CompoundAssignment { .. }
+            | Expr::PreIncrement(_)
+            | Expr::PreDecrement(_)
+            | Expr::ArrayAppend(_)
+            | Expr::ArrayAppendAssignment { .. } => true,
+            Expr::Binary(_, operation, _) => {
+                matches!(operation, BinaryOp::NilCoalescing)
+                    || self.strict_level.unwrap_or(0) >= 2
+                        && matches!(operation, BinaryOp::And | BinaryOp::Or)
+            }
+            Expr::This
+            | Expr::Literal(_)
+            | Expr::Array(_)
+            | Expr::Proplist(_)
+            | Expr::Unary(..)
+            | Expr::PostIncrement(_)
+            | Expr::PostDecrement(_)
+            | Expr::SafeNavigation { .. }
+            | Expr::LegacyParameterList { .. } => false,
+        }
+    }
+
+    fn compile_reference_expression(&mut self, expression: &Expr) -> Option<()> {
+        self.compile_reference_expression_mode(expression, true)
+    }
+
+    fn compile_reference_expression_mode(&mut self, expression: &Expr, create: bool) -> Option<()> {
+        match expression {
+            Expr::GlobalCall { .. } => {
+                self.compile_expression(expression)?;
+                let CompiledInstruction::Call { site } = self.instructions.last()? else {
+                    return None;
+                };
+                self.call_sites[*site].return_reference = true;
+            }
+            Expr::Binary(left, operation, right)
+                if matches!(operation, BinaryOp::NilCoalescing)
+                    || self.strict_level.unwrap_or(0) >= 2
+                        && matches!(operation, BinaryOp::And | BinaryOp::Or) =>
+            {
+                self.compile_short_circuit(left, operation, right, true)?;
+            }
+            Expr::Variable(name) => {
+                if let Some(slot) = self.bare_slots.get(name).copied() {
+                    self.push_instruction(CompiledInstruction::LoadReference(slot));
+                } else {
+                    self.push_instruction(CompiledInstruction::LoadNamedReference(name.clone()));
+                }
+            }
+            Expr::Property(base, property) => {
+                self.compile_reference_expression_mode(base, create)?;
+                self.instructions
+                    .push(CompiledInstruction::PropertyReference {
+                        property: property.clone(),
+                        assignment: false,
+                        create,
+                    });
+            }
+            Expr::Index(base, index) => {
+                self.compile_reference_expression_mode(base, create)?;
+                let (embedded, operands) = match index {
+                    IndexOperand::EmbeddedString(key) => (Some(key.clone()), 1),
+                    IndexOperand::Dynamic(index) => {
+                        self.compile_expression(index)?;
+                        (None, 2)
+                    }
+                };
+                self.collection_instruction(
+                    operands,
+                    CompiledInstruction::IndexReference { embedded, create },
+                )?;
+            }
+            Expr::Call { .. } => {
+                self.compile_expression(expression)?;
+                let CompiledInstruction::Call { site } = self.instructions.last()? else {
+                    return None;
+                };
+                self.call_sites[*site].return_reference = true;
+            }
+            Expr::ArrayAppend(base) => {
+                self.compile_reference_expression(base)?;
+                self.instructions.push(CompiledInstruction::AppendReference);
+            }
+            Expr::ArrayAppendAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => match operation {
+                Some(operation) => {
+                    self.compile_compound_assignment(target, operation, operator, value, true)?
+                }
+                None => self.compile_reference_assignment(target, value, true)?,
+            },
+            Expr::PreIncrement(value) | Expr::PreDecrement(value) => {
+                let delta = if matches!(expression, Expr::PreIncrement(_)) {
+                    1
+                } else {
+                    -1
+                };
+                self.compile_increment_expression(value, delta, false, false)?;
+            }
+            Expr::PostIncrement(_) | Expr::PostDecrement(_) => {
+                self.compile_expression(expression)?
+            }
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => {
+                self.compile_compound_assignment(target, operation, operator, value, true)?;
+            }
+            Expr::Assignment(target, value) => {
+                self.compile_reference_assignment(target, value, true)?;
+            }
+            Expr::SafeNavigation { .. }
+            | Expr::LegacyParameterList { .. }
+            | Expr::This
+            | Expr::Literal(_)
+            | Expr::Array(_)
+            | Expr::Proplist(_)
+            | Expr::Unary(..)
+            | Expr::Binary(..) => self.compile_expression(expression)?,
+        }
+        Some(())
+    }
+
     fn compile_set_no_ref_expression(&mut self, expression: &Expr) -> Option<()> {
         match expression {
+            Expr::ArrayAppend(_)
+            | Expr::ArrayAppendAssignment { .. }
+            | Expr::PreIncrement(_)
+            | Expr::PreDecrement(_) => self.compile_reference_expression(expression),
+            Expr::Call { .. } => self.compile_reference_expression(expression),
             Expr::Assignment(AssignmentTarget::Variable(name), value) => {
                 self.compile_assignment_expression(name, value, true)
             }
-            Expr::Binary(left, operation @ (BinaryOp::And | BinaryOp::Or), right)
-                if self.strict_level.unwrap_or(0) >= 2 =>
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => self.compile_compound_assignment(target, operation, operator, value, true),
+            Expr::Assignment(target, value) => {
+                self.compile_reference_assignment(target, value, true)
+            }
+            Expr::Binary(left, operation, right)
+                if matches!(operation, BinaryOp::NilCoalescing)
+                    || self.strict_level.unwrap_or(0) >= 2
+                        && matches!(operation, BinaryOp::And | BinaryOp::Or) =>
             {
-                self.compile_set_no_ref_expression(left)?;
-                let short_circuit = self.instructions.len();
-                self.instructions.push(match operation {
-                    BinaryOp::And => CompiledInstruction::JumpAnd(usize::MAX),
-                    BinaryOp::Or => CompiledInstruction::JumpOr(usize::MAX),
-                    _ => unreachable!(),
-                });
-                self.stack_depth = self.stack_depth.checked_sub(1)?;
-                self.compile_set_no_ref_expression(right)?;
-                let end = self.instructions.len();
-                self.instructions[short_circuit] = match operation {
-                    BinaryOp::And => CompiledInstruction::JumpAnd(end),
-                    BinaryOp::Or => CompiledInstruction::JumpOr(end),
-                    _ => unreachable!(),
-                };
-                Some(())
+                self.compile_short_circuit(left, operation, right, false)
             }
             _ => self.compile_expression(expression),
         }
+    }
+
+    fn compile_short_circuit(
+        &mut self,
+        left: &Expr,
+        operation: &BinaryOp,
+        right: &Expr,
+        preserve_rhs_reference: bool,
+    ) -> Option<()> {
+        self.compile_set_no_ref_expression(left)?;
+        let jump = self.instructions.len();
+        let instruction = |target| match operation {
+            BinaryOp::And => CompiledInstruction::JumpAnd(target),
+            BinaryOp::Or => CompiledInstruction::JumpOr(target),
+            BinaryOp::NilCoalescing => CompiledInstruction::JumpNotNil(target),
+            _ => unreachable!("only short circuit operators have conditional operands"),
+        };
+        self.instructions.push(instruction(usize::MAX));
+        self.stack_depth = self.stack_depth.checked_sub(1)?;
+        if preserve_rhs_reference {
+            self.compile_reference_expression(right)?;
+        } else {
+            self.compile_set_no_ref_expression(right)?;
+        }
+        self.instructions[jump] = instruction(self.instructions.len());
+        Some(())
     }
 
     fn compile_assignment_expression(
@@ -17664,6 +18179,218 @@ impl CompiledFunctionBuilder {
             copy_result: !preserve_result_reference,
         });
         Some(())
+    }
+
+    fn compile_compound_assignment(
+        &mut self,
+        target: &AssignmentTarget,
+        operation: &BinaryOp,
+        operator: &'static str,
+        value: &Expr,
+        preserve_reference: bool,
+    ) -> Option<()> {
+        self.compile_assignment_target(target)?;
+        let nil_jump = if matches!(operation, BinaryOp::NilCoalescing) {
+            let jump = self.instructions.len();
+            self.instructions.push(CompiledInstruction::JumpIfNotNil {
+                target: usize::MAX,
+                materialize: !preserve_reference,
+            });
+            Some(jump)
+        } else {
+            None
+        };
+        self.compile_expression(value)?;
+        self.collection_instruction(
+            2,
+            CompiledInstruction::CompoundReference {
+                operation: operation.clone(),
+                operator,
+                copy_result: !preserve_reference,
+            },
+        )?;
+        if let Some(jump) = nil_jump {
+            self.instructions[jump] = CompiledInstruction::JumpIfNotNil {
+                target: self.instructions.len(),
+                materialize: !preserve_reference,
+            };
+        }
+        Some(())
+    }
+
+    fn compile_increment_expression(
+        &mut self,
+        value: &Expr,
+        delta: i32,
+        return_old: bool,
+        copy_result: bool,
+    ) -> Option<()> {
+        self.compile_reference_expression(value)?;
+        self.instructions
+            .push(CompiledInstruction::IncrementReference {
+                delta,
+                return_old,
+                copy_result,
+            });
+        Some(())
+    }
+
+    fn compile_assignment_target(&mut self, target: &AssignmentTarget) -> Option<()> {
+        match target {
+            AssignmentTarget::InvalidValue { expression, .. } => {
+                self.compile_expression(expression)?
+            }
+            AssignmentTarget::PrefixChange { target, delta } => {
+                self.compile_assignment_target(target)?;
+                self.instructions
+                    .push(CompiledInstruction::IncrementReference {
+                        delta: *delta,
+                        return_old: false,
+                        copy_result: false,
+                    });
+            }
+            AssignmentTarget::EffectSlot(args) => {
+                self.compile_call("EffectVar", CompiledCallKind::Direct, args, false, 0)?;
+                let CompiledInstruction::Call { site } = self.instructions.last()? else {
+                    return None;
+                };
+                self.call_sites[*site].return_reference = true;
+            }
+            AssignmentTarget::GlobalFunctionCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => {
+                self.compile_reference_expression(&Expr::GlobalCall {
+                    name: name.clone(),
+                    args: args.clone(),
+                    failsafe: *failsafe,
+                    forward_rest: *forward_rest,
+                })?;
+            }
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+                is_arrow,
+            } => {
+                let mut args = args.clone();
+                let callee = if *is_arrow {
+                    Expr::Property(object.clone(), method.clone())
+                } else {
+                    args.push(*object.clone());
+                    Expr::Variable(method.clone())
+                };
+                self.compile_expression(&Expr::Call {
+                    callee: Box::new(callee),
+                    args,
+                    is_optional: false,
+                    forward_rest: false,
+                })?;
+                let CompiledInstruction::Call { site } = self.instructions.last()? else {
+                    return None;
+                };
+                self.call_sites[*site].return_reference = true;
+                if *is_arrow {
+                    self.call_sites[*site].kind = CompiledCallKind::Method {
+                        failsafe: false,
+                        reference: true,
+                    };
+                }
+            }
+            AssignmentTarget::LocalSlot(index) | AssignmentTarget::VarSlot(index) => {
+                self.compile_expression(index)?;
+                self.instructions.push(CompiledInstruction::SlotReference {
+                    local: matches!(target, AssignmentTarget::LocalSlot(_)),
+                });
+            }
+            AssignmentTarget::Variable(name) => {
+                let slot = self.bare_slot(name);
+                self.push_instruction(CompiledInstruction::LoadReference(slot));
+            }
+            AssignmentTarget::Property(base, property) => {
+                self.compile_assignment_target(base)?;
+                self.instructions
+                    .push(CompiledInstruction::PropertyReference {
+                        property: property.clone(),
+                        assignment: true,
+                        create: true,
+                    });
+            }
+            AssignmentTarget::ArrayAppend(base) => {
+                self.compile_reference_expression(base)?;
+                self.instructions.push(CompiledInstruction::AppendReference);
+            }
+            AssignmentTarget::Index(base, index) => {
+                self.compile_assignment_target(base)?;
+                let (embedded, operands) = match index {
+                    IndexOperand::EmbeddedString(key) => (Some(key.clone()), 1),
+                    IndexOperand::Dynamic(index) => {
+                        self.compile_expression(index)?;
+                        (None, 2)
+                    }
+                };
+                self.collection_instruction(
+                    operands,
+                    CompiledInstruction::IndexReference {
+                        embedded,
+                        create: true,
+                    },
+                )?;
+            }
+            AssignmentTarget::FunctionCall { name, args } => {
+                self.compile_reference_expression(&Expr::Call {
+                    callee: Box::new(Expr::Variable(name.clone())),
+                    args: args.clone(),
+                    is_optional: false,
+                    forward_rest: false,
+                })?;
+            }
+        }
+        Some(())
+    }
+
+    fn compile_reference_assignment(
+        &mut self,
+        target: &AssignmentTarget,
+        value: &Expr,
+        preserve_reference: bool,
+    ) -> Option<()> {
+        if let AssignmentTarget::InvalidValue {
+            expression,
+            operator,
+        } = target
+        {
+            self.compile_expression(expression)?;
+            let jump = if *operator == "??=" {
+                let jump = self.instructions.len();
+                self.instructions.push(CompiledInstruction::JumpIfNotNil {
+                    target: usize::MAX,
+                    materialize: false,
+                });
+                Some(jump)
+            } else {
+                None
+            };
+            self.compile_expression(value)?;
+            self.collection_instruction(2, CompiledInstruction::InvalidAssignment { operator })?;
+            if let Some(jump) = jump {
+                self.instructions[jump] = CompiledInstruction::JumpIfNotNil {
+                    target: self.instructions.len(),
+                    materialize: false,
+                };
+            }
+            return Some(());
+        }
+        self.compile_assignment_target(target)?;
+        self.compile_set_no_ref_expression(value)?;
+        self.collection_instruction(
+            2,
+            CompiledInstruction::StoreReference {
+                copy_result: !preserve_reference,
+            },
+        )
     }
 
     fn compile_discarded_expression(&mut self, expression: &Expr) -> Option<()> {
@@ -17703,7 +18430,9 @@ impl CompiledFunctionBuilder {
             | Expr::PreDecrement(value)
             | Expr::PostDecrement(value) => {
                 let Expr::Variable(name) = value.as_ref() else {
-                    return None;
+                    self.compile_expression(expression)?;
+                    self.pop_instruction(CompiledInstruction::Pop)?;
+                    return Some(());
                 };
                 let delta = if matches!(expression, Expr::PreIncrement(_) | Expr::PostIncrement(_))
                 {
@@ -17726,6 +18455,31 @@ impl CompiledFunctionBuilder {
     fn compile_statements(&mut self, statements: &[Stmt]) -> Option<()> {
         for statement in statements {
             match statement {
+                Stmt::LegacyGoto { call, expression } => {
+                    if self.strict_level.is_none() {
+                        let bound_jump = self.instructions.len();
+                        self.instructions
+                            .push(CompiledInstruction::JumpIfGotoBound(usize::MAX));
+                        if self.returns_reference {
+                            self.compile_reference_expression(call)?;
+                        } else {
+                            self.compile_expression(call)?;
+                        }
+                        self.pop_instruction(CompiledInstruction::Return)?;
+                        self.instructions[bound_jump] =
+                            CompiledInstruction::JumpIfGotoBound(self.instructions.len());
+                    }
+                    self.compile_discarded_expression(expression)?;
+                }
+                Stmt::ParseError {
+                    message,
+                    line,
+                    column,
+                } => {
+                    self.instructions.push(CompiledInstruction::Error(format!(
+                        "parse error at {line}:{column}: {message}"
+                    )));
+                }
                 Stmt::VarDecl { name, init } => {
                     let Some(initializer) = init else {
                         continue;
@@ -17750,10 +18504,17 @@ impl CompiledFunctionBuilder {
                 }
                 Stmt::Return(expression) => {
                     match expression {
+                        Some(expression) if self.returns_reference => {
+                            self.compile_reference_expression(expression)?
+                        }
                         Some(expression) => self.compile_expression(expression)?,
                         None => self.push_instruction(CompiledInstruction::Literal(Literal::Nil)),
                     }
                     self.pop_instruction(CompiledInstruction::Return)?;
+                }
+                Stmt::Assignment { target, value } => {
+                    self.compile_reference_assignment(target, value, true)?;
+                    self.pop_instruction(CompiledInstruction::Pop)?;
                 }
                 Stmt::Expr(expression) => match expression {
                     Expr::CompoundAssignment {
@@ -17780,7 +18541,9 @@ impl CompiledFunctionBuilder {
                     | Expr::PreDecrement(value)
                     | Expr::PostDecrement(value) => {
                         let Expr::Variable(name) = value.as_ref() else {
-                            return None;
+                            self.compile_expression(expression)?;
+                            self.pop_instruction(CompiledInstruction::Pop)?;
+                            continue;
                         };
                         let delta =
                             if matches!(expression, Expr::PreIncrement(_) | Expr::PostIncrement(_))
@@ -17890,12 +18653,49 @@ impl CompiledFunctionBuilder {
                     };
                     self.pop_loop(end, back_edge)?;
                 }
+                Stmt::ForIn {
+                    variable,
+                    value_variable,
+                    iterable,
+                    body,
+                    ..
+                } => {
+                    self.compile_expression(iterable)?;
+                    self.pop_instruction(CompiledInstruction::IteratorInit {
+                        map: value_variable.is_some(),
+                    })?;
+                    let control_slots = if value_variable.is_some() { 3 } else { 2 };
+                    self.stack_depth += control_slots;
+                    self.max_stack = self.max_stack.max(self.stack_depth);
+                    let next = self.instructions.len();
+                    let slot = *self.function_var_slots.get(variable)?;
+                    let value_slot = match value_variable {
+                        Some(name) => Some(*self.function_var_slots.get(name)?),
+                        None => None,
+                    };
+                    self.instructions.push(CompiledInstruction::IteratorNext {
+                        slot,
+                        value_slot,
+                        end: usize::MAX,
+                    });
+                    self.push_loop();
+                    self.compile_statements(body)?;
+                    self.instructions.push(CompiledInstruction::Jump(next));
+                    let end = self.instructions.len();
+                    self.instructions[next] = CompiledInstruction::IteratorNext {
+                        slot,
+                        value_slot,
+                        end,
+                    };
+                    self.pop_loop(end, next)?;
+                    self.instructions.push(CompiledInstruction::IteratorEnd);
+                    self.stack_depth = self.stack_depth.checked_sub(control_slots)?;
+                }
                 Stmt::Break => self.compile_loop_control(true)?,
                 Stmt::Continue => self.compile_loop_control(false)?,
                 Stmt::Block(statements) | Stmt::Sequence(statements) => {
                     self.compile_statements(statements)?;
                 }
-                _ => return None,
             }
         }
         Some(())
@@ -17907,13 +18707,17 @@ impl CompiledFunctionBuilder {
             return None;
         }
         self.instructions.push(CompiledInstruction::Finish);
+        let mut legacy_pin_instructions = vec![false; self.instructions.len()];
+        for range in self.legacy_pin_ranges {
+            legacy_pin_instructions[range].fill(true);
+        }
         Some(CompiledFunction {
+            legacy_pin_instructions,
             slots: self.slots,
             function_vars: self.function_vars,
             instructions: self.instructions,
             call_sites: self.call_sites,
             max_stack: self.max_stack,
-            uses_effect_slots: self.uses_effect_slots,
             diagnostic_name: Arc::from(function.name.as_str()),
             diagnostic_source_name: function.source_name().map(Arc::from),
         })
@@ -17993,36 +18797,28 @@ fn read_compiled_indexed_path(
     binding: &Binding,
     segments: &[CompiledPathSegment],
     strict_level: Option<u8>,
-    retained_operands: usize,
+    _retained_operands: usize,
 ) -> Result<TrackedValue, RuntimeError> {
     let _pin_creation = LegacyPathPinCreationGuard::suspend();
     let mut current = ReturnValue::Reference(binding.lvalue());
     for segment in segments {
         current = match segment {
-            CompiledPathSegment::Property(property) => vm
-                .property_reference_or_value_with_hook_stack(
-                    current,
-                    property,
-                    env,
-                    Some(retained_operands + 1),
-                )?,
+            CompiledPathSegment::Property(property) => {
+                vm.property_reference_or_value_with_hook_stack(current, property, env, None)?
+            }
             CompiledPathSegment::EmbeddedIndex(value) => vm
                 .index_value_reference_or_value_with_hook_stack(
                     current,
                     Value::String(vm.literal_string(value)),
                     env,
-                    Some(retained_operands + 1),
+                    None,
                 )?,
             CompiledPathSegment::LiteralIndex(literal) => {
+                let _index_slot = ValueStackReservation::reserve(1)?;
                 let index = TrackedValue::literal(vm.literal_value(literal, strict_level), literal)
                     .set_copy();
                 vm.register_runtime_value(&index.value);
-                vm.index_value_reference_or_value_with_hook_stack(
-                    current,
-                    index.value,
-                    env,
-                    Some(retained_operands + 2),
-                )?
+                vm.index_value_reference_or_value_with_hook_stack(current, index.value, env, None)?
             }
         };
     }
@@ -18082,8 +18878,7 @@ fn read_compiled_path_value(
                     "map access with .: map expected, but got nil!",
                 )),
                 target @ Value::Object(_) => {
-                    let _hook_stack =
-                        compiled_object_hook_stack(target, Some(retained_operands + 1))?;
+                    let _hook_stack = compiled_object_hook_stack(target, None)?;
                     let child = vm.object_local_tracked(env, target, property).set_copy();
                     vm.register_runtime_value(&child.value);
                     read_compiled_path_value(
@@ -18104,6 +18899,10 @@ fn read_compiled_path_value(
         }
         CompiledPathSegment::EmbeddedIndex(value)
         | CompiledPathSegment::LiteralIndex(Literal::String(value)) => {
+            let _index_slot = ValueStackReservation::reserve(usize::from(matches!(
+                segment,
+                CompiledPathSegment::LiteralIndex(_)
+            )))?;
             let index = Value::String(vm.literal_string(value));
             if matches!(segment, CompiledPathSegment::LiteralIndex(_)) {
                 vm.register_runtime_value(&index);
@@ -18121,6 +18920,7 @@ fn read_compiled_path_value(
             )
         }
         CompiledPathSegment::LiteralIndex(literal) => {
+            let _index_slot = ValueStackReservation::reserve(1)?;
             let index = c4_set_copy_value(vm.literal_value(literal, strict_level));
             vm.register_runtime_value(&index);
             read_compiled_index(
@@ -18151,7 +18951,7 @@ fn read_compiled_index(
     remaining: &[CompiledPathSegment],
     strict_level: Option<u8>,
     retained_operands: usize,
-    dynamic_index_slot: bool,
+    _dynamic_index_slot: bool,
 ) -> Result<TrackedValue, RuntimeError> {
     let path_segment = PathSegment::Index(index.clone());
     let child_identity = identity
@@ -18202,10 +19002,7 @@ fn read_compiled_index(
             )
         }
         target @ Value::Object(_) => {
-            let _hook_stack = compiled_object_hook_stack(
-                target,
-                Some(retained_operands + 1 + usize::from(dynamic_index_slot)),
-            )?;
+            let _hook_stack = compiled_object_hook_stack(target, None)?;
             let child = vm.eval_index_tracked(
                 TrackedValue {
                     value: target.clone(),
@@ -18233,31 +19030,74 @@ fn read_compiled_index(
 }
 
 impl CompiledFunction {
+    fn call_result(
+        &self,
+        instruction: usize,
+        value: ReturnValue,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let CompiledInstruction::Call { site } = self.instructions[instruction] else {
+            return Err(RuntimeError::new("internal compiled result without a call"));
+        };
+        let value = if matches!(self.call_sites[site].kind, CompiledCallKind::Global { .. }) {
+            materialize_target_call_result(value)
+        } else {
+            value
+        };
+        if self.call_sites[site].return_reference {
+            Ok(value)
+        } else {
+            value.into_set_tracked_on_stack().map(ReturnValue::Value)
+        }
+    }
+
     fn compile(function: &Function) -> Option<Self> {
         CompiledFunctionBuilder::new(function)?.finish(function)
     }
 
-    fn bindings(&self, env: &Environment) -> Option<SmallVec<[Binding; 16]>> {
+    fn bindings(&self, vm: &Vm<'_>, env: &Environment) -> SmallVec<[Option<Binding>; 16]> {
         let bindings = self
             .slots
             .iter()
             .map(|slot| match slot.kind {
-                CompiledSlotKind::Bare => env.binding(&slot.name),
+                CompiledSlotKind::Bare => env.binding(&slot.name).or_else(|| {
+                    vm.global_variable_cell(&slot.name)
+                        .map(|cell| Binding::Reference(vm.tracked_cell(cell)))
+                }),
                 CompiledSlotKind::FunctionVar => env.function_var_binding(&slot.name),
             })
-            .collect::<Option<SmallVec<_>>>()?;
+            .collect::<SmallVec<_>>();
         #[cfg(test)]
         if bindings.spilled() {
             COMPILED_BINDING_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
         }
-        Some(bindings)
+        bindings
+    }
+
+    fn binding<'a>(
+        &self,
+        slot: usize,
+        bindings: &'a mut [Option<Binding>],
+        vm: &Vm<'_>,
+        env: &Environment,
+    ) -> Result<&'a Binding, RuntimeError> {
+        let binding = &mut bindings[slot];
+        if binding.is_none() {
+            let name = &self.slots[slot].name;
+            *binding = env.binding(name).or_else(|| {
+                vm.global_variable_cell(name)
+                    .map(|cell| Binding::Reference(vm.tracked_cell(cell)))
+            });
+        }
+        binding.as_ref().ok_or_else(|| {
+            RuntimeError::new(format!("undefined variable '{}'", self.slots[slot].name))
+        })
     }
 
     fn resolve_call_targets(
         &self,
         vm: &Vm<'_>,
         env: &Environment,
-    ) -> Option<SmallVec<[CompiledCallTarget; 32]>> {
+    ) -> Option<SmallVec<[CompiledCallBinding; 32]>> {
         let mut call_targets = SmallVec::<[CompiledCallTarget; 32]>::new();
         // Scoped to the resolution prelude alone: the executed body below
         // attributes its own lookups to whichever path it reaches.
@@ -18266,35 +19106,35 @@ impl CompiledFunction {
         for site in &self.call_sites {
             let name = &site.name;
             let argument_count = site.argument_count;
-            if (0..argument_count).any(|index| {
-                vm.reference_parameter_probe
-                    .is_some_and(|probe| probe(name, index))
-            }) {
-                return None;
+            if let CompiledCallKind::Global { failsafe } = site.kind {
+                call_targets.push(CompiledCallTarget::Global {
+                    target: vm.ast_global_call_target(name),
+                    failsafe,
+                });
+                continue;
             }
-            if let CompiledCallKind::Method { failsafe } = site.kind {
-                if vm
-                    .own_or_global_script_function(name)
-                    .is_some_and(|function| {
-                        function.returns_reference
-                            || function.params.iter().any(|param| param.is_reference)
-                    })
-                {
-                    return None;
-                }
-                call_targets.push(CompiledCallTarget::Method { failsafe });
+            if let CompiledCallKind::Method {
+                failsafe,
+                reference,
+            } = site.kind
+            {
+                let reference = reference
+                    || site.return_reference
+                        && (matches!(name.as_str(), "Local" | "LocalN" | "Var" | "EffectVar")
+                            || vm
+                                .own_or_global_script_function(name)
+                                .is_some_and(|function| function.returns_reference));
+                call_targets.push(CompiledCallTarget::Method {
+                    failsafe,
+                    reference,
+                });
+                continue;
+            }
+            if name == "this" && vm.has_bound_this(env) {
+                call_targets.push(CompiledCallTarget::Builtin);
                 continue;
             }
             if let Some(target) = vm.resolved_script_function(name, env.engine_scope) {
-                if target.function.returns_reference
-                    || target
-                        .function
-                        .params
-                        .iter()
-                        .any(|param| param.is_reference)
-                {
-                    return None;
-                }
                 call_targets.push(CompiledCallTarget::Script(CompiledScriptTarget {
                     function: target.function.resolved_snapshot(),
                     validate_compiled_source: target.validate_compiled_source,
@@ -18308,13 +19148,11 @@ impl CompiledFunction {
             // and asking for the reference first could never have changed
             // which target is selected — it only probed twice.
             let host = vm.resolved_host_function(name);
-            if matches!(host, Some(ResolvedHostFunction::Reference(_)))
-                || vm
-                    .host_function_parameter_types
-                    .and_then(|types| types.get(name))
-                    .is_some_and(|types| types.contains(&C4VType::Ref))
-            {
-                return None;
+            if let Some(ResolvedHostFunction::Reference(function)) = host {
+                call_targets.push(CompiledCallTarget::Host(CompiledHostTarget::Reference(
+                    function.clone(),
+                )));
+                continue;
             }
             if let Some(ResolvedHostFunction::Value(function)) = host {
                 call_targets.push(CompiledCallTarget::Host(CompiledHostTarget::Value(
@@ -18322,20 +19160,111 @@ impl CompiledFunction {
                 )));
                 continue;
             }
+            if matches!(name.as_str(), "inherited" | "_inherited") {
+                let target = if let Some(function) = vm.inherited_target(env) {
+                    CompiledCallTarget::Script(CompiledScriptTarget {
+                        function,
+                        validate_compiled_source: true,
+                    })
+                } else if let Some(host) = vm.resolved_host_function(&env.function_name) {
+                    CompiledCallTarget::Host(match host {
+                        ResolvedHostFunction::Value(function) => {
+                            CompiledHostTarget::Value(function.clone())
+                        }
+                        ResolvedHostFunction::Reference(function) => {
+                            CompiledHostTarget::Reference(function.clone())
+                        }
+                    })
+                } else {
+                    CompiledCallTarget::Missing {
+                        error: (name == "inherited").then(|| {
+                            format!(
+                                "inherited: no overloaded function (in {})",
+                                env.function_name
+                            )
+                        }),
+                    }
+                };
+                call_targets.push(target);
+                continue;
+            }
             let legacy_constant = env.strict_level.unwrap_or(0) < 2
-                && argument_count == 0
                 && (vm.global_constant_cell(name).is_some()
                     || vm
                         .constants
                         .is_some_and(|constants| constants.contains_key(name)));
-            if legacy_constant {
+            if legacy_constant && argument_count == 0 {
                 call_targets.push(CompiledCallTarget::LegacyConstant);
                 continue;
             }
-            return None;
+            if Vm::is_global_vm_builtin(name)
+                || name == "Par" && argument_count <= 1
+                || name == "EffectVar" && site.return_reference
+            {
+                call_targets.push(CompiledCallTarget::Builtin);
+                continue;
+            }
+            call_targets.push(CompiledCallTarget::Missing {
+                error: Some(if legacy_constant {
+                    "parameters not allowed in functional usage of constants".to_owned()
+                } else {
+                    format!("unknown function '{name}'")
+                }),
+            });
         }
+        let bindings = call_targets
+            .into_iter()
+            .zip(&self.call_sites)
+            .map(|(target, site)| {
+                let mut reference_parameters = 0u32;
+                for index in 0..site.argument_count {
+                    let selected = match &target {
+                        CompiledCallTarget::Global {
+                            target: AstCallTarget::Script(target),
+                            ..
+                        } => target
+                            .function
+                            .params
+                            .get(index)
+                            .is_some_and(|param| param.is_reference),
+                        CompiledCallTarget::Global {
+                            target: AstCallTarget::HostReference(function),
+                            ..
+                        } => function.wants_reference(index),
+                        CompiledCallTarget::Script(target) => target
+                            .function
+                            .params
+                            .get(index)
+                            .is_some_and(|param| param.is_reference),
+                        CompiledCallTarget::Host(CompiledHostTarget::Reference(function)) => {
+                            function.wants_reference(index)
+                        }
+                        CompiledCallTarget::Method { .. } => vm
+                            .own_or_global_script_function(&site.name)
+                            .and_then(|function| function.params.get(index))
+                            .is_some_and(|param| param.is_reference),
+                        _ => false,
+                    };
+                    let engine = vm
+                        .reference_parameter_probe
+                        .is_some_and(|probe| probe(&site.name, index));
+                    if selected || engine {
+                        if !site.reference_arguments[index] {
+                            return None;
+                        }
+                        if index < u32::BITS as usize {
+                            reference_parameters |= 1 << index;
+                        }
+                    }
+                }
+                Some(CompiledCallBinding {
+                    target,
+                    reference_parameters,
+                })
+            })
+            .collect();
         drop(profiled_prelude);
-        Some(call_targets)
+        bindings
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -18347,14 +19276,15 @@ impl CompiledFunction {
         resume_value: Value,
         function: &Function,
         compiled: &Arc<CompiledFunction>,
-        call_targets: &[CompiledCallTarget],
+        call_targets: &[CompiledCallBinding],
         env: &Environment,
         depth: usize,
         caller: &Option<ScriptCallerContext>,
         instruction: usize,
-        stack: SmallVec<[TrackedValue; 16]>,
+        stack: SmallVec<[ReturnValue; 16]>,
         registered_slots: SmallVec<[bool; 16]>,
         assignment_targets: SmallVec<[(usize, LValueRef); 4]>,
+        iterators: SmallVec<[CompiledIterator; 2]>,
         stack_value_stack: ValueStackReservation,
         frame_value_stack: usize,
         pending: PendingContinuation,
@@ -18374,6 +19304,7 @@ impl CompiledFunction {
             stack,
             registered_slots,
             assignment_targets,
+            iterators,
             stack_value_stack,
             frame_value_stack,
             pending,
@@ -18392,7 +19323,7 @@ impl CompiledFunction {
     fn execute(
         &self,
         vm: &Vm<'_>,
-        env: &Environment,
+        env: &mut Environment,
         depth: usize,
         function: &Function,
         caller: Option<ScriptCallerContext>,
@@ -18402,23 +19333,16 @@ impl CompiledFunction {
         let _execution_timer = crate::execution_profile::ExecutionTimer::enter(
             crate::execution_profile::ExecutionKind::Compiled,
         );
-        let Some(bindings) = self.bindings(env) else {
-            return Ok(None);
-        };
-        if ValueStackReservation::check(self.max_stack).is_err() {
-            return Ok(None);
-        }
-        if self.uses_effect_slots && !vm.host_functions.contains_key("EffectVar") {
-            return Ok(None);
-        }
+        let bindings = self.bindings(vm, env);
         let Some(call_targets) = self.resolve_call_targets(vm, env) else {
             return Ok(None);
         };
         let state = CompiledExecutionState {
             instruction: 0,
-            stack: SmallVec::<[TrackedValue; 16]>::with_capacity(self.max_stack),
+            stack: SmallVec::<[ReturnValue; 16]>::with_capacity(self.max_stack),
             registered_slots: SmallVec::<[bool; 16]>::from_elem(false, bindings.len()),
             assignment_targets: SmallVec::<[(usize, LValueRef); 4]>::new(),
+            iterators: SmallVec::new(),
             stack_value_stack: ValueStackReservation::empty(),
             pending: None,
             resume_value: None,
@@ -18449,23 +19373,27 @@ impl CompiledFunction {
     fn execute_state(
         &self,
         vm: &Vm<'_>,
-        env: &Environment,
+        env: &mut Environment,
         depth: usize,
         function: &Function,
         caller: Option<ScriptCallerContext>,
         compiled: Arc<CompiledFunction>,
-        bindings: SmallVec<[Binding; 16]>,
-        call_targets: SmallVec<[CompiledCallTarget; 32]>,
+        mut bindings: SmallVec<[Option<Binding>; 16]>,
+        call_targets: SmallVec<[CompiledCallBinding; 32]>,
         state: CompiledExecutionState,
         frame_value_stack: usize,
     ) -> Result<Option<ControlFlow>, RuntimeError> {
         let _execution_timer = crate::execution_profile::ExecutionTimer::enter(
             crate::execution_profile::ExecutionKind::Compiled,
         );
+        let mut direct_diagnostic = env.direct_exec_context.as_ref().map(|context| {
+            ScriptDiagnosticGuard::enter_direct(context.frame.clone(), context.profile_on_error)
+        });
         let CompiledExecutionState {
             mut stack,
             mut registered_slots,
             mut assignment_targets,
+            mut iterators,
             mut stack_value_stack,
             mut instruction,
             pending,
@@ -18473,16 +19401,18 @@ impl CompiledFunction {
         } = state;
         let resumed_method = pending.is_some()
             && matches!(&self.instructions[instruction], CompiledInstruction::Call { site }
-                if matches!(self.call_sites[*site].kind, CompiledCallKind::Method { .. }));
+                if matches!(self.call_sites[*site].kind, CompiledCallKind::Method { .. } | CompiledCallKind::Global { .. }));
         if let Some(pending) = pending {
+            let _pin_registry =
+                self.legacy_pin_instructions[instruction].then(LegacyPathPinRegistryGuard::enter);
             match pending {
                 PendingContinuation::Host { value, .. } => {
                     if resumed_method {
-                        stack_value_stack.resize_to(stack.len())?;
+                        stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
                     }
                     let value = TrackedValue::runtime(resume_value.unwrap_or(value)).set_copy();
                     vm.register_runtime_value(&value.value);
-                    stack.push(value);
+                    stack.push(ReturnValue::Value(value));
                     instruction += 1;
                 }
                 PendingContinuation::Child(child) => match match resume_value {
@@ -18491,10 +19421,12 @@ impl CompiledFunction {
                 }? {
                     ContinuationResult::Complete(value) => {
                         if resumed_method {
-                            stack_value_stack.resize_to(stack.len())?;
+                            stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
                         }
-                        let value = value.into_tracked_on_stack()?.set_copy();
-                        vm.register_runtime_value(&value.value);
+                        let value = self.call_result(instruction, value)?;
+                        if let ReturnValue::Value(value) = &value {
+                            vm.register_runtime_value(&value.value);
+                        }
                         stack.push(value);
                         instruction += 1;
                     }
@@ -18515,6 +19447,7 @@ impl CompiledFunction {
                             stack,
                             registered_slots,
                             assignment_targets,
+                            iterators,
                             stack_value_stack,
                             frame_value_stack,
                             PendingContinuation::Child(child),
@@ -18531,11 +19464,11 @@ impl CompiledFunction {
                 )? {
                     NativeResumeOutcome::Complete(value) => {
                         if resumed_method {
-                            stack_value_stack.resize_to(stack.len())?;
+                            stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
                         }
                         let value = TrackedValue::runtime(value).set_copy();
                         vm.register_runtime_value(&value.value);
-                        stack.push(value);
+                        stack.push(ReturnValue::Value(value));
                         instruction += 1;
                     }
                     NativeResumeOutcome::Suspended {
@@ -18560,6 +19493,7 @@ impl CompiledFunction {
                             stack,
                             registered_slots,
                             assignment_targets,
+                            iterators,
                             stack_value_stack,
                             frame_value_stack,
                             pending,
@@ -18569,26 +19503,266 @@ impl CompiledFunction {
             }
         }
         loop {
-            match &self.instructions[instruction] {
+            let _pin_registry =
+                self.legacy_pin_instructions[instruction].then(LegacyPathPinRegistryGuard::enter);
+            let opcode = &self.instructions[instruction];
+            let pushes_slot = matches!(
+                opcode,
+                CompiledInstruction::This
+                    | CompiledInstruction::Literal(_)
+                    | CompiledInstruction::Load(_)
+                    | CompiledInstruction::LoadReference(_)
+                    | CompiledInstruction::LoadNamedReference(_)
+                    | CompiledInstruction::LoadName(_)
+                    | CompiledInstruction::LoadArgument { .. }
+                    | CompiledInstruction::LoadPath { .. }
+                    | CompiledInstruction::BeginAssignment(_)
+                    | CompiledInstruction::IncrementSlot { .. }
+                    | CompiledInstruction::MakeArray(0)
+                    | CompiledInstruction::MakeProplist(0)
+                    | CompiledInstruction::LegacyParameters { count: 0, .. }
+            );
+            stack_value_stack
+                .resize_to(stack.len() + assignment_targets.len() + usize::from(pushes_slot))?;
+            match opcode {
+                CompiledInstruction::Error(message) => {
+                    return Err(RuntimeError::new(message.clone()))
+                }
+                CompiledInstruction::This => {
+                    let value = TrackedValue::runtime(vm.this_value.clone());
+                    vm.register_runtime_value(&value.value);
+                    stack.push(ReturnValue::Value(value));
+                }
                 CompiledInstruction::Literal(literal) => {
                     let value =
                         TrackedValue::literal(vm.literal_value(literal, env.strict_level), literal)
                             .set_copy();
                     vm.register_runtime_value(&value.value);
-                    stack.push(value);
+                    stack.push(ReturnValue::Value(value));
                 }
                 CompiledInstruction::Load(slot) => {
-                    let value = bindings[*slot].read_tracked()?.set_copy();
+                    let value = match &bindings[*slot] {
+                        Some(binding) => binding.read_tracked()?.set_copy(),
+                        None => vm.compiled_named_value(&self.slots[*slot].name, env)?,
+                    };
                     if !registered_slots[*slot] {
                         vm.register_runtime_value(&value.value);
                         registered_slots[*slot] = true;
                     }
+                    stack.push(ReturnValue::Value(value));
+                }
+                CompiledInstruction::LoadReference(slot) => {
+                    stack.push(ReturnValue::Reference(
+                        self.binding(*slot, &mut bindings, vm, env)?.lvalue(),
+                    ));
+                }
+                CompiledInstruction::LoadNamedReference(name) => {
+                    let reference = env.lvalue(name).or_else(|| {
+                        vm.global_variable_cell(name)
+                            .map(|cell| vm.tracked_cell(cell))
+                    });
+                    stack.push(match reference {
+                        Some(reference) => ReturnValue::Reference(reference),
+                        None => ReturnValue::Value(vm.compiled_named_value(name, env)?),
+                    });
+                }
+                CompiledInstruction::SlotReference { local } => {
+                    let value = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled slot index missing"))?
+                        .into_value()?;
+                    let index =
+                        Vm::slot_index_from_value(if *local { "Local()" } else { "Var()" }, value)?;
+                    let value = if *local && vm.retain_global_call_context_for_host_paths {
+                        ReturnValue::Value(TrackedValue::runtime(Value::Nil))
+                    } else if *local && index < 0 {
+                        ReturnValue::Reference(vm.tracked_cell(value_cell(Value::Nil)))
+                    } else if *local {
+                        ReturnValue::Reference(
+                            vm.tracked_cell(env.object_state.local_slot_cell(index)),
+                        )
+                    } else {
+                        ReturnValue::Reference(
+                            vm.tracked_cell(frame_slot_cell(&env.frame_locals, index)),
+                        )
+                    };
                     stack.push(value);
+                }
+                CompiledInstruction::IndexReference { embedded, create } => {
+                    let index = match embedded {
+                        Some(key) => Value::String(vm.literal_string(key)),
+                        None => stack
+                            .pop()
+                            .ok_or_else(|| RuntimeError::new("internal compiled index missing"))?
+                            .into_value()?,
+                    };
+                    let base = stack.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled indexed base missing")
+                    })?;
+                    let _registry = LegacyPathPinRegistryGuard::enter();
+                    let _creation = if *create {
+                        LegacyPathPinCreationGuard::enter()
+                    } else {
+                        LegacyPathPinCreationGuard::suspend()
+                    };
+                    let value =
+                        vm.index_value_reference_or_value_with_hook_stack(base, index, env, None)?;
+                    stack.push(value);
+                }
+                CompiledInstruction::PropertyReference {
+                    property,
+                    assignment,
+                    create,
+                } => {
+                    let base = stack.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled property base missing")
+                    })?;
+                    if *assignment {
+                        if let ReturnValue::Reference(reference) = &base {
+                            if reference.resolved_legacy_value().is_none()
+                                && !matches!(reference, LValueRef::HostPath { .. })
+                            {
+                                let collection = reference.read()?;
+                                if !matches!(
+                                    collection,
+                                    Value::Nil | Value::Object(_) | Value::Proplist(_)
+                                ) {
+                                    return Err(RuntimeError::new(format!(
+                                        "cannot assign property '{property}' on value of type {}",
+                                        collection.type_name()
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    let _registry = LegacyPathPinRegistryGuard::enter();
+                    let _creation = if *create {
+                        LegacyPathPinCreationGuard::enter()
+                    } else {
+                        LegacyPathPinCreationGuard::suspend()
+                    };
+                    let value =
+                        vm.property_reference_or_value_with_hook_stack(base, property, env, None)?;
+                    stack.push(value);
+                }
+                CompiledInstruction::JumpIfValueArgument {
+                    site,
+                    index,
+                    target,
+                } => {
+                    let wants_reference = *index < u32::BITS as usize
+                        && call_targets[*site].reference_parameters & (1 << index) != 0;
+                    if !wants_reference {
+                        instruction = *target;
+                        continue;
+                    }
+                }
+                CompiledInstruction::Dereference => {
+                    let operand = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled result missing"))?;
+                    let value = Vm::materialize_set_no_ref_result(operand)?;
+                    vm.register_runtime_value(&value.value);
+                    stack.push(ReturnValue::Value(value));
+                }
+                CompiledInstruction::LegacyParameters {
+                    count,
+                    forward_rest,
+                } => {
+                    let start = stack.len().checked_sub(*count).ok_or_else(|| {
+                        RuntimeError::new("internal compiled legacy parameters missing")
+                    })?;
+                    let value = if *count == 0 {
+                        if *forward_rest {
+                            env.call_args
+                                .get(env.named_param_count)
+                                .map(Binding::read_tracked)
+                                .transpose()?
+                                .unwrap_or_else(|| TrackedValue::runtime(Value::Nil))
+                        } else {
+                            TrackedValue::runtime(Value::Nil)
+                        }
+                    } else {
+                        stack.truncate(start + 1);
+                        stack
+                            .pop()
+                            .ok_or_else(|| {
+                                RuntimeError::new("internal compiled legacy result missing")
+                            })?
+                            .into_tracked()?
+                    };
+                    stack.push(ReturnValue::Value(value));
+                }
+                CompiledInstruction::AppendReference => {
+                    stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
+                    let base = stack.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled append base missing")
+                    })?;
+                    let _creation = LegacyPathPinCreationGuard::enter();
+                    stack.push(match base {
+                        ReturnValue::Reference(reference) => {
+                            ReturnValue::Reference(vm.append_array_slot(reference)?)
+                        }
+                        ReturnValue::Value(value) => match value.value {
+                            Value::Array(elements) if elements.len() < ARRAY_MAX_SIZE => {
+                                ReturnValue::Value(TrackedValue::runtime(Value::Nil))
+                            }
+                            Value::Array(_) => return Err(RuntimeError::new("out of memory")),
+                            other => {
+                                return Err(RuntimeError::new(format!(
+                                    "array append accesss: can't access {} as an array!",
+                                    other.type_name()
+                                )))
+                            }
+                        },
+                    });
+                }
+                CompiledInstruction::Materialize => {
+                    let value = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled value missing"))?
+                        .into_tracked()?
+                        .set_copy();
+                    vm.register_runtime_value(&value.value);
+                    stack.push(ReturnValue::Value(value));
+                }
+                CompiledInstruction::MaterializeArgument { site, index } => {
+                    let wants_reference = *index < u32::BITS as usize
+                        && call_targets[*site].reference_parameters & (1 << index) != 0;
+                    if !wants_reference {
+                        let value = stack.pop().ok_or_else(|| {
+                            RuntimeError::new("internal compiled argument missing")
+                        })?;
+                        let value = match value {
+                            ReturnValue::Value(value) => value,
+                            ReturnValue::Reference(reference) => {
+                                reference.read_tracked()?.set_copy()
+                            }
+                        };
+                        stack.push(ReturnValue::Value(value));
+                    }
+                }
+                CompiledInstruction::LoadArgument { slot, site, index } => {
+                    let wants_reference = *index < u32::BITS as usize
+                        && call_targets[*site].reference_parameters & (1 << index) != 0;
+                    let operand = if wants_reference {
+                        ReturnValue::Reference(
+                            self.binding(*slot, &mut bindings, vm, env)?.lvalue(),
+                        )
+                    } else {
+                        let value = match &bindings[*slot] {
+                            Some(binding) => binding.read_tracked()?.set_copy(),
+                            None => vm.compiled_named_value(&self.slots[*slot].name, env)?,
+                        };
+                        vm.register_runtime_value(&value.value);
+                        ReturnValue::Value(value)
+                    };
+                    stack.push(operand);
                 }
                 CompiledInstruction::LoadName(name) => {
                     let value = vm.compiled_named_value(name, env)?;
                     vm.register_runtime_value(&value.value);
-                    stack.push(value);
+                    stack.push(ReturnValue::Value(value));
                 }
                 CompiledInstruction::LoadPath { slot, segments } => {
                     let has_index = segments.iter().any(|segment| {
@@ -18608,19 +19782,19 @@ impl CompiledFunction {
                         read_compiled_indexed_path(
                             vm,
                             env,
-                            &bindings[*slot],
+                            self.binding(*slot, &mut bindings, vm, env)?,
                             segments,
                             env.strict_level,
-                            stack.len(),
+                            0,
                         )?
                     } else {
                         let value = read_compiled_path(
                             vm,
                             env,
-                            &bindings[*slot],
+                            self.binding(*slot, &mut bindings, vm, env)?,
                             segments,
                             !has_index && !registered_slots[*slot],
-                            stack.len(),
+                            0,
                         )?;
                         if has_index {
                             vm.register_runtime_value(&value.value);
@@ -18629,24 +19803,67 @@ impl CompiledFunction {
                         }
                         value
                     };
-                    stack.push(value);
+                    stack.push(ReturnValue::Value(value));
                 }
                 CompiledInstruction::BeginAssignment(slot) => {
-                    let reference = bindings[*slot].lvalue();
-                    // The retained target is represented by its owned
-                    // lvalue. The reservation is scoped to this instruction;
-                    // a suspended frame must not keep the thread-local value
-                    // stack occupied while the embedding engine switches
-                    // sections and runs fresh callbacks.
-                    ValueStackReservation::check(1)?;
+                    let reference = self.binding(*slot, &mut bindings, vm, env)?.lvalue();
                     assignment_targets.push((*slot, reference));
                 }
                 CompiledInstruction::Store(slot) => {
                     let value = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    bindings[*slot].write_tracked(value)?;
+                    self.binding(*slot, &mut bindings, vm, env)?
+                        .write_tracked(value.into_tracked()?)?;
                     registered_slots[*slot] = true;
+                }
+                CompiledInstruction::StoreReference { copy_result } => {
+                    let value = stack.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled assignment value missing")
+                    })?;
+                    let target = stack.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled assignment target missing")
+                    })?;
+                    let reference = match target {
+                        ReturnValue::Reference(reference) => reference,
+                        ReturnValue::Value(left) => {
+                            return Err(RuntimeError::new(format!(
+                                "operator \"=\" left side: got \"{}\", but expected \"&\"!",
+                                Vm::c4v_type_name(left.value.c4v_type())
+                            )))
+                        }
+                    };
+                    if let Some(left) = reference.resolved_legacy_value() {
+                        return Err(RuntimeError::new(format!(
+                            "operator \"=\" left side: got \"{}\", but expected \"&\"!",
+                            Vm::c4v_type_name(left.value.c4v_type())
+                        )));
+                    }
+                    let value = match value {
+                        ReturnValue::Reference(reference) => reference.read_tracked()?.set_copy(),
+                        ReturnValue::Value(value) => value,
+                    };
+                    reference.write_tracked(value)?;
+                    stack.push(if *copy_result {
+                        ReturnValue::Value(reference.read_tracked()?.set_copy())
+                    } else {
+                        ReturnValue::Reference(reference)
+                    });
+                }
+                CompiledInstruction::InvalidAssignment { operator } => {
+                    stack.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled assignment rhs missing")
+                    })?;
+                    let left = stack
+                        .pop()
+                        .ok_or_else(|| {
+                            RuntimeError::new("internal compiled assignment target missing")
+                        })?
+                        .into_value()?;
+                    return Err(RuntimeError::new(format!(
+                        "operator \"{operator}\" left side: got \"{}\", but expected \"&\"!",
+                        left.type_name()
+                    )));
                 }
                 CompiledInstruction::StoreAssignment(slot) => {
                     let value = stack
@@ -18656,7 +19873,7 @@ impl CompiledFunction {
                         RuntimeError::new("internal compiled assignment target underflow")
                     })?;
                     debug_assert_eq!(target_slot, *slot);
-                    reference.write_tracked(value)?;
+                    reference.write_tracked(value.into_tracked()?)?;
                     registered_slots[*slot] = true;
                 }
                 CompiledInstruction::StoreKeep { slot, copy_result } => {
@@ -18668,15 +19885,15 @@ impl CompiledFunction {
                         .last()
                         .cloned()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    reference.write_tracked(value)?;
+                    reference.write_tracked(value.into_tracked()?)?;
                     let value = reference.read_tracked()?;
                     *stack
                         .last_mut()
                         .expect("the assigned value was just read from this slot") = if *copy_result
                     {
-                        value.set_copy()
+                        ReturnValue::Value(value.set_copy())
                     } else {
-                        value
+                        ReturnValue::Value(value)
                     };
                     registered_slots[*slot] = true;
                 }
@@ -18685,9 +19902,10 @@ impl CompiledFunction {
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
                     let value =
-                        TrackedValue::runtime(vm.eval_unary(operation, value.value)?).set_copy();
+                        TrackedValue::runtime(vm.eval_unary(operation, value.into_value()?)?)
+                            .set_copy();
                     vm.register_runtime_value(&value.value);
-                    stack.push(value);
+                    stack.push(ReturnValue::Value(value));
                 }
                 CompiledInstruction::Binary(operation) => {
                     let right = stack
@@ -18696,7 +19914,12 @@ impl CompiledFunction {
                     let left = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
+                    let left = left.into_tracked()?;
+                    let right = right.into_tracked()?;
                     let value = match operation {
+                        BinaryOp::Concat => {
+                            vm.eval_concat_tracked(left, right, env.strict_level, "..")?
+                        }
                         BinaryOp::Equal | BinaryOp::NotEqual => {
                             let equal = vm.values_equal(
                                 &left.value,
@@ -18729,7 +19952,7 @@ impl CompiledFunction {
                     }
                     .set_copy();
                     vm.register_runtime_value(&value.value);
-                    stack.push(value);
+                    stack.push(ReturnValue::Value(value));
                 }
                 CompiledInstruction::CompoundStore {
                     slot,
@@ -18747,118 +19970,245 @@ impl CompiledFunction {
                     let value = TrackedValue::runtime(vm.eval_binary(
                         left.value,
                         operation,
-                        right.value,
+                        right.into_value()?,
                         env.strict_level,
                         Some(operator),
                     )?);
                     reference.write_tracked(value)?;
                     registered_slots[*slot] = true;
                 }
+                CompiledInstruction::CompoundReference {
+                    operation,
+                    operator,
+                    copy_result,
+                } => {
+                    stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
+                    let right = stack
+                        .pop()
+                        .ok_or_else(|| {
+                            RuntimeError::new("internal compiled compound value missing")
+                        })?
+                        .into_tracked()?;
+                    let target = stack.pop().ok_or_else(|| {
+                        RuntimeError::new("internal compiled compound target missing")
+                    })?;
+                    let expected =
+                        if matches!(operation, BinaryOp::Concat | BinaryOp::NilCoalescing) {
+                            "&"
+                        } else {
+                            "int&"
+                        };
+                    let invalid = |left: TrackedValue| {
+                        RuntimeError::new(format!(
+                        "operator \"{operator}\" left side: got \"{}\", but expected \"{expected}\"!",
+                        Vm::c4v_type_name(left.value.c4v_type())
+                    ))
+                    };
+                    let reference = match target {
+                        ReturnValue::Reference(reference) => reference,
+                        ReturnValue::Value(left) => return Err(invalid(left)),
+                    };
+                    if let Some(left) = reference.resolved_legacy_value() {
+                        return Err(invalid(left));
+                    }
+                    let result = match operation {
+                        BinaryOp::NilCoalescing => right,
+                        BinaryOp::Concat => vm.eval_concat_tracked(
+                            reference.read_tracked()?,
+                            right,
+                            env.strict_level,
+                            operator,
+                        )?,
+                        _ => TrackedValue::runtime(vm.eval_binary(
+                            reference.read()?,
+                            operation,
+                            right.value,
+                            env.strict_level,
+                            Some(operator),
+                        )?),
+                    };
+                    reference.write_tracked(result.clone())?;
+                    stack.push(if *copy_result {
+                        ReturnValue::Value(result.set_copy())
+                    } else {
+                        ReturnValue::Reference(reference)
+                    });
+                }
+                CompiledInstruction::IncrementReference {
+                    delta,
+                    return_old,
+                    copy_result,
+                } => {
+                    stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
+                    let operand = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled counter missing"))?;
+                    let reference = match operand {
+                        ReturnValue::Reference(reference) => reference,
+                        ReturnValue::Value(value) => {
+                            let operator = if *delta > 0 { "++" } else { "--" };
+                            return Err(RuntimeError::new(format!(
+                                "operator \"{operator}\": got \"{}\", but expected \"int&\"!",
+                                Vm::c4v_type_name(value.value.c4v_type())
+                            )));
+                        }
+                    };
+                    let operation = if *delta > 0 { "increment" } else { "decrement" };
+                    let old = Vm::counter_operand(reference.read()?, operation)?;
+                    reference.write(Value::Int(old.wrapping_add(*delta)))?;
+                    stack.push(if *return_old {
+                        ReturnValue::Value(TrackedValue::runtime(Value::Int(old)))
+                    } else if *copy_result {
+                        ReturnValue::Value(reference.read_tracked()?.set_copy())
+                    } else {
+                        ReturnValue::Reference(reference)
+                    });
+                }
                 CompiledInstruction::IncrementSlot { slot, delta } => {
-                    let reference = bindings[*slot].lvalue();
+                    let reference = self.binding(*slot, &mut bindings, vm, env)?.lvalue();
                     let operation = if *delta > 0 { "increment" } else { "decrement" };
                     let old_value = Vm::counter_operand(reference.read()?, operation)?;
                     reference.write(Value::Int(old_value.wrapping_add(*delta)))?;
                     registered_slots[*slot] = true;
                 }
-                CompiledInstruction::IncrementEffectSlot {
-                    argument_count,
-                    delta,
-                    return_old,
-                } => {
-                    let argument_start = stack
-                        .len()
-                        .checked_sub(*argument_count)
-                        .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let _retained_stack = ValueStackReservation::reserve(argument_start)?;
-                    let arguments = stack
-                        .drain(argument_start..)
-                        .map(CallArg::Value)
-                        .collect::<CallArgs>();
-                    #[cfg(test)]
-                    record_call_arg_heap_spill(arguments.spilled());
-                    let function = vm
-                        .host_functions
-                        .get("EffectVar")
-                        .expect("compiled effect-slot host prevalidated");
-                    let caller = env.caller_context();
-                    let arg_values = {
-                        let _parameter_slots = ValueStackReservation::reserve(
-                            function.parameter_count().unwrap_or(3),
-                        )?;
-                        let _guard = CallerContextGuard::enter(Some(caller.clone()));
-                        let prepared_args =
-                            vm.prepare_registered_host_call_args("EffectVar", function, arguments)?;
-                        vm.call_args_to_values(&prepared_args)?.into_vec()
-                    };
-                    let reference = LValueRef::HostPath {
-                        function: function.callback().clone(),
-                        args: arg_values,
-                        caller,
-                        global_call_context_hook: vm
-                            .retain_global_call_context_for_host_paths
-                            .then(|| vm.global_call_context_hook.cloned())
-                            .flatten(),
-                        segments: Vec::new(),
-                        legacy_pin: None,
-                    };
-                    let _operand_slot = ValueStackReservation::reserve(1)?;
-                    let operation = if *delta > 0 { "increment" } else { "decrement" };
-                    let old_value = Vm::counter_operand(reference.read()?, operation)?;
-                    let new_value = old_value.wrapping_add(*delta);
-                    reference.write(Value::Int(new_value))?;
-                    let value = if *return_old {
-                        TrackedValue::runtime(Value::Int(old_value))
-                    } else {
-                        // Prefix AB_Inc1/AB_Dec1 leaves the reference on the
-                        // stack. Materialize it after the host write so an
-                        // invalid EffectVar slot retains the host's nil result.
-                        reference.read_tracked()?
-                    }
-                    .set_copy();
-                    vm.register_runtime_value(&value.value);
-                    stack.push(value);
-                }
                 CompiledInstruction::Call { site } => {
                     let call_site = &self.call_sites[*site];
-                    let name = &call_site.name;
+                    let name = if matches!(call_site.name.as_str(), "inherited" | "_inherited") {
+                        &env.function_name.clone()
+                    } else {
+                        &call_site.name
+                    };
                     let argument_count = call_site.argument_count;
                     let argument_start = stack
                         .len()
                         .checked_sub(argument_count)
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    stack_value_stack.resize_to(stack.len())?;
+                    stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
                     let mut arguments = stack
                         .drain(argument_start..)
-                        .map(CallArg::Value)
+                        .map(|value| match value {
+                            ReturnValue::Value(value) => CallArg::Value(value),
+                            ReturnValue::Reference(reference) => CallArg::Reference(reference),
+                        })
                         .collect::<CallArgs>();
                     stack_value_stack.shrink(argument_count);
                     #[cfg(test)]
                     record_call_arg_heap_spill(arguments.spilled());
-                    let target = &call_targets[*site];
+                    let target = &call_targets[*site].target;
+                    let parameter_limit = match target {
+                        CompiledCallTarget::Host(CompiledHostTarget::Value(function)) => {
+                            function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS)
+                        }
+                        CompiledCallTarget::Host(CompiledHostTarget::Reference(function)) => {
+                            function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS)
+                        }
+                        _ => MAX_CALL_PARAMETERS,
+                    };
+                    arguments.truncate(parameter_limit);
+                    if call_site.forward_rest {
+                        Vm::append_forwarded_args(&mut arguments, env, parameter_limit)?;
+                    }
                     let sweep_cursor = object_reference_sweep_cursor();
                     let result = match target {
-                        CompiledCallTarget::Method { failsafe } => {
+                        CompiledCallTarget::Builtin
+                            if name == "EffectVar" && call_site.return_reference =>
+                        {
+                            vm.effect_slot_from_call_args(arguments, env)
+                        }
+                        CompiledCallTarget::Global { target, failsafe } => {
+                            stack.pop().ok_or_else(|| {
+                                RuntimeError::new("internal compiled global target missing")
+                            })?;
+                            let known = !matches!(target, AstCallTarget::Dynamic);
+                            stack_value_stack.resize_to(
+                                stack.len()
+                                    + assignment_targets.len()
+                                    + 1
+                                    + if known { MAX_CALL_PARAMETERS } else { 0 },
+                            )?;
+                            if !known {
+                                if *failsafe {
+                                    Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)))
+                                } else {
+                                    Err(RuntimeError::new(format!("unknown function '{name}'")))
+                                }
+                            } else {
+                                let _context =
+                                    GlobalCallContextGuard::enter(vm.global_call_context_hook);
+                                let global_vm = vm.engine_global_vm();
+                                let _parameters = (!matches!(target, AstCallTarget::Builtin))
+                                    .then(|| CallParameterOverrideGuard::enter(0));
+                                let caller = Some(env.caller_context());
+                                global_vm.invoke_ast_global_target(
+                                    target.clone(),
+                                    name,
+                                    arguments,
+                                    depth,
+                                    env,
+                                    caller,
+                                )
+                            }
+                        }
+                        CompiledCallTarget::Missing { error } => match error {
+                            Some(message) => Err(RuntimeError::new(message.clone())),
+                            None => Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil))),
+                        },
+                        CompiledCallTarget::Builtin => {
+                            let _parameters =
+                                ValueStackReservation::reserve(if name == "SetLocal" {
+                                    0
+                                } else {
+                                    arguments.len()
+                                })?;
+                            let caller = Some(env.caller_context());
+                            vm.invoke_ast_direct_target(
+                                AstCallTarget::Builtin,
+                                name,
+                                arguments,
+                                depth,
+                                env,
+                                caller,
+                                call_site.return_reference,
+                            )
+                        }
+                        CompiledCallTarget::Method {
+                            failsafe,
+                            reference,
+                        } => {
                             let receiver = stack.pop().ok_or_else(|| {
                                 RuntimeError::new("internal compiled receiver missing")
                             })?;
                             arguments.truncate(MAX_CALL_PARAMETERS);
                             // AB_CALL retains the receiver and ten parameter
                             // slots, including across a nested suspension.
-                            stack_value_stack.resize_to(stack.len() + 1 + MAX_CALL_PARAMETERS)?;
-                            // Value-only methods cannot mutate this environment's
-                            // binding layout. Its existing cells remain shared;
-                            // the interpreter owns reference/slot accessor calls.
-                            vm.invoke_property_call_with_target_call_args_raw(
-                                receiver.value,
-                                name,
-                                arguments,
-                                *failsafe,
-                                false,
-                                &mut env.clone(),
-                                depth,
-                            )
-                            .and_then(ReturnValue::into_tracked)
+                            stack_value_stack.resize_to(
+                                stack.len() + assignment_targets.len() + 1 + MAX_CALL_PARAMETERS,
+                            )?;
+                            if *reference {
+                                vm.invoke_method_reference_call_args_raw(
+                                    receiver.into_value()?,
+                                    name,
+                                    arguments,
+                                    sweep_cursor,
+                                    env,
+                                    depth,
+                                )
+                            } else {
+                                vm.invoke_property_call_with_target_call_args_raw(
+                                    receiver.into_value()?,
+                                    name,
+                                    arguments,
+                                    *failsafe,
+                                    call_site.return_reference,
+                                    env,
+                                    depth,
+                                )
+                            }
+                        }
+                        CompiledCallTarget::Host(CompiledHostTarget::Value(target))
+                            if call_site.return_reference && name == "EffectVar" =>
+                        {
+                            vm.effect_slot_from_registered_host_call_args(target, arguments, env)
                         }
                         CompiledCallTarget::Host(CompiledHostTarget::Value(target)) => vm
                             .invoke_resolved_host_value(
@@ -18868,13 +20218,24 @@ impl CompiledFunction {
                                 depth + 1,
                                 Some(env.caller_context()),
                             )
-                            .map(TrackedValue::runtime),
+                            .map(TrackedValue::runtime)
+                            .map(ReturnValue::Value),
+                        CompiledCallTarget::Host(CompiledHostTarget::Reference(target)) => vm
+                            .invoke_resolved_host_value(
+                                name,
+                                ResolvedHostFunction::Reference(target),
+                                arguments,
+                                depth + 1,
+                                Some(env.caller_context()),
+                            )
+                            .map(TrackedValue::runtime)
+                            .map(ReturnValue::Value),
                         CompiledCallTarget::Script(target) => {
                             let target = ScriptFunctionTarget {
                                 function: target.function.as_ref(),
                                 validate_compiled_source: target.validate_compiled_source,
                             };
-                            vm.invoke_resolved_script_tracked_value(
+                            vm.invoke_resolved_script_raw(
                                 name,
                                 target,
                                 arguments,
@@ -18885,7 +20246,7 @@ impl CompiledFunction {
                         }
                         CompiledCallTarget::LegacyConstant => {
                             debug_assert!(arguments.is_empty());
-                            vm.compiled_named_value(name, env)
+                            vm.compiled_named_value(name, env).map(ReturnValue::Value)
                         }
                     };
                     let value = match result {
@@ -18943,19 +20304,26 @@ impl CompiledFunction {
                                 stack,
                                 registered_slots,
                                 assignment_targets,
+                                iterators,
                                 stack_value_stack,
                                 frame_value_stack,
                                 pending,
                             ));
                         }
                     };
-                    if matches!(target, CompiledCallTarget::Method { .. }) {
-                        stack_value_stack.resize_to(stack.len())?;
+                    if matches!(
+                        target,
+                        CompiledCallTarget::Method { .. } | CompiledCallTarget::Global { .. }
+                    ) {
+                        stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
                     }
                     for retained in &mut stack {
                         retained.clear_object_reference_sweeps(sweep_cursor);
                     }
-                    vm.register_runtime_value(&value.value);
+                    let value = self.call_result(instruction, value)?;
+                    if let ReturnValue::Value(value) = &value {
+                        vm.register_runtime_value(&value.value);
+                    }
                     stack.push(value);
                 }
                 CompiledInstruction::MakeArray(element_count) => {
@@ -18963,8 +20331,14 @@ impl CompiledFunction {
                         .len()
                         .checked_sub(*element_count)
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    let value = TrackedValue::array(stack.drain(start..).collect()).set_copy();
-                    stack.push(value);
+                    let value = TrackedValue::array(
+                        stack
+                            .drain(start..)
+                            .map(ReturnValue::into_tracked)
+                            .collect::<Result<_, _>>()?,
+                    )
+                    .set_copy();
+                    stack.push(ReturnValue::Value(value));
                 }
                 CompiledInstruction::MakeProplist(entry_count) => {
                     let value_count = entry_count.checked_mul(2).ok_or_else(|| {
@@ -18981,23 +20355,76 @@ impl CompiledFunction {
                             let value = values.next().ok_or_else(|| {
                                 RuntimeError::new("internal compiled proplist value missing")
                             })?;
-                            entries.push((key.value, value));
+                            entries.push((key.into_value()?, value.into_tracked()?));
                         }
                         entries
                     };
                     let value = TrackedValue::proplist(entries).set_copy();
-                    stack.push(value);
+                    stack.push(ReturnValue::Value(value));
                 }
                 CompiledInstruction::Pop => {
                     stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
                 }
+                CompiledInstruction::JumpIfNotNil {
+                    target,
+                    materialize,
+                } => {
+                    stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
+                    let condition = stack
+                        .last_mut()
+                        .ok_or_else(|| RuntimeError::new("internal compiled condition missing"))?;
+                    let value = match condition {
+                        ReturnValue::Reference(reference) => reference.read_tracked()?,
+                        ReturnValue::Value(value) => value.clone(),
+                    };
+                    if !matches!(value.value, Value::Nil) {
+                        if *materialize {
+                            *condition = ReturnValue::Value(value);
+                        }
+                        instruction = *target;
+                        continue;
+                    }
+                }
+                CompiledInstruction::JumpIfNil(target) => {
+                    if matches!(
+                        stack
+                            .last()
+                            .ok_or_else(|| RuntimeError::new(
+                                "internal compiled nil guard missing"
+                            ))?
+                            .as_value()?,
+                        Value::Nil
+                    ) {
+                        instruction = *target;
+                        continue;
+                    }
+                }
+                CompiledInstruction::JumpIfGotoBound(target) => {
+                    if env.lvalue("goto").is_some()
+                        || vm.global_variable_cell("goto").is_some()
+                        || vm.global_constant_cell("goto").is_some()
+                    {
+                        instruction = *target;
+                        continue;
+                    }
+                }
+                CompiledInstruction::JumpNotNil(target) => {
+                    let condition = stack
+                        .last()
+                        .ok_or_else(|| RuntimeError::new("internal compiled condition missing"))?;
+                    if !matches!(condition.as_value()?, Value::Nil) {
+                        instruction = *target;
+                        continue;
+                    }
+                    stack.pop();
+                }
                 CompiledInstruction::JumpAnd(target) => {
                     let condition = stack
                         .last()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    if !condition.value.as_bool() {
+                    if !condition.as_value()?.as_bool() {
                         instruction = *target;
                         continue;
                     }
@@ -19007,7 +20434,7 @@ impl CompiledFunction {
                     let condition = stack
                         .last()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    if condition.value.as_bool() {
+                    if condition.as_value()?.as_bool() {
                         instruction = *target;
                         continue;
                     }
@@ -19017,7 +20444,7 @@ impl CompiledFunction {
                     let condition = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    if !condition.value.as_bool() {
+                    if !condition.as_value()?.as_bool() {
                         instruction = *target;
                         continue;
                     }
@@ -19030,9 +20457,75 @@ impl CompiledFunction {
                     let value = stack
                         .pop()
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
-                    return Ok(Some(ControlFlow::Return(ReturnValue::Value(value))));
+                    if let Some(diagnostic) = &mut direct_diagnostic {
+                        diagnostic.returned(&value.as_value()?);
+                    }
+                    return Ok(Some(ControlFlow::Return(value)));
                 }
-                CompiledInstruction::Finish => return Ok(Some(ControlFlow::Normal)),
+                CompiledInstruction::IteratorInit { map } => {
+                    let iterable = stack
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled iterable missing"))?
+                        .into_value()?;
+                    stack_value_stack.resize_to(stack.len() + assignment_targets.len())?;
+                    // AB_FOREACH retains a fixed control prefix, not one C4 slot per item.
+                    let value_stack = ValueStackReservation::reserve(if *map { 3 } else { 2 })?;
+                    let items = match (&iterable, map) {
+                        (Value::Array(values), false) => {
+                            values.iter().cloned().map(|value| (value, None)).collect()
+                        }
+                        (Value::Proplist(entries), true) => entries
+                            .iter()
+                            .map(|(key, value)| (key.clone(), Some(value.clone())))
+                            .collect(),
+                        (other, _) => {
+                            return Err(RuntimeError::new(format!(
+                                "for: {} expected, but got {}!",
+                                if *map { "map" } else { "array" },
+                                other.type_name()
+                            )))
+                        }
+                    };
+                    iterators.push(CompiledIterator {
+                        iterable,
+                        items,
+                        index: 0,
+                        sweep_cursor: object_reference_sweep_cursor(),
+                        value_stack,
+                    });
+                }
+                CompiledInstruction::IteratorNext {
+                    slot,
+                    value_slot,
+                    end,
+                } => {
+                    let iterator = iterators
+                        .last_mut()
+                        .ok_or_else(|| RuntimeError::new("internal compiled iterator missing"))?;
+                    iterator.apply_removals();
+                    let Some((item, value)) = iterator.items.get(iterator.index) else {
+                        instruction = *end;
+                        continue;
+                    };
+                    self.binding(*slot, &mut bindings, vm, env)?
+                        .write_tracked(TrackedValue::runtime(item.clone()))?;
+                    if let (Some(slot), Some(value)) = (value_slot, value) {
+                        self.binding(*slot, &mut bindings, vm, env)?
+                            .write_tracked(TrackedValue::runtime(value.clone()))?;
+                    }
+                    iterator.index += 1;
+                }
+                CompiledInstruction::IteratorEnd => {
+                    iterators
+                        .pop()
+                        .ok_or_else(|| RuntimeError::new("internal compiled iterator missing"))?;
+                }
+                CompiledInstruction::Finish => {
+                    if let Some(diagnostic) = &mut direct_diagnostic {
+                        diagnostic.returned(&Value::Nil);
+                    }
+                    return Ok(Some(ControlFlow::Normal));
+                }
             }
             instruction += 1;
         }
@@ -19053,7 +20546,7 @@ impl CompiledContinuationFrame {
             function,
             compiled,
             call_targets,
-            env,
+            mut env,
             depth,
             caller,
             returns_reference,
@@ -19061,16 +20554,16 @@ impl CompiledContinuationFrame {
             stack,
             registered_slots,
             assignment_targets,
+            mut iterators,
             mut stack_value_stack,
             frame_value_stack,
             pending,
         } = self;
-        if returns_reference {
-            return Err(RuntimeError::new(
-                "internal error: reference continuation reached compiled executor",
-            ));
-        }
+        debug_assert_eq!(returns_reference, function.returns_reference);
         stack_value_stack.attach()?;
+        for iterator in &mut iterators {
+            iterator.value_stack.attach()?;
+        }
         // The original invocation's parameter/function-var reservation is
         // dropped while the continuation is owned by the host. Reacquire the
         // exact frame prefix for this execution slice so nested calls observe
@@ -19078,23 +20571,20 @@ impl CompiledContinuationFrame {
         let _frame_value_stack = ValueStackReservation::reserve(frame_value_stack)?;
         let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
         _object_reference_cells.register_environment(&env, vm);
-        let Some(bindings) = compiled.bindings(&env) else {
-            return Err(RuntimeError::new(
-                "internal error: suspended function bindings are unavailable",
-            ));
-        };
+        let bindings = compiled.bindings(vm, &env);
         let state = CompiledExecutionState {
             instruction,
             stack,
             registered_slots,
             assignment_targets,
+            iterators,
             stack_value_stack,
             pending: Some(pending),
             resume_value,
         };
         match compiled.execute_state(
             vm,
-            &env,
+            &mut env,
             depth,
             function.as_ref(),
             caller,
@@ -19427,6 +20917,7 @@ struct Environment {
     /// DirectExec/eval expression frames are backed by temporary scripts;
     /// ordinary function invocation leaves this false.
     temporary_script: bool,
+    direct_exec_context: Option<DirectExecContinuationContext>,
     /// Dynamic `cthr->Def` presence. Unlike the VM's owning-script identity,
     /// this is cleared by a nil-object DirectExec and `global->`.
     definition_context: bool,
@@ -19492,6 +20983,7 @@ impl Environment {
             function_name: String::new(),
             engine_scope: false,
             temporary_script: false,
+            direct_exec_context: None,
             definition_context: false,
             global_call_context: false,
         })
@@ -20511,9 +22003,9 @@ mod tests {
         check_eq!(engine.call("Ast", &[Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])]).expect("AST call succeeds") => Value::Int(6));
         let profile = crate::execution_profile::snapshot();
 
-        check_eq!(profile.compiled => 1);
-        check_eq!(profile.ast_without_plan => 1);
-        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 1);
+        check_eq!(profile.compiled => 2);
+        check_eq!(profile.ast_without_plan => 0);
+        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 0);
     }
 
     #[test]
@@ -20529,8 +22021,8 @@ mod tests {
         check_eq!(engine.call("Ast", &[Value::Array(vec![Value::Int(1), Value::Int(2)])]).expect("AST call succeeds") => Value::Int(3));
         let profile = crate::execution_profile::snapshot();
 
-        check_eq!(profile.sole_blocker(crate::execution_profile::AstFallbackReason::Foreach) => 1);
-        check_eq!(profile.ranked_sole_blockers() => vec![(crate::execution_profile::AstFallbackReason::Foreach, 1)]);
+        check_eq!(profile.sole_blocker(crate::execution_profile::AstFallbackReason::Foreach) => 0);
+        check_eq!(profile.ranked_sole_blockers() => vec![]);
     }
 
     #[cfg(feature = "execution-profile")]
@@ -20549,8 +22041,9 @@ mod tests {
         let timing = crate::execution_profile::timing_snapshot();
         crate::execution_profile::set_timing_enabled(false);
 
-        assert!(timing.ast_ns > 0, "{timing:?}");
-        check_eq!(timing.ast_sole_blocker_ns(crate::execution_profile::AstFallbackReason::Foreach) => timing.ast_ns);
+        assert!(timing.compiled_ns > 0, "{timing:?}");
+        check_eq!(timing.ast_ns => 0);
+        check_eq!(timing.ast_sole_blocker_ns(crate::execution_profile::AstFallbackReason::Foreach) => 0);
     }
 
     #[test]
@@ -20584,9 +22077,9 @@ mod tests {
         check_eq!(engine.call("Ast", &[Value::Array(vec![Value::Int(0), Value::Int(1), Value::Int(2)])]).expect("AST call succeeds") => Value::Int(2));
         let profile = crate::execution_profile::snapshot();
 
-        check_eq!(profile.compiled => 1);
-        check_eq!(profile.ast_without_plan => 1);
-        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 1);
+        check_eq!(profile.compiled => 2);
+        check_eq!(profile.ast_without_plan => 0);
+        check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 0);
         check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::LoopControl) => 0);
         check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::ClassicFor) => 0);
     }
@@ -20687,7 +22180,7 @@ mod tests {
         check_eq!(engine.call("Compiled", &[]).expect("compiled loop succeeds") => Value::Int(7));
         check_eq!(compiled_function_execution_count() => 1);
         check_eq!(engine.call("Interpreted", &[]).expect("AST loop succeeds") => Value::Int(7));
-        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(compiled_function_execution_count() => 2);
         let observed = observed.lock().expect("stack observation lock");
 
         check_eq!(observed.len() => 2);
@@ -20738,7 +22231,7 @@ mod tests {
         check_eq!(engine.call("Compiled", &[]).expect("compiled assignment succeeds") => Value::Int(7));
         check_eq!(compiled_function_execution_count() => 1);
         check_eq!(engine.call("Interpreted", &[]).expect("AST assignment succeeds") => Value::Int(7));
-        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(compiled_function_execution_count() => 2);
         let observed = observed.lock().expect("stack observation lock");
 
         check_eq!(observed.len() => 2);
@@ -20774,9 +22267,9 @@ mod tests {
             .expect("AST assignment map succeeds");
         check_eq!(ast_locals.get("slot") => locals.get("slot"));
         check_eq!(ast_result => expected.clone());
-        check_eq!(compiled_function_execution_count() => 0);
-        check_eq!(engine.call_with_locals("Probe", &[], &locals).expect("compiled assignment map succeeds").0 => expected);
         check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(engine.call_with_locals("Probe", &[], &locals).expect("compiled assignment map succeeds").0 => expected);
+        check_eq!(compiled_function_execution_count() => 2);
     }
 
     #[test]
@@ -20879,8 +22372,8 @@ mod tests {
 
         check_eq!(compiled => Value::Int(119_227_338));
         check_eq!(interpreted => compiled);
-        // Only the nine Mark callbacks lower inside the AST run.
-        check_eq!(compiled_function_execution_count() => 20);
+        // The second driver and its nine Mark callbacks also lower.
+        check_eq!(compiled_function_execution_count() => 21);
     }
 
     #[test]
@@ -20985,7 +22478,7 @@ mod tests {
         check_eq!(engine.call("Compiled", &[]).expect("compiled loop succeeds") => Value::Int(7));
         check_eq!(compiled_function_execution_count() => 1);
         check_eq!(engine.call("Interpreted", &[]).expect("AST loop succeeds") => Value::Int(7));
-        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(compiled_function_execution_count() => 2);
         let observed = observed.lock().expect("stack observation lock");
 
         check_eq!(observed.len() => 6);
@@ -21192,8 +22685,8 @@ mod tests {
                     .push(VALUE_STACK_SIZE.with(Cell::get));
                 Ok(Value::Int(0))
             });
-            // An unreachable unsupported expression selects the AST without
-            // adding a local slot or executing any additional side effects.
+            // Unreachable short-circuit syntax must also compile without adding
+            // a local slot or executing any additional side effects.
             let fallback = if interpreted {
                 "if (false) { 0 ?? 0; }"
             } else {
@@ -21201,7 +22694,7 @@ mod tests {
             };
             let source = format!("#strict 3\nfunc Probe(target) {{ {fallback} return 1 + target->Pause(2) + Observe(); }}");
             let functions = parse_functions(&source, "suspending method parses");
-            check_eq!(CompiledFunction::compile(&functions["Probe"]).is_none() => interpreted);
+            check!(CompiledFunction::compile(&functions["Probe"]).is_some());
             engine.load_script(&source).expect("method script loads");
             let ScriptCallOutcome::Suspended(suspension) = engine
                 .call_with_continuation("Probe", &[Value::Object(7)])
@@ -21411,8 +22904,676 @@ mod tests {
             .expect("stack-size log lock")
             .clear();
         check_eq!(engine.call("Interpreted", &[]).expect("probe succeeds") => Value::Int(2));
-        check_eq!(compiled_function_execution_count() => 1);
+        check_eq!(compiled_function_execution_count() => 2);
         check_eq!(*observed_stack_sizes.lock().expect("stack-size log lock") => vec![12, 12, 12], "the compiled instruction must retain exactly the AST path's C++ stack shape");
+    }
+
+    #[test]
+    fn bytecode_reference_result_survives_the_callee_frame() {
+        // AB_RETURN preserves a reference from a reference-returning function
+        // (C4AulExec.cpp:1053-1090; C4Value.cpp:67-102).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nlocal data;\nfunc &GetData() { return data; }\n\
+                 func Probe() { GetData() = 9; return data; }",
+            )
+            .expect("reference return script loads");
+        reset_compiled_function_execution_count();
+        let (result, locals) = engine
+            .call_with_locals(
+                "Probe",
+                &[],
+                &HashMap::from([("data".into(), Value::Int(4))]),
+            )
+            .expect("reference return remains writable");
+        check_eq!(result => Value::Int(9));
+        check_eq!(locals.get("data") => Some(&Value::Int(9)));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_reference_return_is_forwarded_through_nested_calls() {
+        // AB_CALL can leave a C4V_pC4Value for the enclosing AB_RETURN
+        // (C4AulExec.cpp:1053-1090; C4Value.cpp:67-102).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc &Identity(&slot) { return slot; }\n\
+             func &Forward(&slot) { return Identity(slot); }\n\
+             func Probe() { var slot = 4; Forward(slot) = 9; return slot; }",
+            )
+            .expect("reference forwarding script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("forwarded reference remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 3);
+    }
+
+    #[test]
+    fn bytecode_effect_increment_uses_the_selected_script_overload() {
+        // A selected script overload supplies the reference consumed by
+        // AB_Inc1 (C4AulExec.cpp:450-454,1095-1140).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script("#strict 3\nlocal value; func &EffectVar(a, b, c) { return value; } func Probe() { value = 4; return ++EffectVar(0, 0, 1); }").expect("effect overload script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("selected effect overload increments") => Value::Int(5));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_unknown_call_is_checked_only_when_reached() {
+        // An unexecuted branch must not change the executor for its enclosing
+        // function (C4AulExec.cpp:995-999,1044-1050).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script("#strict 3\nfunc Probe(fail) { if (fail) Missing(); return 7; }")
+            .expect("unreached call script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[Value::Bool(false)]).expect("unreached call is skipped") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        check!(engine
+            .call("Probe", &[Value::Bool(true)])
+            .expect_err("reached missing call fails")
+            .to_string()
+            .contains("unknown function 'Missing'"));
+    }
+
+    #[test]
+    fn bytecode_missing_binding_is_checked_only_when_reached() {
+        // C4Aul branches jump over unexecuted instructions; lookup failures
+        // must not force a different executor for the whole function
+        // (C4AulExec.cpp:995-999,1044-1050).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script("#strict 3\nfunc Probe() { if (false) missing = 9; return 7; }")
+            .expect("unreached binding script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("unreached binding is skipped") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_constant_argument_does_not_require_a_local_binding() {
+        // Constants are pushed as values before Parse_Params invokes the
+        // destination function (C4AulParse.cpp:2311-2344).
+        let mut engine = crate::engine::Engine::new();
+        engine.register_constant("ANSWER", Value::Int(7));
+        engine.load_script("#strict 3\nfunc Identity(value) { return value; } func Probe() { return Identity(ANSWER); }").expect("constant argument script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("constant argument resolves") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_method_result_can_be_passed_as_a_reference_argument() {
+        // AB_CALL can return a reference retained by Parse_Params for the
+        // next call (C4AulExec.cpp:1216-1305; C4AulParse.cpp:2311-2325).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script("#strict 3\nlocal value; func &Slot() { return value; } func Set(&slot) { slot = 9; } func Probe(target) { Set(target->Slot()); return value; }").expect("method reference argument script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[Value::Object(42)]).expect("method reference reaches callee") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 3);
+    }
+
+    #[test]
+    fn bytecode_nonstrict_goto_returns_before_its_expression_suffix() {
+        // The NONSTRICT goto hack emits AB_RETURN immediately after the
+        // call, before its expression suffix (C4AulParse.cpp:2193-2246).
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("goto", |args| {
+            Ok(args.first().cloned().unwrap_or(Value::Nil))
+        });
+        engine
+            .load_script("func Probe() { goto(41) + 1; return 99; }")
+            .expect("legacy goto script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("goto returns its call result") => Value::Int(41));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_context_expression_returns_the_active_object() {
+        // The public AST's explicit context expression has the same result
+        // as C4Aul's this context function (C4Script.cpp:211-223).
+        let mut function = parse_function(
+            "func Probe() { return 0; }",
+            "context fixture parses",
+            "probe exists",
+        );
+        function.body = vec![Stmt::Return(Some(Expr::This))];
+        let functions = FxHashMap::from_iter([(function.name.clone(), function)]);
+        let vm = test_vm(&functions, &[]).with_this(Value::Object(42));
+        reset_compiled_function_execution_count();
+        check_eq!(vm.call("Probe", &[]).expect("context expression succeeds") => Value::Object(42));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_reference_argument_preserves_a_prefix_increment_result() {
+        // AB_Inc1 leaves its operand reference; Parse_Params keeps it for
+        // a C4V_pC4Value parameter (C4AulExec.cpp:450-454; C4AulParse.cpp:2311-2325).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script("#strict 3\nfunc Set(&slot) { slot = 9; } func Probe() { var value = 1; Set(++value); return value; }").expect("reference expression script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("increment argument remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_parse_error_only_fails_when_its_instruction_is_reached() {
+        // AB_ERR is executable code, not a reason to reject the complete
+        // function before its branches run (C4AulExec.cpp:401-402).
+        let mut function = parse_function(
+            "#strict 3\nfunc Probe(fail) { if (fail) return 1; return 7; }",
+            "error fixture parses",
+            "probe exists",
+        );
+        let Stmt::If { then_branch, .. } = &mut function.body[0] else {
+            panic!("conditional fixture expected");
+        };
+        *then_branch = vec![Stmt::ParseError {
+            message: "broken suffix".into(),
+            line: 2,
+            column: 3,
+        }];
+        let functions = FxHashMap::from_iter([(function.name.clone(), function)]);
+        let vm = test_vm(&functions, &[]);
+        reset_compiled_function_execution_count();
+        check_eq!(vm.call("Probe", &[Value::Bool(false)]).expect("unreached error is skipped") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+        check!(vm
+            .call("Probe", &[Value::Bool(true)])
+            .expect_err("reached error fails")
+            .to_string()
+            .contains("parse error at 2:3: broken suffix"));
+    }
+
+    #[test]
+    fn bytecode_non_nil_value_coalescing_assignment_skips_reference_validation() {
+        // AB_NilCoalescingIt skips AB_Set for a non-nil value, even when it
+        // is not a reference (C4AulExec.cpp:849-865).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script("#strict 3\nfunc Probe() { return !0 ??= 7; }")
+            .expect("value coalescing script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("non-nil skips reference validation") => Value::Bool(true));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_prefix_change_remains_an_assignment_target() {
+        // AB_Inc1 leaves the changed reference for the following changer
+        // opcode (C4AulExec.cpp:450-460).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script("#strict 3\nfunc Probe() { var value = 1; ++value += 5; return value; }")
+            .expect("prefix target script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("prefix result remains writable") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_effect_assignment_writes_the_native_slot() {
+        // AB_Set retains the EffectVar reference while evaluating its RHS
+        // (C4Script.cpp:5571-5578; C4AulExec.cpp:858-879).
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(4));
+        let native_slot = slot.clone();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("EffectVar", move |args| {
+            let mut value = native_slot.lock().expect("effect fixture lock");
+            if let Some(Value::Int(replacement)) = args.get(3) {
+                *value = *replacement;
+            }
+            Ok(Value::Int(*value))
+        });
+        engine
+            .load_script(
+                "#strict 3\nfunc Probe() { EffectVar(0, 0, 1) += 3; return EffectVar(0, 0, 1); }",
+            )
+            .expect("effect assignment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("effect slot is writable") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_legacy_condition_keeps_the_first_reference_through_surplus_arguments() {
+        // Parse_Params(1) retains the first reference until AB_STACK drops
+        // the surplus arguments (C4AulParse.cpp:2311-2344,2492-2496).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script("#strict\nfunc Probe() { var value = 0; if (value, value = 1) return 7; return 0; }").expect("legacy condition script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("condition reads the retained reference") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_property_read_accepts_a_computed_receiver() {
+        // AB_MAPA_V reads the evaluated receiver rather than requiring a
+        // named local (C4AulExec.cpp:952-969).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script("#strict 3\nfunc Make() { return { value = 7 }; } func Probe() { return Make().value; }").expect("computed property script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("computed property reads") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_safe_navigation_skips_the_entire_remaining_suffix() {
+        // AB_JUMPNIL skips every suffix operand until the final AB_DEREF
+        // (C4AulParse.cpp:3105-3129).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script("#strict 3\nfunc Probe(target) { var calls = 0; var result = target?[++calls].key; return [result, calls]; }").expect("safe navigation script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[Value::Nil]).expect("nil skips the suffix") => Value::Array(vec![Value::Nil, Value::Int(0)]));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_optional_missing_call_evaluates_explicit_arguments() {
+        // An unresolved failsafe name emits its explicit operands followed
+        // by nil, without calling a target (C4AulParse.cpp:3215-3231).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script("#strict 2\nfunc Probe() { var calls = 0; var result = 0->~Missing(++calls); return [result, calls]; }").expect("optional script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("optional missing call succeeds") => Value::Array(vec![Value::Nil, Value::Int(1)]));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_global_call_uses_the_engine_owner_without_object_context() {
+        // AB_CALLGLOBAL selects the engine owner and a nil object target
+        // (C4AulExec.cpp:1216-1305).
+        let object_functions = parse_functions(
+            "#strict 3\nfunc Pick() { return 99; } func Probe() { return global->Pick(); }",
+            "object script parses",
+        );
+        let global_functions = parse_functions(
+            "#strict 3\nglobal func Pick() { return [7, this()]; }",
+            "global script parses",
+        );
+        let declarations = Vec::new();
+        let vm = test_vm(&object_functions, &declarations)
+            .with_optional_globals(Some(&global_functions))
+            .with_this(Value::Object(42));
+        reset_compiled_function_execution_count();
+        check_eq!(vm.call("Probe", &[]).expect("global call selects the engine") => Value::Array(vec![Value::Int(7), Value::Nil]));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_inherited_calls_follow_the_retained_owner_chain() {
+        // inherited selects Fn->OwnerOverloaded rather than resolving the
+        // current overload again (C4AulParse.cpp:2775-2798).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script("#strict 2\nfunc Probe(value) { return value + 1; }")
+            .expect("base loads");
+        engine
+            .load_script("#strict 2\nfunc Probe(value) { return inherited(value) + 10; }")
+            .expect("override loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[Value::Int(4)]).expect("inherited selects the base") => Value::Int(15));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_forwarded_arguments_keep_the_unnamed_parameter_reference() {
+        // Parse_Params emits AB_PARN_R for the unnamed tail, so a reference
+        // parameter can write through a forwarded argument (C4AulParse.cpp:2293-2306).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nfunc Set(&slot) { slot = 9; }\nfunc Forward(named) { Set(...); return Par(1); }\nfunc Probe() { return Forward(4, 7); }",
+        ).expect("forwarding script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("forwarded parameter remains live") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 3);
+    }
+
+    #[test]
+    fn bytecode_special_builtins_access_the_active_call_frame() {
+        // FnPar reads the ten-slot C4AulParSet; FnSetLocal updates the
+        // active object's local list (C4AulExec.cpp:404-409; C4Script.cpp:3409-3425).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nfunc Probe() { SetLocal(1, Par(1)); SetGlobal(2, Local(1)); return [Global(2), this()]; }",
+        ).expect("context builtin script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[Value::Int(4), Value::Int(7)]).expect("builtins preserve the frame") => Value::Array(vec![Value::Int(7), Value::Nil]));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_method_slot_assignment_updates_the_selected_object() {
+        // AB_CALL preserves the selected function's reference result
+        // (C4AulExec.cpp:1216-1305; C4AulParse.cpp:2293-2344).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nlocal value; func &Slot() { return value; }\nfunc Probe(target) { target->Slot() = 7; return value; }",
+        ).expect("method slot script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[Value::Object(42)]).expect("method reference remains writable") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_slot_assignments_preserve_frame_and_object_storage() {
+        // FnVar addresses the call frame; FnLocal addresses the active object
+        // (C4Script.cpp:3391-3396,3417-3425).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nfunc Probe() { Var(0) = 4; Local(2) = 7; Var(0) += Local(2); return [Var(0), Local(2)]; }",
+        ).expect("slot assignment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("slot assignments remain live") => Value::Array(vec![Value::Int(11), Value::Int(7)]));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_effect_slot_return_keeps_the_native_reference() {
+        // FnEffectVar exposes the effect's live C4Value slot, so a func &
+        // result remains writable after AB_RETURN (C4Script.cpp:5571-5578;
+        // C4AulParse.cpp:2293-2344).
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(4));
+        let native_slot = slot.clone();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("EffectVar", move |args| {
+            let mut value = native_slot.lock().expect("effect fixture lock");
+            if let Some(Value::Int(replacement)) = args.get(3) {
+                *value = *replacement;
+            }
+            Ok(Value::Int(*value))
+        });
+        engine
+            .load_script(
+                "#strict 2\nfunc &Slot() { return EffectVar(0, 0, 1); }\n\
+             func Probe() { Slot() = 9; return Slot(); }",
+            )
+            .expect("native reference script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("native reference remains writable") => Value::Int(9));
+        check_eq!(*slot.lock().expect("effect fixture lock") => 9);
+        check_eq!(compiled_function_execution_count() => 3);
+    }
+
+    #[test]
+    fn bytecode_foreach_keeps_iteration_order_through_continue_and_break() {
+        // AB_FOREACH_NEXT advances the retained collection cursor, while
+        // loop controls jump to the next item or cleanup (C4AulExec.cpp:1135-1210).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nfunc Probe() { var result = 0; for (var item in [1, 2, 3, 4]) { if (item == 2) continue; result = result * 10 + item; if (item == 3) break; } return result; }",
+        ).expect("foreach script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("foreach controls preserve order") => Value::Int(13));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_array_append_grows_before_the_rhs_runs() {
+        // AB_ARRAY_APPEND inserts the nil slot before the assignment RHS
+        // (C4AulExec.cpp:971-981).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 3\nfunc Probe() { var items = []; items[] = items == []; return items; }",
+            )
+            .expect("array append script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("array append succeeds") => Value::Array(vec![Value::Bool(false)]));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_nil_assignment_skips_a_non_nil_zero() {
+        // AB_NilCoalescingIt tests the type, not truthiness, before AB_Set
+        // (C4AulExec.cpp:849-856).
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("Mark", move |_| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Value::Int(9))
+        });
+        engine.load_script(
+            "#strict 3\nfunc Probe() { var slot = 0; var empty; slot ??= Mark(); empty ??= 8; return [slot, empty]; }",
+        ).expect("nil assignment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("nil assignment succeeds") => Value::Array(vec![Value::Int(0), Value::Int(8)]));
+        check_eq!(calls.load(std::sync::atomic::Ordering::Relaxed) => 0);
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_nil_coalescing_returns_the_selected_reference() {
+        // AB_NilCoalescing skips its RHS only for a non-nil left operand
+        // (C4AulExec.cpp:1309-1320); the selected RHS can remain a reference.
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 3\nfunc &Pick(&left, &right) { return left ?? right; }\n\
+             func Probe() { var left = nil; var right = 4; Pick(left, right) = 9; return right; }",
+            )
+            .expect("nil coalescing script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("selected reference remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_concat_assignment_preserves_nested_array_identity() {
+        // AB_ConcatIt copies the appended entries through C4Value::Set
+        // (C4AulExec.cpp:594-657).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nfunc Probe() { var nested = [1]; var joined = [nested]; joined ..= [nested]; return joined[0] == joined[1]; }",
+        ).expect("concatenation assignment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("concatenation assignment preserves identity") => Value::Bool(true));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_concatenation_preserves_nested_array_identity() {
+        // AB_Concat copies array entries through C4Value::Set
+        // (C4AulExec.cpp:594-657).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nfunc Probe() { var nested = [1]; var left = [nested]; var joined = left .. [nested]; return joined[0] == joined[1]; }",
+        ).expect("concatenation script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("concatenation preserves identity") => Value::Bool(true));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_compound_assignment_returns_the_indexed_reference() {
+        // AB_Inc evaluates the RHS with the destination reference retained
+        // and leaves that reference as the result (C4AulExec.cpp:786-803).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc &Add(&items, index) { return items[index] += 2; }\n\
+             func Probe() { var items = [4]; Add(items, 0) = 9; return items[0]; }",
+            )
+            .expect("indexed compound assignment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("compound assignment result remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_prefix_increment_returns_the_indexed_reference() {
+        // AB_Inc1 modifies and retains its reference operand; AB_RETURN does
+        // not dereference a func & result (C4AulExec.cpp:450-458).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc &Increment(&items, index) { return ++items[index]; }\n\
+             func Probe() { var items = [4]; Increment(items, 0) = 9; return items[0]; }",
+            )
+            .expect("indexed increment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("increment result remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_named_variable_builtin_retains_the_function_local() {
+        // FnVarN resolves the immediate caller's VarNamed cell
+        // (C4Script.cpp:4577-4588).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc Probe() { var count = 4; VarN(\"count\") = 9; return count; }",
+            )
+            .expect("named variable script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("named variable remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_dynamic_index_read_does_not_grow_the_array() {
+        // AB_ARRAYA_V reads an absent positive index without inserting a slot
+        // (C4AulExec.cpp:916-950).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 3\nfunc Probe(index) { var items = []; var value = items[index]; return [value, items]; }",
+        ).expect("dynamic index script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[Value::Int(3)]).expect("dynamic index read succeeds") => Value::Array(vec![Value::Nil, Value::Array(vec![])]));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_index_argument_updates_the_callers_array() {
+        // Parse_Params preserves array element references for an & parameter
+        // (C4AulParse.cpp:2311-2344).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc Set(&slot) { slot = 9; }\n\
+             func Probe() { var items = [4]; Set(items[0]); return items[0]; }",
+            )
+            .expect("indexed argument script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("indexed argument remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_property_assignment_writes_the_selected_entry() {
+        // AB_MAPA_R selects the entry before AB_Set consumes the RHS
+        // (C4AulExec.cpp:858-865,952-969; C4Value.cpp:67-102).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 3\nfunc Probe() { var items = {value = 4}; items.value = 9; return items.value; }",
+        ).expect("property assignment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("property assignment succeeds") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_index_assignment_writes_the_selected_slot() {
+        // AB_Set writes through its already evaluated left operand
+        // (C4AulExec.cpp:858-865,952-969; C4Value.cpp:67-102).
+        let mut engine = crate::engine::Engine::new();
+        engine.load_script(
+            "#strict 2\nfunc Probe() { var items = [4]; var index = 0; items[index] = 9; return items[0]; }",
+        ).expect("indexed assignment script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("indexed assignment succeeds") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_property_return_retains_the_map_entry() {
+        // AB_MAPA_R retains the selected entry through AB_RETURN
+        // (C4Value.cpp:185-227; C4AulExec.cpp:1053-1090).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 3\nfunc &Entry(&items) { return items.value; }\n\
+             func Probe() { var items = {value = 4}; Entry(items) = 9; return items.value; }",
+            )
+            .expect("property reference script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("property reference remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_dynamic_index_return_retains_the_array_slot() {
+        // AB_ARRAYA_R keeps the selected array element as a reference across
+        // AB_RETURN (C4Value.cpp:185-227; C4AulExec.cpp:1053-1090).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc &At(&items, index) { return items[index]; }\n\
+             func Probe() { var items = [4]; At(items, 0) = 9; return items[0]; }",
+            )
+            .expect("indexed reference script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("indexed reference remains writable") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn bytecode_native_reference_argument_updates_the_script_local() {
+        // Native C4V_pC4Value parameters retain the caller's slot through
+        // conversion (C4Value.cpp:488-620).
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_reference_function("Set", [0], |args| {
+            assert!(args[0].write(Value::Int(9))?);
+            Ok(Value::Nil)
+        });
+        engine
+            .load_script("func Probe() { var value = 1; Set(value); return value; }")
+            .expect("native reference script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("native call succeeds") => Value::Int(9));
+        check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn bytecode_call_retains_a_reference_while_later_arguments_mutate_it() {
+        // Parse_Params evaluates left-to-right and retains reference slots
+        // until AB_CALL (C4AulParse.cpp:2311-2344).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc Add(&slot, amount) { slot += amount; return slot; }\n\
+             func Mutate(&slot) { slot = 5; return 2; }\n\
+             func Probe() { var slot = 1; Add(slot, Mutate(slot)); return slot; }",
+            )
+            .expect("nested reference script loads");
+        reset_compiled_function_execution_count();
+        check_eq!(engine.call("Probe", &[]).expect("nested call succeeds") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 3);
+    }
+
+    #[test]
+    fn bytecode_reference_parameter_writes_the_callers_cell() {
+        // A C4V_pC4Value parameter retains its caller's reference through
+        // parameter conversion (C4AulExec.cpp:1364-1397; C4Value.cpp:488-620).
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script(
+                "#strict 2\nfunc Add(&value) { value += 3; return value; }\n\
+                 func Probe() { var value = 4; Add(value); return value; }",
+            )
+            .expect("reference parameter script loads");
+        reset_compiled_function_execution_count();
+        let (result, cells) = engine
+            .call_with_ref_args("Add", &[Value::Int(4)])
+            .expect("call succeeds");
+        check_eq!(result => Value::Int(7));
+        check_eq!(cells[0] => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
@@ -21615,10 +23776,12 @@ mod tests {
             .body = replacement.body;
 
         reset_compiled_source_validations();
+        reset_compiled_function_execution_count();
         let value = test_vm(&functions, &var_decls)
             .call_pinned_args(&functions["Probe"], Vec::new())
             .expect("mutated function executes");
         check_eq!(value => Value::Int(2));
+        check_eq!(compiled_function_execution_count() => 1);
         check_eq!(compiled_source_validations() => 1);
     }
 
@@ -21784,7 +23947,21 @@ mod tests {
         check_eq!(compiled.0 => ast.0);
         check_eq!(compiled.1 => ast.1);
         check_eq!(compiled.2 => 1);
-        check_eq!(ast.2 => 0);
+        check_eq!(ast.2 => 1);
+    }
+
+    #[test]
+    fn bytecode_unreached_array_does_not_consume_the_value_stack() {
+        // PushValue checks the running stack, not the largest static branch
+        // (C4AulExec.cpp:179-212).
+        let elements = std::iter::repeat_n("0", MAX_VALUE_STACK + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        let source =
+            format!("#strict 3\nfunc Probe() {{ if (false) return [{elements}]; return 7; }}");
+        reset_compiled_function_execution_count();
+        check_eq!(execute_script(&source, "Probe", &[]).expect("unreached branch is free") => Value::Int(7));
+        check_eq!(compiled_function_execution_count() => 1);
     }
 
     #[test]
@@ -21857,7 +24034,7 @@ mod tests {
         check_eq!(compiled.0 => ast.0);
         check_eq!(compiled.1 => ast.1);
         check_eq!(compiled.2 => 1);
-        check_eq!(ast.2 => 0);
+        check_eq!(ast.2 => 1);
     }
 
     #[test]
@@ -22346,6 +24523,20 @@ mod tests {
                 &[Value::String(
                     c4_string_from_bytes(b"1//comment\r+1").into()
                 )]; expect "a carriage return ends a C++ line comment" => Value::Int(2));
+    }
+
+    #[test]
+    fn bytecode_direct_exec_updates_live_local_cells() {
+        // DirectExec parses a temporary function and executes its bytecode
+        // in the supplied object context (C4AulExec.cpp:1657-1699).
+        let functions = FxHashMap::default();
+        let declarations = Vec::new();
+        let cells = LocalCells::from_local_vars(&HashMap::new());
+        let vm = test_vm(&functions, &declarations);
+        reset_compiled_function_execution_count();
+        check_eq!(vm.direct_exec_with_cells("Local(0) = 7", &cells, Some(3)).expect("expression runs") => Value::Int(7));
+        check_eq!(vm.direct_exec_with_cells("++Local(0)", &cells, Some(3)).expect("live cell increments") => Value::Int(8));
+        check_eq!(compiled_function_execution_count() => 2);
     }
 
     #[test]

@@ -748,6 +748,34 @@ mod tests {
     }
 
     #[test]
+    fn nested_value_arguments_resolve_each_source_call_once() {
+        // C4Aul emits one AB_FUNC per source call even inside array operands
+        // (C4AulParse.cpp:2808-2832; C4AulExec.cpp:866-885).
+        let mut engine = crate::Engine::new();
+        engine
+            .load_script(
+                "#strict 3\nglobal func Id(value) { return value; }\n\
+             global func Probe() { return Id([Id([Id([Id(7)])])]); }",
+            )
+            .expect("nested value arguments parse");
+        reset();
+        let expected = (0..3).fold(crate::Value::Int(7), |value, _| {
+            crate::Value::Array(vec![value])
+        });
+        assert_eq!(
+            engine.call("Probe", &[]).expect("nested calls run"),
+            expected
+        );
+        assert_eq!(
+            snapshot()
+                .family_at(LookupFamily::ScriptFunction, LookupSite::CompiledPrelude)
+                .lookups,
+            4,
+            "reference and value argument paths must share identical value-only expressions"
+        );
+    }
+
+    #[test]
     fn one_reference_query_resolves_its_callee_once() {
         // `direct_value_call_has_materialized_result` asked
         // `call_expression_returns_reference` whether the result is a
@@ -762,6 +790,7 @@ mod tests {
         let engine = interpreted_driver_engine();
         const ITERATIONS: i32 = 32;
         reset();
+        crate::execution_profile::reset();
         let (_, _) = engine
             .call_with_ref_args(
                 "Interpreted",
@@ -774,7 +803,10 @@ mod tests {
             .lookups;
         let budget = u64::try_from(ITERATIONS).expect("iteration count fits u64") * 2;
 
-        assert!(query > 0, "the interpreted path must reach the predicate");
+        assert!(
+            query > 0 || crate::execution_profile::snapshot().compiled > 0,
+            "the driver must execute reference queries or its bytecode plan"
+        );
         assert!(
             query <= budget,
             "a reference query resolved the callee {query} times over {ITERATIONS} calls, \

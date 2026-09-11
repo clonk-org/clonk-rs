@@ -1771,6 +1771,35 @@ awk '
 # stateful, so lift the complete production method bodies used by the bounded
 # runtime-operation table. The scaffold supplies only allocation/reference
 # counters, object/string stubs for unreachable switch arms, and JSON output.
+# Keep the complete production ??= branch decision. The runtime scaffold below
+# supplies real C4Value references and counts whether the RHS is reached.
+awk '
+  /^[[:space:]]*case AB_NilCoalescingIt:/ { p = 1 }
+  p && /^[[:space:]]*case AB_Set:/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/script_nil_coalescing_it.inc"
+
+# Resolve the ordinary function owner before incrementing its returned reference.
+awk '
+  /^C4AulFunc \*C4AulScript::GetFuncRecursive\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Aul.cpp" > "$gen/script_get_func_recursive.inc"
+awk '
+  /^[[:space:]]*template<bool asReference = false, bool allowAny = true>/ { p = 1 }
+  p && /^[[:space:]]*C4AulBCC \*Call\(/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/script_check_operator_parameters.inc"
+awk '
+  /^[[:space:]]*case AB_Inc1:/ { p = 1 }
+  p && /^[[:space:]]*case AB_Dec1:/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4AulExec.cpp" > "$gen/script_increment_reference.inc"
+
 awk '
   /^C4Value::~C4Value\(\)$/ ||
   /^C4Value &C4Value::operator=\(const C4Value &nValue\)$/ ||
@@ -1778,6 +1807,8 @@ awk '
   /^void C4Value::DelDataRef\(/ ||
   /^void C4Value::Set\(C4V_Data nData, C4V_Type nType\)$/ ||
   /^void C4Value::Set0\(\)$/ ||
+  /^void C4Value::HintType\(C4V_Type type\)$/ ||
+  /^const char \*C4Value::GetTypeInfo\(\)$/ ||
   /^void C4Value::CheckRemoveFromMap\(\)$/ ||
   /^void C4Value::Move\(C4Value \*nValue\)$/ ||
   /^void C4Value::GetContainerElement\(/ ||
@@ -1788,7 +1819,7 @@ awk '
   /^void C4Value::DelRef\(/ { p = 1; ++found }
   p { print }
   p && /^}$/ { p = 0 }
-  END { if (found != 14) exit 1 }
+  END { if (found != 16) exit 1 }
 ' "$src/C4Value.cpp" > "$gen/c4value_runtime_core.inc"
 
 # Inline mutation/dispatch entry points used by the stateful conversion rows.
@@ -1796,10 +1827,11 @@ awk '
 awk '
   /^\tvoid SetObject\(C4Object \*Obj\)/ { print; ++found; next }
   /^\tvoid Deref\(\)/ { print; ++found; next }
+  /^\texplicit operator bool\(\) const \{/ { print; ++found; next }
   /^\tinline bool ConvertTo\(/ { p = 1; ++found }
   p { print }
   p && /^\t}$/ { p = 0 }
-  END { if (found != 3) exit 1 }
+  END { if (found != 4) exit 1 }
 ' "$src/C4Value.h" > "$gen/c4value_runtime_inline.inc"
 
 # Lift the complete conversion dispatch implementation and table. The
