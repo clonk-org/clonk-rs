@@ -6532,6 +6532,91 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
+    // The real owner lookup selects a script overload before AB_Inc1 mutates
+    // its reference result (C4Aul.cpp:285-293; C4AulExec.cpp:450-454).
+    {
+        let section_name = "script_reference_call_increment";
+        let section = golden[section_name]
+            .as_array()
+            .expect("reference call cases come from C++");
+        for (index, case) in section.iter().enumerate() {
+            let native = std::sync::Arc::new(std::sync::Mutex::new(40));
+            let native_slot = native.clone();
+            let mut script = clonk_script::Engine::new();
+            script.register_host_function("EffectVar", move |args| {
+                let mut value = native_slot.lock().expect("effect oracle slot lock");
+                if let Some(ScriptValue::Int(replacement)) = args.get(3) {
+                    *value = *replacement;
+                }
+                Ok(ScriptValue::Int(*value))
+            });
+            let overload = match case["case"].as_str().expect("reference call case name") {
+                "script_overload" => "func &EffectVar(a, b, c) { return value; }",
+                "engine_native" => "",
+                other => panic!("unknown reference call case `{other}`"),
+            };
+            script.load_script(&format!("#strict 3\nlocal value; {overload} func Probe() {{ value = 4; var result = ++EffectVar(0, 0, 1); return [result, value]; }}")).expect("reference call oracle script loads");
+            let ScriptValue::Array(result) = script
+                .call("Probe", &[])
+                .expect("reference increment executes")
+            else {
+                panic!("reference oracle returns its slots");
+            };
+            for (field, actual) in [
+                ("result", c4value_scalar_payload(&result[0])),
+                ("script_slot", c4value_scalar_payload(&result[1])),
+                (
+                    "native_slot",
+                    i64::from(*native.lock().expect("effect oracle slot lock")),
+                ),
+            ] {
+                expect_eq(section_name, index, field, i(case, field), actual);
+            }
+        }
+    }
+
+    // AB_NilCoalescingIt branches on the dereferenced type before reaching
+    // the RHS and AB_Set (C4AulExec.cpp:849-865). Run the whole script expression
+    // so an eager RHS cannot pass merely by preserving the destination value.
+    {
+        let section_name = "script_nil_coalescing_assignment";
+        let section = golden[section_name]
+            .as_array()
+            .expect("script nil assignment cases come from the C++ oracle");
+        for (index, case) in section.iter().enumerate() {
+            let input = match case["case"].as_str().expect("nil assignment case name") {
+                "nil_evaluates_rhs" => ScriptValue::Nil,
+                "zero_int_skips_rhs" => ScriptValue::Int(0),
+                "false_bool_skips_rhs" => ScriptValue::Bool(false),
+                "nonzero_int_skips_rhs" => ScriptValue::Int(5),
+                other => panic!("unknown script nil assignment case `{other}`"),
+            };
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+            let observed = calls.clone();
+            let mut script = clonk_script::Engine::new();
+            script.register_host_function("Mark", move |_| {
+                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(ScriptValue::Int(7))
+            });
+            script
+                .load_script("#strict 3\nfunc Probe(value) { value ??= Mark(); return value; }")
+                .expect("nil assignment oracle script loads");
+            let result = script
+                .call("Probe", &[input])
+                .expect("nil assignment executes");
+            for (field, actual) in [
+                ("type", result.c4v_type() as i64),
+                ("value", c4value_scalar_payload(&result)),
+                (
+                    "rhs_calls",
+                    calls.load(std::sync::atomic::Ordering::Relaxed),
+                ),
+            ] {
+                expect_eq(section_name, index, field, i(case, field), actual);
+            }
+        }
+    }
+
     // 0x. Stateful array operations preserve old element references across
     //     growth, distinguish value reads from mutable indexing, clamp negative
     //     indices and report native index failures without mutating the array

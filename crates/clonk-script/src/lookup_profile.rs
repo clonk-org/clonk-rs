@@ -95,9 +95,6 @@ pub enum LookupSite {
     /// The compiled executor's per-invocation prelude, which resolves every
     /// call site in a function body each time the function is entered.
     CompiledPrelude,
-    /// The AST interpreter resolving a call expression's callee, per executed
-    /// call.
-    AstCall,
     /// The VM's generic name dispatch, which walks own script functions,
     /// engine globals, host functions and host reference functions in
     /// selection order. This is the path a host entry point takes when the
@@ -107,10 +104,6 @@ pub enum LookupSite {
     /// The `->` and `Call` dispatch path, which resolves a named method
     /// against the target's own and global functions per executed call.
     ObjectCall,
-    /// The static "does this call return a reference?" predicate the
-    /// interpreter asks before evaluating an expression. It resolves a name
-    /// only to inspect the signature and throws the answer away.
-    ReferenceQuery,
     /// Anything not covered above. A large share here means the interesting
     /// path is still unattributed, not that it is cheap.
     Unattributed,
@@ -118,23 +111,19 @@ pub enum LookupSite {
 
 impl LookupSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 4] = [
         Self::CompiledPrelude,
-        Self::AstCall,
         Self::GenericDispatch,
         Self::ObjectCall,
-        Self::ReferenceQuery,
         Self::Unattributed,
     ];
 
     const fn index(self) -> usize {
         match self {
             Self::CompiledPrelude => 0,
-            Self::AstCall => 1,
-            Self::GenericDispatch => 2,
-            Self::ObjectCall => 3,
-            Self::ReferenceQuery => 4,
-            Self::Unattributed => 5,
+            Self::GenericDispatch => 1,
+            Self::ObjectCall => 2,
+            Self::Unattributed => 3,
         }
     }
 
@@ -142,10 +131,8 @@ impl LookupSite {
     pub const fn label(self) -> &'static str {
         match self {
             Self::CompiledPrelude => "compiled_prelude",
-            Self::AstCall => "ast_call",
             Self::GenericDispatch => "generic_dispatch",
             Self::ObjectCall => "object_call",
-            Self::ReferenceQuery => "reference_query",
             Self::Unattributed => "unattributed",
         }
     }
@@ -519,7 +506,7 @@ mod tests {
         reset();
         record(LookupFamily::ScriptFunction, "Before");
         {
-            let _span = enter_site(LookupSite::AstCall);
+            let _span = enter_site(LookupSite::ObjectCall);
             record(LookupFamily::ScriptFunction, "Inside");
         }
         record(LookupFamily::ScriptFunction, "After");
@@ -527,7 +514,7 @@ mod tests {
 
         assert_eq!(
             profile
-                .family_at(LookupFamily::ScriptFunction, LookupSite::AstCall)
+                .family_at(LookupFamily::ScriptFunction, LookupSite::ObjectCall)
                 .lookups,
             1,
             "only the guarded probe belongs to the span"
@@ -606,9 +593,8 @@ mod tests {
         reset();
     }
 
-    /// A driver the compiled executor refuses (a reference parameter), so its
-    /// body runs on the AST path where the reference-returning predicate lives.
-    fn interpreted_driver_engine() -> crate::Engine {
+    /// Reference-parameter calls share their pre-resolved callee across loop iterations.
+    fn reference_driver_engine() -> crate::Engine {
         let mut engine = crate::Engine::new();
         engine
             .load_script(
@@ -695,11 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reference_query_does_not_probe_the_host_tables_for_an_ordinary_name() {
-        // Only seven builtin names (`Var`, `Par`, `LocalN`, …) can make the
-        // host tables decide whether a call yields a reference. The predicate
-        // probed them for every other name too, before the cheap name test
-        // that is the only thing making the answer relevant.
+    fn bytecode_reference_argument_calls_resolve_host_once() {
         let mut engine = crate::Engine::new();
         engine.register_host_function("HostDouble", |args: &[crate::Value]| {
             let value = args.first().and_then(crate::Value::as_c4_int).unwrap_or(0);
@@ -730,38 +712,48 @@ mod tests {
             .expect("interpreted driver runs");
         let profile = snapshot();
         let host = profile
-            .family_at(LookupFamily::HostFunction, LookupSite::ReferenceQuery)
+            .family_at(LookupFamily::HostFunction, LookupSite::CompiledPrelude)
             .lookups;
-        let budget = u64::try_from(ITERATIONS).expect("iteration count fits u64");
-
-        // One probe per call survives, and it is not waste: deciding whether
-        // the result is *materialized* genuinely needs to know a host function
-        // exists. The two that asked whether the result is a *reference* did
-        // not — `HostDouble` is not one of the seven builtins whose
-        // reference-ness a host registration can change.
-        assert!(
-            host <= budget,
-            "a reference query walked the host tables {host} times over {ITERATIONS} calls, \
-             over the budget of {budget}; it was 3 per call before the name test moved first:\
-             \n{profile}"
+        assert_eq!(
+            host, 1,
+            "one retained native target serves every iteration: {profile}"
         );
     }
 
     #[test]
-    fn one_reference_query_resolves_its_callee_once() {
-        // `direct_value_call_has_materialized_result` asked
-        // `call_expression_returns_reference` whether the result is a
-        // reference and then resolved the same callee again to decide whether
-        // it is materialized — two walks of the same tables to answer one
-        // question about one call site.
-        //
-        // The remaining probe per call belongs to `set_no_ref_keeps_reference`
-        // on a separate evaluator entry point. Sharing it would mean threading
-        // a resolution between two entry points that encode C++'s SetNoRef
-        // decision, so it is deliberately left to its own change.
-        let engine = interpreted_driver_engine();
+    fn nested_value_arguments_resolve_each_source_call_once() {
+        // C4Aul emits one AB_FUNC per source call even inside array operands
+        // (C4AulParse.cpp:2808-2832; C4AulExec.cpp:866-885).
+        let mut engine = crate::Engine::new();
+        engine
+            .load_script(
+                "#strict 3\nglobal func Id(value) { return value; }\n\
+             global func Probe() { return Id([Id([Id([Id(7)])])]); }",
+            )
+            .expect("nested value arguments parse");
+        reset();
+        let expected = (0..3).fold(crate::Value::Int(7), |value, _| {
+            crate::Value::Array(vec![value])
+        });
+        assert_eq!(
+            engine.call("Probe", &[]).expect("nested calls run"),
+            expected
+        );
+        assert_eq!(
+            snapshot()
+                .family_at(LookupFamily::ScriptFunction, LookupSite::CompiledPrelude)
+                .lookups,
+            4,
+            "reference and value argument paths must share identical value-only expressions"
+        );
+    }
+
+    #[test]
+    fn bytecode_reference_argument_calls_resolve_script_once() {
+        let engine = reference_driver_engine();
         const ITERATIONS: i32 = 32;
         reset();
+        crate::execution_profile::reset();
         let (_, _) = engine
             .call_with_ref_args(
                 "Interpreted",
@@ -770,15 +762,11 @@ mod tests {
             .expect("interpreted driver runs");
         let profile = snapshot();
         let query = profile
-            .family_at(LookupFamily::ScriptFunction, LookupSite::ReferenceQuery)
+            .family_at(LookupFamily::ScriptFunction, LookupSite::CompiledPrelude)
             .lookups;
-        let budget = u64::try_from(ITERATIONS).expect("iteration count fits u64") * 2;
-
-        assert!(query > 0, "the interpreted path must reach the predicate");
-        assert!(
-            query <= budget,
-            "a reference query resolved the callee {query} times over {ITERATIONS} calls, \
-             over the budget of {budget}; it was 3 per call before the duplicate was removed"
+        assert_eq!(
+            query, 1,
+            "one retained script target serves every iteration: {profile}"
         );
     }
 

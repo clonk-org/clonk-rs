@@ -187,9 +187,9 @@ pub type EvalDirectExecHook = std::rc::Rc<
     ) -> Option<Result<Value, RuntimeError>>,
 >;
 
-/// Continuation-capable twin of [`EvalDirectExecHook`].  The old hook remains
-/// value-returning for the recursive evaluator; this channel is used only by
-/// an AST continuation so a nested `eval` can preserve its parent's suffix.
+/// Continuation-capable twin of [`EvalDirectExecHook`]. The original hook
+/// returns values for synchronous calls; this channel is used by
+/// a bytecode continuation so a nested `eval` can preserve its parent's suffix.
 pub type EvalDirectExecContinuationHook = std::rc::Rc<
     dyn Fn(
         &str,
@@ -1191,7 +1191,7 @@ pub struct Engine {
     /// Embedding-engine receiver selection and DirectExec for FnEval.
     eval_direct_exec_hook: Option<EvalDirectExecHook>,
     /// Continuation-capable receiver selection and DirectExec for nested
-    /// `eval` inside an already suspended AST frame.
+    /// `eval` inside an already suspended bytecode frame.
     eval_direct_exec_continuation_hook: Option<EvalDirectExecContinuationHook>,
     /// The shared `static` table; `None` keeps the legacy per-host
     /// fallback (fixtures without an engine).

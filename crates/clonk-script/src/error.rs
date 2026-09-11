@@ -207,8 +207,8 @@ impl RuntimeCallFrame {
         self.source_name.as_deref()
     }
 
-    /// Zero-based declaration line used when the tree-walking VM has no
-    /// bytecode-program-counter location for the active expression.
+    /// Zero-based declaration line used when the active expression has no
+    /// bytecode-program-counter source location.
     pub fn source_line(&self) -> usize {
         self.source_line
     }

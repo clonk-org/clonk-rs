@@ -8807,6 +8807,8 @@ public:
         Set(data, C4V_pC4Value);
     }
 #include "c4value_runtime_inline.inc"
+    void HintType(C4V_Type type);
+    const char *GetTypeInfo();
     void Set0();
     void Move(C4Value *value);
     bool IsRef() const { return Type == C4V_pC4Value; }
@@ -8956,6 +8958,117 @@ C4Value int_value(std::int32_t value)
     data.Int = value;
     return C4Value{data, C4V_Int};
 }
+
+struct NilCoalescingResult
+{
+    const char *name;
+    int type;
+    std::int32_t value;
+    int rhs_calls;
+};
+
+std::vector<NilCoalescingResult> run_nil_coalescing()
+{
+    struct Case { const char *name; C4V_Type type; std::int32_t value; };
+    const Case cases[] = {
+        {"nil_evaluates_rhs", C4V_Any, 0},
+        {"zero_int_skips_rhs", C4V_Int, 0},
+        {"false_bool_skips_rhs", C4V_Bool, 0},
+        {"nonzero_int_skips_rhs", C4V_Int, 5},
+    };
+    std::vector<NilCoalescingResult> results;
+    for (const auto &test : cases)
+    {
+        C4V_Data data{};
+        data.Int = test.value;
+        C4Value left{data, test.type}, operand;
+        operand.SetRef(&left);
+        C4Value *pCurVal = &operand;
+        struct Bytecode { int bccX; } instructions[] = {{1}, {0}};
+        Bytecode *pCPos = instructions;
+        bool fJump = false;
+        enum { AB_NilCoalescingIt };
+        switch (AB_NilCoalescingIt)
+        {
+#include "script_nil_coalescing_it.inc"
+        }
+        int rhs_calls = 0;
+        if (!fJump)
+        {
+            ++rhs_calls;
+            *pCurVal = int_value(7);
+        }
+        results.push_back({test.name, left.GetType(), left._getInt(), rhs_calls});
+    }
+    return results;
+}
+
+namespace reference_call
+{
+enum class C4AulScriptStrict : std::uint8_t { NONSTRICT, STRICT1, STRICT2, STRICT3 };
+// A one-entry function table and a trivial reference-return body supply the
+// state around the extracted owner lookup and VM operator implementation.
+struct C4AulFunc { const char *name; C4Value *returned_slot; };
+struct C4AulScript
+{
+    C4AulScript *Owner{};
+    C4AulFunc *function{};
+    C4AulScriptStrict Strict{C4AulScriptStrict::STRICT3};
+    C4AulFunc *GetFunc(const char *name)
+    {
+        return function && std::strcmp(function->name, name) == 0 ? function : nullptr;
+    }
+    C4AulFunc *GetFuncRecursive(const char *name);
+};
+#include "script_get_func_recursive.inc"
+
+struct Operator { C4V_Type Type1; C4V_Type Type2; const char *Identifier; };
+const Operator C4ScriptOpMap[] = {{C4V_Int, C4V_Any, "++"}};
+struct FunctionContext { C4AulScript *pOrgScript; };
+struct Context { C4Object *Obj; FunctionContext *Func; };
+struct IncrementExecutor
+{
+    C4Value *pCurVal;
+    Context *pCurCtx;
+#include "script_check_operator_parameters.inc"
+    void Run()
+    {
+        struct Bytecode { std::intptr_t bccX; } bytecode{0};
+        auto *pCPos = &bytecode;
+        enum { AB_Inc1 };
+        switch (AB_Inc1)
+        {
+#include "script_increment_reference.inc"
+        }
+    }
+};
+
+struct Result { const char *name; int result; int script_slot; int native_slot; };
+std::vector<Result> run()
+{
+    std::vector<Result> results;
+    for (bool has_script_override : {true, false})
+    {
+        auto script_slot = int_value(4), native_slot = int_value(40);
+        C4AulFunc script_function{"EffectVar", &script_slot};
+        C4AulFunc native_function{"EffectVar", &native_slot};
+        C4AulScript engine{nullptr, &native_function};
+        C4AulScript script{&engine, has_script_override ? &script_function : nullptr};
+        auto *selected = script.GetFuncRecursive("EffectVar");
+        if (!selected) throw std::runtime_error("reference oracle target missing");
+        C4Value operand;
+        operand.SetRef(selected->returned_slot);
+        FunctionContext function_context{&script};
+        Context context{nullptr, &function_context};
+        IncrementExecutor executor{&operand, &context};
+        executor.Run();
+        results.push_back({has_script_override ? "script_overload" : "engine_native",
+                           operand.GetRefVal()._getInt(), script_slot._getInt(),
+                           native_slot._getInt()});
+    }
+    return results;
+}
+} // namespace reference_call
 
 std::string serialize(const C4Value &value)
 {
@@ -15469,6 +15582,26 @@ int main()
                static_cast<long long>(denumeration.payload));
         json_string(denumeration.serialized);
         printf(",\"rng_delta\":%d}", denumeration.rng_delta);
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("script_reference_call_increment");
+    for (const auto &result : c4value_runtime::reference_call::run())
+    {
+        sep();
+        printf("{\"case\":\"%s\",\"result\":%d,\"script_slot\":%d,\"native_slot\":%d}",
+               result.name, result.result, result.script_slot, result.native_slot);
+    }
+    arr_end();
+    printf(",\n");
+
+    arr_begin("script_nil_coalescing_assignment");
+    for (const auto &result : c4value_runtime::run_nil_coalescing())
+    {
+        sep();
+        printf("{\"case\":\"%s\",\"type\":%d,\"value\":%d,\"rhs_calls\":%d}",
+               result.name, result.type, result.value, result.rhs_calls);
     }
     arr_end();
     printf(",\n");

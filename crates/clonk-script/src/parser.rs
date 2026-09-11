@@ -704,7 +704,7 @@ impl<'a> Parser<'a> {
 
     /// Parse as much of a function body as possible. C++ retains bytecode
     /// emitted before a parser failure, then appends AB_ERR; preserving the
-    /// statement prefix gives the tree-walking VM the same observable order.
+    /// statement prefix lets bytecode compilation retain the same observable order.
     fn parse_block_statements_until_error(&mut self) -> (Vec<Stmt>, Option<ParseError>) {
         let mut statements = Vec::new();
         loop {
