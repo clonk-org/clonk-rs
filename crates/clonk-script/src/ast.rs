@@ -201,7 +201,7 @@ pub struct Function {
     /// one. Set after the whole script is parsed; a function carrying it fails
     /// to link and raises on every call.
     pub(crate) global_local_reference: Option<(String, usize)>,
-    /// Lazily lowered local-only instruction stream. This is derived state:
+    /// Lazily lowered complete bytecode instruction stream. This is derived state:
     /// function equality remains solely a property of the parsed script.
     pub(crate) compiled: std::sync::OnceLock<crate::vm::CompiledFunctionCache>,
     /// Immutable C4AulFunc-style pointer retained by native callback queues.

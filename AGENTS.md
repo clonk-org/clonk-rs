@@ -347,8 +347,9 @@ The change is done when it has [landed](#pull-requests--how-work-lands).
   C4Script content** mutates state through host-function calls and its callback
   return values are ignored, matching C++. Do not make the engine *require*
   command-proplist returns from real content.
-- `clonk-script` is the C4Script VM port (an AST tree-walk; C++ is an 84-opcode
-  stack VM). `this` carries the active object/definition context. Preserve C++
+- `clonk-script` is the C4Script bytecode VM port (C++ is an 84-opcode
+  stack VM). ASTs are used for parsing and compilation only. `this` carries the
+  active object/definition context. Preserve C++
   call, conversion, and callback ordering rather than relying on shape.
 - `content/` is a submodule and is also the engine's data root — read-only parity
   input. Run `git submodule update --init --recursive` before any test run, not

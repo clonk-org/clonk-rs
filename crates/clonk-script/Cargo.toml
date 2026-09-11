@@ -16,8 +16,8 @@ bench = ["dep:criterion"]
 # VM's hottest paths, where leaving them live would cost real time and perturb
 # the measurement they exist to take.
 lookup-profile = []
-# Count compiled execution, AST fallback, and the syntax families blocking
-# lowering. Off by default because every script invocation touches it.
+# Count and optionally time bytecode execution. Off by default because every
+# script invocation touches the counters.
 execution-profile = []
 
 [dependencies]
@@ -31,7 +31,7 @@ rustc-hash = "2"
 smallvec = { version = "1", features = ["const_generics"] }
 tracing = "0.1"
 # Grows the native stack on demand so deep (but C++-legal, <=512) script
-# recursion doesn't overflow the thread stack in this tree-walking interpreter.
+# recursion does not overflow the native thread stack.
 stacker = "0.1"
 # Benchmark-only: ordinary test roots must not pull Criterion/Ciborium into
 # the workspace-wide Serde feature union.

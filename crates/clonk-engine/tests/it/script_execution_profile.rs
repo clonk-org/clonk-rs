@@ -1,4 +1,4 @@
-//! Manual compiled-vs-AST C4Script probe over shipped content.
+//! Manual C4Script bytecode execution probe over shipped content.
 //!
 //! Run:
 //!
@@ -18,7 +18,7 @@ const PROFILED_FRAMES: usize = 400;
 #[test]
 #[ignore = "manual release timing probe; requires execution-profile"]
 #[cfg(feature = "execution-profile")]
-fn ast_execution_materiality_on_shipped_content() {
+fn bytecode_execution_time_on_shipped_content() {
     use std::time::Instant;
 
     for scenario in [
@@ -50,19 +50,15 @@ fn ast_execution_materiality_on_shipped_content() {
                     expected_profile = Some(profile);
                 }
                 eprintln!(
-                    "scenario={scenario} run={run} timing={enabled} frames={PROFILED_FRAMES} tick_ns={} ast_ns={} compiled_ns={} compiled={} ast={} guards={}",
-                    elapsed.as_nanos(), timing.ast_ns, timing.compiled_ns,
-                    profile.compiled, profile.ast_without_plan, profile.ast_after_runtime_guard,
+                    "scenario={scenario} run={run} timing={enabled} frames={PROFILED_FRAMES} tick_ns={} compiled_ns={} compiled={}",
+                    elapsed.as_nanos(), timing.compiled_ns, profile.compiled,
                 );
                 if enabled {
                     eprintln!("{profile}");
-                    for (reason, ns) in timing.ranked_ast_sole_blocker_ns() {
-                        eprintln!(
-                            "sole {reason}: {ns} ns ({}% of ast_ns)",
-                            ns.saturating_mul(100) / timing.ast_ns.max(1)
-                        );
-                    }
-                    assert!(timing.ast_ns > 0, "scenario must exercise AST execution");
+                    assert!(
+                        timing.compiled_ns > 0,
+                        "scenario must execute script bytecode"
+                    );
                 }
             }
         }
@@ -71,7 +67,7 @@ fn ast_execution_materiality_on_shipped_content() {
 
 #[test]
 #[ignore = "manual profiling probe; needs --features execution-profile for real counters"]
-fn compiled_vs_ast_over_effect_heavy_shipped_content() {
+fn bytecode_invocations_over_effect_heavy_shipped_content() {
     let mut engine = load_installed_scenario("Hazard.c4f/Tutorial.c4s", 0);
     let _owner = join_local_player(&mut engine, "Execution profile");
     execution_profile::reset();
@@ -89,15 +85,4 @@ fn compiled_vs_ast_over_effect_heavy_shipped_content() {
         return;
     }
     eprintln!("{profile}");
-    let ast = profile
-        .ast_without_plan
-        .saturating_add(profile.ast_after_runtime_guard);
-    eprintln!(
-        "AST share: {}% ({ast}/{})",
-        ast.saturating_mul(100) / profile.total_invocations().max(1),
-        profile.total_invocations(),
-    );
-    eprintln!(
-        "fallback reason counts overlap when one function has several blockers; the `sole` lines count invocations that one family alone kept on the AST VM"
-    );
 }
