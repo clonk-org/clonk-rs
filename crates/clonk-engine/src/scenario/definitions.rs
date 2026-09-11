@@ -104,46 +104,62 @@ where
             })
             .collect();
     }
-    let chunk_size = items.len().div_ceil(worker_count);
+    let next_item = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let chunks = items
-            .chunks(chunk_size)
-            .enumerate()
-            .map(|(chunk_index, chunk)| {
-                let start = chunk_index * chunk_size;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(worker_count);
+        let workers = (0..worker_count)
+            .filter_map(|_| {
                 let run_item = &run_item;
-                let worker_chunk = chunk;
+                let next_item = &next_item;
+                let sender = sender.clone();
                 std::thread::Builder::new()
                     .name("definition-loader".to_owned())
-                    .spawn_scoped(scope, move || {
-                        worker_chunk
-                            .iter()
-                            .enumerate()
-                            .map(|(offset, item)| run_item(start + offset, item))
-                            .collect::<Vec<_>>()
+                    .spawn_scoped(scope, move || loop {
+                        let index = next_item.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            break;
+                        };
+                        if sender.send((index, run_item(index, item))).is_err() {
+                            break;
+                        }
                     })
-                    .map_err(|_| (start, chunk))
+                    .ok()
             })
             .collect::<Vec<_>>();
-        let mut output = Vec::with_capacity(items.len());
-        for chunk in chunks {
-            let chunk = match chunk {
-                Ok(handle) => match handle.join() {
-                    Ok(chunk) => chunk,
-                    Err(payload) => std::panic::resume_unwind(payload),
-                },
-                Err((start, chunk)) => chunk
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, item)| run_item(start + offset, item))
-                    .collect(),
-            };
-            for mut outcome in chunk {
-                report_ordered(output.len(), &mut outcome, &mut on_ordered);
-                output.push(outcome);
+        drop(sender);
+        if workers.is_empty() {
+            return items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let mut outcome = run_item(index, item);
+                    report_ordered(index, &mut outcome, &mut on_ordered);
+                    outcome
+                })
+                .collect();
+        }
+
+        // Subtrees have very different decode costs. Workers share pending
+        // entries, while the parent alone publishes the completed prefix in
+        // native order. The bounded channel also limits queued worker results.
+        let mut output = (0..items.len()).map(|_| None).collect::<Vec<_>>();
+        let mut next_report = 0;
+        for (index, outcome) in receiver {
+            output[index] = Some(outcome);
+            while let Some(Some(outcome)) = output.get_mut(next_report) {
+                report_ordered(next_report, outcome, &mut on_ordered);
+                next_report += 1;
+            }
+        }
+        for worker in workers {
+            if let Err(payload) = worker.join() {
+                std::panic::resume_unwind(payload);
             }
         }
         output
+            .into_iter()
+            .map(|outcome| outcome.expect("definition workers report every child"))
+            .collect()
     })
 }
 
@@ -613,6 +629,34 @@ fn queue_rejected_definition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn definition_workers_share_pending_children_when_one_subtree_blocks() {
+        // C4DefList::Load folds child results in entry order
+        // (src/C4Def.cpp:930-949). Independent decoding must still let an
+        // idle worker take the next child while an earlier subtree is busy.
+        let (finished, completion) = std::sync::mpsc::channel();
+        let completion = std::sync::Mutex::new(completion);
+        let mut reported = Vec::new();
+        let mapped = ordered_parallel_map_until(
+            &[0, 1, 2, 3],
+            2,
+            |index| match index {
+                0 => completion
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_ok(),
+                1 => finished.send(()).is_ok(),
+                _ => true,
+            },
+            |_| false,
+            |index, _| reported.push(index),
+        );
+
+        assert!(matches!(mapped[0], OrderedParallelOutcome::Completed(true)));
+        assert_eq!(reported, [0, 1, 2, 3]);
+    }
 
     #[test]
     fn ordered_parallel_map_until_preserves_order_across_worker_chunks() {

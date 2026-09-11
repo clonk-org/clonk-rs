@@ -164,6 +164,8 @@ thread_local! {
     static NESTED_GENERIC_SCRIPT_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static COMPILED_SOURCE_VALIDATIONS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static AST_STATEMENT_BODY_COPIES: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -5317,6 +5319,7 @@ impl<'a> Vm<'a> {
         let function = Self::direct_exec_function(expr, strict_level);
         let result = self.execute_ast_with_continuation(
             &function,
+            None,
             &mut env,
             depth,
             false,
@@ -5971,7 +5974,9 @@ impl<'a> Vm<'a> {
         let compiled_cache = function
             .compiled
             .get_or_init(|| CompiledFunctionCache::new(function));
-        let compiled = compiled_cache.validated(function, target.validate_compiled_source);
+        let validated_cache = compiled_cache.validated(function, target.validate_compiled_source);
+        let compiled = validated_cache.and_then(|cache| cache.compiled.as_deref());
+        let cached_statements = validated_cache.map(|cache| &cache.body);
         // The callee's parameter bindings allocate C4Value cells while the
         // caller remains active. Enter its frame before constructing that
         // environment so their cleanup is charged to the callee, not the
@@ -6108,6 +6113,7 @@ impl<'a> Vm<'a> {
                     crate::execution_profile::record_ast_after_runtime_guard();
                     self.execute_ast_with_continuation(
                         function,
+                        cached_statements,
                         &mut env,
                         depth,
                         function.returns_reference,
@@ -6131,6 +6137,7 @@ impl<'a> Vm<'a> {
             let sole_blocker = None;
             self.execute_ast_with_continuation(
                 function,
+                cached_statements,
                 &mut env,
                 depth,
                 function.returns_reference,
@@ -6610,6 +6617,7 @@ impl<'a> Vm<'a> {
     fn execute_ast_with_continuation(
         &self,
         function: &Function,
+        cached_statements: Option<&Arc<Vec<Stmt>>>,
         env: &mut Environment,
         depth: usize,
         returns_reference: bool,
@@ -6622,7 +6630,14 @@ impl<'a> Vm<'a> {
         let _execution_timer = crate::execution_profile::ExecutionTimer::enter(
             crate::execution_profile::ExecutionKind::Ast(sole_blocker),
         );
-        let statements = Arc::new(function.body.clone());
+        // Installed functions already retain an owned source body for cache
+        // validation. Share it with suspended frames; externally replaced
+        // bodies and one-shot DirectExec still receive their own snapshot.
+        let statements = cached_statements.map(Arc::clone).unwrap_or_else(|| {
+            #[cfg(test)]
+            AST_STATEMENT_BODY_COPIES.with(|count| count.set(count.get() + 1));
+            Arc::new(function.body.clone())
+        });
         let state = AstMachineState {
             tasks: vec![AstTask::Statements {
                 statements,
@@ -16899,7 +16914,7 @@ struct CompiledCallSite {
 
 pub(crate) struct CompiledFunctionCache {
     params: Vec<Parameter>,
-    body: Vec<Stmt>,
+    body: Arc<Vec<Stmt>>,
     strict_level: Option<u8>,
     returns_reference: bool,
     compiled: Option<Arc<CompiledFunction>>,
@@ -16918,7 +16933,7 @@ impl CompiledFunctionCache {
         };
         Self {
             params: function.params.clone(),
-            body: function.body.clone(),
+            body: Arc::new(function.body.clone()),
             strict_level: function.strict_level,
             returns_reference: function.returns_reference,
             compiled,
@@ -16927,18 +16942,17 @@ impl CompiledFunctionCache {
         }
     }
 
-    fn validated(&self, function: &Function, validate_source: bool) -> Option<&CompiledFunction> {
+    fn validated(&self, function: &Function, validate_source: bool) -> Option<&Self> {
         #[cfg(test)]
         if validate_source {
             COMPILED_SOURCE_VALIDATIONS.with(|count| count.set(count.get() + 1));
         }
         (!validate_source
             || self.params == function.params
-                && self.body == function.body
+                && *self.body == function.body
                 && self.strict_level == function.strict_level
                 && self.returns_reference == function.returns_reference)
-            .then_some(self.compiled.as_deref())
-            .flatten()
+            .then_some(self)
     }
 }
 
@@ -20399,6 +20413,24 @@ mod tests {
         check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::Foreach) => 1);
         check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::LoopControl) => 0);
         check_eq!(profile.reason(crate::execution_profile::AstFallbackReason::ClassicFor) => 0);
+    }
+
+    #[test]
+    fn repeated_ast_calls_reuse_owned_function_body() {
+        // C4AulExec::Exec retains the installed function's code for each call
+        // (C4AulExec.cpp:356-363); a continuation must own the same immutable
+        // body without copying its syntax tree on every invocation.
+        let mut engine = crate::engine::Engine::new();
+        engine
+            .load_script("func Sum(values) { var sum = 0; for (var value in values) sum += value; return sum; }")
+            .expect("AST script loads");
+        let args = [Value::Array(vec![Value::Int(3), Value::Int(7)])];
+        check_eq!(engine.call("Sum", &args).expect("warm AST call succeeds") => Value::Int(10));
+        AST_STATEMENT_BODY_COPIES.with(|count| count.set(0));
+        for _ in 0..64 {
+            check_eq!(engine.call("Sum", &args).expect("AST call succeeds") => Value::Int(10));
+        }
+        check_eq!(AST_STATEMENT_BODY_COPIES.with(Cell::get) => 0);
     }
 
     #[test]

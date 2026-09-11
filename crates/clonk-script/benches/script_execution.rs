@@ -14,6 +14,16 @@ global func SumLoop(iterations)
     }
     return acc;
 }
+
+global func SumValues(values)
+{
+    var acc = 0;
+    for (var value in values)
+    {
+        acc += value;
+    }
+    return acc;
+}
 "#;
 
 fn bench_script_execution(c: &mut Criterion) {
@@ -28,6 +38,14 @@ fn bench_script_execution(c: &mut Criterion) {
             let args = [Value::Int(iterations)];
             let result = engine.call("SumLoop", &args).expect("script call succeeds");
             black_box(result);
+        });
+    });
+
+    let args = [Value::Array((0..8).map(Value::Int).collect())];
+    assert_eq!(engine.call("SumValues", &args).unwrap(), Value::Int(28));
+    c.bench_function("script_ast_sum_values", |b| {
+        b.iter(|| {
+            black_box(engine.call("SumValues", black_box(&args)).unwrap());
         });
     });
 }

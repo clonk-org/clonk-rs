@@ -849,8 +849,11 @@ impl<S> ControlTransport<S> {
 }
 
 pub(crate) fn encode_complete_message(message: ControlMessage) -> Result<Vec<u8>, TransportError> {
-    let frame = ControlTransport::<()>::encode_message_frame(message)?;
-    Ok(frame[FRAME_HEADER_LEN..].to_vec())
+    let mut frame = ControlTransport::<()>::encode_message_frame(message)?;
+    // Reliable UDP and packet logging need the body alone. Keep the encoded
+    // buffer instead of allocating another payload-sized copy to strip TCP.
+    drop(frame.drain(..FRAME_HEADER_LEN));
+    Ok(frame)
 }
 
 pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage>, TransportError> {
@@ -3279,6 +3282,29 @@ mod tests {
             0x0b,
         ]));
         assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn complete_control_packet_encoding_reuses_frame_allocation() {
+        let message = ControlMessage::Packet {
+            delivery: ControlDelivery::Direct,
+            data: vec![0x80; 65_536],
+        };
+        let tcp_message = message.clone();
+        let mut tcp = None;
+        let tcp_allocations = crate::test_allocations::count(|| {
+            tcp = Some(ControlTransport::<()>::encode_message_frame(tcp_message).unwrap());
+        });
+        let mut udp = None;
+        let udp_allocations = crate::test_allocations::count(|| {
+            udp = Some(encode_complete_message(message).unwrap());
+        });
+
+        assert_eq!(udp.unwrap(), tcp.unwrap()[FRAME_HEADER_LEN..]);
+        assert_eq!(
+            udp_allocations, tcp_allocations,
+            "removing the TCP header must not allocate a second packet buffer"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
