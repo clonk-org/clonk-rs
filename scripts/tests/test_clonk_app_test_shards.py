@@ -37,7 +37,7 @@ EXPECTED_SHARDS = {
         "menus_2.rs",
         "scenario_routes_2.rs",
     },
-    "app-test-shard-12": {"runtime.rs"},
+    "app-test-shard-12": {"runtime.rs", "runtime_allocations.rs"},
 }
 EXPECTED_SHARED = [
     (
