@@ -1,0 +1,4760 @@
+{
+  "schema_version": 1,
+  "measured_at_utc": "2026-09-11",
+  "fingerprint": {
+    "baseline_commit": "190d17e30d1a4549b2aa78895213c66dbc35fce6",
+    "candidate_source_commit": "a09c4711c5386ad9b13f1ff4e31609b4ef1afab2",
+    "content_commit": "9a01c8f55f0fbdccfa2dcf3a67e3cfcfcac7c009",
+    "cargo_lock_sha256": "01819c62165db1f23d148c2979ab9f3027bfdc88fa78b35048ee38b71f1162dd",
+    "cpu": "Apple M4 Pro",
+    "os": "macOS 26.3.1 (25D2128)",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "target": "aarch64-apple-darwin",
+    "llvm": "22.1.8",
+    "profile": "release; thin LTO; codegen-units=1 for measured crates",
+    "binary_sha256": {
+      "objects_baseline": "089fd9c8083a9ac2c06f7cfeb55fdcd5d9cf96742969ffeb84977667d4822bc4",
+      "objects_candidate": "566cd7f56c54c67eb5f797b2353e89b39146ef7fffe548a070cdfb1668515b1c",
+      "method_baseline": "9d6977ec4dab9f63e984b61b9264109ac3495e8a1d4db4cb9b701a22f3d9561e",
+      "method_candidate": "2f8e84b62818f07be9b8cccd0034bcca74764d19dbeb1fd793946360c71374ca",
+      "gpu_baseline": "a72c2a08335caa03b229149e0be3a291efed6c7fa524df77c65bff489d557adc",
+      "gpu_candidate": "45780955f5f5a006a829048899fbfc5716e7d4d5612fc3804052541504d2ba42",
+      "ast_baseline": "0b8576c5e8540dd47dfd42bb4c1fedec50f81424a86c05cb7967325c1f6bf780",
+      "ast_candidate": "fd101aacc9f8944349384d2c907b6b85cca04753766221013f3c9c8b7f993c13"
+    },
+    "candidate_file_sha256": {
+      "crates/clonk-app-render/src/gpu_renderer.rs": "e3c8cd44350c61cd60ee49e815c844e695f7d75e2bf41eb5161c65ce54e3a176",
+      "crates/clonk-app-render/benches/landscape_render.rs": "8ae668fa67b11e4ef6256d7c2b0bfe291da4921b5ca7fd8b3842ca43bc17ecfa",
+      "crates/clonk-frontend/src/fog_modulation.rs": "ee86638a8a77bb8343e45d0093b069f9d4a509490d3d2f532ad451842c665021",
+      "crates/clonk-frontend/src/sprite_capture.rs": "1258ed314e80a05cc350396bf5cdadebd0b6f5cfd8000f4cffa68df524d404dd",
+      "crates/clonk-frontend/benches/object_capture.rs": "da814b1ccd3d412bec469c177846f8c768f5c7576caeae52518c1ae0295519d4",
+      "crates/clonk-graphics/src/surface.rs": "25a564bf830453647bcf6e85a864a1e414e30e9447becc39a98606a291610d3f",
+      "crates/clonk-script/src/vm.rs": "6dbc9dcb13c9e7293833f9e05ba6bc49df1da0821d5ec99ab7b8b5b87a3623f1",
+      "crates/clonk-script/benches/script_execution.rs": "8c73ff13c83ef5a9e9dc523dc4326608a2e819bb8316fa3e40541d7a189f2961"
+    }
+  },
+  "method": {
+    "comparison": "Identical benchmark fixtures, lockfile, toolchain and content on the same machine; one timing process at a time after compilation completed.",
+    "cpu_and_gpu_trial_order": [
+      "before_1",
+      "after_1",
+      "after_2",
+      "before_2"
+    ],
+    "criterion_statistic": "Median of sample time / iterations, pooled across both trials per variant. This is not the Criterion regression-slope point estimate. Raw iterations, elapsed samples and bootstrap estimates are retained.",
+    "criterion_warmup_seconds": {
+      "software": 2,
+      "method": 3,
+      "landscape": 2
+    },
+    "criterion_measurement_seconds": 5,
+    "criterion_samples_per_trial": {
+      "software": 20,
+      "method": 100,
+      "landscape": 20
+    },
+    "gpu_delta": "Baseline plus candidate crates/clonk-app-render/src/gpu_renderer.rs, with identical landscape_render benchmark in both. No frontend or VM production change is needed by this fixture.",
+    "gpu_wall_time_scope": "Plan clone, CPU encoding, queue submit and device.poll for a completed offscreen frame; timestamp instrumentation disabled on this device.",
+    "gpu_timestamp_scope": "Separate timestamp-enabled device; ShaderLandscape pass only, 4 warm frames then 32 consecutive samples per workload/trial. Frame identity and sample validity asserted. These short windows show GPU clock variation and are diagnostic, not a whole-frame timing claim.",
+    "scenario_order": [
+      "before_1",
+      "after_1",
+      "after_2",
+      "before_2"
+    ],
+    "scenario_statistic": "Median of 10 fresh-run window mean tick times per variant/scenario, clock-disabled rows only; every timed and untimed window retained.",
+    "scenario_warmup_frames": 100,
+    "scenario_measured_frames": 400,
+    "scenario_seed": 0,
+    "scenario_scope": "Headless simulation ticks excluding scenario loading and snapshots. Invocation counters enabled in both variants, VM elapsed clocks disabled for headline comparison. Native hosts remain included; this does not measure shipped whole-game FPS.",
+    "excluded_probes": "Earlier scenarios collected before final fallback-diagnostic classification cleanup and initial measurements overlapping builds are not included in these final scenario estimates.",
+    "limitations": "One Apple Silicon machine, two reversed trials, synthetic renderer fixtures, and two fixed-seed scenarios. Small differences are not universal improvements; report controls and slower cases too. No full-scenario C++ differential validation is claimed."
+  },
+  "criterion": {
+    "software_object_frame_1000": {
+      "trials": {
+        "before_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              3.0,
+              6.0,
+              9.0,
+              12.0,
+              15.0,
+              18.0,
+              21.0,
+              24.0,
+              27.0,
+              30.0,
+              33.0,
+              36.0,
+              39.0,
+              42.0,
+              45.0,
+              48.0,
+              51.0,
+              54.0,
+              57.0,
+              60.0
+            ],
+            "times": [
+              34511458.0,
+              68913667.0,
+              103420542.0,
+              138334917.0,
+              172273208.0,
+              206551125.0,
+              241384250.0,
+              275759167.0,
+              310094333.0,
+              344795834.0,
+              379084709.0,
+              413264208.0,
+              447814250.0,
+              481956625.0,
+              516719667.0,
+              553225584.0,
+              585390250.0,
+              619005709.0,
+              654838292.0,
+              688275167.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 11481924.925728727,
+                "upper_bound": 11495476.817462346
+              },
+              "point_estimate": 11488238.697392749,
+              "standard_error": 3469.01034476273
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 11480989.0,
+                "upper_bound": 11490568.3125
+              },
+              "point_estimate": 11485293.231481481,
+              "standard_error": 2424.6028895899053
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 4428.8382476891375,
+                "upper_bound": 17450.6066596345
+              },
+              "point_estimate": 9585.851876876774,
+              "standard_error": 3230.782341051415
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 11475479.998832675,
+                "upper_bound": 11494414.706373552
+              },
+              "point_estimate": 11483488.48350755,
+              "standard_error": 4894.3941375313925
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 7773.3039468702855,
+                "upper_bound": 21075.46302185099
+              },
+              "point_estimate": 15926.160113542577,
+              "standard_error": 3397.727060688276
+            }
+          },
+          "median_ns": 11485293.231481481
+        },
+        "after_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              3.0,
+              6.0,
+              9.0,
+              12.0,
+              15.0,
+              18.0,
+              21.0,
+              24.0,
+              27.0,
+              30.0,
+              33.0,
+              36.0,
+              39.0,
+              42.0,
+              45.0,
+              48.0,
+              51.0,
+              54.0,
+              57.0,
+              60.0
+            ],
+            "times": [
+              29450000.0,
+              58121666.0,
+              87049708.0,
+              117560875.0,
+              145612125.0,
+              174275167.0,
+              205168417.0,
+              233112667.0,
+              261974875.0,
+              291282875.0,
+              320543959.0,
+              349077500.0,
+              378041208.0,
+              407433084.0,
+              436449125.0,
+              465142583.0,
+              494392291.0,
+              523847625.0,
+              554081792.0,
+              583714833.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 9700336.34585513,
+                "upper_bound": 9732171.769441271
+              },
+              "point_estimate": 9714741.422866356,
+              "standard_error": 8186.131548146544
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 9695281.856209151,
+                "upper_bound": 9713240.547348484
+              },
+              "point_estimate": 9701827.546296295,
+              "standard_error": 4909.161434527742
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 8063.6965235075895,
+                "upper_bound": 30864.926867038103
+              },
+              "point_estimate": 16721.73545937985,
+              "standard_error": 6123.0759767530735
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 9699083.840801781,
+                "upper_bound": 9716097.415489335
+              },
+              "point_estimate": 9707408.594657375,
+              "standard_error": 4389.310075139289
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 14369.993040607766,
+                "upper_bound": 49935.86574151051
+              },
+              "point_estimate": 37499.370040164984,
+              "standard_error": 8685.287590154214
+            }
+          },
+          "median_ns": 9701827.546296295
+        },
+        "after_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              3.0,
+              6.0,
+              9.0,
+              12.0,
+              15.0,
+              18.0,
+              21.0,
+              24.0,
+              27.0,
+              30.0,
+              33.0,
+              36.0,
+              39.0,
+              42.0,
+              45.0,
+              48.0,
+              51.0,
+              54.0,
+              57.0,
+              60.0
+            ],
+            "times": [
+              29122667.0,
+              58002292.0,
+              87189500.0,
+              117203166.0,
+              145292208.0,
+              174494375.0,
+              203466792.0,
+              232483417.0,
+              261500000.0,
+              290608000.0,
+              319591459.0,
+              349067625.0,
+              377782083.0,
+              406703541.0,
+              435965250.0,
+              464646083.0,
+              493994166.0,
+              524296125.0,
+              554121958.0,
+              581350416.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 9686631.712688716,
+                "upper_bound": 9704039.36096286
+              },
+              "point_estimate": 9694130.569678554,
+              "standard_error": 4511.871265760117
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 9686153.65882353,
+                "upper_bound": 9691652.77222222
+              },
+              "point_estimate": 9687327.777777778,
+              "standard_error": 1604.6487652597418
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1554.1457182411177,
+                "upper_bound": 13573.503544437448
+              },
+              "point_estimate": 3618.0655913231762,
+              "standard_error": 3448.280759599922
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 9686369.466291118,
+                "upper_bound": 9702901.56560899
+              },
+              "point_estimate": 9694118.171777004,
+              "standard_error": 4322.395628650777
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 7337.663438777366,
+                "upper_bound": 30952.679246109336
+              },
+              "point_estimate": 20633.92980704132,
+              "standard_error": 6748.077172398135
+            }
+          },
+          "median_ns": 9687327.777777778
+        },
+        "before_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              3.0,
+              6.0,
+              9.0,
+              12.0,
+              15.0,
+              18.0,
+              21.0,
+              24.0,
+              27.0,
+              30.0,
+              33.0,
+              36.0,
+              39.0,
+              42.0,
+              45.0,
+              48.0,
+              51.0,
+              54.0,
+              57.0,
+              60.0
+            ],
+            "times": [
+              34394166.0,
+              68824667.0,
+              103196500.0,
+              137648167.0,
+              172038417.0,
+              206524666.0,
+              240920375.0,
+              275338167.0,
+              310160791.0,
+              344263250.0,
+              379117000.0,
+              412321042.0,
+              446323708.0,
+              481278459.0,
+              515611084.0,
+              551109958.0,
+              585105250.0,
+              619670375.0,
+              653907417.0,
+              688254375.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 11465286.002349118,
+                "upper_bound": 11474313.08849289
+              },
+              "point_estimate": 11469921.058092635,
+              "standard_error": 2295.6106993435405
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 11467752.78888889,
+                "upper_bound": 11473122.258169934
+              },
+              "point_estimate": 11471483.09868421,
+              "standard_error": 1401.4027732053617
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 2021.0463465761682,
+                "upper_bound": 16224.481576956716
+              },
+              "point_estimate": 5821.268759663705,
+              "standard_error": 3513.528233007662
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 11463973.96608752,
+                "upper_bound": 11474796.670226095
+              },
+              "point_estimate": 11469819.915679442,
+              "standard_error": 2741.991685696435
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 6342.9384337939655,
+                "upper_bound": 13692.742551536181
+              },
+              "point_estimate": 10560.149215846437,
+              "standard_error": 1889.038903737045
+            }
+          },
+          "median_ns": 11471483.09868421
+        }
+      },
+      "comparison": {
+        "before_median_ns": 11475409.49074074,
+        "after_median_ns": 9694049.217320262,
+        "elapsed_change_percent": -15.523282849800001
+      }
+    },
+    "software_translucent_hud_strip": {
+      "trials": {
+        "before_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              52.0,
+              104.0,
+              156.0,
+              208.0,
+              260.0,
+              312.0,
+              364.0,
+              416.0,
+              468.0,
+              520.0,
+              572.0,
+              624.0,
+              676.0,
+              728.0,
+              780.0,
+              832.0,
+              884.0,
+              936.0,
+              988.0,
+              1040.0
+            ],
+            "times": [
+              23211500.0,
+              46490792.0,
+              70326333.0,
+              93179208.0,
+              116750042.0,
+              138915459.0,
+              162817750.0,
+              185574834.0,
+              209137750.0,
+              232669541.0,
+              255409083.0,
+              279057875.0,
+              302911500.0,
+              327204667.0,
+              350178458.0,
+              374342208.0,
+              404424666.0,
+              420656958.0,
+              443111708.0,
+              467072125.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 447486.8479514828,
+                "upper_bound": 449660.61785086215
+              },
+              "point_estimate": 448442.59275578475,
+              "standard_error": 560.0790471990084
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 447117.4895833333,
+                "upper_bound": 449073.21778846154
+              },
+              "point_estimate": 448035.4482248521,
+              "standard_error": 592.6804018271228
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 816.4880803762508,
+                "upper_bound": 2576.5512649301313
+              },
+              "point_estimate": 1654.7878832818992,
+              "standard_error": 422.79706944147705
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 448096.05224574986,
+                "upper_bound": 451358.03518394614
+              },
+              "point_estimate": 449457.65832216566,
+              "standard_error": 870.1474182503639
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1146.307199956227,
+                "upper_bound": 3856.4779039984164
+              },
+              "point_estimate": 2566.460237067692,
+              "standard_error": 812.0809338096449
+            }
+          },
+          "median_ns": 448035.4482248521
+        },
+        "after_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              151.0,
+              302.0,
+              453.0,
+              604.0,
+              755.0,
+              906.0,
+              1057.0,
+              1208.0,
+              1359.0,
+              1510.0,
+              1661.0,
+              1812.0,
+              1963.0,
+              2114.0,
+              2265.0,
+              2416.0,
+              2567.0,
+              2718.0,
+              2869.0,
+              3020.0
+            ],
+            "times": [
+              23871291.0,
+              47981708.0,
+              71359750.0,
+              95206041.0,
+              119214708.0,
+              143019458.0,
+              166754125.0,
+              190710375.0,
+              214570500.0,
+              238246041.0,
+              262304917.0,
+              286638917.0,
+              310601625.0,
+              333832916.0,
+              357192833.0,
+              381471000.0,
+              405444542.0,
+              428868583.0,
+              452837916.0,
+              476408791.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 157811.23290358193,
+                "upper_bound": 158050.71908470656
+              },
+              "point_estimate": 157917.54284613702,
+              "standard_error": 61.65666146388272
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 157783.56453274464,
+                "upper_bound": 157917.58222241333
+              },
+              "point_estimate": 157880.6739790287,
+              "standard_error": 34.02303473720469
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 45.77999750150669,
+                "upper_bound": 286.87556735728305
+              },
+              "point_estimate": 143.97446250468317,
+              "standard_error": 60.45670258341172
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 157808.65612810667,
+                "upper_bound": 157957.50454824188
+              },
+              "point_estimate": 157873.65221635092,
+              "standard_error": 38.06579913787431
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 121.53586021589855,
+                "upper_bound": 417.10379847580896
+              },
+              "point_estimate": 282.0861660157559,
+              "standard_error": 84.32962528118262
+            }
+          },
+          "median_ns": 157880.6739790287
+        },
+        "after_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              151.0,
+              302.0,
+              453.0,
+              604.0,
+              755.0,
+              906.0,
+              1057.0,
+              1208.0,
+              1359.0,
+              1510.0,
+              1661.0,
+              1812.0,
+              1963.0,
+              2114.0,
+              2265.0,
+              2416.0,
+              2567.0,
+              2718.0,
+              2869.0,
+              3020.0
+            ],
+            "times": [
+              23776417.0,
+              47575834.0,
+              71368583.0,
+              95470375.0,
+              119398708.0,
+              142756833.0,
+              166922292.0,
+              191639084.0,
+              215102125.0,
+              238312583.0,
+              262313167.0,
+              287003375.0,
+              309619208.0,
+              334109083.0,
+              357699000.0,
+              381426125.0,
+              405567667.0,
+              429150791.0,
+              453304542.0,
+              476758875.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 157809.18272419798,
+                "upper_bound": 158060.8160135503
+              },
+              "point_estimate": 157931.21285077848,
+              "standard_error": 64.16357224393207
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 157845.03990066226,
+                "upper_bound": 158023.40493203208
+              },
+              "point_estimate": 157922.65468306528,
+              "standard_error": 48.10083918147987
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 80.62584042407649,
+                "upper_bound": 491.525154228985
+              },
+              "point_estimate": 195.81383046401177,
+              "standard_error": 102.42351788892186
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 157897.03031061936,
+                "upper_bound": 158052.6119450167
+              },
+              "point_estimate": 157963.7656529063,
+              "standard_error": 39.573375677649054
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 185.70783125229002,
+                "upper_bound": 375.9234272581359
+              },
+              "point_estimate": 293.9805673142661,
+              "standard_error": 49.20454571279268
+            }
+          },
+          "median_ns": 157922.65468306528
+        },
+        "before_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              52.0,
+              104.0,
+              156.0,
+              208.0,
+              260.0,
+              312.0,
+              364.0,
+              416.0,
+              468.0,
+              520.0,
+              572.0,
+              624.0,
+              676.0,
+              728.0,
+              780.0,
+              832.0,
+              884.0,
+              936.0,
+              988.0,
+              1040.0
+            ],
+            "times": [
+              23313083.0,
+              46351291.0,
+              69556958.0,
+              92666000.0,
+              116783166.0,
+              139112541.0,
+              162751250.0,
+              186654042.0,
+              208886542.0,
+              232249459.0,
+              256649375.0,
+              279974375.0,
+              302415167.0,
+              325761000.0,
+              349158625.0,
+              372431125.0,
+              396500834.0,
+              419730375.0,
+              441012709.0,
+              464833500.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 446853.5701767792,
+                "upper_bound": 447839.89579161454
+              },
+              "point_estimate": 447348.77931164706,
+              "standard_error": 251.90262551798193
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 446501.3568319838,
+                "upper_bound": 448379.203525641
+              },
+              "point_estimate": 447416.8077979713,
+              "standard_error": 417.32700903772394
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 593.0344020455003,
+                "upper_bound": 1966.2383967665257
+              },
+              "point_estimate": 1575.7902588766917,
+              "standard_error": 343.8988345771713
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 447081.38031102193,
+                "upper_bound": 448019.3855207185
+              },
+              "point_estimate": 447545.1805079067,
+              "standard_error": 240.8263160395963
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 886.3865911278396,
+                "upper_bound": 1337.6433794915188
+              },
+              "point_estimate": 1159.522555656715,
+              "standard_error": 115.10572756745273
+            }
+          },
+          "median_ns": 447416.8077979713
+        }
+      },
+      "comparison": {
+        "before_median_ns": 447553.7324004121,
+        "after_median_ns": 157892.87454010302,
+        "elapsed_change_percent": -64.72091212528616
+      }
+    },
+    "script_value_method_call": {
+      "trials": {
+        "before_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              201.0,
+              402.0,
+              603.0,
+              804.0,
+              1005.0,
+              1206.0,
+              1407.0,
+              1608.0,
+              1809.0,
+              2010.0,
+              2211.0,
+              2412.0,
+              2613.0,
+              2814.0,
+              3015.0,
+              3216.0,
+              3417.0,
+              3618.0,
+              3819.0,
+              4020.0,
+              4221.0,
+              4422.0,
+              4623.0,
+              4824.0,
+              5025.0,
+              5226.0,
+              5427.0,
+              5628.0,
+              5829.0,
+              6030.0,
+              6231.0,
+              6432.0,
+              6633.0,
+              6834.0,
+              7035.0,
+              7236.0,
+              7437.0,
+              7638.0,
+              7839.0,
+              8040.0,
+              8241.0,
+              8442.0,
+              8643.0,
+              8844.0,
+              9045.0,
+              9246.0,
+              9447.0,
+              9648.0,
+              9849.0,
+              10050.0,
+              10251.0,
+              10452.0,
+              10653.0,
+              10854.0,
+              11055.0,
+              11256.0,
+              11457.0,
+              11658.0,
+              11859.0,
+              12060.0,
+              12261.0,
+              12462.0,
+              12663.0,
+              12864.0,
+              13065.0,
+              13266.0,
+              13467.0,
+              13668.0,
+              13869.0,
+              14070.0,
+              14271.0,
+              14472.0,
+              14673.0,
+              14874.0,
+              15075.0,
+              15276.0,
+              15477.0,
+              15678.0,
+              15879.0,
+              16080.0,
+              16281.0,
+              16482.0,
+              16683.0,
+              16884.0,
+              17085.0,
+              17286.0,
+              17487.0,
+              17688.0,
+              17889.0,
+              18090.0,
+              18291.0,
+              18492.0,
+              18693.0,
+              18894.0,
+              19095.0,
+              19296.0,
+              19497.0,
+              19698.0,
+              19899.0,
+              20100.0
+            ],
+            "times": [
+              1013250.0,
+              1974417.0,
+              2952291.0,
+              3960375.0,
+              4932708.0,
+              5931291.0,
+              6955541.0,
+              7922208.0,
+              8885959.0,
+              9858458.0,
+              10894916.0,
+              11842333.0,
+              12809000.0,
+              13875791.0,
+              14835417.0,
+              15832667.0,
+              16816417.0,
+              17935375.0,
+              18924417.0,
+              19912333.0,
+              20938041.0,
+              22076667.0,
+              23118250.0,
+              23772209.0,
+              24755500.0,
+              25716459.0,
+              26731833.0,
+              28096250.0,
+              29048959.0,
+              30051542.0,
+              31079208.0,
+              32127917.0,
+              33164750.0,
+              34135584.0,
+              35134709.0,
+              36161125.0,
+              37230250.0,
+              38340375.0,
+              39554125.0,
+              39778875.0,
+              40976791.0,
+              41884000.0,
+              42791958.0,
+              43573583.0,
+              44974666.0,
+              46134667.0,
+              47297833.0,
+              48938584.0,
+              48975958.0,
+              49875958.0,
+              50728417.0,
+              51876625.0,
+              52347292.0,
+              53563708.0,
+              55409000.0,
+              56043458.0,
+              56970875.0,
+              57762917.0,
+              58908333.0,
+              59769583.0,
+              60939834.0,
+              62254000.0,
+              63281500.0,
+              64262292.0,
+              65104000.0,
+              66104167.0,
+              66755000.0,
+              68001917.0,
+              69196792.0,
+              70071458.0,
+              70903958.0,
+              71806042.0,
+              72538667.0,
+              73707791.0,
+              74885208.0,
+              76178000.0,
+              77222125.0,
+              78133708.0,
+              79556000.0,
+              79890291.0,
+              81155166.0,
+              81750666.0,
+              83195125.0,
+              83955959.0,
+              84540833.0,
+              86067792.0,
+              87788875.0,
+              89610000.0,
+              90510791.0,
+              90730333.0,
+              91453250.0,
+              92636167.0,
+              93573250.0,
+              94419208.0,
+              94719584.0,
+              95981209.0,
+              96878042.0,
+              97829583.0,
+              100619125.0,
+              99812542.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 4963.164975019847,
+                "upper_bound": 4977.796961886662
+              },
+              "point_estimate": 4970.415000261834,
+              "standard_error": 3.727947110273234
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 4962.521250584683,
+                "upper_bound": 4981.011360568546
+              },
+              "point_estimate": 4971.262683981134,
+              "standard_error": 4.105337637852131
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 25.468765304510185,
+                "upper_bound": 45.72754893941754
+              },
+              "point_estimate": 34.58547504930288,
+              "standard_error": 4.930902279015769
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 4976.805622730753,
+                "upper_bound": 4993.513443232239
+              },
+              "point_estimate": 4984.941405533291,
+              "standard_error": 4.274102225875554
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 31.948319316689357,
+                "upper_bound": 42.581858663826765
+              },
+              "point_estimate": 37.534210938409075,
+              "standard_error": 2.713199622243961
+            }
+          },
+          "median_ns": 4971.262683981134
+        },
+        "after_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              250.0,
+              500.0,
+              750.0,
+              1000.0,
+              1250.0,
+              1500.0,
+              1750.0,
+              2000.0,
+              2250.0,
+              2500.0,
+              2750.0,
+              3000.0,
+              3250.0,
+              3500.0,
+              3750.0,
+              4000.0,
+              4250.0,
+              4500.0,
+              4750.0,
+              5000.0,
+              5250.0,
+              5500.0,
+              5750.0,
+              6000.0,
+              6250.0,
+              6500.0,
+              6750.0,
+              7000.0,
+              7250.0,
+              7500.0,
+              7750.0,
+              8000.0,
+              8250.0,
+              8500.0,
+              8750.0,
+              9000.0,
+              9250.0,
+              9500.0,
+              9750.0,
+              10000.0,
+              10250.0,
+              10500.0,
+              10750.0,
+              11000.0,
+              11250.0,
+              11500.0,
+              11750.0,
+              12000.0,
+              12250.0,
+              12500.0,
+              12750.0,
+              13000.0,
+              13250.0,
+              13500.0,
+              13750.0,
+              14000.0,
+              14250.0,
+              14500.0,
+              14750.0,
+              15000.0,
+              15250.0,
+              15500.0,
+              15750.0,
+              16000.0,
+              16250.0,
+              16500.0,
+              16750.0,
+              17000.0,
+              17250.0,
+              17500.0,
+              17750.0,
+              18000.0,
+              18250.0,
+              18500.0,
+              18750.0,
+              19000.0,
+              19250.0,
+              19500.0,
+              19750.0,
+              20000.0,
+              20250.0,
+              20500.0,
+              20750.0,
+              21000.0,
+              21250.0,
+              21500.0,
+              21750.0,
+              22000.0,
+              22250.0,
+              22500.0,
+              22750.0,
+              23000.0,
+              23250.0,
+              23500.0,
+              23750.0,
+              24000.0,
+              24250.0,
+              24500.0,
+              24750.0,
+              25000.0
+            ],
+            "times": [
+              986667.0,
+              1979542.0,
+              2973792.0,
+              3963584.0,
+              4939917.0,
+              5929500.0,
+              6905292.0,
+              7883333.0,
+              8870583.0,
+              9870459.0,
+              10855750.0,
+              11801292.0,
+              12799167.0,
+              13747209.0,
+              14692500.0,
+              15688291.0,
+              16638583.0,
+              17609708.0,
+              19105625.0,
+              19970708.0,
+              20756875.0,
+              21726417.0,
+              22642625.0,
+              23567250.0,
+              24602458.0,
+              25624125.0,
+              26528333.0,
+              27458500.0,
+              29060709.0,
+              29705625.0,
+              30584541.0,
+              31606750.0,
+              32686500.0,
+              34099208.0,
+              35134875.0,
+              36213125.0,
+              37163417.0,
+              37978750.0,
+              39154292.0,
+              40304958.0,
+              40980458.0,
+              41906333.0,
+              43020625.0,
+              44426584.0,
+              45141667.0,
+              46100959.0,
+              46877333.0,
+              48032375.0,
+              48976084.0,
+              49946250.0,
+              50898333.0,
+              52077083.0,
+              52926042.0,
+              53568958.0,
+              54442917.0,
+              55894375.0,
+              56806958.0,
+              57802209.0,
+              58703875.0,
+              60744125.0,
+              61060625.0,
+              62071042.0,
+              63356834.0,
+              63868584.0,
+              64764625.0,
+              65902958.0,
+              66805959.0,
+              68138208.0,
+              68834084.0,
+              69718458.0,
+              70022417.0,
+              71504375.0,
+              71807750.0,
+              72650917.0,
+              75307250.0,
+              76442167.0,
+              77437958.0,
+              77999292.0,
+              78212750.0,
+              80017625.0,
+              80559125.0,
+              81686625.0,
+              82234542.0,
+              83382084.0,
+              85280292.0,
+              85872166.0,
+              87011500.0,
+              86104500.0,
+              87173417.0,
+              89798875.0,
+              90179583.0,
+              91794709.0,
+              92042917.0,
+              92968208.0,
+              95006875.0,
+              95308750.0,
+              96571625.0,
+              97402125.0,
+              99245750.0,
+              99286458.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3969.881056505044,
+                "upper_bound": 3982.617248086498
+              },
+              "point_estimate": 3976.273298280235,
+              "standard_error": 3.245740547100977
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3965.056,
+                "upper_bound": 3991.074304347826
+              },
+              "point_estimate": 3983.1234686303387,
+              "standard_error": 6.968928768344375
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 28.94551014625921,
+                "upper_bound": 44.39440059939347
+              },
+              "point_estimate": 36.54219201690106,
+              "standard_error": 3.8834020375907814
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3975.6445610853684,
+                "upper_bound": 3989.642815663059
+              },
+              "point_estimate": 3982.7456638273975,
+              "standard_error": 3.5908592320573938
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 29.00840387336504,
+                "upper_bound": 35.76804317166308
+              },
+              "point_estimate": 32.62567246829835,
+              "standard_error": 1.7233895318139638
+            }
+          },
+          "median_ns": 3983.1234686303387
+        },
+        "after_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              252.0,
+              504.0,
+              756.0,
+              1008.0,
+              1260.0,
+              1512.0,
+              1764.0,
+              2016.0,
+              2268.0,
+              2520.0,
+              2772.0,
+              3024.0,
+              3276.0,
+              3528.0,
+              3780.0,
+              4032.0,
+              4284.0,
+              4536.0,
+              4788.0,
+              5040.0,
+              5292.0,
+              5544.0,
+              5796.0,
+              6048.0,
+              6300.0,
+              6552.0,
+              6804.0,
+              7056.0,
+              7308.0,
+              7560.0,
+              7812.0,
+              8064.0,
+              8316.0,
+              8568.0,
+              8820.0,
+              9072.0,
+              9324.0,
+              9576.0,
+              9828.0,
+              10080.0,
+              10332.0,
+              10584.0,
+              10836.0,
+              11088.0,
+              11340.0,
+              11592.0,
+              11844.0,
+              12096.0,
+              12348.0,
+              12600.0,
+              12852.0,
+              13104.0,
+              13356.0,
+              13608.0,
+              13860.0,
+              14112.0,
+              14364.0,
+              14616.0,
+              14868.0,
+              15120.0,
+              15372.0,
+              15624.0,
+              15876.0,
+              16128.0,
+              16380.0,
+              16632.0,
+              16884.0,
+              17136.0,
+              17388.0,
+              17640.0,
+              17892.0,
+              18144.0,
+              18396.0,
+              18648.0,
+              18900.0,
+              19152.0,
+              19404.0,
+              19656.0,
+              19908.0,
+              20160.0,
+              20412.0,
+              20664.0,
+              20916.0,
+              21168.0,
+              21420.0,
+              21672.0,
+              21924.0,
+              22176.0,
+              22428.0,
+              22680.0,
+              22932.0,
+              23184.0,
+              23436.0,
+              23688.0,
+              23940.0,
+              24192.0,
+              24444.0,
+              24696.0,
+              24948.0,
+              25200.0
+            ],
+            "times": [
+              997334.0,
+              1999834.0,
+              2997917.0,
+              3989542.0,
+              4965375.0,
+              5974209.0,
+              6971458.0,
+              8029041.0,
+              8943541.0,
+              9958250.0,
+              10940667.0,
+              11962167.0,
+              13215917.0,
+              14040542.0,
+              15232958.0,
+              16169083.0,
+              17187209.0,
+              18114750.0,
+              19099709.0,
+              20103834.0,
+              21121667.0,
+              22137625.0,
+              23068375.0,
+              24303125.0,
+              25286208.0,
+              26041583.0,
+              26954958.0,
+              27983458.0,
+              28986417.0,
+              30091167.0,
+              30994250.0,
+              32422542.0,
+              33236875.0,
+              34328792.0,
+              35439375.0,
+              36435208.0,
+              37513709.0,
+              38300792.0,
+              39061292.0,
+              40003250.0,
+              40938334.0,
+              42190625.0,
+              43579209.0,
+              44392750.0,
+              45526333.0,
+              46463791.0,
+              47795333.0,
+              48715125.0,
+              49552584.0,
+              50443917.0,
+              51637458.0,
+              52066000.0,
+              52982917.0,
+              53733500.0,
+              55637458.0,
+              56721500.0,
+              57749500.0,
+              58633709.0,
+              59945333.0,
+              60021541.0,
+              61171708.0,
+              61897458.0,
+              63535000.0,
+              63597417.0,
+              64548375.0,
+              65828334.0,
+              66542584.0,
+              67484875.0,
+              68460250.0,
+              69641833.0,
+              71425416.0,
+              72326625.0,
+              73102709.0,
+              74158000.0,
+              75323666.0,
+              76525500.0,
+              76962625.0,
+              78305875.0,
+              79528084.0,
+              80337625.0,
+              81560291.0,
+              81941333.0,
+              83070667.0,
+              84307208.0,
+              84426209.0,
+              85321333.0,
+              86156166.0,
+              86887416.0,
+              88049208.0,
+              88681875.0,
+              89645875.0,
+              90442334.0,
+              91799500.0,
+              92383375.0,
+              93457542.0,
+              94324375.0,
+              95463167.0,
+              95940667.0,
+              97092959.0,
+              97738125.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3965.186014272315,
+                "upper_bound": 3979.807233153522
+              },
+              "point_estimate": 3972.5583328164216,
+              "standard_error": 3.744742801860865
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3966.3953201970444,
+                "upper_bound": 3985.0012400793653
+              },
+              "point_estimate": 3974.545507733008,
+              "standard_error": 5.091330698552744
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 29.119536383449447,
+                "upper_bound": 49.09882947020137
+              },
+              "point_estimate": 40.03236118081806,
+              "standard_error": 5.154249244104136
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3941.4500952870426,
+                "upper_bound": 3964.368643961721
+              },
+              "point_estimate": 3952.3005542654478,
+              "standard_error": 5.8417738938820545
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 32.64527522148188,
+                "upper_bound": 41.99559874612625
+              },
+              "point_estimate": 37.67236821735373,
+              "standard_error": 2.3859772831134887
+            }
+          },
+          "median_ns": 3974.545507733008
+        },
+        "before_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              199.0,
+              398.0,
+              597.0,
+              796.0,
+              995.0,
+              1194.0,
+              1393.0,
+              1592.0,
+              1791.0,
+              1990.0,
+              2189.0,
+              2388.0,
+              2587.0,
+              2786.0,
+              2985.0,
+              3184.0,
+              3383.0,
+              3582.0,
+              3781.0,
+              3980.0,
+              4179.0,
+              4378.0,
+              4577.0,
+              4776.0,
+              4975.0,
+              5174.0,
+              5373.0,
+              5572.0,
+              5771.0,
+              5970.0,
+              6169.0,
+              6368.0,
+              6567.0,
+              6766.0,
+              6965.0,
+              7164.0,
+              7363.0,
+              7562.0,
+              7761.0,
+              7960.0,
+              8159.0,
+              8358.0,
+              8557.0,
+              8756.0,
+              8955.0,
+              9154.0,
+              9353.0,
+              9552.0,
+              9751.0,
+              9950.0,
+              10149.0,
+              10348.0,
+              10547.0,
+              10746.0,
+              10945.0,
+              11144.0,
+              11343.0,
+              11542.0,
+              11741.0,
+              11940.0,
+              12139.0,
+              12338.0,
+              12537.0,
+              12736.0,
+              12935.0,
+              13134.0,
+              13333.0,
+              13532.0,
+              13731.0,
+              13930.0,
+              14129.0,
+              14328.0,
+              14527.0,
+              14726.0,
+              14925.0,
+              15124.0,
+              15323.0,
+              15522.0,
+              15721.0,
+              15920.0,
+              16119.0,
+              16318.0,
+              16517.0,
+              16716.0,
+              16915.0,
+              17114.0,
+              17313.0,
+              17512.0,
+              17711.0,
+              17910.0,
+              18109.0,
+              18308.0,
+              18507.0,
+              18706.0,
+              18905.0,
+              19104.0,
+              19303.0,
+              19502.0,
+              19701.0,
+              19900.0
+            ],
+            "times": [
+              1016750.0,
+              1996916.0,
+              2994291.0,
+              4006166.0,
+              5002000.0,
+              5999625.0,
+              6990459.0,
+              7988208.0,
+              8972416.0,
+              10012250.0,
+              11013625.0,
+              11981750.0,
+              12989708.0,
+              13970959.0,
+              14984292.0,
+              15961792.0,
+              16968708.0,
+              18065125.0,
+              19087584.0,
+              20076875.0,
+              21050000.0,
+              22044584.0,
+              23045209.0,
+              24065917.0,
+              25038125.0,
+              26040459.0,
+              27012084.0,
+              28047250.0,
+              29046417.0,
+              30097042.0,
+              31139417.0,
+              32058209.0,
+              33107875.0,
+              34196542.0,
+              35111125.0,
+              36153959.0,
+              37135500.0,
+              38200875.0,
+              39105416.0,
+              40046541.0,
+              41099625.0,
+              42153667.0,
+              43054125.0,
+              43973292.0,
+              44998167.0,
+              45984500.0,
+              46963958.0,
+              48124792.0,
+              49230000.0,
+              50146750.0,
+              51037042.0,
+              52047917.0,
+              52922542.0,
+              55242959.0,
+              55327125.0,
+              56079208.0,
+              56404459.0,
+              57413292.0,
+              58734000.0,
+              62174334.0,
+              60367667.0,
+              61138625.0,
+              62398209.0,
+              63761417.0,
+              64809833.0,
+              65657833.0,
+              66742333.0,
+              67669792.0,
+              68835208.0,
+              70277209.0,
+              71162042.0,
+              70899500.0,
+              72149750.0,
+              73667083.0,
+              74152083.0,
+              75028334.0,
+              75988583.0,
+              77630791.0,
+              77596583.0,
+              78730417.0,
+              80347334.0,
+              81357917.0,
+              82328625.0,
+              83398709.0,
+              84434542.0,
+              85748042.0,
+              86432875.0,
+              87788708.0,
+              88825166.0,
+              89560542.0,
+              90604250.0,
+              92449959.0,
+              93166042.0,
+              93899333.0,
+              94705458.0,
+              97081042.0,
+              98892542.0,
+              99174584.0,
+              99662167.0,
+              100924375.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 5016.2092411251815,
+                "upper_bound": 5031.414998458028
+              },
+              "point_estimate": 5023.5856735313255,
+              "standard_error": 3.8640767317001656
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 5017.632399418477,
+                "upper_bound": 5032.233309404163
+              },
+              "point_estimate": 5024.866247906198,
+              "standard_error": 4.267371273087683
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 18.66048434207761,
+                "upper_bound": 31.1104020504373
+              },
+              "point_estimate": 24.261618614496616,
+              "standard_error": 3.276203724450714
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 5006.418111999462,
+                "upper_bound": 5030.882743870026
+              },
+              "point_estimate": 5018.384594555458,
+              "standard_error": 6.244999174934825
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 28.952635672292175,
+                "upper_bound": 48.58670414775089
+              },
+              "point_estimate": 38.7433863527823,
+              "standard_error": 5.069503188376297
+            }
+          },
+          "median_ns": 5024.866247906198
+        }
+      },
+      "comparison": {
+        "before_median_ns": 4998.232570176628,
+        "after_median_ns": 3978.8262714314624,
+        "elapsed_change_percent": -20.395335439726082
+      }
+    },
+    "landscape_sparse/distant_edits": {
+      "trials": {
+        "before_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              22.0,
+              44.0,
+              66.0,
+              88.0,
+              110.0,
+              132.0,
+              154.0,
+              176.0,
+              198.0,
+              220.0,
+              242.0,
+              264.0,
+              286.0,
+              308.0,
+              330.0,
+              352.0,
+              374.0,
+              396.0,
+              418.0,
+              440.0
+            ],
+            "times": [
+              23655541.0,
+              48716333.0,
+              75627084.0,
+              100492375.0,
+              122868250.0,
+              148653333.0,
+              171953708.0,
+              193127459.0,
+              213728333.0,
+              237691625.0,
+              262282000.0,
+              463631250.0,
+              279268500.0,
+              311938292.0,
+              379497292.0,
+              403443125.0,
+              397063875.0,
+              419232125.0,
+              456238291.0,
+              481090625.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1077843.6702165855,
+                "upper_bound": 1202021.8247884305
+              },
+              "point_estimate": 1125886.9362984875,
+              "standard_error": 33859.50917538469
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1079926.2512626261,
+                "upper_bound": 1121572.852272727
+              },
+              "point_estimate": 1095351.4460227273,
+              "standard_error": 12081.988183177355
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 18543.208963117017,
+                "upper_bound": 66026.24999012033
+              },
+              "point_estimate": 38875.85621606541,
+              "standard_error": 12192.421040548437
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1063746.6573367224,
+                "upper_bound": 1205415.3137080984
+              },
+              "point_estimate": 1116341.8467532468,
+              "standard_error": 37429.11333279594
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 29855.446391264926,
+                "upper_bound": 251358.9152141176
+              },
+              "point_estimate": 154717.09057473598,
+              "standard_error": 72640.51978791913
+            }
+          },
+          "median_ns": 1095351.4460227273
+        },
+        "after_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              45.0,
+              90.0,
+              135.0,
+              180.0,
+              225.0,
+              270.0,
+              315.0,
+              360.0,
+              405.0,
+              450.0,
+              495.0,
+              540.0,
+              585.0,
+              630.0,
+              675.0,
+              720.0,
+              765.0,
+              810.0,
+              855.0,
+              900.0
+            ],
+            "times": [
+              19722500.0,
+              41920875.0,
+              64828750.0,
+              93419792.0,
+              115668333.0,
+              139963958.0,
+              162066166.0,
+              183945958.0,
+              211249959.0,
+              235148209.0,
+              257919041.0,
+              280585209.0,
+              309128458.0,
+              330648958.0,
+              359860750.0,
+              379239209.0,
+              409717250.0,
+              431161250.0,
+              449356167.0,
+              485951500.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 502885.5268978761,
+                "upper_bound": 524069.2841572962
+              },
+              "point_estimate": 514625.2444080726,
+              "standard_error": 5459.935121660666
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 516440.39735449734,
+                "upper_bound": 526141.9460160818
+              },
+              "point_estimate": 521326.7023569023,
+              "standard_error": 2490.198439426216
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 4773.686377472309,
+                "upper_bound": 18365.01774831604
+              },
+              "point_estimate": 10325.530044377538,
+              "standard_error": 3637.500390790565
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 523844.5018039537,
+                "upper_bound": 532160.8598028045
+              },
+              "point_estimate": 528448.5982965544,
+              "standard_error": 2129.7252021692025
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 8109.238527693569,
+                "upper_bound": 34723.687183617665
+              },
+              "point_estimate": 25045.58439522025,
+              "standard_error": 6600.215306473712
+            }
+          },
+          "median_ns": 521326.7023569023
+        },
+        "after_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              46.0,
+              92.0,
+              138.0,
+              184.0,
+              230.0,
+              276.0,
+              322.0,
+              368.0,
+              414.0,
+              460.0,
+              506.0,
+              552.0,
+              598.0,
+              644.0,
+              690.0,
+              736.0,
+              782.0,
+              828.0,
+              874.0,
+              920.0
+            ],
+            "times": [
+              23995167.0,
+              45774250.0,
+              69818750.0,
+              95162500.0,
+              123900584.0,
+              146259250.0,
+              169635416.0,
+              192511417.0,
+              214860541.0,
+              247322917.0,
+              266538250.0,
+              306428834.0,
+              328160792.0,
+              348865250.0,
+              359982792.0,
+              385921084.0,
+              412625083.0,
+              434927375.0,
+              466826417.0,
+              491588000.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 522100.87801775883,
+                "upper_bound": 533502.6585610519
+              },
+              "point_estimate": 527866.4492637956,
+              "standard_error": 2906.707719220198
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 522421.52092391305,
+                "upper_bound": 534230.5589244851
+              },
+              "point_estimate": 526786.7484472049,
+              "standard_error": 2802.7195090627692
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 4279.036443415968,
+                "upper_bound": 17567.47689602396
+              },
+              "point_estimate": 11036.193217683991,
+              "standard_error": 3402.7981955898895
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 527497.209674824,
+                "upper_bound": 536698.9821506533
+              },
+              "point_estimate": 531856.9344493259,
+              "standard_error": 2338.792912338842
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 8236.061249620436,
+                "upper_bound": 17212.009357263767
+              },
+              "point_estimate": 13345.3950042571,
+              "standard_error": 2302.430102315149
+            }
+          },
+          "median_ns": 526786.7484472049
+        },
+        "before_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              23.0,
+              46.0,
+              69.0,
+              92.0,
+              115.0,
+              138.0,
+              161.0,
+              184.0,
+              207.0,
+              230.0,
+              253.0,
+              276.0,
+              299.0,
+              322.0,
+              345.0,
+              368.0,
+              391.0,
+              414.0,
+              437.0,
+              460.0
+            ],
+            "times": [
+              27443250.0,
+              55582041.0,
+              81908833.0,
+              105222542.0,
+              125258542.0,
+              143832959.0,
+              167808167.0,
+              193012667.0,
+              222607458.0,
+              253877542.0,
+              279700125.0,
+              299704542.0,
+              324497375.0,
+              350322833.0,
+              374764333.0,
+              398531500.0,
+              447602375.0,
+              480658000.0,
+              481282917.0,
+              512151125.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1089357.1183822106,
+                "upper_bound": 1130780.6651907393
+              },
+              "point_estimate": 1109431.2814311609,
+              "standard_error": 10615.30430976039
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1085580.7617056856,
+                "upper_bound": 1128547.6467391304
+              },
+              "point_estimate": 1095269.309610984,
+              "standard_error": 11457.494481995083
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 11300.649718436756,
+                "upper_bound": 76437.8300321204
+              },
+              "point_estimate": 28149.875914370245,
+              "standard_error": 18809.274182365767
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1088776.9323626184,
+                "upper_bound": 1122220.1632431047
+              },
+              "point_estimate": 1105864.3875018936,
+              "standard_error": 8566.145767431597
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 32437.699121296664,
+                "upper_bound": 59236.618703959306
+              },
+              "point_estimate": 48725.65596799801,
+              "standard_error": 6814.851446190517
+            }
+          },
+          "median_ns": 1095269.309610984
+        }
+      },
+      "comparison": {
+        "before_median_ns": 1095351.4460227273,
+        "after_median_ns": 524594.4573930297,
+        "elapsed_change_percent": -52.10720182112719
+      }
+    },
+    "landscape_sparse/dense_edits": {
+      "trials": {
+        "before_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              23.0,
+              46.0,
+              69.0,
+              92.0,
+              115.0,
+              138.0,
+              161.0,
+              184.0,
+              207.0,
+              230.0,
+              253.0,
+              276.0,
+              299.0,
+              322.0,
+              345.0,
+              368.0,
+              391.0,
+              414.0,
+              437.0,
+              460.0
+            ],
+            "times": [
+              24908125.0,
+              49365208.0,
+              73127791.0,
+              97827333.0,
+              122298083.0,
+              146001000.0,
+              169110834.0,
+              194800458.0,
+              218405459.0,
+              241066625.0,
+              267484458.0,
+              289852500.0,
+              315094583.0,
+              342186167.0,
+              378982583.0,
+              392524917.0,
+              405356667.0,
+              461431542.0,
+              603912625.0,
+              526815833.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1060445.81454868,
+                "upper_bound": 1120482.2744161172
+              },
+              "point_estimate": 1084030.2729123626,
+              "standard_error": 16194.26404062001
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1056174.8289415897,
+                "upper_bound": 1069900.245923913
+              },
+              "point_estimate": 1061256.5087991718,
+              "standard_error": 3820.8886451251
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 5566.67100334556,
+                "upper_bound": 29082.995042640996
+              },
+              "point_estimate": 13571.075137158834,
+              "standard_error": 6157.524257481574
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1060130.832903161,
+                "upper_bound": 1191365.9885406552
+              },
+              "point_estimate": 1118320.596061203,
+              "standard_error": 35245.21652381231
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 14331.163418896753,
+                "upper_bound": 118627.7173340927
+              },
+              "point_estimate": 74534.97876997243,
+              "standard_error": 33071.943813330814
+            }
+          },
+          "median_ns": 1061256.5087991718
+        },
+        "after_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              22.0,
+              44.0,
+              66.0,
+              88.0,
+              110.0,
+              132.0,
+              154.0,
+              176.0,
+              198.0,
+              220.0,
+              242.0,
+              264.0,
+              286.0,
+              308.0,
+              330.0,
+              352.0,
+              374.0,
+              396.0,
+              418.0,
+              440.0
+            ],
+            "times": [
+              23447166.0,
+              47162333.0,
+              71014209.0,
+              93312208.0,
+              116021041.0,
+              138559084.0,
+              160110042.0,
+              183947833.0,
+              208434458.0,
+              232293791.0,
+              258145416.0,
+              280333875.0,
+              313194917.0,
+              339887167.0,
+              370359917.0,
+              385147333.0,
+              396899208.0,
+              412591167.0,
+              443466250.0,
+              467220667.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1058484.7561133401,
+                "upper_bound": 1076773.3114041158
+              },
+              "point_estimate": 1067071.0233049388,
+              "standard_error": 4700.261352577824
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1055308.8022727272,
+                "upper_bound": 1069293.8997933883
+              },
+              "point_estimate": 1061546.4905748663,
+              "standard_error": 3293.4838603453986
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 6490.370859359783,
+                "upper_bound": 30326.546213455676
+              },
+              "point_estimate": 14212.145316623431,
+              "standard_error": 6016.1018963007355
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1058495.3565860246,
+                "upper_bound": 1084872.603387968
+              },
+              "point_estimate": 1070672.1577446943,
+              "standard_error": 6733.855338624345
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 12424.084715943187,
+                "upper_bound": 27729.155541895307
+              },
+              "point_estimate": 21551.030720498555,
+              "standard_error": 3932.8175920370113
+            }
+          },
+          "median_ns": 1061546.4905748663
+        },
+        "after_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              21.0,
+              42.0,
+              63.0,
+              84.0,
+              105.0,
+              126.0,
+              147.0,
+              168.0,
+              189.0,
+              210.0,
+              231.0,
+              252.0,
+              273.0,
+              294.0,
+              315.0,
+              336.0,
+              357.0,
+              378.0,
+              399.0,
+              420.0
+            ],
+            "times": [
+              23738458.0,
+              47717334.0,
+              70074625.0,
+              92706375.0,
+              113224333.0,
+              134735125.0,
+              154069500.0,
+              175213167.0,
+              204187459.0,
+              237159959.0,
+              264273750.0,
+              276541125.0,
+              286232791.0,
+              310393417.0,
+              337058250.0,
+              362012750.0,
+              401414875.0,
+              413066375.0,
+              462136042.0,
+              478651959.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1081747.4841212376,
+                "upper_bound": 1112389.4035395323
+              },
+              "point_estimate": 1096950.5361093483,
+              "standard_error": 7825.440502363541
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1073722.5446428573,
+                "upper_bound": 1126872.276330532
+              },
+              "point_estimate": 1095076.8022486772,
+              "standard_error": 14257.90193848707
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 20800.156922390044,
+                "upper_bound": 59576.11403516971
+              },
+              "point_estimate": 47139.96903685635,
+              "standard_error": 9832.337622830404
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1080408.5412470915,
+                "upper_bound": 1123614.722944761
+              },
+              "point_estimate": 1103653.918981251,
+              "standard_error": 11076.181463319783
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 27365.06536608189,
+                "upper_bound": 41558.55029574108
+              },
+              "point_estimate": 35831.803546080555,
+              "standard_error": 3620.472288838001
+            }
+          },
+          "median_ns": 1095076.8022486772
+        },
+        "before_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              23.0,
+              46.0,
+              69.0,
+              92.0,
+              115.0,
+              138.0,
+              161.0,
+              184.0,
+              207.0,
+              230.0,
+              253.0,
+              276.0,
+              299.0,
+              322.0,
+              345.0,
+              368.0,
+              391.0,
+              414.0,
+              437.0,
+              460.0
+            ],
+            "times": [
+              24446791.0,
+              49634375.0,
+              74317084.0,
+              98522125.0,
+              122773292.0,
+              145742292.0,
+              169801667.0,
+              194375375.0,
+              218758083.0,
+              246315084.0,
+              271840625.0,
+              294756166.0,
+              318223959.0,
+              351610500.0,
+              369438750.0,
+              386249125.0,
+              414780750.0,
+              439915750.0,
+              463074750.0,
+              491136250.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1062053.0714981013,
+                "upper_bound": 1070519.4448578134
+              },
+              "point_estimate": 1066111.7298957757,
+              "standard_error": 2161.18736111231
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1060243.9763090592,
+                "upper_bound": 1070864.8097826086
+              },
+              "point_estimate": 1065944.010367893,
+              "standard_error": 2875.452345282614
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 4890.829800561844,
+                "upper_bound": 14208.139627103175
+              },
+              "point_estimate": 8450.870345593945,
+              "standard_error": 2422.6796597501752
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1060256.778727588,
+                "upper_bound": 1070754.362342946
+              },
+              "point_estimate": 1065049.414406908,
+              "standard_error": 2664.1307100790023
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 6318.2332327421755,
+                "upper_bound": 12945.92060296108
+              },
+              "point_estimate": 9950.741011128071,
+              "standard_error": 1748.6034290991568
+            }
+          },
+          "median_ns": 1065944.010367893
+        }
+      },
+      "comparison": {
+        "before_median_ns": 1063122.2663043477,
+        "after_median_ns": 1070948.6975108227,
+        "elapsed_change_percent": 0.7361741405042199
+      }
+    },
+    "landscape_sparse/unchanged": {
+      "trials": {
+        "before_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              76.0,
+              152.0,
+              228.0,
+              304.0,
+              380.0,
+              456.0,
+              532.0,
+              608.0,
+              684.0,
+              760.0,
+              836.0,
+              912.0,
+              988.0,
+              1064.0,
+              1140.0,
+              1216.0,
+              1292.0,
+              1368.0,
+              1444.0,
+              1520.0
+            ],
+            "times": [
+              22279167.0,
+              48084458.0,
+              67032792.0,
+              93395709.0,
+              111739666.0,
+              139105750.0,
+              167910292.0,
+              178895000.0,
+              213389084.0,
+              246669292.0,
+              251494000.0,
+              285142042.0,
+              311102875.0,
+              330855334.0,
+              351680666.0,
+              393424667.0,
+              440943334.0,
+              462638542.0,
+              455071541.0,
+              479360208.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 306293.4421291001,
+                "upper_bound": 317797.349297681
+              },
+              "point_estimate": 311878.0849018869,
+              "standard_error": 2930.6258545220135
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 306139.59813596494,
+                "upper_bound": 315494.7037593985
+              },
+              "point_estimate": 312314.04641812865,
+              "standard_error": 2784.9582149473285
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3692.7840020992535,
+                "upper_bound": 21859.653845910274
+              },
+              "point_estimate": 9154.236860615763,
+              "standard_error": 4780.0487126787
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 311888.52717285976,
+                "upper_bound": 326037.26681939245
+              },
+              "point_estimate": 318960.8377727856,
+              "standard_error": 3620.7528917832433
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 8592.98334328128,
+                "upper_bound": 16865.35731158666
+              },
+              "point_estimate": 13421.16808908544,
+              "standard_error": 2132.8390655909466
+            }
+          },
+          "median_ns": 312314.04641812865
+        },
+        "after_1": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              75.0,
+              150.0,
+              225.0,
+              300.0,
+              375.0,
+              450.0,
+              525.0,
+              600.0,
+              675.0,
+              750.0,
+              825.0,
+              900.0,
+              975.0,
+              1050.0,
+              1125.0,
+              1200.0,
+              1275.0,
+              1350.0,
+              1425.0,
+              1500.0
+            ],
+            "times": [
+              21999750.0,
+              49741333.0,
+              72274833.0,
+              93589041.0,
+              122800416.0,
+              144078292.0,
+              169436792.0,
+              193661167.0,
+              217028750.0,
+              251275167.0,
+              264610916.0,
+              280315709.0,
+              316873500.0,
+              347118084.0,
+              370043625.0,
+              400886000.0,
+              413841667.0,
+              444082625.0,
+              439157625.0,
+              449825667.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 316011.3555923501,
+                "upper_bound": 325462.2093747951
+              },
+              "point_estimate": 321010.68962010485,
+              "standard_error": 2412.6445028240964
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 320457.2432323232,
+                "upper_bound": 328197.72133333335
+              },
+              "point_estimate": 322752.6791666667,
+              "standard_error": 2141.0619040628203
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3156.4236875147208,
+                "upper_bound": 15073.505525502938
+              },
+              "point_estimate": 9171.660643559326,
+              "standard_error": 3379.27769988292
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 313099.88851950684,
+                "upper_bound": 327712.36553819553
+              },
+              "point_estimate": 320465.24343786296,
+              "standard_error": 3798.7624866526257
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 6401.882425977372,
+                "upper_bound": 14157.470349887268
+              },
+              "point_estimate": 11061.32574793701,
+              "standard_error": 1988.6399941541558
+            }
+          },
+          "median_ns": 322752.6791666667
+        },
+        "after_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              75.0,
+              150.0,
+              225.0,
+              300.0,
+              375.0,
+              450.0,
+              525.0,
+              600.0,
+              675.0,
+              750.0,
+              825.0,
+              900.0,
+              975.0,
+              1050.0,
+              1125.0,
+              1200.0,
+              1275.0,
+              1350.0,
+              1425.0,
+              1500.0
+            ],
+            "times": [
+              22207000.0,
+              49457375.0,
+              71645375.0,
+              100105291.0,
+              115077250.0,
+              137173167.0,
+              159195709.0,
+              180757417.0,
+              204010583.0,
+              226111250.0,
+              253236792.0,
+              268740792.0,
+              300541500.0,
+              324290125.0,
+              339219792.0,
+              361982750.0,
+              385482875.0,
+              416268125.0,
+              427257750.0,
+              453757166.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 303094.4282988494,
+                "upper_bound": 311366.29473486065
+              },
+              "point_estimate": 306834.15881366155,
+              "standard_error": 2131.502616338162
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 301590.4978333333,
+                "upper_bound": 307600.68979020976
+              },
+              "point_estimate": 302867.3496190476,
+              "standard_error": 1784.2631805979088
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 1261.112810410768,
+                "upper_bound": 8910.710437068215
+              },
+              "point_estimate": 5220.728707313552,
+              "standard_error": 2000.237385150189
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 301951.71980980085,
+                "upper_bound": 305804.07152374287
+              },
+              "point_estimate": 303689.8182485482,
+              "standard_error": 989.5208387256431
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3647.103246437456,
+                "upper_bound": 13179.224155116806
+              },
+              "point_estimate": 9763.424583722848,
+              "standard_error": 2381.606127401973
+            }
+          },
+          "median_ns": 302867.3496190476
+        },
+        "before_2": {
+          "samples": {
+            "sampling_mode": "Linear",
+            "iters": [
+              76.0,
+              152.0,
+              228.0,
+              304.0,
+              380.0,
+              456.0,
+              532.0,
+              608.0,
+              684.0,
+              760.0,
+              836.0,
+              912.0,
+              988.0,
+              1064.0,
+              1140.0,
+              1216.0,
+              1292.0,
+              1368.0,
+              1444.0,
+              1520.0
+            ],
+            "times": [
+              21992541.0,
+              48897667.0,
+              67807167.0,
+              94365708.0,
+              116252459.0,
+              132823792.0,
+              166257500.0,
+              186308417.0,
+              212904250.0,
+              232123500.0,
+              254856625.0,
+              282304334.0,
+              299514292.0,
+              339497417.0,
+              342874917.0,
+              377224333.0,
+              426396708.0,
+              445567875.0,
+              443671292.0,
+              478848708.0
+            ]
+          },
+          "estimates": {
+            "mean": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 304468.5764364782,
+                "upper_bound": 313304.82807745103
+              },
+              "point_estimate": 308867.65707249905,
+              "standard_error": 2249.5392906463285
+            },
+            "median": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 305139.0400717703,
+                "upper_bound": 311888.8105680869
+              },
+              "point_estimate": 308397.9065674053,
+              "standard_error": 2092.031599435014
+            },
+            "median_abs_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 3898.0744410229768,
+                "upper_bound": 15513.7086115503
+              },
+              "point_estimate": 6940.03589946182,
+              "standard_error": 3000.7657030489295
+            },
+            "slope": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 307388.60860746546,
+                "upper_bound": 318272.58986587205
+              },
+              "point_estimate": 312959.16208967543,
+              "standard_error": 2767.9374944707415
+            },
+            "std_dev": {
+              "confidence_interval": {
+                "confidence_level": 0.95,
+                "lower_bound": 6694.062445755561,
+                "upper_bound": 12941.375848447899
+              },
+              "point_estimate": 10326.400539179709,
+              "standard_error": 1595.3222151919708
+            }
+          },
+          "median_ns": 308397.9065674053
+        }
+      },
+      "comparison": {
+        "before_median_ns": 310315.4461348684,
+        "after_median_ns": 310154.8184920635,
+        "elapsed_change_percent": -0.05176269657396482
+      }
+    }
+  },
+  "gpu_pass_timestamps": {
+    "distant_edits": {
+      "trials": {
+        "before_1": {
+          "duration_ns": [
+            1973166.0,
+            1941792.0,
+            1931459.0,
+            1929208.0,
+            1933833.0,
+            1884083.0,
+            478959.0,
+            524834.0,
+            475042.0,
+            474958.0,
+            478333.0,
+            446875.0,
+            450042.0,
+            446750.0,
+            446000.0,
+            446250.0,
+            445792.0,
+            446500.0,
+            446291.0,
+            446083.0,
+            449750.0,
+            493166.0,
+            478375.0,
+            475166.0,
+            475084.0,
+            474875.0,
+            474666.0,
+            474666.0,
+            474541.0,
+            474833.0,
+            474416.0,
+            474542.0
+          ],
+          "median_ns": 474854.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 984064,
+          "upload_calls": 1,
+          "composed_texels": 3936256
+        },
+        "after_1": {
+          "duration_ns": [
+            35959.0,
+            36209.0,
+            35834.0,
+            35708.0,
+            35083.0,
+            35916.0,
+            58833.0,
+            58917.0,
+            58875.0,
+            57625.0,
+            57958.0,
+            36166.0,
+            36417.0,
+            35875.0,
+            34959.0,
+            52584.0,
+            34666.0,
+            35917.0,
+            35625.0,
+            35292.0,
+            35042.0,
+            35292.0,
+            34625.0,
+            34708.0,
+            35041.0,
+            35625.0,
+            35833.0,
+            52666.0,
+            35125.0,
+            35292.0,
+            34958.0,
+            35542.0
+          ],
+          "median_ns": 35770.5,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 2,
+          "upload_calls": 2,
+          "composed_texels": 8
+        },
+        "after_2": {
+          "duration_ns": [
+            34667.0,
+            54709.0,
+            34875.0,
+            65625.0,
+            65125.0,
+            63250.0,
+            66500.0,
+            60584.0,
+            63541.0,
+            58500.0,
+            35583.0,
+            35042.0,
+            34875.0,
+            34833.0,
+            34750.0,
+            53125.0,
+            34709.0,
+            34459.0,
+            35042.0,
+            54833.0,
+            34792.0,
+            34917.0,
+            34833.0,
+            35375.0,
+            34583.0,
+            35583.0,
+            35125.0,
+            35875.0,
+            53333.0,
+            31583.0,
+            34958.0,
+            53875.0
+          ],
+          "median_ns": 35250.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 2,
+          "upload_calls": 2,
+          "composed_texels": 8
+        },
+        "before_2": {
+          "duration_ns": [
+            1979500.0,
+            1952208.0,
+            1934834.0,
+            1934375.0,
+            1944792.0,
+            1933458.0,
+            1946000.0,
+            1934417.0,
+            1021833.0,
+            446667.0,
+            446916.0,
+            446709.0,
+            446583.0,
+            446167.0,
+            487083.0,
+            447041.0,
+            446334.0,
+            446917.0,
+            446209.0,
+            446583.0,
+            446333.0,
+            416958.0,
+            416209.0,
+            417250.0,
+            464958.0,
+            447333.0,
+            447042.0,
+            446458.0,
+            446375.0,
+            447084.0,
+            446833.0,
+            446583.0
+          ],
+          "median_ns": 446916.5,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 984064,
+          "upload_calls": 1,
+          "composed_texels": 3936256
+        }
+      },
+      "comparison": {
+        "before_median_ns": 469687.0,
+        "after_median_ns": 35604.0,
+        "elapsed_change_percent": -92.41963264897687
+      }
+    },
+    "dense_edits": {
+      "trials": {
+        "before_1": {
+          "duration_ns": [
+            805791.0,
+            793084.0,
+            790083.0,
+            776250.0,
+            776333.0,
+            716209.0,
+            659791.0,
+            659375.0,
+            659750.0,
+            697042.0,
+            752875.0,
+            754084.0,
+            753375.0,
+            753291.0,
+            753750.0,
+            752958.0,
+            753625.0,
+            753750.0,
+            753458.0,
+            740375.0,
+            662875.0,
+            659792.0,
+            613375.0,
+            476041.0,
+            475500.0,
+            476000.0,
+            475916.0,
+            475333.0,
+            475667.0,
+            475584.0,
+            475667.0,
+            475875.0
+          ],
+          "median_ns": 706625.5,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 1048576,
+          "upload_calls": 1,
+          "composed_texels": 4194304
+        },
+        "after_1": {
+          "duration_ns": [
+            753084.0,
+            658916.0,
+            659417.0,
+            684375.0,
+            690625.0,
+            689958.0,
+            659542.0,
+            786458.0,
+            752292.0,
+            753000.0,
+            756000.0,
+            752666.0,
+            753042.0,
+            753250.0,
+            753209.0,
+            658875.0,
+            659208.0,
+            659625.0,
+            658833.0,
+            659042.0,
+            657583.0,
+            505667.0,
+            509209.0,
+            505625.0,
+            505584.0,
+            506584.0,
+            505500.0,
+            505333.0,
+            505625.0,
+            505708.0,
+            505625.0,
+            505333.0
+          ],
+          "median_ns": 659125.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 1048576,
+          "upload_calls": 1,
+          "composed_texels": 4194304
+        },
+        "after_2": {
+          "duration_ns": [
+            753166.0,
+            777459.0,
+            787000.0,
+            776875.0,
+            777583.0,
+            782958.0,
+            753208.0,
+            753542.0,
+            753583.0,
+            753209.0,
+            532208.0,
+            532250.0,
+            532208.0,
+            531917.0,
+            532708.0,
+            527750.0,
+            506291.0,
+            505875.0,
+            505458.0,
+            505334.0,
+            506125.0,
+            506042.0,
+            506083.0,
+            505958.0,
+            506542.0,
+            506125.0,
+            506333.0,
+            531459.0,
+            531375.0,
+            532542.0,
+            531125.0,
+            531459.0
+          ],
+          "median_ns": 531688.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 1048576,
+          "upload_calls": 1,
+          "composed_texels": 4194304
+        },
+        "before_2": {
+          "duration_ns": [
+            2102625.0,
+            2061334.0,
+            2062792.0,
+            2062750.0,
+            505875.0,
+            506375.0,
+            498334.0,
+            475500.0,
+            496500.0,
+            476125.0,
+            475958.0,
+            506375.0,
+            476000.0,
+            476458.0,
+            479458.0,
+            475917.0,
+            476875.0,
+            476334.0,
+            476333.0,
+            476958.0,
+            497292.0,
+            506458.0,
+            507500.0,
+            507208.0,
+            506750.0,
+            506375.0,
+            492292.0,
+            476667.0,
+            476250.0,
+            476625.0,
+            476584.0,
+            476375.0
+          ],
+          "median_ns": 485875.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 1048576,
+          "upload_calls": 1,
+          "composed_texels": 4194304
+        }
+      },
+      "comparison": {
+        "before_median_ns": 506375.0,
+        "after_median_ns": 532625.0,
+        "elapsed_change_percent": 5.183905208590467
+      }
+    },
+    "unchanged": {
+      "trials": {
+        "before_1": {
+          "duration_ns": [
+            23917.0,
+            24000.0,
+            24250.0,
+            23834.0,
+            23583.0,
+            23375.0,
+            23416.0,
+            23625.0,
+            23459.0,
+            23333.0,
+            27166.0,
+            32500.0,
+            26042.0,
+            26833.0,
+            26167.0,
+            26792.0,
+            26250.0,
+            24250.0,
+            23709.0,
+            23750.0,
+            23166.0,
+            23750.0,
+            23208.0,
+            23334.0,
+            22667.0,
+            23666.0,
+            22916.0,
+            23667.0,
+            23166.0,
+            23542.0,
+            23000.0,
+            23333.0
+          ],
+          "median_ns": 23666.5,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 0,
+          "upload_calls": 0,
+          "composed_texels": 0
+        },
+        "after_1": {
+          "duration_ns": [
+            19375.0,
+            19750.0,
+            19875.0,
+            19375.0,
+            19625.0,
+            19458.0,
+            19417.0,
+            19500.0,
+            19333.0,
+            19250.0,
+            19417.0,
+            22125.0,
+            21875.0,
+            22000.0,
+            21500.0,
+            21666.0,
+            21958.0,
+            21667.0,
+            19416.0,
+            19500.0,
+            19458.0,
+            19583.0,
+            19334.0,
+            19333.0,
+            19291.0,
+            19500.0,
+            19542.0,
+            19375.0,
+            19333.0,
+            10875.0,
+            9542.0,
+            7917.0
+          ],
+          "median_ns": 19458.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 0,
+          "upload_calls": 0,
+          "composed_texels": 0
+        },
+        "after_2": {
+          "duration_ns": [
+            15958.0,
+            15958.0,
+            15250.0,
+            15292.0,
+            15958.0,
+            15334.0,
+            15292.0,
+            15333.0,
+            15333.0,
+            15875.0,
+            15250.0,
+            15291.0,
+            22125.0,
+            21375.0,
+            21208.0,
+            21250.0,
+            21958.0,
+            21917.0,
+            19500.0,
+            19500.0,
+            19541.0,
+            19791.0,
+            19333.0,
+            19541.0,
+            19375.0,
+            19375.0,
+            19500.0,
+            15875.0,
+            15333.0,
+            15333.0,
+            19375.0,
+            19417.0
+          ],
+          "median_ns": 19354.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 0,
+          "upload_calls": 0,
+          "composed_texels": 0
+        },
+        "before_2": {
+          "duration_ns": [
+            19458.0,
+            19750.0,
+            19750.0,
+            19083.0,
+            18958.0,
+            19042.0,
+            19833.0,
+            19500.0,
+            19833.0,
+            18875.0,
+            18375.0,
+            19542.0,
+            19208.0,
+            18583.0,
+            19292.0,
+            18708.0,
+            18542.0,
+            19500.0,
+            18291.0,
+            27875.0,
+            23667.0,
+            24625.0,
+            22875.0,
+            24292.0,
+            23334.0,
+            23958.0,
+            23208.0,
+            23750.0,
+            23542.0,
+            23292.0,
+            23292.0,
+            23541.0
+          ],
+          "median_ns": 19750.0,
+          "extent": [
+            1024,
+            1024
+          ],
+          "detail": 2,
+          "upload_bytes": 0,
+          "upload_calls": 0,
+          "composed_texels": 0
+        }
+      },
+      "comparison": {
+        "before_median_ns": 23334.0,
+        "after_median_ns": 19416.5,
+        "elapsed_change_percent": -16.788806034113314
+      }
+    }
+  },
+  "scenario_windows": [
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2398764834,
+      "ast_ns": 1148048666,
+      "compiled_ns": 176171805,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2426206541,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2397276125,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2378874750,
+      "ast_ns": 1136171596,
+      "compiled_ns": 172168649,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2399002834,
+      "ast_ns": 1136940711,
+      "compiled_ns": 177983471,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2408136959,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2395817041,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2384618583,
+      "ast_ns": 1137019409,
+      "compiled_ns": 173658043,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2399099167,
+      "ast_ns": 1144349952,
+      "compiled_ns": 176437830,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2414721500,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 694175792,
+      "ast_ns": 246224259,
+      "compiled_ns": 59079874,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 687178666,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 698932417,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 694465792,
+      "ast_ns": 246956806,
+      "compiled_ns": 58287110,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 696179958,
+      "ast_ns": 247970158,
+      "compiled_ns": 59378554,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 690018875,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 692788333,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 693590917,
+      "ast_ns": 247846388,
+      "compiled_ns": 58444850,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 695684459,
+      "ast_ns": 247035095,
+      "compiled_ns": 58565951,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 691278000,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2337673125,
+      "ast_ns": 752035984,
+      "compiled_ns": 508301528,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2355513625,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2348763208,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2359129625,
+      "ast_ns": 760144965,
+      "compiled_ns": 511131819,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2353981667,
+      "ast_ns": 763661532,
+      "compiled_ns": 510684040,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2347476792,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2346246958,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2361237000,
+      "ast_ns": 761532477,
+      "compiled_ns": 515431527,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2344656417,
+      "ast_ns": 754440578,
+      "compiled_ns": 511837027,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2346653792,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 710522708,
+      "ast_ns": 260414631,
+      "compiled_ns": 60343818,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 697101875,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 714096125,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 708203750,
+      "ast_ns": 257115822,
+      "compiled_ns": 58756080,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 703096709,
+      "ast_ns": 256518076,
+      "compiled_ns": 58247619,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 701261458,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 703301958,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 697693292,
+      "ast_ns": 255976325,
+      "compiled_ns": 57834636,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 705217250,
+      "ast_ns": 257986194,
+      "compiled_ns": 60171051,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 704394584,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_1"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2358104708,
+      "ast_ns": 760898588,
+      "compiled_ns": 512528148,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2342228959,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2352893833,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2360284542,
+      "ast_ns": 762105947,
+      "compiled_ns": 513642629,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2374374000,
+      "ast_ns": 766697861,
+      "compiled_ns": 516116315,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2347746125,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2354441542,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2369027750,
+      "ast_ns": 765195898,
+      "compiled_ns": 514494827,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2364936042,
+      "ast_ns": 766122780,
+      "compiled_ns": 510641974,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2367149916,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 35425,
+      "ast": 16910,
+      "guards": 169,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 706274042,
+      "ast_ns": 259318678,
+      "compiled_ns": 59261362,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 721639250,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 717946125,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 706061125,
+      "ast_ns": 257474206,
+      "compiled_ns": 59625980,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 698869916,
+      "ast_ns": 254606870,
+      "compiled_ns": 57875010,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 720859250,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 701444375,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 710089208,
+      "ast_ns": 258927695,
+      "compiled_ns": 59983233,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 709596958,
+      "ast_ns": 261496784,
+      "compiled_ns": 60088336,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 708650917,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10422,
+      "ast": 4381,
+      "guards": 36,
+      "trial": "after_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2415247125,
+      "ast_ns": 1150083111,
+      "compiled_ns": 177281556,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2396757292,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2442157125,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2406628584,
+      "ast_ns": 1151479626,
+      "compiled_ns": 177993932,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2429694167,
+      "ast_ns": 1163520966,
+      "compiled_ns": 177477555,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2415956917,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2423551500,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2419511750,
+      "ast_ns": 1155999350,
+      "compiled_ns": 177596500,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 2431746250,
+      "ast_ns": 1159936109,
+      "compiled_ns": 177858156,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 2415155666,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 28948,
+      "ast": 23387,
+      "guards": 169,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 694423042,
+      "ast_ns": 248536218,
+      "compiled_ns": 57984103,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 0,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 696683167,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 699059834,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 1,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 704910458,
+      "ast_ns": 249056154,
+      "compiled_ns": 58958761,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 708620542,
+      "ast_ns": 251786191,
+      "compiled_ns": 60136749,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 2,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 721943792,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 726412125,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 3,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 720647541,
+      "ast_ns": 255697269,
+      "compiled_ns": 60921898,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": true,
+      "frames": 400,
+      "tick_ns": 704357917,
+      "ast_ns": 252859576,
+      "compiled_ns": 60033717,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    },
+    {
+      "scenario": "Missions.c4f/SevenKeys.c4s",
+      "run": 4,
+      "timing": false,
+      "frames": 400,
+      "tick_ns": 699497667,
+      "ast_ns": 0,
+      "compiled_ns": 0,
+      "compiled": 10416,
+      "ast": 4387,
+      "guards": 36,
+      "trial": "before_2"
+    }
+  ],
+  "scenario_comparisons": {
+    "Collection.c4f/Puzzles.c4f/4_TowerOfMagic.c4s": {
+      "trial_median_tick_ns": {
+        "before_1": 6020342.3975,
+        "after_1": 5868691.98,
+        "after_2": 5882234.5825,
+        "before_2": 6039892.2925
+      },
+      "comparison": {
+        "before_median_ns": 6037346.4575,
+        "after_median_ns": 5870636.66625,
+        "elapsed_change_percent": -2.761309002614909
+      },
+      "invocations_per_400_frames": {
+        "before": {
+          "compiled": 28948,
+          "ast": 23387,
+          "guards": 169
+        },
+        "after": {
+          "compiled": 35425,
+          "ast": 16910,
+          "guards": 169
+        }
+      }
+    },
+    "Missions.c4f/SevenKeys.c4s": {
+      "trial_median_tick_ns": {
+        "before_1": 1728195.0,
+        "after_1": 1758254.895,
+        "after_2": 1794865.3125,
+        "before_2": 1748744.1675
+      },
+      "comparison": {
+        "before_median_ns": 1744519.48,
+        "after_median_ns": 1766306.87625,
+        "elapsed_change_percent": 1.2489053002721517
+      },
+      "invocations_per_400_frames": {
+        "before": {
+          "compiled": 10416,
+          "ast": 4387,
+          "guards": 36
+        },
+        "after": {
+          "compiled": 10422,
+          "ast": 4381,
+          "guards": 36
+        }
+      }
+    }
+  }
+}
