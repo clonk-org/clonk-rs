@@ -158,6 +158,8 @@ thread_local! {
     #[cfg(test)]
     static OBJECT_REFERENCE_INDEX_VALUE_VISITS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
+    static OBJECT_REFERENCE_DISCOVERY_BORROWS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
     static OBJECT_REFERENCE_PENDING_PRUNE_VISITS: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
     static GENERIC_HOST_RESOLUTIONS: Cell<usize> = const { Cell::new(0) };
@@ -214,6 +216,7 @@ test_counter_accessors! {
     fn reset_object_reference_table_traversals, object_reference_table_traversals => OBJECT_REFERENCE_TABLE_TRAVERSALS;
     fn reset_active_object_reference_sweep_visits, active_object_reference_sweep_visits => ACTIVE_OBJECT_REFERENCE_SWEEP_VISITS;
     fn reset_object_reference_index_value_visits, object_reference_index_value_visits => OBJECT_REFERENCE_INDEX_VALUE_VISITS;
+    fn reset_object_reference_discovery_borrows, object_reference_discovery_borrows => OBJECT_REFERENCE_DISCOVERY_BORROWS;
     fn reset_object_reference_pending_prune_visits, object_reference_pending_prune_visits => OBJECT_REFERENCE_PENDING_PRUNE_VISITS;
     fn reset_generic_host_resolutions, generic_host_resolutions => GENERIC_HOST_RESOLUTIONS;
     fn reset_direct_binding_allocations, direct_binding_allocations => DIRECT_BINDING_ALLOCATIONS;
@@ -459,12 +462,18 @@ pub fn set_value_cell(cell: &ValueCell, value: Value) {
     register_active_object_reference_cell(cell);
 }
 
-fn register_shared_object_reference_cells(cells: impl IntoIterator<Item = Weak<RefCell<Value>>>) {
-    for cell in cells {
-        if let Some(cell) = cell.upgrade() {
-            ensure_active_object_reference_cell_registered(&cell);
+fn register_shared_object_reference_cells<C: std::borrow::Borrow<ValueCell>>(
+    cells: impl IntoIterator<Item = C>,
+) {
+    ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+        #[cfg(test)]
+        OBJECT_REFERENCE_DISCOVERY_BORROWS.with(|count| count.set(count.get() + 1));
+        if let Some(index) = index.borrow_mut().as_mut() {
+            for cell in cells {
+                index.ensure_registered(std::borrow::Borrow::borrow(&cell));
+            }
         }
-    }
+    });
 }
 
 /// Clear one object's references from every active C4Aul value cell, like
@@ -620,8 +629,22 @@ impl ActiveObjectReferenceIndex {
     }
 
     fn register(&mut self, cell: &ValueCell) {
+        let value = cell.borrow();
+        if !matches!(
+            &*value,
+            Value::Object(1..) | Value::Array(_) | Value::Proplist(_)
+        ) {
+            // Most shared globals and fixed call slots are scalars. They
+            // cannot introduce a FirstRef link; only an overwrite of an
+            // existing reference needs index or frame-lifetime maintenance.
+            let address = Rc::as_ptr(cell) as usize;
+            if self.memberships_by_cell.contains_key(&address) {
+                self.remove_cell(address);
+            }
+            return;
+        }
         let mut object_counts = FxHashMap::default();
-        collect_object_reference_counts(&cell.borrow(), &mut object_counts);
+        collect_object_reference_counts(&value, &mut object_counts);
         self.register_counts(cell, object_counts);
     }
 
@@ -926,6 +949,8 @@ fn refresh_active_object_reference_cell_after_sweep(cell: &ValueCell, swept_obje
 
 fn ensure_active_object_reference_cell_registered(cell: &ValueCell) {
     ACTIVE_OBJECT_REFERENCE_INDEX.with(|index| {
+        #[cfg(test)]
+        OBJECT_REFERENCE_DISCOVERY_BORROWS.with(|count| count.set(count.get() + 1));
         if let Some(index) = index.borrow_mut().as_mut() {
             index.ensure_registered(cell);
         }
@@ -3029,7 +3054,7 @@ impl ActiveObjectReferenceCellsGuard {
 
     fn register_environment(&self, env: &Environment, vm: &Vm<'_>) {
         let cells = env.object_reference_cells(vm);
-        register_shared_object_reference_cells(cells);
+        register_shared_object_reference_cells(cells.into_iter().filter_map(|cell| cell.upgrade()));
     }
 }
 
@@ -19512,27 +19537,27 @@ impl Environment {
             #[cfg(test)]
             OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 2));
             let named_locals = self.object_state.named_locals.borrow();
-            register_shared_object_reference_cells(named_locals.values().map(Rc::downgrade));
+            register_shared_object_reference_cells(named_locals.values());
             let local_slots = self.object_state.local_slots.borrow();
-            register_shared_object_reference_cells(local_slots.values().map(Rc::downgrade));
+            register_shared_object_reference_cells(local_slots.values());
         }
         if let Some(globals) = vm.globals_named {
             #[cfg(test)]
             OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
             let globals = globals.borrow();
-            register_shared_object_reference_cells(globals.values().map(Rc::downgrade));
+            register_shared_object_reference_cells(globals.values());
         }
         if let Some(globals) = vm.globals_numbered {
             #[cfg(test)]
             OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
             let globals = globals.borrow();
-            register_shared_object_reference_cells(globals.values().map(Rc::downgrade));
+            register_shared_object_reference_cells(globals.values());
         }
         if let Some(globals) = vm.globals_consts {
             #[cfg(test)]
             OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
             let globals = globals.borrow();
-            register_shared_object_reference_cells(globals.values().map(Rc::downgrade));
+            register_shared_object_reference_cells(globals.values());
         }
         cells
     }
@@ -20290,6 +20315,58 @@ mod tests {
 
         check_eq!(result => Value::Object(7));
         check_eq!(object_reference_table_traversals() => 4);
+    }
+
+    #[test]
+    fn shared_reference_discovery_borrows_the_index_once_per_batch() {
+        // AB_CALL must preserve every existing object's FirstRef link
+        // (C4AulExec.cpp:1217-1223; C4Object.cpp:312). Discovering a shared
+        // table should acquire its thread-local index once, independently
+        // of the number of cells that table contains.
+        let cells = (0..128)
+            .map(|_| value_cell(Value::Object(7)))
+            .collect::<Vec<_>>();
+        let _guard = ActiveObjectReferenceCellsGuard::enter_frame();
+        reset_object_reference_discovery_borrows();
+
+        register_shared_object_reference_cells(cells.iter());
+
+        check_eq!(object_reference_discovery_borrows() => 1);
+        clear_active_object_references(7);
+        check!(cells.iter().all(|cell| *cell.borrow() == Value::Nil));
+    }
+
+    #[test]
+    fn scalar_globals_do_not_walk_reference_values_on_nested_calls() {
+        // C++ AB_CALL adds the callee's frame; integer globals have no
+        // intrusive FirstRef membership to rebuild (C4AulExec.cpp:1217-1223;
+        // C4Value.cpp:104-140). Their later object assignments must still
+        // participate in synchronous AssignRemoval (C4Object.cpp:312).
+        let functions = FxHashMap::default();
+        let globals = crate::engine::new_global_variables();
+        for index in 0..128 {
+            globals
+                .borrow_mut()
+                .insert(format!("scalar{index}"), value_cell(Value::Int(index)));
+        }
+        let target = value_cell(Value::Nil);
+        globals
+            .borrow_mut()
+            .insert("target".to_owned(), Rc::clone(&target));
+        let vm = test_vm(&functions, &[]).with_global_variables(Some(&globals));
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        reset_object_reference_index_value_visits();
+
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        }
+
+        check_eq!(object_reference_index_value_visits() => 0);
+        set_value_cell(&target, Value::Object(7));
+        clear_active_object_references(7);
+        check_eq!(*target.borrow() => Value::Nil);
     }
 
     #[test]

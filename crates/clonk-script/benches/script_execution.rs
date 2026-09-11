@@ -1,5 +1,5 @@
-use clonk_script::{Engine, Value};
-use criterion::{criterion_group, criterion_main, Criterion};
+use clonk_script::{new_global_variables, value_cell, Engine, Value};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
 
 const SCRIPT: &str = r#"
@@ -27,6 +27,17 @@ global func SumValues(values)
 
 global func Method(value) { return value + 1; }
 global func CallMethod(target) { return target->Method(41); }
+"#;
+
+const SHARED_GLOBAL_SCRIPT: &str = r#"
+global func Method(value) { return value + 1; }
+global func NestedCalls(iterations)
+{
+    var total = 0;
+    for (var index = 0; index < iterations; ++index)
+        total += Method(index);
+    return total;
+}
 "#;
 
 fn bench_script_execution(c: &mut Criterion) {
@@ -57,6 +68,36 @@ fn bench_script_execution(c: &mut Criterion) {
     c.bench_function("script_value_method_call", |b| {
         b.iter(|| black_box(engine.call("CallMethod", black_box(&args)).unwrap()));
     });
+
+    let mut group = c.benchmark_group("script_nested_calls_with_shared_globals");
+    for global_count in [0, 128, 512] {
+        let globals = new_global_variables();
+        for index in 0..global_count {
+            // Include live references among ordinary scalar globals so each
+            // call discovers both kinds without weakening AssignRemoval.
+            let value = if index % 16 == 0 {
+                Value::Object(index as u64 + 1)
+            } else {
+                Value::Int(index)
+            };
+            globals
+                .borrow_mut()
+                .insert(format!("global{index}"), value_cell(value));
+        }
+        let mut engine = Engine::new();
+        engine.set_global_variables(globals);
+        engine.load_script(SHARED_GLOBAL_SCRIPT).unwrap();
+        let args = [Value::Int(32)];
+        assert_eq!(engine.call("NestedCalls", &args).unwrap(), Value::Int(528));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(global_count),
+            &args,
+            |b, args| {
+                b.iter(|| black_box(engine.call("NestedCalls", black_box(args)).unwrap()));
+            },
+        );
+    }
+    group.finish();
 }
 
 criterion_group!(benches, bench_script_execution);
