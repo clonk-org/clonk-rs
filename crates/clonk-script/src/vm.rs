@@ -6003,7 +6003,7 @@ impl<'a> Vm<'a> {
             .compiled
             .get_or_init(|| CompiledFunctionCache::new(function));
         let validated_cache = compiled_cache.validated(function, target.validate_compiled_source);
-        let compiled = validated_cache.and_then(|cache| cache.compiled.as_deref());
+        let compiled = validated_cache.and_then(|cache| cache.compiled.as_ref());
         let cached_statements = validated_cache.map(|cache| &cache.body);
         // The callee's parameter bindings allocate C4Value cells while the
         // caller remains active. Enter its frame before constructing that
@@ -6128,7 +6128,7 @@ impl<'a> Vm<'a> {
                 depth,
                 function,
                 caller.clone(),
-                Arc::new(compiled.clone()),
+                Arc::clone(compiled),
                 value_stack.count,
             )? {
                 Some(result) => {
