@@ -1391,17 +1391,20 @@ pub(crate) fn draw_image_region_transformed_float_source(
         return;
     }
 
-    for target_y in min_y..max_y {
-        for target_x in min_x..max_x {
+    rasterize_sprite_region(
+        surface,
+        SurfaceRect::new(min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32),
+        gamma,
+        |target_x, target_y| {
             let (sample_x, sample_y) =
                 inverse.transform_point(target_x as f32 + 0.5, target_y as f32 + 0.5);
             if !sample_x.is_finite() || !sample_y.is_finite() {
-                continue;
+                return None;
             }
             let normalized_x = (sample_x - dest_x) / dest_width;
             let normalized_y = (sample_y - dest_y) / dest_height;
             if !(0.0..1.0).contains(&normalized_x) || !(0.0..1.0).contains(&normalized_y) {
-                continue;
+                return None;
             }
 
             let (source_edge_x, source_edge_y) =
@@ -1426,21 +1429,11 @@ pub(crate) fn draw_image_region_transformed_float_source(
                 owner_color,
                 pixel_blit,
             ) else {
-                continue;
+                return None;
             };
-            if source.alpha() == 0.0 {
-                continue;
-            }
-            blend_prepared_sprite_fragment(
-                surface,
-                target_x as u32,
-                target_y as u32,
-                source,
-                pixel_blit,
-                gamma,
-            );
-        }
-    }
+            Some((source, pixel_blit))
+        },
+    );
 }
 
 /// Untransformed float-source counterpart used by straight C4Object faces.
@@ -1532,21 +1525,14 @@ pub(crate) fn draw_image_region_float_source(
         )
     });
 
-    let bounds = surface.bounds();
-    for dy in 0..dest_height {
-        let target_y = dest_y + dy as i32;
-        if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
-            continue;
-        }
-
-        let normalized_y = (dy as f32 + 0.5) / dest_height as f32;
-
-        for dx in 0..dest_width {
-            let target_x = dest_x + dx as i32;
-            if target_x < bounds.x || target_x >= bounds.x + bounds.width as i32 {
-                continue;
-            }
-
+    rasterize_sprite_region(
+        surface,
+        SurfaceRect::new(dest_x, dest_y, dest_width, dest_height),
+        gamma,
+        |target_x, target_y| {
+            let dx = target_x - dest_x;
+            let dy = target_y - dest_y;
+            let normalized_y = (dy as f32 + 0.5) / dest_height as f32;
             let normalized_x = (dx as f32 + 0.5) / dest_width as f32;
             let (source_edge_x, source_edge_y) =
                 source.source_edge(normalized_x, normalized_y, flip_x);
@@ -1570,21 +1556,11 @@ pub(crate) fn draw_image_region_float_source(
                 owner_color,
                 pixel_blit,
             ) else {
-                continue;
+                return None;
             };
-            if source.alpha() == 0.0 {
-                continue;
-            }
-            blend_prepared_sprite_fragment(
-                surface,
-                target_x as u32,
-                target_y as u32,
-                source,
-                pixel_blit,
-                gamma,
-            );
-        }
-    }
+            Some((source, pixel_blit))
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1733,16 +1709,27 @@ fn draw_image_region_float_source_adjusted(
     let min_y = ((dest.1 - 0.5).ceil() as i32).max(bounds.y);
     let max_x = ((dest.0 + dest.2 - 0.5).ceil() as i32).min(bounds.x + bounds.width as i32);
     let max_y = ((dest.1 + dest.3 - 0.5).ceil() as i32).min(bounds.y + bounds.height as i32);
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
 
-    for target_y in min_y..max_y {
-        let normalized_y = (target_y as f32 + 0.5 - dest.1) / dest.3;
-        if !(0.0..1.0).contains(&normalized_y) {
-            continue;
-        }
-        for target_x in min_x..max_x {
+    rasterize_sprite_region(
+        surface,
+        SurfaceRect::new(
+            min_x,
+            min_y,
+            max_x.saturating_sub(min_x) as u32,
+            max_y.saturating_sub(min_y) as u32,
+        ),
+        gamma,
+        |target_x, target_y| {
+            let normalized_y = (target_y as f32 + 0.5 - dest.1) / dest.3;
+            if !(0.0..1.0).contains(&normalized_y) {
+                return None;
+            }
             let normalized_x = (target_x as f32 + 0.5 - dest.0) / dest.2;
             if !(0.0..1.0).contains(&normalized_x) {
-                continue;
+                return None;
             }
             let (source_edge_x, source_edge_y) =
                 source.source_edge(normalized_x, normalized_y, flip_x);
@@ -1766,21 +1753,11 @@ fn draw_image_region_float_source_adjusted(
                 owner_color,
                 pixel_blit,
             ) else {
-                continue;
+                return None;
             };
-            if source.alpha() == 0.0 {
-                continue;
-            }
-            blend_prepared_sprite_fragment(
-                surface,
-                target_x as u32,
-                target_y as u32,
-                source,
-                pixel_blit,
-                gamma,
-            );
-        }
-    }
+            Some((source, pixel_blit))
+        },
+    );
 }
 
 pub(crate) fn draw_image_region(
@@ -2412,6 +2389,32 @@ pub fn draw_image_strip(
         return;
     }
     let pixels = image.pixels();
+    if surface.rasterize_rgba_rows(
+        SurfaceRect::new(dest_x, dest_y, src_w, src_h),
+        |x, y, destination| {
+            let source_x = i64::from(src_x) + i64::from(x) - i64::from(dest_x);
+            let source_y = i64::from(src_y) + i64::from(y) - i64::from(dest_y);
+            let offset = (source_y as usize * iw as usize + source_x as usize) * 4;
+            for (column, pixel) in destination.iter_mut().enumerate() {
+                let start = offset + column * 4;
+                let Some(rgba) = pixels.get(start..start + 4) else {
+                    continue;
+                };
+                if rgba[3] == 0 {
+                    continue;
+                }
+                let output = composite_sprite_fragment(
+                    PreparedSpriteFragment::Legacy(Color::new(rgba[0], rgba[1], rgba[2], rgba[3])),
+                    Color::new(pixel[0], pixel[1], pixel[2], pixel[3]),
+                    SpriteBlitState::normal(),
+                    gamma,
+                );
+                *pixel = [output.r, output.g, output.b, output.a];
+            }
+        },
+    ) {
+        return;
+    }
     for sy in 0..src_h {
         let ty = dest_y + sy as i32;
         if ty < 0 || ty >= surface.height() as i32 {

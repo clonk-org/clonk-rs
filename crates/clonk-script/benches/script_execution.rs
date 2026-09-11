@@ -24,6 +24,9 @@ global func SumValues(values)
     }
     return acc;
 }
+
+global func Method(value) { return value + 1; }
+global func CallMethod(target) { return target->Method(41); }
 "#;
 
 fn bench_script_execution(c: &mut Criterion) {
@@ -47,6 +50,12 @@ fn bench_script_execution(c: &mut Criterion) {
         b.iter(|| {
             black_box(engine.call("SumValues", black_box(&args)).unwrap());
         });
+    });
+
+    let args = [Value::Object(1)];
+    assert_eq!(engine.call("CallMethod", &args).unwrap(), Value::Int(42));
+    c.bench_function("script_value_method_call", |b| {
+        b.iter(|| black_box(engine.call("CallMethod", black_box(&args)).unwrap()));
     });
 }
 

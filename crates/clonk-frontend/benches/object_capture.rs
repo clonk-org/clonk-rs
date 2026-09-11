@@ -643,12 +643,55 @@ fn bench_mouse_target_lookup(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_software_drawing(c: &mut Criterion) {
+    let objects = objects();
+    let render_order = objects.iter().map(|object| object.id).collect();
+    let snapshot = SimulationSnapshot {
+        objects,
+        render_order,
+        ..SimulationSnapshot::default()
+    };
+    let viewports = [ViewportInput::ownerless(
+        Vector2::new((EXTENT[0] / 2) as i32, (EXTENT[1] / 2) as i32),
+        1.0,
+    )];
+    let mut renderer = graphics();
+    renderer.render_frame_without_atlas(&snapshot, &viewports);
+    c.bench_function("software_object_frame_1000", |b| {
+        b.iter(|| {
+            renderer.render_frame_without_atlas(black_box(&snapshot), &viewports);
+            black_box(renderer.surface().pixels());
+        });
+    });
+
+    let image = ImageData::new(1280, 16, [71, 133, 219, 127].repeat(1280 * 16));
+    let gamma = GammaRamp::standard();
+    let mut surface = clonk_graphics::Surface::new(1280, 24, clonk_graphics::PixelFormat::Rgba8888);
+    surface.fill(clonk_graphics::Color::opaque(31, 47, 61));
+    c.bench_function("software_translucent_hud_strip", |b| {
+        b.iter(|| {
+            clonk_frontend::draw_image_strip(
+                &mut surface,
+                0,
+                4,
+                black_box(&image),
+                0,
+                0,
+                1280,
+                16,
+                Some(&gamma),
+            );
+            black_box(surface.pixels());
+        });
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(Duration::from_secs(2))
         .measurement_time(Duration::from_secs(5))
         .sample_size(20);
-    targets = bench_object_capture, bench_mouse_target_lookup
+    targets = bench_object_capture, bench_mouse_target_lookup, bench_software_drawing
 }
 criterion_main!(benches);

@@ -868,12 +868,156 @@ fn bench_landscape_render(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_sparse_shader_landscape(c: &mut Criterion) {
+    use clonk_app_render::gpu_renderer::{SHADER_LANDSCAPE_HAS_OVERLAY, SHADER_LANDSCAPE_PRESENT};
+    use clonk_graphics::ShaderLandscapePlan;
+
+    const EXTENT: [u32; 2] = [1024, 1024];
+    const DETAIL: u32 = 2;
+    let devices = benchmark_devices();
+    let base = GpuTextureId::fresh();
+    let composed = [EXTENT[0] * DETAIL, EXTENT[1] * DETAIL];
+    let vertex = |x: f32, y: f32| {
+        GpuVertex::new(
+            [x * EXTENT[0] as f32, y * EXTENT[1] as f32, 1.0],
+            [x, y],
+            [1.0, 1.0, 1.0, 0.0],
+        )
+    };
+    let scene = GpuScene::new(
+        EXTENT,
+        Color::transparent(),
+        GpuGammaLut::from_ramp(&GammaRamp::identity()),
+        GpuGammaMode::Disabled,
+        vec![GpuTextureResource::immutable_rgba(
+            base,
+            composed[0],
+            composed[1],
+            vec![0; (composed[0] * composed[1] * 4) as usize].into(),
+        )],
+        vec![landscape_command(
+            base,
+            [
+                vertex(0.0, 0.0),
+                vertex(1.0, 0.0),
+                vertex(0.0, 1.0),
+                vertex(1.0, 1.0),
+            ],
+        )],
+    );
+    let mut slots = vec![[0; 16]; 3];
+    for (index, slot) in slots.iter_mut().enumerate().skip(1) {
+        slot[..4].copy_from_slice(&[0x805020 + index as u32, 0x907030, 0xa09050, 0]);
+        slot[4..8].copy_from_slice(&[
+            0,
+            1,
+            2,
+            SHADER_LANDSCAPE_PRESENT | SHADER_LANDSCAPE_HAS_OVERLAY,
+        ]);
+        slot[8..12].copy_from_slice(&[0, 0, 16, 16]);
+        slot[12..16].copy_from_slice(&[16, 0, 16, 16]);
+    }
+    let original = ShaderLandscapePlan {
+        extent: EXTENT,
+        index_plane: vec![1; (EXTENT[0] * EXTENT[1]) as usize],
+        shading_plane: None,
+        atlas: (0..32 * 16)
+            .flat_map(|pixel| [pixel as u8, (pixel * 7) as u8, (pixel * 13) as u8, 255])
+            .collect(),
+        atlas_extent: [32, 16],
+        slots,
+    };
+    let presentation = GpuPresentation::identity(EXTENT[0], EXTENT[1]);
+    let (_target, view) =
+        benchmark_target(&devices.device, EXTENT, "lc_sparse_landscape_benchmark");
+    let mut group = c.benchmark_group("landscape_sparse");
+    for workload in ["distant_edits", "dense_edits", "unchanged"] {
+        let mut edited = original.clone();
+        match workload {
+            "distant_edits" => {
+                edited.index_plane[16 * 1024 + 16] = 2;
+                edited.index_plane[1007 * 1024 + 1007] = 2;
+            }
+            "dense_edits" => edited.index_plane.fill(2),
+            _ => {}
+        }
+        let plans = [original.clone(), edited];
+        let mut renderer = RetainedGpuRenderer::new(
+            &devices.device,
+            &devices.queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        renderer.set_shader_landscape(true);
+        renderer.set_landscape_detail(DETAIL);
+        let mut phase = 0;
+        let mut render = || {
+            renderer.set_pending_shader_landscape(Some((base, plans[phase].clone())));
+            phase ^= 1;
+            render_completed_frame(
+                &mut renderer,
+                &devices.device,
+                &devices.queue,
+                &view,
+                &scene,
+                &presentation,
+            )
+        };
+        let _ = render();
+        let warm = render();
+        assert!(warm.has_exact_draw_call_counts());
+        println!("landscape_sparse workload={workload} extent=1024x1024 detail=2 upload_bytes={} upload_calls={} composed_texels={} scope=plan_clone_encode_submit_and_device_poll", warm.shader_landscape_upload_bytes, warm.shader_landscape_upload_calls, warm.shader_landscape_composed_texels);
+        group.bench_function(workload, |b| b.iter(|| black_box(render())));
+
+        // GPU pass timestamps use a separate device; the Criterion wall-time
+        // samples above contain no timestamp instrumentation or readbacks.
+        if let Some(timestamp) = &devices.timestamp {
+            let (_target, view) =
+                benchmark_target(&timestamp.device, EXTENT, "lc_sparse_landscape_timestamp");
+            let mut renderer = RetainedGpuRenderer::new(
+                &timestamp.device,
+                &timestamp.queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+            );
+            renderer.set_shader_landscape(true);
+            renderer.set_landscape_detail(DETAIL);
+            let mut durations = Vec::new();
+            for frame in 0..36 {
+                renderer.set_pending_shader_landscape(Some((base, plans[frame % 2].clone())));
+                let stats = render_completed_frame(
+                    &mut renderer,
+                    &timestamp.device,
+                    &timestamp.queue,
+                    &view,
+                    &scene,
+                    &presentation,
+                );
+                let samples = renderer
+                    .drain_timestamp_frames(&timestamp.device)
+                    .expect("drain sparse landscape timestamps");
+                assert_eq!(samples.len(), 1);
+                assert_eq!(Some(samples[0].frame_id), stats.timestamp_frame_id);
+                let sample = samples[0]
+                    .passes
+                    .iter()
+                    .find(|sample| sample.pass == GpuTimestampPass::ShaderLandscape)
+                    .expect("landscape timestamp pass");
+                assert_eq!(sample.validity, GpuTimestampSampleValidity::Valid);
+                if frame >= 4 {
+                    durations.push(sample.duration_ns.expect("valid GPU duration"));
+                }
+            }
+            println!("landscape_sparse workload={workload} shader_gpu_ns={durations:?}");
+        }
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(Duration::from_secs(2))
         .measurement_time(Duration::from_secs(5))
         .sample_size(20);
-    targets = bench_landscape_render
+    targets = bench_landscape_render, bench_sparse_shader_landscape
 }
 criterion_main!(benches);

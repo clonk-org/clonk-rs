@@ -73,6 +73,9 @@ enum CompiledCallTarget {
     /// queue-time snapshot, so unlink/relink of the destination host cannot
     /// invalidate a suspended child call.
     Script(CompiledScriptTarget),
+    Method {
+        failsafe: bool,
+    },
     LegacyConstant,
 }
 
@@ -16910,6 +16913,13 @@ struct CompiledExecutionState {
 struct CompiledCallSite {
     name: String,
     argument_count: usize,
+    kind: CompiledCallKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CompiledCallKind {
+    Direct,
+    Method { failsafe: bool },
 }
 
 pub(crate) struct CompiledFunctionCache {
@@ -16987,6 +16997,15 @@ fn compiled_fallback_reasons(
                 forward_rest,
             } => {
                 match callee.as_ref() {
+                    Expr::Property(base, name)
+                        if !forward_rest
+                            && !matches!(
+                                name.as_str(),
+                                "Var" | "Local" | "LocalN" | "EffectVar" | "SetLocal"
+                            ) =>
+                    {
+                        expression(reasons, base, false);
+                    }
                     Expr::Variable(name)
                         if !is_optional
                             && !forward_rest
@@ -17494,16 +17513,37 @@ impl CompiledFunctionBuilder {
             Expr::Call {
                 callee,
                 args,
-                is_optional: false,
+                is_optional,
                 forward_rest: false,
             } => {
-                let Expr::Variable(name) = callee.as_ref() else {
-                    return None;
+                let (name, kind, receiver_count) = match callee.as_ref() {
+                    Expr::Variable(name) if !is_optional => (name, CompiledCallKind::Direct, 0),
+                    Expr::Property(receiver, name) => {
+                        // Slot accessors can return live references; keep
+                        // those calls on the interpreter's reference path.
+                        if matches!(
+                            name.as_str(),
+                            "Var" | "Local" | "LocalN" | "EffectVar" | "SetLocal"
+                        ) {
+                            return None;
+                        }
+                        self.compile_expression(receiver)?;
+                        (
+                            name,
+                            CompiledCallKind::Method {
+                                failsafe: *is_optional,
+                            },
+                            1,
+                        )
+                    }
+                    _ => return None,
                 };
-                if matches!(
-                    name.as_str(),
-                    "inherited" | "_inherited" | "this" | "Par" | "SetLocal" | "SetGlobal"
-                ) {
+                if kind == CompiledCallKind::Direct
+                    && matches!(
+                        name.as_str(),
+                        "inherited" | "_inherited" | "this" | "Par" | "SetLocal" | "SetGlobal"
+                    )
+                {
                     return None;
                 }
                 for argument in args {
@@ -17513,8 +17553,17 @@ impl CompiledFunctionBuilder {
                 self.call_sites.push(CompiledCallSite {
                     name: name.clone(),
                     argument_count: args.len(),
+                    kind,
                 });
-                self.collection_instruction(args.len(), CompiledInstruction::Call { site })?;
+                if receiver_count != 0 {
+                    self.max_stack = self
+                        .max_stack
+                        .max(self.stack_depth - args.len() + MAX_CALL_PARAMETERS);
+                }
+                self.collection_instruction(
+                    args.len() + receiver_count,
+                    CompiledInstruction::Call { site },
+                )?;
             }
             Expr::Array(elements) => {
                 for element in elements {
@@ -18198,6 +18247,19 @@ impl CompiledFunction {
             }) {
                 return None;
             }
+            if let CompiledCallKind::Method { failsafe } = site.kind {
+                if vm
+                    .own_or_global_script_function(name)
+                    .is_some_and(|function| {
+                        function.returns_reference
+                            || function.params.iter().any(|param| param.is_reference)
+                    })
+                {
+                    return None;
+                }
+                call_targets.push(CompiledCallTarget::Method { failsafe });
+                continue;
+            }
             if let Some(target) = vm.resolved_script_function(name, env.engine_scope) {
                 if target.function.returns_reference
                     || target
@@ -18384,9 +18446,15 @@ impl CompiledFunction {
             pending,
             resume_value,
         } = state;
+        let resumed_method = pending.is_some()
+            && matches!(&self.instructions[instruction], CompiledInstruction::Call { site }
+                if matches!(self.call_sites[*site].kind, CompiledCallKind::Method { .. }));
         if let Some(pending) = pending {
             match pending {
                 PendingContinuation::Host { value, .. } => {
+                    if resumed_method {
+                        stack_value_stack.resize_to(stack.len())?;
+                    }
                     let value = TrackedValue::runtime(resume_value.unwrap_or(value)).set_copy();
                     vm.register_runtime_value(&value.value);
                     stack.push(value);
@@ -18397,6 +18465,9 @@ impl CompiledFunction {
                     None => child.resume(vm),
                 }? {
                     ContinuationResult::Complete(value) => {
+                        if resumed_method {
+                            stack_value_stack.resize_to(stack.len())?;
+                        }
                         let value = value.into_tracked_on_stack()?.set_copy();
                         vm.register_runtime_value(&value.value);
                         stack.push(value);
@@ -18434,6 +18505,9 @@ impl CompiledFunction {
                     parameter_slots,
                 )? {
                     NativeResumeOutcome::Complete(value) => {
+                        if resumed_method {
+                            stack_value_stack.resize_to(stack.len())?;
+                        }
                         let value = TrackedValue::runtime(value).set_copy();
                         vm.register_runtime_value(&value.value);
                         stack.push(value);
@@ -18729,7 +18803,7 @@ impl CompiledFunction {
                         .checked_sub(argument_count)
                         .ok_or_else(|| RuntimeError::new("internal compiled stack underflow"))?;
                     stack_value_stack.resize_to(stack.len())?;
-                    let arguments = stack
+                    let mut arguments = stack
                         .drain(argument_start..)
                         .map(CallArg::Value)
                         .collect::<CallArgs>();
@@ -18739,6 +18813,28 @@ impl CompiledFunction {
                     let target = &call_targets[*site];
                     let sweep_cursor = object_reference_sweep_cursor();
                     let result = match target {
+                        CompiledCallTarget::Method { failsafe } => {
+                            let receiver = stack.pop().ok_or_else(|| {
+                                RuntimeError::new("internal compiled receiver missing")
+                            })?;
+                            arguments.truncate(MAX_CALL_PARAMETERS);
+                            // AB_CALL retains the receiver and ten parameter
+                            // slots, including across a nested suspension.
+                            stack_value_stack.resize_to(stack.len() + 1 + MAX_CALL_PARAMETERS)?;
+                            // Value-only methods cannot mutate this environment's
+                            // binding layout. Its existing cells remain shared;
+                            // the interpreter owns reference/slot accessor calls.
+                            vm.invoke_property_call_with_target_call_args_raw(
+                                receiver.value,
+                                name,
+                                arguments,
+                                *failsafe,
+                                false,
+                                &mut env.clone(),
+                                depth,
+                            )
+                            .and_then(ReturnValue::into_tracked)
+                        }
                         CompiledCallTarget::Host(CompiledHostTarget::Value(target)) => vm
                             .invoke_resolved_host_value(
                                 name,
@@ -18828,6 +18924,9 @@ impl CompiledFunction {
                             ));
                         }
                     };
+                    if matches!(target, CompiledCallTarget::Method { .. }) {
+                        stack_value_stack.resize_to(stack.len())?;
+                    }
                     for retained in &mut stack {
                         retained.clear_object_reference_sweeps(sweep_cursor);
                     }
@@ -20975,6 +21074,78 @@ mod tests {
             "SumLoop",
             &[Value::Int(128)]; expect "slot-resolved scalar loop runs" => Value::Int(379));
         check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    #[test]
+    fn value_method_calls_use_compiled_execution() {
+        // AB_CALL resolves the receiver and then dispatches the named method
+        // with ten parameter slots (C4AulExec.cpp:1216-1297).
+        let functions = parse_functions(
+            "func Target(value) { return value + 1; } func Probe(target) { return target->Target(41); }",
+            "method script parses",
+        );
+        reset_compiled_function_execution_count();
+        check_eq!(test_vm(&functions, &[]).call("Probe", &[Value::Object(7)]).expect("method call") => Value::Int(42));
+        check_eq!(compiled_function_execution_count() => 2);
+    }
+
+    #[test]
+    fn compiled_method_suspension_matches_interpreted_stack_and_result() {
+        // AB_CALL keeps its target and ten arguments until return
+        // (C4AulExec.cpp:1216-1297), even across a host suspension.
+        let run = |interpreted: bool| {
+            let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut engine = crate::engine::Engine::new();
+            let method_observations = observations.clone();
+            engine.register_method_dispatch(std::sync::Arc::new(move |_| {
+                method_observations
+                    .lock()
+                    .unwrap()
+                    .push(VALUE_STACK_SIZE.with(Cell::get));
+                Err(RuntimeError::host_continuation(
+                    PauseProbeRequest,
+                    Value::Nil,
+                ))
+            }));
+            let after_observations = observations.clone();
+            engine.register_host_function("Observe", move |_| {
+                after_observations
+                    .lock()
+                    .unwrap()
+                    .push(VALUE_STACK_SIZE.with(Cell::get));
+                Ok(Value::Int(0))
+            });
+            // An unreachable unsupported expression selects the AST without
+            // adding a local slot or executing any additional side effects.
+            let fallback = if interpreted {
+                "if (false) { 0 ?? 0; }"
+            } else {
+                ""
+            };
+            let source = format!("#strict 3\nfunc Probe(target) {{ {fallback} return 1 + target->Pause(2) + Observe(); }}");
+            let functions = parse_functions(&source, "suspending method parses");
+            check_eq!(CompiledFunction::compile(&functions["Probe"]).is_none() => interpreted);
+            engine.load_script(&source).expect("method script loads");
+            let ScriptCallOutcome::Suspended(suspension) = engine
+                .call_with_continuation("Probe", &[Value::Object(7)])
+                .expect("method suspends")
+            else {
+                panic!("method completed before host continuation")
+            };
+            check_eq!(VALUE_STACK_SIZE.with(Cell::get) => 0);
+            let ScriptCallOutcome::Complete(result) = engine
+                .resume_script_continuation_with_value(suspension, Value::Int(2))
+                .expect("method resumes")
+            else {
+                panic!("method suspended twice")
+            };
+            check_eq!(VALUE_STACK_SIZE.with(Cell::get) => 0);
+            let observations = observations.lock().unwrap().clone();
+            (result, observations)
+        };
+        let interpreted = run(true);
+        check_eq!(interpreted.0 => Value::Int(3));
+        check_eq!(run(false) => interpreted);
     }
 
     #[test]
