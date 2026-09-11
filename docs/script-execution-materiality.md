@@ -3,7 +3,8 @@
 This document records measurements before the AST fallback was removed.
 C4Script now executes exclusively as bytecode; the fallback-family counters
 and their timing categories described below no longer exist. The manual
-probe reports total bytecode invocations and script execution time.
+probe reports total bytecode invocations and script execution time. See the
+[bytecode performance report](script-bytecode-performance.md) for the removal results.
 
 Investigation of clonk-org/clonk-rs#1546.
 
