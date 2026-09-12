@@ -383,6 +383,7 @@ std::thread_local! {
     static HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_DEFINITION_TABLE_PLACEHOLDERS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_PLAYER_STATE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static RELOADABLE_DEFINITION_TABLE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };

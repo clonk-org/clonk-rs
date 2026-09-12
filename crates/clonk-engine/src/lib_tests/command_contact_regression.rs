@@ -875,6 +875,72 @@ fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
 }
 
 #[test]
+fn legacy_rect_find_checks_positions_without_materializing_candidates() {
+    // C4Game.cpp:1367,1414-1416 compares each live object's x/y while retaining
+    // forward master order; rejected positions require no object copy.
+    let mut engine = Engine::with_seed(0);
+    engine.register_test_definition(test_definition("TARG", "Target", "#strict\n"));
+    register_fixture!(
+        engine,
+        "SRCH",
+        "Searcher",
+        "#strict\nprotected func FindRect() { return FindObject(TARG, 10, 10, 1, 1); }",
+        set_c4_callback_convention(true)
+    );
+    let target = spawn_fixture!(engine, "TARG", with_position: Vector2::new(10, 10));
+    for x in 100..164 {
+        spawn_fixture!(engine, "TARG", with_position: Vector2::new(x, 10));
+    }
+    let searcher = spawn_fixture!(engine, "SRCH");
+    let index = engine.test_object_index(searcher);
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(index, "FindRect", Vec::new())
+            .expect("rectangle query succeeds"),
+        object_reference_value(target)
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "only the executing object needs a host snapshot"
+    );
+}
+
+#[test]
+fn legacy_closest_find_reads_positions_without_materializing_candidates() {
+    // C4Game.cpp:1343-1344,1357-1362,1400-1411 keeps the first master-list
+    // match at a given distance; pFindNext advances through equal ties.
+    let mut engine = Engine::with_seed(0);
+    engine.register_test_definition(test_definition("TARG", "Target", "#strict\n"));
+    register_fixture!(
+        engine,
+        "SRCH",
+        "Searcher",
+        "#strict\nprotected func FindNear() { return FindObject(TARG, 0, 0, -1, -1); }",
+        set_c4_callback_convention(true)
+    );
+    let target = spawn_fixture!(engine, "TARG", with_position: Vector2::new(10, 10));
+    for x in 100..164 {
+        spawn_fixture!(engine, "TARG", with_position: Vector2::new(x, 10));
+    }
+    let searcher = spawn_fixture!(engine, "SRCH");
+    let index = engine.test_object_index(searcher);
+    HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(index, "FindNear", Vec::new())
+            .expect("closest query succeeds"),
+        object_reference_value(target)
+    );
+    assert_eq!(
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+        1,
+        "distance comparisons need positions, not complete object states"
+    );
+}
+
+#[test]
 fn legacy_object_count_filters_scalars_without_full_state_materialization() {
     // FnObjectCount applies the fixed-parameter C4Game::FindObject predicates
     // to live scalar fields while counting every match

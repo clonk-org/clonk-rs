@@ -575,6 +575,7 @@ struct ObjectState {
 #[derive(Default)]
 struct ActiveObjectReferenceTables {
     object_states: SmallVec<[(ObjectState, usize); 4]>,
+    global_tables: SmallVec<[(GlobalVariables, Option<u64>, usize); 4]>,
 }
 
 #[derive(Default)]
@@ -639,6 +640,19 @@ impl ActiveObjectReferenceIndex {
     }
 
     fn ensure_registered(&mut self, cell: &ValueCell) {
+        // Scalars cannot introduce a reverse link. Register still removes a
+        // stale membership after a host replacement, but skips the preceding
+        // hash lookup and Weak upgrade needed by unchanged reference cells.
+        // An in-use, already indexed cell needs no value borrow at all.
+        if cell.try_borrow().is_ok_and(|value| {
+            !matches!(
+                &*value,
+                Value::Object(1..) | Value::Array(_) | Value::Proplist(_)
+            )
+        }) {
+            self.register(cell);
+            return;
+        }
         // Discovery may avoid a recursive walk only while the exact Rc is
         // still indexed. Whole-cell writes use `register` (embedding hosts
         // use `set_value_cell`), and path writes apply their recorded delta.
@@ -967,7 +981,26 @@ impl ActiveObjectReferenceTables {
         true
     }
 
+    fn register_global_table(&mut self, table: &GlobalVariables, depth: usize) -> bool {
+        let revision = table.revision();
+        if let Some((_, registered_revision, _)) = self
+            .global_tables
+            .iter_mut()
+            .find(|(registered, _, _)| Rc::ptr_eq(registered, table))
+        {
+            if revision.is_some() && *registered_revision == revision {
+                return false;
+            }
+            *registered_revision = revision;
+        } else {
+            self.global_tables.push((Rc::clone(table), revision, depth));
+        }
+        true
+    }
+
     fn leave_depth(&mut self, depth: usize) {
+        self.global_tables
+            .retain(|(_, _, registered_depth)| *registered_depth != depth);
         self.object_states
             .retain(|(_, registered_depth)| *registered_depth != depth);
     }
@@ -12373,10 +12406,19 @@ impl Environment {
             register_shared_object_reference_cells(local_slots.values());
         }
         if let Some(globals) = vm.globals_named {
-            #[cfg(test)]
-            OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
-            let globals = globals.borrow();
-            register_shared_object_reference_cells(globals.values());
+            let scan = ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| {
+                tables
+                    .borrow_mut()
+                    .as_mut()
+                    .expect("the reference guard installs its table registry first")
+                    .register_global_table(globals, depth)
+            });
+            if scan {
+                #[cfg(test)]
+                OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
+                let globals = globals.borrow();
+                register_shared_object_reference_cells(globals.values());
+            }
         }
         if let Some(globals) = vm.globals_numbered {
             #[cfg(test)]
@@ -12385,10 +12427,19 @@ impl Environment {
             register_shared_object_reference_cells(globals.values());
         }
         if let Some(globals) = vm.globals_consts {
-            #[cfg(test)]
-            OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
-            let globals = globals.borrow();
-            register_shared_object_reference_cells(globals.values());
+            let scan = ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| {
+                tables
+                    .borrow_mut()
+                    .as_mut()
+                    .expect("the reference guard installs its table registry first")
+                    .register_global_table(globals, depth)
+            });
+            if scan {
+                #[cfg(test)]
+                OBJECT_REFERENCE_TABLE_TRAVERSALS.with(|count| count.set(count.get() + 1));
+                let globals = globals.borrow();
+                register_shared_object_reference_cells(globals.values());
+            }
         }
         cells
     }
@@ -13101,8 +13152,8 @@ mod tests {
         // C++ attaches every live C4Value to one process-global intrusive
         // FirstRef list, so AB_CALL only adds its frame values
         // (C4AulExec.cpp:62-63,1217-1223; C4Object.cpp:312). Rust can retain
-        // the private object-state scan, while public mutable global tables
-        // must still be checked at each nested frame.
+        // the object-state scan and the global-table generation across
+        // nested frames; a mutable table borrow invalidates the latter.
         let script = parse_script(
             "static persisted; local target; func Leaf() { return target; } func Probe() { return Leaf(); }",
             "script parses",
@@ -13124,7 +13175,48 @@ mod tests {
             .0;
 
         check_eq!(result => Value::Object(7));
-        check_eq!(object_reference_table_traversals() => 4);
+        check_eq!(object_reference_table_traversals() => 3);
+    }
+
+    #[test]
+    fn registered_reference_discovery_does_not_reborrow_an_in_use_cell() {
+        // AB_CALL retains an existing FirstRef link without reading the
+        // referenced value (C4AulExec.cpp:1217-1223; C4Value.cpp:104-140).
+        let _frame = ActiveObjectReferenceCellsGuard::enter_frame();
+        let cell = value_cell(Value::Object(7));
+        let borrowed = cell.borrow_mut();
+        ensure_active_object_reference_cell_registered(&cell);
+        drop(borrowed);
+        clear_active_object_references(7);
+        check_eq!(*cell.borrow() => Value::Nil);
+    }
+
+    #[test]
+    fn replaced_global_cell_is_discovered_at_the_next_nested_call() {
+        // Host replacement must retain synchronous AssignRemoval clearing
+        // (C4Object.cpp:312), including an existing key with unchanged length.
+        let functions = FxHashMap::default();
+        let globals = crate::engine::new_global_variables();
+        globals
+            .borrow_mut()
+            .insert("target".into(), value_cell(Value::Nil));
+        let vm = test_vm(&functions, &[]).with_global_variables(Some(&globals));
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        // A pre-existing embedding cell can enter the table without calling
+        // value_cell or set_value_cell while a VM frame is active.
+        let replacement = Rc::new(RefCell::new(Value::Object(7)));
+        globals
+            .borrow_mut()
+            .insert("target".into(), Rc::clone(&replacement));
+        reset_object_reference_table_traversals();
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            check_eq!(object_reference_table_traversals() => 1);
+            clear_active_object_references(7);
+            check_eq!(*replacement.borrow() => Value::Nil);
+        }
     }
 
     #[test]
@@ -13144,6 +13236,41 @@ mod tests {
         check_eq!(object_reference_discovery_borrows() => 1);
         clear_active_object_references(7);
         check!(cells.iter().all(|cell| *cell.borrow() == Value::Nil));
+    }
+
+    #[test]
+    fn nested_calls_do_not_enumerate_unchanged_global_tables() {
+        // C4AulExec.cpp:1217-1223 adds a call frame without walking
+        // GlobalNamed; C4Value.cpp:104-140 maintains FirstRef on writes.
+        let functions = FxHashMap::default();
+        let globals = crate::engine::new_global_variables();
+        let constants = crate::engine::new_global_variables();
+        for index in 0..128 {
+            globals
+                .borrow_mut()
+                .insert(format!("scalar{index}"), value_cell(Value::Int(index)));
+            constants
+                .borrow_mut()
+                .insert(format!("constant{index}"), value_cell(Value::Int(index)));
+        }
+        let target = value_cell(Value::Nil);
+        globals
+            .borrow_mut()
+            .insert("target".to_owned(), Rc::clone(&target));
+        let vm = test_vm(&functions, &[])
+            .with_global_variables(Some(&globals))
+            .with_global_constants(Some(&constants));
+        let env = Environment::new_with_params(&[], &[], None, ObjectState::default())
+            .expect("empty environment builds");
+        let _outer = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+        reset_object_reference_table_traversals();
+        {
+            let _nested = ActiveObjectReferenceCellsGuard::enter(&env, &vm);
+            check_eq!(object_reference_table_traversals() => 0);
+            set_value_cell(&target, Value::Object(7));
+            clear_active_object_references(7);
+            check_eq!(*target.borrow() => Value::Nil);
+        }
     }
 
     #[test]
