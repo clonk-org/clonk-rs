@@ -4808,7 +4808,7 @@ pub(crate) fn object_number(args: &[Value]) -> Result<Value, RuntimeError> {
     let number = explicit.or_else(|| {
         HOST_CONTEXT.with(|cell| {
             cell.borrow()
-                .as_ref()
+                .as_deref()
                 .and_then(EffectHostContext::object_context)
                 .map(|object| object.id().as_u64())
         })

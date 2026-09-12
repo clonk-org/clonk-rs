@@ -2168,7 +2168,7 @@ fn native_blast_objects(
         let _ = native_blast_object(container, level, caused_by)?;
         let ids = HOST_CONTEXT.with(|cell| {
             cell.borrow()
-                .as_ref()
+                .as_deref()
                 .map(EffectHostContext::master_object_ids)
                 .unwrap_or_default()
         });
@@ -2194,7 +2194,7 @@ fn native_blast_objects(
 
     let ids = HOST_CONTEXT.with(|cell| {
         cell.borrow()
-            .as_ref()
+            .as_deref()
             .map(EffectHostContext::master_object_ids)
             .unwrap_or_default()
     });

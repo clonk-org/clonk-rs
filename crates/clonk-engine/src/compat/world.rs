@@ -1,6 +1,8 @@
 use super::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+mod callback;
+
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
     pub id: ObjectId,

@@ -39,6 +39,10 @@ path = "tests/particle_allocations.rs"
 name = "snapshot_definition_allocations"
 path = "tests/snapshot_definition_allocations.rs"
 
+[[test]]
+name = "host_context_allocations"
+path = "tests/host_context_allocations.rs"
+
 [dev-dependencies]
 clonk-test-support = { path = "../clonk-test-support" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
