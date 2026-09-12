@@ -800,6 +800,20 @@ impl Engine {
         master_order
     }
 
+    /// Native predicates check status while matching, so they can traverse
+    /// the IDs without first resolving every object to check status again.
+    ///
+    /// # Safety
+    ///
+    /// Same synchronous source-lifetime contract as `lazy_host_world_object`.
+    unsafe fn lazy_host_world_native_query_order(source: *const ()) -> Vec<ObjectId> {
+        let engine = source.cast::<Self>();
+        // SAFETY: this field is frozen during the callback and disjoint from
+        // any exclusively borrowed object. No object storage is dereferenced.
+        let exec_list = unsafe { &*std::ptr::addr_of!((*engine).execution.exec_list) };
+        exec_list.iter().rev().copied().collect()
+    }
+
     pub(crate) fn note_solid_mask_host_state_changed(&self) {
         self.solid_mask_host_state_generation
             .set(self.solid_mask_host_state_generation.get().wrapping_add(1));
@@ -1039,6 +1053,7 @@ impl Engine {
             // execution. APIs such as FindBase walk the forward list, but
             // most callbacks never inspect it, so snapshot it on first use.
             .with_master_order(Self::lazy_host_world_master_order)
+            .with_native_query_order(Self::lazy_host_world_native_query_order)
             .with_player(Self::lazy_host_world_player)
             .with_landscape_dimensions(Self::lazy_host_world_landscape_dimensions)
             .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)

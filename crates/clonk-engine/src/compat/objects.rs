@@ -2831,7 +2831,10 @@ impl FindObjectParams {
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
     ) -> bool {
-        if matches!(status, ObjectStatus::Deleted) {
+        // Inactive objects belong to InactiveObjects, outside FindObject's
+        // master list (oracle-src-pinned src/C4Object.cpp:5987-5995). Native
+        // candidate enumeration defers that membership check to this pass.
+        if !status.is_active() {
             return false;
         }
 
@@ -2954,6 +2957,14 @@ impl FindObjectParams {
         Some(squared_distance(position, self.x, self.y))
     }
 
+    fn master_candidate_ids(&self, world: &impl WorldAccessor) -> Vec<ObjectId> {
+        if self.find_next.is_some() {
+            world.master_object_ids()
+        } else {
+            world.native_query_object_ids()
+        }
+    }
+
     /// Sector-prefiltered candidates for the port-internal fixed-parameter
     /// FindObjects (modelled on C4FindObject::FindMany's bounded arms —
     /// this form has no C++ counterpart) and the order-insensitive
@@ -2962,7 +2973,7 @@ impl FindObjectParams {
     /// (C4Game.cpp:1367-1424).
     fn candidate_ids(&self, world: &impl WorldAccessor) -> Vec<ObjectId> {
         if self.is_closest_query() || self.is_full_range() {
-            return world.master_object_ids();
+            return self.master_candidate_ids(world);
         }
 
         if self.is_point_query() {
@@ -4208,7 +4219,13 @@ fn find_candidate_ids(world: &impl WorldAccessor, condition: &FindCondition) -> 
         })
         // Unbounded criteria walk `Objs.First -> Next`, the forward master
         // list (C4FindObject.cpp:188-216), not the callback's storage order.
-        .unwrap_or_else(|| world.master_object_ids())
+        .unwrap_or_else(|| {
+            if condition.uses_func() {
+                world.master_object_ids()
+            } else {
+                world.native_query_object_ids()
+            }
+        })
 }
 
 /// Collect matches in C++ walk order (C4FindObject::FindMany,
@@ -4410,14 +4427,14 @@ pub(crate) fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
     with_host_context(Ok(Value::Int(0)), |context| {
         let condition = condition.pruned(context);
         if condition.is_ensured(context) {
+            // IsEnsured is not always equivalent to Check (Category(0) is
+            // ensured but checks false). Count active entries directly, as
+            // C4FindObject::Count does, without copying their script state.
+            let active = FindCondition::And(Vec::new());
             let count = context
-                .master_object_ids()
+                .native_query_object_ids()
                 .into_iter()
-                .filter(|id| {
-                    context
-                        .get_world_object(*id)
-                        .is_some_and(|object| object.status().is_active())
-                })
+                .filter(|id| context.matches_find_condition_candidate(*id, &active) == Some(true))
                 .count();
             return Ok(Value::Int(truncate_to_i32(count as u64)));
         }
@@ -4606,7 +4623,7 @@ pub(crate) fn edit_cursor_object_at(
 
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
-    for object_id in world.master_object_ids() {
+    for object_id in params.master_candidate_ids(world) {
         if let Some(target) = skip_until {
             if object_id == target {
                 skip_until = None;
@@ -4649,7 +4666,7 @@ fn find_object_closest(world: &impl WorldAccessor, params: &FindObjectParams) ->
     let farther_than = params.reference_distance(world).unwrap_or(-1);
     let mut find_next_pending = params.find_next;
     let mut best: Option<(ObjectId, i64)> = None;
-    for object_id in world.master_object_ids() {
+    for object_id in params.master_candidate_ids(world) {
         if !params.excludes_id(object_id)
             && world
                 .matches_legacy_find_object_candidate(object_id, params)

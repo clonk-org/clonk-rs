@@ -170,6 +170,15 @@ impl WorldAccessor for EffectHostContext {
         EffectHostContext::master_object_ids(self)
     }
 
+    fn native_query_object_ids(&self) -> Vec<ObjectId> {
+        if let Some(order) = &self.master_order_preview {
+            return order.clone();
+        }
+        let mut ids = self.world.native_query_object_ids();
+        ids.extend(self.pending_order.iter().copied());
+        ids
+    }
+
     fn script_function_known(&self, name: &str) -> bool {
         self.world.script_function_known(name)
     }

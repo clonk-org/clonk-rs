@@ -1863,6 +1863,7 @@ pub(crate) struct LazyHostWorldProvider {
     master_order: Option<
         unsafe fn(*const (), &HashMap<ObjectId, ObjectStatus>, &HashSet<usize>) -> Vec<ObjectId>,
     >,
+    native_query_order: Option<unsafe fn(*const ()) -> Vec<ObjectId>>,
     /// Landscape extent without the shell copy. `C4LSectors::Update` sizes its
     /// grid from Width/Height alone (oracle-src-pinned src/C4Sector.cpp:107),
     /// so a provider that can answer those two integers directly spares the
@@ -1916,6 +1917,7 @@ impl LazyHostWorldProvider {
             player: None,
             landscape,
             master_order: None,
+            native_query_order: None,
             landscape_dimensions: None,
             landscape_borrow: None,
             sector_map_borrow: None,
@@ -2029,6 +2031,21 @@ impl LazyHostWorldProvider {
         ) -> Vec<ObjectId>,
     ) -> Self {
         self.master_order = Some(master_order);
+        self
+    }
+
+    /// Supply master-order candidates without reading object statuses. Native
+    /// predicates must reject inactive/deleted objects; continuation searches
+    /// and reentrant callbacks still use the exact master list.
+    ///
+    /// # Safety
+    ///
+    /// Same source-lifetime contract as [`LazyHostWorldProvider::new`].
+    pub(crate) unsafe fn with_native_query_order(
+        mut self,
+        query_order: unsafe fn(*const ()) -> Vec<ObjectId>,
+    ) -> Self {
+        self.native_query_order = Some(query_order);
         self
     }
 
@@ -4602,6 +4619,23 @@ impl HostWorldContext {
             .as_slice()
     }
 
+    pub(crate) fn native_query_object_ids(&self) -> Vec<ObjectId> {
+        if let Some(order) = self.master_order.get() {
+            return order.as_ref().clone();
+        }
+        self.lazy_world
+            .and_then(|provider| {
+                // SAFETY: the paused source outlives this synchronous call.
+                // The provider reads only the frozen execution list.
+                unsafe {
+                    provider
+                        .native_query_order
+                        .map(|query| query(provider.source))
+                }
+            })
+            .unwrap_or_else(|| self.master_object_ids().to_vec())
+    }
+
     pub(crate) fn inactive_object_ids(&self) -> &[ObjectId] {
         self.inactive_order.as_slice()
     }
@@ -5728,6 +5762,12 @@ pub(crate) trait WorldAccessor {
     }
     fn object_ids(&self) -> Vec<ObjectId>;
     fn master_object_ids(&self) -> Vec<ObjectId>;
+    /// Master-order candidates for a non-reentrant native predicate that
+    /// rejects inactive/deleted objects. Never use this for FindNext markers
+    /// or a callback that can change list membership during traversal.
+    fn native_query_object_ids(&self) -> Vec<ObjectId> {
+        self.master_object_ids()
+    }
     /// Exact world-space `C4Object::Shape`; no `C4Object::addtop` expansion.
     fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
     /// Sector/legacy-`At` bounds, including `C4Object::addtop`.
@@ -5840,6 +5880,10 @@ impl WorldAccessor for HostWorldContext {
 
     fn master_object_ids(&self) -> Vec<ObjectId> {
         HostWorldContext::master_object_ids(self).to_vec()
+    }
+
+    fn native_query_object_ids(&self) -> Vec<ObjectId> {
+        HostWorldContext::native_query_object_ids(self)
     }
 
     fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
