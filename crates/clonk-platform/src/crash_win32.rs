@@ -532,9 +532,9 @@ pub use windows_impl::{
 #[cfg(windows)]
 mod windows_impl {
     use super::{
-        compose_report, crash_dialog_text, crash_dump_filename, CollectedWalk, ExceptionSummary,
-        LoadedModule, SourceLocation, StackFrame, StackMemory, StackMemoryDump, SymbolMatch,
-        X64Registers,
+        compose_report, crash_dialog_caption, crash_dialog_text, crash_dump_filename,
+        CollectedWalk, ExceptionSummary, LoadedModule, SourceLocation, StackFrame, StackMemory,
+        StackMemoryDump, SymbolMatch, X64Registers,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
