@@ -1,5 +1,8 @@
 # Shared script-reference discovery
 
+For the subsequent generation-based table cache and updated measurements, see
+[script and host bookkeeping](script-bookkeeping-performance.md).
+
 Nested C4Script calls still discover shared global cells on every entry. Hosts
 can replace a table entry between calls, so treating the whole table as already
 visited would miss live object references during `AssignRemoval`.
