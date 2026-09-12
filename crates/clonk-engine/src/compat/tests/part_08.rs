@@ -934,7 +934,7 @@
                 || {
                     let before = HOST_CONTEXT.with(|cell| {
                         cell.borrow()
-                            .as_ref()
+                            .as_deref()
                             .and_then(EffectHostContext::object_context)
                             .map(|scope| scope.command_count)
                             .unwrap_or_default()
@@ -942,7 +942,7 @@
                     let added = add_command(&[v_string("Wait".into())])?;
                     let after = HOST_CONTEXT.with(|cell| {
                         cell.borrow()
-                            .as_ref()
+                            .as_deref()
                             .and_then(EffectHostContext::object_context)
                             .map(|scope| scope.command_count)
                             .unwrap_or_default()

@@ -461,7 +461,7 @@ pub(crate) fn diagnostic_object_data_string(id: u64) -> Option<(String, Option<S
 pub(crate) fn value_to_data_string(value: &Value) -> String {
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
-        value_to_data_string_with_context(value, borrow.as_ref())
+        value_to_data_string_with_context(value, borrow.as_deref())
     })
 }
 
@@ -773,7 +773,7 @@ pub(crate) fn format_script_string(
 ) -> Result<String, RuntimeError> {
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
-        format_script_string_with_context(function, format_str, params, borrow.as_ref())
+        format_script_string_with_context(function, format_str, params, borrow.as_deref())
     })
 }
 

@@ -856,170 +856,16 @@ impl Engine {
     /// Build the shared/static portion of a script host context without
     /// materializing every object's mutable script state or cloning the
     /// landscape shell. Movement can finish this lazily on first contact.
-    fn host_world_context_base(&self) -> HostWorldContext {
+    fn host_world_context_base(&self, provider: LazyHostWorldProvider) -> HostWorldContext {
         #[cfg(test)]
         HOST_WORLD_CONTEXT_BASE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         self.record_effect_dispatch(|stats| stats.context_base_materializations += 1);
-        let definition_metadata = self.definition_metadata_table();
-        let host_definition_tables = self.host_definition_tables();
-        let reloadable_definitions = Rc::clone(&host_definition_tables.reloadable_definitions);
-        let solid_mask_metadata = self.solid_mask_metadata_table();
-        let transfer_zones = self.transfer_zones.states();
-        let player_order = self.player_ids_in_order();
-        let local_players: Vec<i32> = self.local_players.as_ref().map_or_else(
-            || player_order.clone(),
-            |players| players.iter().copied().collect(),
+        let mut world = HostWorldContext::from_engine(
+            self,
+            self.solid_mask_metadata_table(),
+            self.host_solid_mask_state(),
+            provider,
         );
-        let solid_mask_state = self.host_solid_mask_state();
-        let sky_adjustment = self
-            .sky
-            .as_ref()
-            .map(SkyState::adjustment)
-            .unwrap_or_default();
-        let sky_fade = self.sky.as_ref().map_or_else(
-            || {
-                let settings = SkySettings::default();
-                [settings.fade_top, settings.fade_bottom]
-            },
-            |sky| [sky.settings().fade_top, sky.settings().fade_bottom],
-        );
-        let mut world = HostWorldContext::with_landscape_shared(
-            std::iter::empty(),
-            None,
-            definition_metadata,
-            Rc::clone(&self.scenario_values),
-            Rc::clone(&self.default_rank_names),
-            transfer_zones,
-            HashMap::new(),
-            HashMap::new(),
-            self.next_object_id,
-            self.team_home_base_rule,
-            Some(&host_definition_tables),
-            self.base_auto_sell_enabled,
-            self.host_crew_info_state(),
-        )
-        .with_shared_bases(self.shared_bases)
-        .with_player_fow_view_objects(
-            self.players
-                .values()
-                .map(|player| (player.id(), player.fow_view_objects().iter().copied())),
-        )
-        .with_game_time(self.game_time)
-        .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
-        .with_object_no_dig_resource_string(Rc::clone(&self.object_no_dig_resource_string))
-        .with_construction_check_strings(Rc::clone(&self.construction_check_strings))
-        .with_control_key_names(Rc::clone(&self.control_key_names))
-        .with_solid_mask_metadata(solid_mask_metadata)
-        .with_shared_solid_mask_bakes(Rc::clone(&solid_mask_state.bakes))
-        .with_solid_mask_instance_sequences(
-            solid_mask_state.instance_sequences.as_ref().clone(),
-            solid_mask_state.next_instance_sequence,
-        )
-        .with_scenario_sections(
-            self.scenario_section_state
-                .sections
-                .values()
-                .map(|section| section.name.as_str()),
-        )
-        .with_scenario_section_switch_in_flight(self.scenario_section_state.switch_in_flight)
-        .with_suspended_script_registrations(Rc::clone(&self.suspended_script_registrations))
-        .with_scenario_section_landscape_extents(self.scenario_section_state.sections.values().map(
-            |section| {
-                (
-                    section.name.as_str(),
-                    section
-                        .landscape
-                        .as_ref()
-                        .map(crate::compat::landscape_extent),
-                )
-            },
-        ))
-        .with_teams(Rc::clone(&self.team_state.teams))
-        .with_team_runtime_options(self.team_state.team_configuration, self.league_game)
-        .with_game_tick_delay(
-            Rc::clone(&self.game_tick_delay_ms),
-            Rc::clone(&self.game_tick_delay_revision),
-        )
-        .with_league_progress_data(
-            Rc::clone(&self.league_name),
-            Rc::clone(&self.player_info_league_progress_data),
-        )
-        .with_player_info_ids(self.players.values().map(Player::player_info_id))
-        .with_league_scores(Rc::clone(&self.player_info_league_scores))
-        .with_movement_solid_masks(self.ocf_solid_mask_overlay())
-        .with_definition_order(Rc::clone(&self.definition_order.runtime_order))
-        .with_shared_particle_defs(self.particle_system.shared_def_names())
-        .with_shared_particle_reloads(
-            self.particle_system.shared_reloadable_def_names(),
-            Rc::clone(&self.host_requests.particle_reload_requests),
-        )
-        .with_shared_particle_reload_io_success(
-            self.particle_system.shared_reloadable_def_io_success(),
-        )
-        .with_definition_reloads(
-            reloadable_definitions,
-            Rc::clone(&self.host_requests.definition_reload_requests),
-        )
-        .with_crew_ranks(Rc::clone(&self.crew_ranks))
-        .with_crew_infos(Rc::clone(&self.crew_object_infos))
-        .with_crew_info_links(Rc::clone(&self.crew_info_links))
-        .with_materials(Some(self.materials_shared()))
-        .with_scenario_script(
-            self.scenario_script
-                .as_ref()
-                .map(ScenarioScript::script_arc),
-        )
-        .with_network_game(self.network_game)
-        .with_network_control_mode(self.network_control_mode)
-        .with_control_sync_mode(self.control_sync_mode())
-        .with_edit_cursor_target(self.edit_cursor_target)
-        .with_pause_game_requests(
-            self.replay_control,
-            Rc::clone(&self.host_requests.pause_game_requests),
-        )
-        .with_network_target_fps_requests(Rc::clone(
-            &self.host_requests.network_target_fps_requests,
-        ))
-        .with_viewport_presentation_requests(
-            self.replay_control,
-            Rc::clone(&self.host_requests.viewport_presentation_requests),
-        )
-        .with_film_viewport_available(self.film_viewport_available)
-        .with_smoke_level(self.bubble_smoke_level())
-        .with_fire_particles_loaded(self.particle_system.is_fire_particle_loaded())
-        .with_max_players(self.max_players.unwrap_or_default())
-        .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
-        .with_fair_crew_physical_cache(Rc::clone(&self.definition_order.fair_crew_physical_cache))
-        .with_control_host(
-            self.control_host,
-            Rc::clone(&self.host_requests.player_info_updates),
-        )
-        .with_live_player_order(player_order)
-        .with_local_players(local_players)
-        .with_shared_physical_viewport_players(Rc::clone(&self.physical_viewport_players))
-        .with_active_message_board_input(self.active_message_board_input.clone())
-        .with_mission_access(Rc::clone(&self.mission_access.inner))
-        .with_scoreboard(Rc::clone(&self.scoreboard))
-        .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
-        .with_scenario_script_counter(self.scenario_script_counter)
-        .with_next_storage_index(self.objects.len())
-        .with_inactive_order(self.execution.inactive.iter().rev().copied())
-        .with_pathfinder_settings(
-            self.pathfinder_level,
-            self.pathfinder_transfer_zones_enabled,
-        )
-        .with_pathfinder_debug_sink(Rc::clone(&self.pathfinder_debug))
-        .with_command_settings(
-            self.frame,
-            self.base_buy_enabled,
-            self.base_sell_enabled,
-            self.base_reject_entrance_enabled,
-            self.base_extinguish_enabled,
-        )
-        .with_structures_need_energy(self.structures_need_energy)
-        .with_flag_removeable(self.flag_removeable)
-        .with_sky_adjustment(sky_adjustment)
-        .with_sky_fade(sky_fade[0], sky_fade[1]);
         if self.solid_mask_staging.defer_solid_mask_updates {
             if let Some(preview) = self.solid_mask_staging.deferred_host_raster_preview.clone() {
                 world.apply_host_raster_preview(preview);
@@ -1063,8 +909,7 @@ impl Engine {
             .with_object_position(Self::lazy_host_world_object_position)
             .with_find_condition(Self::lazy_host_world_find_condition_matches)
         };
-        self.host_world_context_base()
-            .with_lazy_world_provider(provider)
+        self.host_world_context_base(provider)
     }
 
     pub(crate) fn host_world_context_for_object(&self, index: usize) -> HostWorldContext {

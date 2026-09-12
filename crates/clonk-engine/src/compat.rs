@@ -88,7 +88,8 @@ pub use values::*;
 pub use world::*;
 
 thread_local! {
-    static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
+    // Nested callbacks move ownership without copying the large context.
+    static HOST_CONTEXT: RefCell<Option<Box<EffectHostContext>>> = const { RefCell::new(None) };
     static RANDOM_CONTEXT: RefCell<Option<Rc<RandomContext>>> = const { RefCell::new(None) };
     // C++ SafeRandom is a process-global, deliberately unsynchronized
     // libc-rand stream (C4Random.h:35,71-75). Keep presentation-only script
@@ -156,12 +157,12 @@ const LEGACY_GAME_PALETTE: &[u8; 256 * 3] = include_bytes!("../../../planet/Grap
 /// context; the `Option` models the window between frames, where every
 /// wrapper returns its own inert value rather than touching engine state.
 fn with_host_context<R>(fallback: R, f: impl FnOnce(&EffectHostContext) -> R) -> R {
-    HOST_CONTEXT.with(|cell| cell.borrow().as_ref().map_or(fallback, f))
+    HOST_CONTEXT.with(|cell| cell.borrow().as_deref().map_or(fallback, f))
 }
 
 /// `with_host_context` for the wrappers that mutate engine state.
 fn with_host_context_mut<R>(fallback: R, f: impl FnOnce(&mut EffectHostContext) -> R) -> R {
-    HOST_CONTEXT.with(|cell| cell.borrow_mut().as_mut().map_or(fallback, f))
+    HOST_CONTEXT.with(|cell| cell.borrow_mut().as_deref_mut().map_or(fallback, f))
 }
 
 /// `with_host_context` for the wrappers that raise a script error instead of

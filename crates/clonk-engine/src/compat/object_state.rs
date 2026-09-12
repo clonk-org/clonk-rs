@@ -3519,7 +3519,7 @@ pub(crate) fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
             HOST_CONTEXT.with(|cell| {
                 if let Some(object) = cell
                     .borrow_mut()
-                    .as_mut()
+                    .as_deref_mut()
                     .and_then(EffectHostContext::object_context_mut)
                 {
                     object.set_fixed_velocity(FixedVec2::new(txdir, tydir));

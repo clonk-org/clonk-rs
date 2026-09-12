@@ -274,7 +274,7 @@ pub(crate) fn broadcast_global_callback(
     const BROADCAST_MASK: i32 = (1 << 5) | (1 << 6) | (1 << 19);
     let targets = HOST_CONTEXT.with(|cell| {
         cell.borrow()
-            .as_ref()
+            .as_deref()
             .map(EffectHostContext::master_object_ids)
             .unwrap_or_default()
     });
@@ -1326,7 +1326,7 @@ pub(crate) fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
     const BROADCAST_MASK: i32 = (1 << 5) | (1 << 6) | (1 << 19);
     let targets: Vec<ObjectId> = HOST_CONTEXT.with(|cell| {
         cell.borrow()
-            .as_ref()
+            .as_deref()
             .map(EffectHostContext::master_object_ids)
             .unwrap_or_default()
     });
@@ -2343,13 +2343,13 @@ where
 }
 
 struct EffectHostContextTlsGuard<'a> {
-    cell: &'a RefCell<Option<EffectHostContext>>,
-    previous: Option<EffectHostContext>,
+    cell: &'a RefCell<Option<Box<EffectHostContext>>>,
+    previous: Option<Box<EffectHostContext>>,
     active: bool,
 }
 
 impl EffectHostContextTlsGuard<'_> {
-    fn finish(mut self) -> EffectHostContext {
+    fn finish(mut self) -> Box<EffectHostContext> {
         let context = self
             .cell
             .replace(self.previous.take())
@@ -4001,7 +4001,7 @@ impl EffectHostContext {
         audio: AudioRegistry,
         game_over_triggered: bool,
         publish_spawn_previews: bool,
-    ) -> Self {
+    ) -> Box<Self> {
         let team_home_base_rule = world.team_home_base_rule();
         let shared_bases = world.shared_bases();
         let scenario_script_counter = world.scenario_script_counter();
@@ -4199,7 +4199,7 @@ impl EffectHostContext {
             }
         }
         let global = Some(EffectScopeContext::new(global_effects));
-        Self {
+        Box::new(Self {
             object,
             definition_context,
             script_object_context,
@@ -4250,7 +4250,7 @@ impl EffectHostContext {
             contents_link_operations: Vec::new(),
             nested_order: Vec::new(),
             foreign_local_cells: HashMap::new(),
-        }
+        })
     }
 
     pub(crate) fn scope_mut(
@@ -8338,7 +8338,7 @@ impl EffectHostContext {
         true
     }
 
-    fn into_commands(mut self) -> EffectContextOutcome {
+    fn into_commands(mut self: Box<Self>) -> EffectContextOutcome {
         debug_assert!(
             self.dormant_scopes.is_empty(),
             "all nested calls must have finished before the context closes"
