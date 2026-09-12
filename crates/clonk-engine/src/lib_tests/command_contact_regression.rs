@@ -683,6 +683,132 @@ fn set_position_without_a_solid_mask_bake_does_not_materialize_the_landscape() {
 }
 
 #[test]
+fn native_find_object_does_not_scan_statuses_before_testing_candidates() {
+    // C4Game::FindObject tests Status in the candidate walk itself and returns
+    // on the first match (oracle-src-pinned src/C4Game.cpp:1334-1424).
+    let mut engine = Engine::new();
+    engine.register_test_script_definition("FILL", "Filler", "");
+    engine.register_test_script_definition(
+        "FIND",
+        "Finder",
+        r#"#strict
+        func Search() { return(FindObject(FILL)); }
+        func After(p) { return(FindObject(FILL, 0, 0, 0, 0, 0, 0, 0, 0, p)); }
+        "#,
+    );
+    for _ in 0..64 {
+        spawn_fixture!(engine, "FILL");
+    }
+    let caller = spawn_fixture!(engine, "FIND");
+    let caller_index = engine.test_object_index(caller);
+    // Inactive entries are not members of C++'s main list even though their
+    // Status is nonzero (src/C4Object.cpp:5987-5995). Deleted entries can
+    // remain linked until removal completes (src/C4Game.cpp:1367-1373).
+    let inactive = engine.objects[0].id;
+    engine.objects[0].state.status = ObjectStatus::Inactive;
+    engine.objects[1].state.status = ObjectStatus::Deleted;
+    let expected = engine
+        .execution
+        .exec_list
+        .iter()
+        .rev()
+        .copied()
+        .find(|id| {
+            *id != caller
+                && engine.objects[engine.test_object_index(*id)]
+                    .state
+                    .status
+                    .is_active()
+        })
+        .expect("filler exists");
+
+    HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(|count| count.set(0));
+    assert_eq!(
+        engine
+            .call_object_function(caller_index, "Search", Vec::new())
+            .expect("native search succeeds"),
+        Value::Object(expected.0),
+    );
+    assert_eq!(
+        HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(Cell::get),
+        0,
+        "a first-match query must not first scan every object's status"
+    );
+    // FindNext is a list marker, even when it fails the query predicate.
+    // An inactive marker is absent and must never release the continuation
+    // (src/C4Game.cpp:1370-1373,1421-1422).
+    assert_eq!(
+        engine
+            .call_object_function(caller_index, "After", vec![Value::Object(inactive.0)])
+            .expect("continuation search succeeds"),
+        Value::Nil,
+    );
+}
+
+#[test]
+fn native_criteria_and_count_queries_check_status_in_the_candidate_pass() {
+    // C4FindObject::Find/FindMany/Count check each candidate's Status in the
+    // same walk (oracle-src-pinned src/C4FindObject.cpp:127-226).
+    // FnObjectCount uses C4Game::FindObject (src/C4Script.cpp:2085-2111).
+    let mut engine = Engine::new();
+    engine.register_test_script_definition("FILL", "Filler", "");
+    engine.register_test_script_definition(
+        "FIND",
+        "Finder",
+        r#"#strict
+        func First() { return(ObjectNumber(FindObject2([20, FILL]))); }
+        func Many() { return(GetLength(FindObjects([20, FILL]))); }
+        func CountLegacy() { return(ObjectCount(FILL)); }
+        func CountCriteria() { return(ObjectCount2([20, FILL])); }
+        func CountAll() { return(ObjectCount2([2])); }
+        func CountCategoryZero() { return(ObjectCount2([22, 0])); }
+        "#,
+    );
+    for _ in 0..64 {
+        spawn_fixture!(engine, "FILL");
+    }
+    let caller = spawn_fixture!(engine, "FIND");
+    let caller_index = engine.test_object_index(caller);
+    let expected_first = engine
+        .execution
+        .exec_list
+        .iter()
+        .rev()
+        .copied()
+        .find(|id| *id != caller)
+        .expect("filler exists");
+
+    for (function, expected) in [
+        ("First", expected_first.0 as i32),
+        ("Many", 64),
+        ("CountLegacy", 64),
+        ("CountCriteria", 64),
+        ("CountAll", 65),
+        ("CountCategoryZero", 65),
+    ] {
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, function, Vec::new())
+                .expect("native query succeeds"),
+            Value::Int(expected),
+            "{function}"
+        );
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "{function} needs only the caller snapshot, not every candidate's state"
+        );
+        assert_eq!(
+            HOST_WORLD_MASTER_ORDER_SOURCE_STATUS_READS.with(Cell::get),
+            0,
+            "{function} must check status alongside its predicate"
+        );
+    }
+}
+
+#[test]
 fn lazy_master_order_ignores_stale_object_index_cache() {
     let mut engine = Engine::new();
     engine.register_test_script_definition("ORDR", "Order", "");

@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
@@ -1861,8 +1862,13 @@ pub(crate) struct LazyHostWorldProvider {
     player: Option<unsafe fn(*const (), i32) -> Option<PlayerState>>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
     master_order: Option<
-        unsafe fn(*const (), &HashMap<ObjectId, ObjectStatus>, &HashSet<usize>) -> Vec<ObjectId>,
+        unsafe fn(
+            *const (),
+            &FxHashMap<ObjectId, ObjectStatus>,
+            &FxHashSet<usize>,
+        ) -> Vec<ObjectId>,
     >,
+    native_query_order: Option<unsafe fn(*const ()) -> Vec<ObjectId>>,
     /// Landscape extent without the shell copy. `C4LSectors::Update` sizes its
     /// grid from Width/Height alone (oracle-src-pinned src/C4Sector.cpp:107),
     /// so a provider that can answer those two integers directly spares the
@@ -1916,6 +1922,7 @@ impl LazyHostWorldProvider {
             player: None,
             landscape,
             master_order: None,
+            native_query_order: None,
             landscape_dimensions: None,
             landscape_borrow: None,
             sector_map_borrow: None,
@@ -2024,11 +2031,26 @@ impl LazyHostWorldProvider {
         mut self,
         master_order: unsafe fn(
             *const (),
-            &HashMap<ObjectId, ObjectStatus>,
-            &HashSet<usize>,
+            &FxHashMap<ObjectId, ObjectStatus>,
+            &FxHashSet<usize>,
         ) -> Vec<ObjectId>,
     ) -> Self {
         self.master_order = Some(master_order);
+        self
+    }
+
+    /// Supply master-order candidates without reading object statuses. Native
+    /// predicates must reject inactive/deleted objects; continuation searches
+    /// and reentrant callbacks still use the exact master list.
+    ///
+    /// # Safety
+    ///
+    /// Same source-lifetime contract as [`LazyHostWorldProvider::new`].
+    pub(crate) unsafe fn with_native_query_order(
+        mut self,
+        query_order: unsafe fn(*const ()) -> Vec<ObjectId>,
+    ) -> Self {
+        self.native_query_order = Some(query_order);
         self
     }
 
@@ -2168,8 +2190,8 @@ impl LazyHostWorldProvider {
 
     fn master_order(
         self,
-        seeded_statuses: &HashMap<ObjectId, ObjectStatus>,
-        excluded: &HashSet<usize>,
+        seeded_statuses: &FxHashMap<ObjectId, ObjectStatus>,
+        excluded: &FxHashSet<usize>,
     ) -> Option<Vec<ObjectId>> {
         // SAFETY: see `object`; seeded objects are resolved from their
         // callback-local status and are never dereferenced through the source.
@@ -2204,13 +2226,16 @@ impl LazyHostWorldProvider {
 
 #[derive(Clone, Default)]
 pub(crate) struct HostWorldObjectStore {
-    objects: HashMap<ObjectId, Rc<HostWorldObject>>,
+    // Like the engine object-index cache, use Fx hashing for numeric IDs.
+    // Traversal uses `order`/master order, never bucket order; bulk
+    // materialization sorts by unique storage indices before exposing them.
+    objects: FxHashMap<ObjectId, Rc<HostWorldObject>>,
     /// Storage order. Valid only after [`Self::ensure_ordered`]; between a
     /// materialization and the next read this holds materialization order.
     order: Vec<ObjectId>,
     order_dirty: bool,
-    indices: HashMap<ObjectId, usize>,
-    removed: HashSet<ObjectId>,
+    indices: FxHashMap<ObjectId, usize>,
+    removed: FxHashSet<ObjectId>,
     complete: bool,
 }
 
@@ -2986,7 +3011,7 @@ impl HostWorldContext {
         let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
         let sectors = RefCell::new(None);
         let mut order = Vec::with_capacity(map.len());
-        let mut lookup = HashMap::with_capacity(map.len());
+        let mut lookup = FxHashMap::with_capacity_and_hasher(map.len(), Default::default());
         for object in map {
             let id = object.id;
             order.push(id);
@@ -3026,7 +3051,7 @@ impl HostWorldContext {
                     .enumerate()
                     .map(|(index, id)| (id, index))
                     .collect(),
-                removed: HashSet::new(),
+                removed: FxHashSet::default(),
                 order_dirty: false,
                 complete: true,
             })),
@@ -4602,6 +4627,23 @@ impl HostWorldContext {
             .as_slice()
     }
 
+    pub(crate) fn native_query_object_ids(&self) -> Vec<ObjectId> {
+        if let Some(order) = self.master_order.get() {
+            return order.as_ref().clone();
+        }
+        self.lazy_world
+            .and_then(|provider| {
+                // SAFETY: the paused source outlives this synchronous call.
+                // The provider reads only the frozen execution list.
+                unsafe {
+                    provider
+                        .native_query_order
+                        .map(|query| query(provider.source))
+                }
+            })
+            .unwrap_or_else(|| self.master_object_ids().to_vec())
+    }
+
     pub(crate) fn inactive_object_ids(&self) -> &[ObjectId] {
         self.inactive_order.as_slice()
     }
@@ -5728,6 +5770,12 @@ pub(crate) trait WorldAccessor {
     }
     fn object_ids(&self) -> Vec<ObjectId>;
     fn master_object_ids(&self) -> Vec<ObjectId>;
+    /// Master-order candidates for a non-reentrant native predicate that
+    /// rejects inactive/deleted objects. Never use this for FindNext markers
+    /// or a callback that can change list membership during traversal.
+    fn native_query_object_ids(&self) -> Vec<ObjectId> {
+        self.master_object_ids()
+    }
     /// Exact world-space `C4Object::Shape`; no `C4Object::addtop` expansion.
     fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
     /// Sector/legacy-`At` bounds, including `C4Object::addtop`.
@@ -5840,6 +5888,10 @@ impl WorldAccessor for HostWorldContext {
 
     fn master_object_ids(&self) -> Vec<ObjectId> {
         HostWorldContext::master_object_ids(self).to_vec()
+    }
+
+    fn native_query_object_ids(&self) -> Vec<ObjectId> {
+        HostWorldContext::native_query_object_ids(self)
     }
 
     fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
