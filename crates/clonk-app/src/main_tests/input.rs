@@ -3972,9 +3972,9 @@ fn picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon()
     // C4PortraitSelDlg adds the branded user/program paths followed by
     // each existing platform location (pinned C4FileSelDlg.cpp:534-561).
     let expected_locations = vec![
-        PortraitLocation::new("LegacyClonk User Path", paths.user_data_dir()),
+        PortraitLocation::new("Clonk Rust User Path", paths.user_data_dir()),
         PortraitLocation::new(
-            "LegacyClonk Program Directory",
+            "Clonk Rust Program Directory",
             PathBuf::from(format!(
                 "{}{}",
                 paths.install_root().display(),

@@ -168,7 +168,7 @@ mod tests {
             sink.0,
             vec![StartupFailureDialog {
                 // STD_PRODUCT, which this port already uses as its window title.
-                caption: "LegacyClonk",
+                caption: "Clonk Rust",
                 message: "failed to initialize COM: access denied".to_owned(),
             }]
         );

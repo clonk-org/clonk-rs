@@ -400,7 +400,7 @@ mod tests {
                 "AppUserModelId\\LegacyClonkTeam.LegacyClonk",
                 Some("DisplayName")
             ),
-            Some("LegacyClonk")
+            Some("Clonk Rust")
         );
 
         // 11 classes * 4 values + 4 protocol + 3 verb + 1 AppUserModelId.
