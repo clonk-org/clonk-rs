@@ -2907,7 +2907,7 @@ impl FindObjectParams {
             object.action_name(),
             object.action_target(0),
             object.action_target(1),
-        )
+        ) && (!self.is_rect_query() || self.matches_rect_position(object.position()))
     }
 
     pub(crate) fn matches_engine_object(&self, object: &crate::Object) -> bool {
@@ -2921,7 +2921,13 @@ impl FindObjectParams {
             object.state.action.name.as_str(),
             object.state.action.target,
             object.state.action.target2,
-        )
+        ) && (!self.is_rect_query() || self.matches_rect_position(object.state.position))
+    }
+
+    fn matches_rect_position(&self, position: Vector2) -> bool {
+        let dx = position.x - self.x;
+        let dy = position.y - self.y;
+        dx >= 0 && dx < self.width && dy >= 0 && dy < self.height
     }
 
     fn matches_area(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> bool {
@@ -2936,10 +2942,7 @@ impl FindObjectParams {
         }
 
         if self.is_rect_query() {
-            let position = object.position();
-            let dx = position.x - self.x;
-            let dy = position.y - self.y;
-            return dx >= 0 && dx < self.width && dy >= 0 && dy < self.height;
+            return self.matches_rect_position(object.position());
         }
 
         false
@@ -2947,8 +2950,8 @@ impl FindObjectParams {
 
     fn reference_distance(&self, world: &impl WorldAccessor) -> Option<i64> {
         let id = self.find_next?;
-        let object = world.get_object(id)?;
-        Some(squared_distance(object.position(), self.x, self.y))
+        let position = world.query_object_position(id)?;
+        Some(squared_distance(position, self.x, self.y))
     }
 
     /// Sector-prefiltered candidates for the port-internal fixed-parameter
@@ -4619,7 +4622,7 @@ fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> 
         {
             continue;
         }
-        if params.is_full_range() {
+        if params.is_full_range() || params.is_rect_query() {
             return Some(object_id);
         }
         let Some(object) = world.get_object(object_id) else {
@@ -4652,8 +4655,8 @@ fn find_object_closest(world: &impl WorldAccessor, params: &FindObjectParams) ->
                 .matches_legacy_find_object_candidate(object_id, params)
                 .unwrap_or(false)
         {
-            if let Some(object) = world.get_object(object_id) {
-                let distance = squared_distance(object.position(), params.x, params.y);
+            if let Some(position) = world.query_object_position(object_id) {
+                let distance = squared_distance(position, params.x, params.y);
                 if distance == farther_than && find_next_pending.is_none() {
                     return Some(object_id);
                 }
@@ -4845,7 +4848,7 @@ fn collect_linear_matches(world: &impl WorldAccessor, params: &FindObjectParams)
         {
             continue;
         }
-        if params.is_full_range() {
+        if params.is_full_range() || params.is_rect_query() {
             matches.push(object_id);
             continue;
         }
@@ -4869,10 +4872,10 @@ fn collect_closest_matches(world: &impl WorldAccessor, params: &FindObjectParams
         {
             continue;
         }
-        let Some(object) = world.get_object(object_id) else {
+        let Some(position) = world.query_object_position(object_id) else {
             continue;
         };
-        let distance = squared_distance(object.position(), params.x, params.y);
+        let distance = squared_distance(position, params.x, params.y);
         if let Some(reference) = reference {
             if distance <= reference {
                 continue;

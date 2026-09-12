@@ -1882,6 +1882,7 @@ pub(crate) struct LazyHostWorldProvider {
     /// object callbacks.
     sector_map_borrow: Option<unsafe fn(*const ()) -> Option<*const SectorMap>>,
     legacy_find_object: Option<unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>>,
+    object_position: Option<unsafe fn(*const (), ObjectId) -> Option<Vector2>>,
     find_condition: Option<unsafe fn(*const (), ObjectId, &FindCondition) -> Option<bool>>,
 }
 
@@ -1919,6 +1920,7 @@ impl LazyHostWorldProvider {
             landscape_borrow: None,
             sector_map_borrow: None,
             legacy_find_object: None,
+            object_position: None,
             find_condition: None,
         }
     }
@@ -2077,6 +2079,14 @@ impl LazyHostWorldProvider {
         sector_map_borrow: unsafe fn(*const ()) -> Option<*const SectorMap>,
     ) -> Self {
         self.sector_map_borrow = Some(sector_map_borrow);
+        self
+    }
+
+    pub(crate) fn with_object_position(
+        mut self,
+        object_position: unsafe fn(*const (), ObjectId) -> Option<Vector2>,
+    ) -> Self {
+        self.object_position = Some(object_position);
         self
     }
 
@@ -2824,31 +2834,6 @@ impl HostWorldContext {
         self
     }
 
-    pub(crate) fn with_definition_tables(
-        mut self,
-        tables: Rc<HostDefinitionTables>,
-        base_auto_sell_enabled: bool,
-        crew_info_state: HostCrewInfoState,
-    ) -> Self {
-        self.color_by_owner_definitions = Rc::clone(&tables.color_by_owner);
-        self.base_auto_sell_definitions = Rc::clone(&tables.base_auto_sell);
-        self.rebuyable_definitions = Rc::clone(&tables.rebuyable);
-        self.no_sell_definitions = Rc::clone(&tables.no_sell);
-        self.definition_descriptions = Rc::clone(&tables.descriptions);
-        self.definition_rank_names = Rc::clone(&tables.rank_names);
-        self.definition_rank_bases = Rc::clone(&tables.rank_bases);
-        self.definition_scripts = Rc::clone(&tables.scripts);
-        self.ordered_definition_scripts = Rc::clone(&tables.ordered_scripts);
-        self.reference_parameter_slots = Rc::clone(&tables.reference_parameter_slots);
-        self.direct_call_function_names = Rc::clone(&tables.direct_call_function_names);
-        self.linked_script_hosts = Rc::clone(&tables.linked_script_hosts);
-        self.standard_crew_names = tables.standard_crew_names.clone();
-        self.definition_crew_names = Rc::clone(&tables.definition_crew_names);
-        self.base_auto_sell_enabled = base_auto_sell_enabled;
-        self.crew_info_state = Rc::new(RefCell::new(crew_info_state));
-        self
-    }
-
     pub(crate) fn with_needed_material_strings(
         mut self,
         strings: Rc<crate::NeededMaterialStrings>,
@@ -2967,6 +2952,9 @@ impl HostWorldContext {
             crew_selection,
             next_object_id,
             team_home_base_rule,
+            None,
+            true,
+            HostCrewInfoState::default(),
         )
     }
 
@@ -2984,10 +2972,17 @@ impl HostWorldContext {
         crew_selection: HashMap<i32, CrewSelectionState>,
         next_object_id: u64,
         team_home_base_rule: bool,
+        definition_tables: Option<&HostDefinitionTables>,
+        base_auto_sell_enabled: bool,
+        crew_info_state: HostCrewInfoState,
     ) -> Self
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
+        #[cfg(test)]
+        if definition_tables.is_none() {
+            crate::HOST_DEFINITION_TABLE_PLACEHOLDERS.with(|count| count.set(count.get() + 1));
+        }
         let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
         let sectors = RefCell::new(None);
         let mut order = Vec::with_capacity(map.len());
@@ -3054,14 +3049,35 @@ impl HostWorldContext {
             solid_mask_bakes: Rc::new(Vec::new()),
             solid_mask_instance_sequences: Rc::new(RefCell::new(HashMap::new())),
             next_solid_mask_instance_sequence: Rc::new(Cell::new(1)),
-            color_by_owner_definitions: Rc::new(HashSet::new()),
-            base_auto_sell_definitions: Rc::new(HashSet::new()),
-            rebuyable_definitions: Rc::new(HashSet::new()),
-            no_sell_definitions: Rc::new(HashSet::new()),
-            definition_descriptions: Rc::new(HashMap::new()),
-            definition_rank_names: Rc::new(HashMap::new()),
+            color_by_owner_definitions: definition_tables.map_or_else(
+                || Rc::new(HashSet::new()),
+                |tables| Rc::clone(&tables.color_by_owner),
+            ),
+            base_auto_sell_definitions: definition_tables.map_or_else(
+                || Rc::new(HashSet::new()),
+                |tables| Rc::clone(&tables.base_auto_sell),
+            ),
+            rebuyable_definitions: definition_tables.map_or_else(
+                || Rc::new(HashSet::new()),
+                |tables| Rc::clone(&tables.rebuyable),
+            ),
+            no_sell_definitions: definition_tables.map_or_else(
+                || Rc::new(HashSet::new()),
+                |tables| Rc::clone(&tables.no_sell),
+            ),
+            definition_descriptions: definition_tables.map_or_else(
+                || Rc::new(HashMap::new()),
+                |tables| Rc::clone(&tables.descriptions),
+            ),
+            definition_rank_names: definition_tables.map_or_else(
+                || Rc::new(HashMap::new()),
+                |tables| Rc::clone(&tables.rank_names),
+            ),
             default_rank_names,
-            definition_rank_bases: Rc::new(HashMap::new()),
+            definition_rank_bases: definition_tables.map_or_else(
+                || Rc::new(HashMap::new()),
+                |tables| Rc::clone(&tables.rank_bases),
+            ),
             definition_order: Rc::new(Vec::new()),
             sectors,
             borrowed_sector_map_valid: Cell::new(false),
@@ -3118,20 +3134,39 @@ impl HostWorldContext {
             scenario_script_counter: 0,
             structures_need_energy: false,
             flag_removeable: false,
-            standard_crew_names: None,
-            definition_crew_names: Rc::new(HashMap::new()),
-            crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
+            standard_crew_names: definition_tables
+                .and_then(|tables| tables.standard_crew_names.clone()),
+            definition_crew_names: definition_tables.map_or_else(
+                || Rc::new(HashMap::new()),
+                |tables| Rc::clone(&tables.definition_crew_names),
+            ),
+            crew_info_state: Rc::new(RefCell::new(crew_info_state)),
             particle_defs: None,
             reloadable_particle_defs: None,
             particle_reload_requests: Rc::new(RefCell::new(Vec::new())),
             reloadable_particle_io_success: None,
             reloadable_definitions: None,
             definition_reload_requests: Rc::new(RefCell::new(Vec::new())),
-            definition_scripts: Rc::new(HashMap::new()),
-            ordered_definition_scripts: Rc::new(Vec::new()),
-            reference_parameter_slots: Rc::new(HashMap::new()),
-            direct_call_function_names: Rc::new(HashSet::new()),
-            linked_script_hosts: Rc::new(Vec::new()),
+            definition_scripts: definition_tables.map_or_else(
+                || Rc::new(HashMap::new()),
+                |tables| Rc::clone(&tables.scripts),
+            ),
+            ordered_definition_scripts: definition_tables.map_or_else(
+                || Rc::new(Vec::new()),
+                |tables| Rc::clone(&tables.ordered_scripts),
+            ),
+            reference_parameter_slots: definition_tables.map_or_else(
+                || Rc::new(HashMap::new()),
+                |tables| Rc::clone(&tables.reference_parameter_slots),
+            ),
+            direct_call_function_names: definition_tables.map_or_else(
+                || Rc::new(HashSet::new()),
+                |tables| Rc::clone(&tables.direct_call_function_names),
+            ),
+            linked_script_hosts: definition_tables.map_or_else(
+                || Rc::new(Vec::new()),
+                |tables| Rc::clone(&tables.linked_script_hosts),
+            ),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
             crew_infos: Rc::new(HashMap::new()),
@@ -3141,7 +3176,7 @@ impl HostWorldContext {
             game_time: 0,
             base_buy_enabled: true,
             base_sell_enabled: true,
-            base_auto_sell_enabled: true,
+            base_auto_sell_enabled,
             base_reject_entrance_enabled: true,
             base_extinguish_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
@@ -3645,6 +3680,18 @@ impl HostWorldContext {
         mut self,
         scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
     ) -> Self {
+        // Scenario entry supplies the same scripts already installed in the
+        // shared world tables. Preserve that namespace until a relink changes
+        // an exact script handle, including replacement under an existing id.
+        if scripts.len() == self.definition_scripts.len()
+            && scripts.iter().all(|(id, script)| {
+                self.definition_scripts
+                    .get(id)
+                    .is_some_and(|current| Arc::ptr_eq(current, script))
+            })
+        {
+            return self;
+        }
         self.direct_call_function_names = Rc::new(direct_call_function_names(
             &scripts,
             self.linked_script_hosts.as_ref(),
@@ -4029,6 +4076,29 @@ impl HostWorldContext {
         store.objects.insert(id, Rc::clone(&object));
         store.record_materialized(id);
         Some(object)
+    }
+
+    pub(crate) fn query_object_position(&self, id: ObjectId) -> Option<Vector2> {
+        {
+            let store = self.object_store.borrow();
+            if store.removed.contains(&id) {
+                return None;
+            }
+            if let Some(object) = store.objects.get(&id) {
+                return Some(object.position());
+            }
+            if store.complete {
+                return None;
+            }
+        }
+        if let Some(provider) = self.lazy_world {
+            if let Some(position) = provider.object_position {
+                // SAFETY: the paused source and seeded-object exclusion have
+                // the same lifetime contract as the full object provider.
+                return unsafe { position(provider.source, id) };
+            }
+        }
+        self.get(id).map(|object| object.position())
     }
 
     pub(crate) fn matches_legacy_find_object_candidate(
@@ -5622,6 +5692,9 @@ pub(crate) fn host_vertex_bounds_rect(
 
 pub(crate) trait WorldAccessor {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject>;
+    fn query_object_position(&self, id: ObjectId) -> Option<Vector2> {
+        self.get_object(id).map(|object| object.position())
+    }
     fn matches_find_condition_candidate(
         &self,
         id: ObjectId,
@@ -5729,6 +5802,10 @@ pub(crate) fn sort_object_mass(world: &impl WorldAccessor, target: ObjectId) -> 
 }
 
 impl WorldAccessor for HostWorldContext {
+    fn query_object_position(&self, id: ObjectId) -> Option<Vector2> {
+        HostWorldContext::query_object_position(self, id)
+    }
+
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         self.get(id)
     }

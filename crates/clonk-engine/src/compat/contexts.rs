@@ -90,6 +90,15 @@ pub(crate) fn fair_crew_definition_context() -> Option<(DefinitionId, PhysicalIn
 }
 
 impl WorldAccessor for EffectHostContext {
+    fn query_object_position(&self, id: ObjectId) -> Option<Vector2> {
+        // Scope overlays include pending SetPosition/DoCon and nested writes.
+        // Only untouched objects can use the paused engine's scalar view.
+        if self.object_scope(id).is_some() || self.pending_objects.contains_key(&id) {
+            return self.get_world_object(id).map(|object| object.position());
+        }
+        self.world.query_object_position(id)
+    }
+
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         self.get_world_object(id)
     }

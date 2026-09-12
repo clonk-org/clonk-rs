@@ -203,7 +203,47 @@ pub type EvalDirectExecContinuationHook = std::rc::Rc<
 /// The engine-global named-variable table (`static` declarations;
 /// C4AulScriptEngine::GlobalNamed): one shared table across every script
 /// host. Values live in cells so lvalues (x = .., x++, ...) write through.
-pub type GlobalVariables = std::rc::Rc<std::cell::RefCell<IndexMap<String, crate::vm::ValueCell>>>;
+pub type GlobalVariables = std::rc::Rc<GlobalVariableTable>;
+
+/// Shared global cells with mutation tracking for reference discovery.
+/// Mutable table access invalidates discovery even when an existing key is
+/// replaced; changes to a cell itself use [`crate::set_value_cell`].
+#[derive(Debug)]
+pub struct GlobalVariableTable {
+    values: std::cell::RefCell<IndexMap<String, crate::vm::ValueCell>>,
+    revision: std::cell::Cell<Option<u64>>,
+}
+
+impl Default for GlobalVariableTable {
+    fn default() -> Self {
+        Self {
+            values: std::cell::RefCell::new(IndexMap::new()),
+            revision: std::cell::Cell::new(Some(0)),
+        }
+    }
+}
+
+impl GlobalVariableTable {
+    pub fn borrow(&self) -> std::cell::Ref<'_, IndexMap<String, crate::vm::ValueCell>> {
+        self.values.borrow()
+    }
+
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, IndexMap<String, crate::vm::ValueCell>> {
+        let values = self.values.borrow_mut();
+        // Exhaustion disables caching instead of allowing an old generation
+        // to match after wraparound.
+        self.revision.set(
+            self.revision
+                .get()
+                .and_then(|revision| revision.checked_add(1)),
+        );
+        values
+    }
+
+    pub(crate) fn revision(&self) -> Option<u64> {
+        self.revision.get()
+    }
+}
 
 /// The engine-global numbered-variable table (`C4AulScriptEngine::Global`).
 /// It is separate from [`GlobalVariables`] because numeric slots and declared
@@ -222,7 +262,7 @@ pub type LocalCellHook = std::rc::Rc<dyn Fn(&Value, &str) -> Option<crate::vm::V
 pub type ObjectTargetAvailabilityProbe = std::rc::Rc<dyn Fn(u64) -> bool>;
 
 pub fn new_global_variables() -> GlobalVariables {
-    std::rc::Rc::new(std::cell::RefCell::new(IndexMap::new()))
+    std::rc::Rc::new(GlobalVariableTable::default())
 }
 
 /// One process-global `C4StringTable` registration ledger.

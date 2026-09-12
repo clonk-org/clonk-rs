@@ -444,6 +444,21 @@ impl Engine {
         crate::engine_exec_order::object_index_in_storage(generation, cache, objects, id)
     }
 
+    /// Read query coordinates without constructing an owned host object.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as `lazy_host_world_object`: the object storage is
+    /// frozen and exclusively borrowed entries must already be seeded.
+    unsafe fn lazy_host_world_object_position(source: *const (), id: ObjectId) -> Option<Vector2> {
+        let engine = source.cast::<Self>();
+        // SAFETY: field-only reads use the generation- and identity-checked
+        // index, as in the scalar legacy-find provider below.
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let index = unsafe { Self::lazy_object_index(engine, objects, id) }?;
+        objects.get(index).map(|object| object.state.position)
+    }
+
     /// Resolve one callback-visible object allocation token without cloning
     /// its full state. The token table is interior mutable and remains stable
     /// while the Engine is synchronously paused inside the host callback.
@@ -864,6 +879,9 @@ impl Engine {
             HashMap::new(),
             self.next_object_id,
             self.team_home_base_rule,
+            Some(&host_definition_tables),
+            self.base_auto_sell_enabled,
+            self.host_crew_info_state(),
         )
         .with_shared_bases(self.shared_bases)
         .with_player_fow_view_objects(
@@ -915,11 +933,6 @@ impl Engine {
         .with_league_scores(Rc::clone(&self.player_info_league_scores))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.definition_order.runtime_order))
-        .with_definition_tables(
-            host_definition_tables,
-            self.base_auto_sell_enabled,
-            self.host_crew_info_state(),
-        )
         .with_shared_particle_defs(self.particle_system.shared_def_names())
         .with_shared_particle_reloads(
             self.particle_system.shared_reloadable_def_names(),
@@ -1031,6 +1044,7 @@ impl Engine {
             .with_landscape_borrow(Self::lazy_host_world_landscape_borrow)
             .with_sector_map_borrow(Self::lazy_host_world_sector_map_borrow)
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
+            .with_object_position(Self::lazy_host_world_object_position)
             .with_find_condition(Self::lazy_host_world_find_condition_matches)
         };
         self.host_world_context_base()
@@ -1732,6 +1746,64 @@ mod tests {
             .expect("second callback succeeds");
 
         assert_eq!(HOST_SOLID_MASK_BAKE_VECTOR_CLONES.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn unchanged_scenario_definition_scripts_reuse_linked_name_tables() {
+        // GetFirstFunc's namespace is established by linking, not rebuilt by
+        // GameCall (C4Aul.cpp:545-552; C4Script.cpp:3483).
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("DEFS", "Names", "func KnownCallback() { return 1; }")
+            .expect("definition registers");
+        let world = engine.host_world_context();
+        let scripts = engine.definition_script_table();
+        HOST_SCRIPT_ORDER_MATERIALIZATIONS.with(|count| count.set(0));
+        let world = world.with_definition_scripts(scripts);
+        assert!(world.script_function_known("KnownCallback"));
+        assert_eq!(
+            HOST_SCRIPT_ORDER_MATERIALIZATIONS.with(Cell::get),
+            0,
+            "attaching the same linked scripts must reuse their compiled namespace"
+        );
+    }
+
+    #[test]
+    fn replacing_a_definition_script_refreshes_direct_call_names() {
+        // ReLink installs the new GetFirstFunc namespace even when the
+        // definition ID is unchanged (C4Aul.cpp:545-552).
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("DEFS", "Names", "func Before() { return 1; }")
+            .expect("definition registers");
+        let world = engine.host_world_context();
+        let mut replacement = ScriptEngine::new();
+        replacement.add_script(
+            clonk_script::Script::compile("func After() { return 2; }")
+                .expect("replacement compiles"),
+        );
+        #[allow(clippy::arc_with_non_send_sync)]
+        let world =
+            world.with_definition_scripts(HashMap::from([("DEFS".into(), Arc::new(replacement))]));
+        assert!(world.script_function_known("After"));
+        assert!(world
+            .definition_script("DEFS")
+            .expect("definition remains present")
+            .has_function("After"));
+    }
+
+    #[test]
+    fn host_context_initialization_uses_linked_tables_without_placeholders() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("DEFS", "Names", "func KnownCallback() { return 1; }")
+            .expect("definition registers");
+        HOST_DEFINITION_TABLE_PLACEHOLDERS.with(|count| count.set(0));
+        let world = engine.host_world_context();
+        assert!(world.script_function_known("KnownCallback"));
+        assert!(world.definition_script("DEFS").is_some());
+        assert_eq!(HOST_DEFINITION_TABLE_PLACEHOLDERS.with(Cell::get), 0,
+            "an engine callback must seed the linked tables without allocating disposable empty tables");
     }
 
     #[test]
