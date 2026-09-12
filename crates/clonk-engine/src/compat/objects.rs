@@ -2924,6 +2924,12 @@ impl FindObjectParams {
         )
     }
 
+    fn matches_rect_position(&self, position: Vector2) -> bool {
+        let dx = position.x - self.x;
+        let dy = position.y - self.y;
+        dx >= 0 && dx < self.width && dy >= 0 && dy < self.height
+    }
+
     fn matches_area(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> bool {
         if self.is_full_range() || self.is_closest_query() {
             return true;
@@ -2936,10 +2942,7 @@ impl FindObjectParams {
         }
 
         if self.is_rect_query() {
-            let position = object.position();
-            let dx = position.x - self.x;
-            let dy = position.y - self.y;
-            return dx >= 0 && dx < self.width && dy >= 0 && dy < self.height;
+            return self.matches_rect_position(object.position());
         }
 
         false
