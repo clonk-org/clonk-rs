@@ -10,8 +10,11 @@
 //! The report text and dump path are built by host-independent helpers here so
 //! they can be pinned on any platform; only the handler itself is Win32-gated.
 
-/// `C4ENGINENAME` — the dump and dialog both name the engine, not the port.
-const ENGINE_NAME: &str = "LegacyClonk";
+/// `C4ENGINENAME` names the crashed product in both the dump filename and the
+/// dialog. The port names itself: the compact spelling keeps the filename free
+/// of spaces, the display spelling is what the person reading the box sees.
+const DUMP_PRODUCT_NAME: &str = crate::PRODUCT_COMPACT_NAME;
+const DIALOG_PRODUCT_NAME: &str = crate::PRODUCT_NAME;
 
 /// Builds the dump path for `user_path`, mirroring the
 /// `"%s-crash-%04d-%02d-%02d-%02d-%02d-%02d.dmp"` template at
@@ -24,7 +27,7 @@ pub fn crash_dump_filename(user_path: &str, time: (u16, u8, u8, u8, u8, u8)) -> 
         // "Make sure the path ends in a backslash" (:400-404).
         let separator = if user_path.ends_with('\\') { "" } else { "\\" };
         format!(
-            "{user_path}{separator}{ENGINE_NAME}-crash-\
+            "{user_path}{separator}{DUMP_PRODUCT_NAME}-crash-\
              {year:04}-{month:02}-{day:02}-{hour:02}-{minute:02}-{second:02}.dmp"
         )
     })
@@ -223,9 +226,14 @@ pub fn eflags_line(eflags: u32) -> String {
     format!("EFLAGS: {eflags:#010x} ({letters})\n")
 }
 
+/// The message-box caption at `C4CrashHandlerWin32.cpp:466`.
+pub fn crash_dialog_caption() -> String {
+    format!("{DIALOG_PRODUCT_NAME} crashed")
+}
+
 /// The message-body assembled at `C4CrashHandlerWin32.cpp:427-447`.
 pub fn crash_dialog_text(log_path: Option<&str>, dump_path: Option<&str>) -> String {
-    let mut text = "LegacyClonk crashed. Please report this crash ".to_owned();
+    let mut text = format!("{DIALOG_PRODUCT_NAME} crashed. Please report this crash ");
     if log_path.is_none() && dump_path.is_none() {
         text.push_str("to the developers.");
         return text;
@@ -957,11 +965,12 @@ mod windows_impl {
                 artifacts.report.len() as u32,
             );
         }
-        if let Ok(body) = std::ffi::CString::new(artifacts.dialog) {
+        let caption = std::ffi::CString::new(crash_dialog_caption());
+        if let (Ok(body), Ok(caption)) = (std::ffi::CString::new(artifacts.dialog), caption) {
             MessageBoxA(
                 std::ptr::null_mut(),
                 body.as_ptr().cast(),
-                c"LegacyClonk crashed".as_ptr().cast(),
+                caption.as_ptr().cast(),
                 MB_ICONERROR,
             );
         }
@@ -1232,12 +1241,13 @@ mod tests {
         assert_eq!(loaded_modules_section(Some(&[])), "\nLoaded modules:\n");
     }
 
-    // C4CrashHandlerWin32.cpp:390,410 — the C4ENGINENAME-crash-<UTC>.dmp template.
+    // C4CrashHandlerWin32.cpp:390,410 — the C4ENGINENAME-crash-<UTC>.dmp
+    // template, with the port's own compact product name in the engine slot.
     #[test]
     fn crash_dump_filename_uses_the_cpp_template() {
         assert_eq!(
             crash_dump_filename("C:\\Users\\a\\Clonk", (2026, 7, 29, 4, 5, 6)).as_deref(),
-            Some("C:\\Users\\a\\Clonk\\LegacyClonk-crash-2026-07-29-04-05-06.dmp")
+            Some("C:\\Users\\a\\Clonk\\ClonkRust-crash-2026-07-29-04-05-06.dmp")
         );
     }
 
@@ -1246,7 +1256,7 @@ mod tests {
     fn crash_dump_filename_does_not_double_the_separator() {
         assert_eq!(
             crash_dump_filename("C:\\Clonk\\", (2026, 12, 31, 23, 59, 58)).as_deref(),
-            Some("C:\\Clonk\\LegacyClonk-crash-2026-12-31-23-59-58.dmp")
+            Some("C:\\Clonk\\ClonkRust-crash-2026-12-31-23-59-58.dmp")
         );
     }
 
@@ -1412,19 +1422,21 @@ mod tests {
         );
     }
 
-    // :427-447 — the message box names whichever artifacts exist.
+    // :427-447 — the message box names whichever artifacts exist, and names
+    // the port as the product that crashed.
     #[test]
     fn crash_dialog_text_names_the_generated_artifacts() {
         assert_eq!(
             crash_dialog_text(Some("C:\\Clonk.log"), Some("C:\\a.dmp")),
-            "LegacyClonk crashed. Please report this crash together with the following \
+            "Clonk Rust crashed. Please report this crash together with the following \
              information to the developers:\n\nYou can find detailed information in \
              C:\\Clonk.log.\nA crash dump has been generated at C:\\a.dmp."
         );
         assert_eq!(
             crash_dialog_text(None, None),
-            "LegacyClonk crashed. Please report this crash to the developers."
+            "Clonk Rust crashed. Please report this crash to the developers."
         );
+        assert_eq!(crash_dialog_caption(), "Clonk Rust crashed");
     }
 
     /// C4CrashHandlerWin32.cpp:252-352 — the walk and the snapshot themselves,
@@ -1507,7 +1519,7 @@ mod tests {
             .and_then(|n| n.to_str())
             .expect("dump name");
         assert!(
-            name.starts_with("LegacyClonk-crash-") && name.ends_with(".dmp"),
+            name.starts_with("ClonkRust-crash-") && name.ends_with(".dmp"),
             "unexpected dump name {name}"
         );
         assert_eq!(dump.parent(), Some(user_directory.path()));
@@ -1534,7 +1546,7 @@ mod tests {
         assert_eq!(
             artifacts.dialog,
             format!(
-                "LegacyClonk crashed. Please report this crash together with the following \
+                "Clonk Rust crashed. Please report this crash together with the following \
                  information to the developers:\n\nYou can find detailed information in \
                  C:\\Clonk.log.\nA crash dump has been generated at {dump_path}."
             )
