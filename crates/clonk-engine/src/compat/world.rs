@@ -1,4 +1,5 @@
 use super::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
@@ -1861,7 +1862,11 @@ pub(crate) struct LazyHostWorldProvider {
     player: Option<unsafe fn(*const (), i32) -> Option<PlayerState>>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
     master_order: Option<
-        unsafe fn(*const (), &HashMap<ObjectId, ObjectStatus>, &HashSet<usize>) -> Vec<ObjectId>,
+        unsafe fn(
+            *const (),
+            &FxHashMap<ObjectId, ObjectStatus>,
+            &FxHashSet<usize>,
+        ) -> Vec<ObjectId>,
     >,
     native_query_order: Option<unsafe fn(*const ()) -> Vec<ObjectId>>,
     /// Landscape extent without the shell copy. `C4LSectors::Update` sizes its
@@ -2026,8 +2031,8 @@ impl LazyHostWorldProvider {
         mut self,
         master_order: unsafe fn(
             *const (),
-            &HashMap<ObjectId, ObjectStatus>,
-            &HashSet<usize>,
+            &FxHashMap<ObjectId, ObjectStatus>,
+            &FxHashSet<usize>,
         ) -> Vec<ObjectId>,
     ) -> Self {
         self.master_order = Some(master_order);
@@ -2185,8 +2190,8 @@ impl LazyHostWorldProvider {
 
     fn master_order(
         self,
-        seeded_statuses: &HashMap<ObjectId, ObjectStatus>,
-        excluded: &HashSet<usize>,
+        seeded_statuses: &FxHashMap<ObjectId, ObjectStatus>,
+        excluded: &FxHashSet<usize>,
     ) -> Option<Vec<ObjectId>> {
         // SAFETY: see `object`; seeded objects are resolved from their
         // callback-local status and are never dereferenced through the source.
@@ -2221,13 +2226,16 @@ impl LazyHostWorldProvider {
 
 #[derive(Clone, Default)]
 pub(crate) struct HostWorldObjectStore {
-    objects: HashMap<ObjectId, Rc<HostWorldObject>>,
+    // Like the engine object-index cache, use Fx hashing for numeric IDs.
+    // Traversal uses `order`/master order, never bucket order; bulk
+    // materialization sorts by unique storage indices before exposing them.
+    objects: FxHashMap<ObjectId, Rc<HostWorldObject>>,
     /// Storage order. Valid only after [`Self::ensure_ordered`]; between a
     /// materialization and the next read this holds materialization order.
     order: Vec<ObjectId>,
     order_dirty: bool,
-    indices: HashMap<ObjectId, usize>,
-    removed: HashSet<ObjectId>,
+    indices: FxHashMap<ObjectId, usize>,
+    removed: FxHashSet<ObjectId>,
     complete: bool,
 }
 
@@ -3003,7 +3011,7 @@ impl HostWorldContext {
         let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
         let sectors = RefCell::new(None);
         let mut order = Vec::with_capacity(map.len());
-        let mut lookup = HashMap::with_capacity(map.len());
+        let mut lookup = FxHashMap::with_capacity_and_hasher(map.len(), Default::default());
         for object in map {
             let id = object.id;
             order.push(id);
@@ -3043,7 +3051,7 @@ impl HostWorldContext {
                     .enumerate()
                     .map(|(index, id)| (id, index))
                     .collect(),
-                removed: HashSet::new(),
+                removed: FxHashSet::default(),
                 order_dirty: false,
                 complete: true,
             })),

@@ -4,6 +4,7 @@
 //! Structural only: same crate, same type, same method bodies.
 
 use super::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::rc::Rc;
 
 impl Engine {
@@ -743,8 +744,8 @@ impl Engine {
     /// Same contract as [`Self::lazy_host_world_object`].
     unsafe fn lazy_host_world_master_order(
         source: *const (),
-        seeded_statuses: &HashMap<ObjectId, ObjectStatus>,
-        excluded: &HashSet<usize>,
+        seeded_statuses: &FxHashMap<ObjectId, ObjectStatus>,
+        excluded: &FxHashSet<usize>,
     ) -> Vec<ObjectId> {
         #[cfg(test)]
         HOST_WORLD_MASTER_ORDER_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
