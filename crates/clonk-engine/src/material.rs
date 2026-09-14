@@ -595,36 +595,6 @@ fn compile_identifier_string(value: Option<&str>) -> String {
         .collect()
 }
 
-fn compile_reaction_string(value: Option<&str>) -> String {
-    let value = value
-        .unwrap_or_default()
-        .trim_start_matches(|character: char| character.is_ascii_whitespace());
-    let Some(quoted) = value.strip_prefix('"') else {
-        return value.to_owned();
-    };
-
-    let mut compiled = String::new();
-    let mut characters = quoted.chars();
-    while let Some(character) = characters.next() {
-        match character {
-            '"' => break,
-            '\\' => match characters.next() {
-                Some('a') => compiled.push('\u{7}'),
-                Some('b') => compiled.push('\u{8}'),
-                Some('f') => compiled.push('\u{c}'),
-                Some('n') => compiled.push('\n'),
-                Some('r') => compiled.push('\r'),
-                Some('t') => compiled.push('\t'),
-                Some('v') => compiled.push('\u{b}'),
-                Some(escaped) => compiled.push(escaped),
-                None => break,
-            },
-            character => compiled.push(character),
-        }
-    }
-    compiled
-}
-
 fn compile_c4_id(value: Option<&str>) -> String {
     let identifier = compile_identifier_string(value);
     let bytes = identifier.as_bytes().get(..4).unwrap_or_default();
@@ -663,7 +633,14 @@ fn insert_reaction_values(
     entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
     reaction: &MaterialReactionDefinition,
 ) {
-    let reaction_type = match compile_reaction_string(reaction.value("type")).as_str() {
+    // The resource loader already compiled these strings with the native
+    // StdCompilerINIRead rules (StdCompiler.cpp:734-742,903-1000); compiling
+    // them again is not idempotent, so they are reflected verbatim.
+    let stored_string =
+        |key: &str| MaterialCoreValue::String(reaction.value(key).unwrap_or_default().to_owned());
+    // Type reflects the name of the function bound by exact SEqual lookup,
+    // which is empty for NoReaction (C4Material.cpp:48-57).
+    let reaction_type = match reaction.value("type").unwrap_or_default() {
         "Script" => "Script",
         "Convert" => "Convert",
         "Poof" => "Poof",
@@ -676,16 +653,8 @@ fn insert_reaction_values(
         "Type",
         MaterialCoreValue::String(reaction_type.to_owned()),
     );
-    append_reaction_value(
-        entries,
-        "TargetSpec",
-        MaterialCoreValue::String(compile_reaction_string(reaction.value("targetspec"))),
-    );
-    append_reaction_value(
-        entries,
-        "ScriptFunc",
-        MaterialCoreValue::String(compile_reaction_string(reaction.value("scriptfunc"))),
-    );
+    append_reaction_value(entries, "TargetSpec", stored_string("targetspec"));
+    append_reaction_value(entries, "ScriptFunc", stored_string("scriptfunc"));
     append_reaction_value(
         entries,
         "ExecMask",
@@ -711,11 +680,7 @@ fn insert_reaction_values(
         "Depth",
         MaterialCoreValue::Int(reaction.int("depth").unwrap_or(0)),
     );
-    append_reaction_value(
-        entries,
-        "ConvertMat",
-        MaterialCoreValue::String(compile_reaction_string(reaction.value("convertmat"))),
-    );
+    append_reaction_value(entries, "ConvertMat", stored_string("convertmat"));
     append_reaction_value(
         entries,
         "CorrosionRate",
@@ -2898,6 +2863,69 @@ mod tests {
 
         assert_eq!(&baseline[..4], b"LCMB");
         assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn runtime_behavior_validation_state_keeps_native_compiled_reaction_strings() {
+        // LCMB carries the reaction strings GetMaterialVal exposes
+        // (C4Script.cpp:4283-4300) exactly as C4MaterialReaction::CompileFunc
+        // stored them (C4Material.cpp:48-68); the resource loader has already
+        // applied the native string rules (StdCompiler.cpp:734-742,903-1000).
+        let mut group = MutableGroup::new("Material.c4g");
+        group
+            .add_file(
+                "Quoted.c4m",
+                br#"[Material]
+Name=Quoted
+
+[Reaction]
+Type="Poof"
+TargetSpec=" Solid"
+ScriptFunc="\"Callback\""
+
+[Reaction]
+Type= "Script"
+TargetSpec=  "Solid"
+ScriptFunc=  "Callback"
+"#
+                .to_vec(),
+            )
+            .expect("quoted material adds");
+        let packed = group.pack_raw().expect("material group packs");
+        let group = clonk_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Material.c4g"),
+            packed,
+        )
+        .expect("material group reopens");
+        let library = MaterialLibrary::from_group(&group).expect("native materials compile");
+        let state = MaterialSet::from_resource_library(&library)
+            .runtime_behavior_validation_state()
+            .expect("material behavior state encodes");
+
+        // Type, TargetSpec and ScriptFunc are adjacent length-prefixed strings.
+        let reaction_strings = |values: [&[u8]; 3]| {
+            values
+                .iter()
+                .flat_map(|value| {
+                    let length = u32::try_from(value.len()).expect("short test string");
+                    length
+                        .to_le_bytes()
+                        .into_iter()
+                        .chain(value.iter().copied())
+                })
+                .collect::<Vec<_>>()
+        };
+        for expected in [
+            reaction_strings([b"Poof", b" Solid", b"\"Callback\""]),
+            reaction_strings([b"", b"\"Solid\"", b"\"Callback\""]),
+        ] {
+            assert!(
+                state
+                    .windows(expected.len())
+                    .any(|window| window == expected),
+                "LCMB lacks reaction strings {expected:?}"
+            );
+        }
     }
 
     #[test]

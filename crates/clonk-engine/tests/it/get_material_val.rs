@@ -1,5 +1,5 @@
 use clonk_engine::{Definition, Engine, SpawnConfig};
-use clonk_resources::MaterialLibrary;
+use clonk_resources::{Group, MaterialLibrary, MutableGroup};
 use clonk_script::Value;
 
 fn string(value: &str) -> Value {
@@ -259,6 +259,82 @@ fn get_material_val_reflects_compiled_material_core() {
                 Value::Int(100),
                 Value::Int(17),
             ]),
+        ])
+    );
+}
+
+#[test]
+fn get_material_val_reflects_native_compiled_reaction_strings() {
+    // GetMaterialVal decompiles the loaded C4MaterialCore (C4Script.cpp:
+    // 4283-4300), so reaction strings come back exactly as
+    // C4MaterialReaction::CompileFunc stored them (C4Material.cpp:48-68). A
+    // quoted leading space survives, and whitespace before a quote reads it
+    // literally (StdCompiler.cpp:734-742,903-1000), so `"Script"` binds no
+    // reaction function.
+    let mut packed = MutableGroup::new("Material.c4g");
+    crate::support::TestValueExt::test_value(
+        packed.add_file(
+            "Quoted.c4m",
+            br#"[Material]
+Name=Quoted
+
+[Reaction]
+Type="Poof"
+TargetSpec=" Solid"
+ScriptFunc="\"Callback\""
+ConvertMat="W\xe4ter"
+
+[Reaction]
+Type= "Script"
+TargetSpec=  "Solid"
+ScriptFunc=  "Callback"
+"#
+            .to_vec(),
+        ),
+    );
+    let group = crate::support::TestValueExt::test_value(Group::from_raw_memory(
+        std::path::PathBuf::from("Material.c4g"),
+        crate::support::TestValueExt::test_value(packed.pack_raw()),
+    ));
+    let library = crate::support::TestValueExt::test_value(MaterialLibrary::from_group(&group));
+
+    let mut engine = Engine::new();
+    engine.configure_materials_from_library(&library);
+    crate::support::TestValueExt::test_value(engine.register_definition(
+        crate::support::TestValueExt::test_value(Definition::from_script(
+            "GMVQ",
+            "GetMaterialVal native reaction string probe",
+            r#"#strict 2
+                public func Probe()
+                {
+                var quoted = Material("Quoted");
+                return [GetMaterialVal("Type", "Material", quoted, 0),
+                        GetMaterialVal("TargetSpec", "Material", quoted, 0),
+                        GetMaterialVal("ScriptFunc", "Material", quoted, 0),
+                        GetMaterialVal("ConvertMat", "Material", quoted, 0),
+                        GetMaterialVal("Type", "Material", quoted, 1),
+                        GetMaterialVal("TargetSpec", "Material", quoted, 1),
+                        GetMaterialVal("ScriptFunc", "Material", quoted, 1)];
+                }
+                "#,
+        )),
+    ));
+    let probe =
+        crate::support::TestValueExt::test_value(engine.spawn_object(SpawnConfig::new("GMVQ")));
+    let probe_index = crate::support::TestValueExt::test_value(engine.find_object_index(probe));
+
+    assert_eq!(
+        engine
+            .call_object_function(probe_index, "Probe", Vec::new())
+            .expect("native reaction string reflection executes"),
+        Value::Array(vec![
+            string("Poof"),
+            string(" Solid"),
+            string("\"Callback\""),
+            string(&clonk_script::c4_string_from_bytes(b"W\xe4ter")),
+            string(""),
+            string("\"Solid\""),
+            string("\"Callback\""),
         ])
     );
 }

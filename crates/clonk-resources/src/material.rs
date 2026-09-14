@@ -371,6 +371,10 @@ impl MaterialDefinition {
     }
 }
 
+/// One `[Reaction]` of a material. Its `Type`, `TargetSpec`, `ScriptFunc`
+/// and `ConvertMat` values are already compiled by the native string rules
+/// (StdCompiler.cpp:734-742,903-1000) whichever loader built it; consumers
+/// must use them verbatim, because compiling them again is not idempotent.
 #[derive(Debug, Clone)]
 pub struct MaterialReactionDefinition {
     properties: HashMap<String, Vec<String>>,
@@ -463,21 +467,24 @@ impl<'a> MaterialParser<'a> {
             }
 
             if let Some((key, value)) = parse_key_value(line) {
-                let target = if let Some(reaction) = self.current_reaction.as_mut() {
-                    &mut reaction.properties
+                let normalized_key = normalize_key(key);
+                let (target, value) = if let Some(reaction) = self.current_reaction.as_mut() {
+                    (
+                        &mut reaction.properties,
+                        compiled_reaction_value(&normalized_key, value),
+                    )
                 } else {
                     let entry = self.current.get_or_insert_with(|| MaterialRecord {
                         name_hint: None,
                         properties: HashMap::new(),
                         reactions: Vec::new(),
                     });
-                    &mut entry.properties
+                    (&mut entry.properties, value.trim().to_string())
                 };
-                let normalized_key = normalize_key(key);
                 target
                     .entry(normalized_key)
                     .or_insert_with(Vec::new)
-                    .push(value.trim().to_string());
+                    .push(value);
             }
         }
         self.finish_current_reaction()?;
@@ -747,6 +754,16 @@ fn native_compiled_string(name: &str, value: &str) -> String {
     }
 }
 
+/// `MaterialLibrary::parse` counterpart of [`native_compiled_string`] for a
+/// reaction key: the strings C4MaterialReaction::CompileFunc reads escaped
+/// (C4Material.cpp:48-68) are stored compiled, as `from_group` stores them.
+fn compiled_reaction_value(key: &str, value: &str) -> String {
+    match key {
+        "type" | "targetspec" | "scriptfunc" | "convertmat" => native_escaped_string(value),
+        _ => value.trim().to_string(),
+    }
+}
+
 fn native_identifier(value: &str, max_len: usize) -> String {
     let bytes = clonk_script::c4_string_bytes(value.trim_start_matches([' ', '\t']));
     let len = bytes
@@ -969,10 +986,12 @@ fn parse_section_header(line: &str) -> Option<SectionHeader> {
     }
 }
 
+/// Splits `key=value`, keeping the value's leading whitespace: whether a
+/// quote directly follows `=` decides how a reaction string compiles.
 fn parse_key_value(line: &str) -> Option<(&str, &str)> {
     let mut split = line.splitn(2, '=');
     let key = split.next()?.trim();
-    let value = split.next()?.trim();
+    let value = split.next()?;
     if key.is_empty() {
         return None;
     }
@@ -1466,6 +1485,81 @@ CheckSlide=0x
             numeric_whitespace.int_list("PXSGfxRt"),
             Some(vec![1, 2, 0, 0, 0, 0])
         );
+    }
+
+    #[test]
+    fn parse_stores_reaction_strings_compiled_like_from_group() {
+        // C4MaterialReaction::CompileFunc reads Type, TargetSpec, ScriptFunc
+        // and ConvertMat as escaped strings (C4Material.cpp:48-68). The escape
+        // rule applies only when the quote directly follows `=`; otherwise the
+        // value is read literally after whitespace skipping
+        // (StdCompiler.cpp:734-742,903-1000). Both loaders store that compiled
+        // value, so no consumer may compile it a second time.
+        let source = br#"[Material]
+Name=Quoted
+
+[Reaction]
+Type="Poof"
+TargetSpec=" Solid"
+ScriptFunc="\"Callback\""
+ConvertMat="W\xe4ter\x80"
+
+[Reaction]
+Type= "Script"
+TargetSpec=  "Solid"
+ScriptFunc=  Callback
+"#;
+        let mut packed = crate::MutableGroup::new("Quoted.c4g");
+        packed
+            .add_file("Quoted.c4m", source.to_vec())
+            .expect("add quoted material");
+        let group = Group::from_raw_memory(
+            std::path::PathBuf::from("Quoted.c4g"),
+            packed.pack_raw().expect("pack quoted material group"),
+        )
+        .expect("open quoted material group");
+
+        for (loader, library) in [
+            (
+                "from_group",
+                MaterialLibrary::from_group(&group).expect("quoted group compiles"),
+            ),
+            (
+                "parse",
+                MaterialLibrary::parse_bytes(source).expect("quoted source parses"),
+            ),
+        ] {
+            let reactions = library.get("Quoted").expect("quoted material").reactions();
+            let values = |index: usize| {
+                ["Type", "TargetSpec", "ScriptFunc", "ConvertMat"].map(|key| {
+                    reactions[index]
+                        .value(key)
+                        .map(clonk_script::c4_string_bytes)
+                        .unwrap_or_default()
+                })
+            };
+            assert_eq!(reactions.len(), 2, "{loader}");
+            assert_eq!(
+                values(0),
+                [
+                    b"Poof".to_vec(),
+                    b" Solid".to_vec(),
+                    b"\"Callback\"".to_vec(),
+                    b"W\xe4ter\x80".to_vec(),
+                ],
+                "{loader}: quoted values keep their escaped content verbatim"
+            );
+            assert_eq!(
+                values(1),
+                [
+                    b"\"Script\"".to_vec(),
+                    b"\"Solid\"".to_vec(),
+                    b"Callback".to_vec(),
+                    Vec::new(),
+                ],
+                "{loader}: whitespace before a quote selects the literal rule"
+            );
+        }
     }
 
     #[test]
