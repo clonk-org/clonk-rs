@@ -329,12 +329,12 @@ directory, may differ. `--leaks` runs the fixtures under `leaks --atExit` and
 fails on any leak whose stack reaches the bridge or a Rust frame, which is how
 the returned strings and the handle are shown to be freed.
 
-The malformed fixture pins how the two parsers differ on garbage, and those
-differences are real: `StdCompilerINIRead` skips a line that does not start
-with a letter and takes the first section of a repeated name
-(`StdCompiler.cpp`, the name tree and `Name()`), while `clonk-core` keeps an
-empty key and merges a repeated section. They are tracked as
-clonk-org/clonk-rs#1597 rather than hidden by the expectations.
+The malformed fixture pins how the two parsers handle garbage.
+`StdCompilerINIRead` skips a line that does not start with a letter and takes
+the first section of a repeated name (`StdCompiler.cpp`, the name tree and
+`Name()`). `clonk-core` has done the same since clonk-org/clonk-rs#1597, so the
+fixture rejects the report lines an empty key and a merged repeated section
+used to produce.
 
 No required gate runs the live bridge: it needs a separately built oracle
 checkout and is intentionally an opt-in investigation tool. `cargo xtask parity

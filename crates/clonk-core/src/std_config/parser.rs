@@ -42,6 +42,11 @@ pub(crate) fn parse_line(line: &str) -> Option<ParsedItem<'_>> {
 
     let (raw_key, raw_value) = split_key_value(trimmed)?;
     let key = raw_key.trim();
+    // StdCompilerINIRead opens a value only on a line that starts with a
+    // letter (src/StdCompiler.cpp:812-813); anything else is skipped.
+    if !key.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
     let value = raw_value.trim();
 
     let (value, escaped_bytes) =
@@ -207,6 +212,21 @@ mod tests {
             ParsedItem::Entry { value, .. } => assert_eq!(value, "value=with=equals"),
             ParsedItem::Section { .. } => panic!("expected entry"),
         }
+    }
+
+    #[test]
+    fn skip_line_with_empty_key() {
+        // StdCompilerINIRead opens a value node only when the line starts with
+        // a letter (src/StdCompiler.cpp:812-813), so `=5` is skipped.
+        assert!(parse_line("=5").is_none());
+    }
+
+    #[test]
+    fn skip_line_whose_key_does_not_start_with_a_letter() {
+        // Same gate as above: `isalpha` on the first byte after the indent
+        // (src/StdCompiler.cpp:812-813), so a digit or underscore opens nothing.
+        assert!(parse_line("1Key=5").is_none());
+        assert!(parse_line("_Key=5").is_none());
     }
 
     #[test]

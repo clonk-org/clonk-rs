@@ -214,14 +214,22 @@ impl Config {
         fn handle_item(
             config: &mut Config,
             current_section: &mut Option<String>,
+            in_repeated_block: &mut bool,
             item: ParsedItem<'_>,
         ) {
             match item {
                 ParsedItem::Section { name, commented } => {
-                    let owned = name.into_owned();
-                    config.ensure_section(Some(owned.clone()), commented);
-                    *current_section = Some(owned);
+                    let owned = Some(name.into_owned());
+                    // C++ builds a name node per header and `Name()` takes the
+                    // first one (src/StdCompiler.cpp:517-520), so the block
+                    // under a repeated header is never read.
+                    *in_repeated_block = config.section_meta.contains_key(&owned);
+                    if !*in_repeated_block {
+                        config.ensure_section(owned.clone(), commented);
+                    }
+                    *current_section = owned;
                 }
+                ParsedItem::Entry { .. } if *in_repeated_block => {}
                 ParsedItem::Entry {
                     key,
                     value,
@@ -257,6 +265,7 @@ impl Config {
         let mut config = Config::new();
         let mut buffer = String::new();
         let mut current_section: Option<String> = None;
+        let mut in_repeated_block = false;
 
         loop {
             buffer.clear();
@@ -267,7 +276,12 @@ impl Config {
             if let Some(comment) = standalone_comment(&buffer) {
                 config.standalone_comments.push(comment);
             } else if let Some(item) = parse_line(&buffer) {
-                handle_item(&mut config, &mut current_section, item);
+                handle_item(
+                    &mut config,
+                    &mut current_section,
+                    &mut in_repeated_block,
+                    item,
+                );
             }
         }
         Ok(config)
@@ -920,6 +934,21 @@ mod tests {
         let cfg = Config::from_reader(&mut cursor).unwrap();
 
         assert_eq!(cfg.get_in(Some("General"), "Language"), Some("DE"));
+    }
+
+    #[test]
+    fn repeated_section_block_is_never_read() {
+        // C++ builds a name node per section header and `Name()` takes the
+        // first child with that name (src/StdCompiler.cpp:517-520, 841-852),
+        // so C4Config never compiles a second [General] block.
+        let data = b"[General]\nLanguage=DE\n[Graphics]\nResX=800\n[General]\nLanguage=US\nLanguageEx=US\n[Sound]\nRXSound=1\n";
+        let mut cursor = Cursor::new(&data[..]);
+        let cfg = Config::from_reader(&mut cursor).unwrap();
+
+        assert_eq!(cfg.get_in(Some("General"), "Language"), Some("DE"));
+        assert_eq!(cfg.get_in(Some("General"), "LanguageEx"), None);
+        assert_eq!(cfg.get_in(Some("Graphics"), "ResX"), Some("800"));
+        assert_eq!(cfg.get_in(Some("Sound"), "RXSound"), Some("1"));
     }
 
     #[test]

@@ -199,9 +199,9 @@ grep -q '^Language=' "$OUT/missing.config" || fail "missing: the C++ writer did 
 #    The report pins how the two parsers differ on garbage; the C++ side is
 #    StdCompilerINIRead's name tree (StdCompiler.cpp: a header needs "[" and a
 #    letter and is dropped without its "]", a line that starts with anything
-#    but a letter is skipped, and the first section of a name wins). The two
-#    lines where clonk-core differs (an empty key kept, a repeated section
-#    merged) are clonk-org/clonk-rs#1597; change them together with that fix.
+#    but a letter is skipped, and the first section of a name wins). clonk-core
+#    matches both since clonk-org/clonk-rs#1597, so the empty key and the
+#    seed's repeated [General] block must no longer reach the report.
 {
 	printf '[General]\r\nVersion=abc\r\nLanguage="US - English\r\n[Graphics\r\nResX=\r\n=5\r\nGarbage line here\r\n'
 	cat "$seed"
@@ -209,8 +209,8 @@ grep -q '^Language=' "$OUT/missing.config" || fail "missing: the C++ writer did 
 run_oracle malformed "$CLONK"
 expect_line malformed "Rust config diff: Missing in legacy: [General] Version (rust='abc')"
 expect_line malformed "Rust config diff: Missing in legacy: [General] ResX (rust='')"
-expect_line malformed "Rust config diff: Missing in legacy: [General]  (rust='5')"
-expect_line malformed "Rust config diff: Value mismatch for [General] LanguageEx (rust='US', legacy='')"
+reject_line malformed "Rust config diff: Missing in legacy: [General]  (rust="
+reject_line malformed "Rust config diff: Value mismatch for [General] LanguageEx"
 reject_line malformed "Rust config parity verified"
 [ -s "$OUT/malformed.config" ] || fail "malformed: the oracle wrote no config back"
 
