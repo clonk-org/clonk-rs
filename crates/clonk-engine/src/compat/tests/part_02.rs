@@ -2695,7 +2695,8 @@ func Announce()
                     },
                 )
             })
-            .collect();
+            .collect::<HashMap<_, _>>()
+            .into();
         let mut script = ScriptEngine::new();
         script
             .load_script("protected func FrameDecorationBackClr() { return(-2144193998); }").test_value();

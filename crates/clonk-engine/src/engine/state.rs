@@ -439,7 +439,7 @@ impl Engine {
         // and whether that sharing holds is the question
         // clonk-org/clonk-rs#294 asks about the largest section.
         let section = std::time::Instant::now();
-        let global_effects = self.global_effects.clone();
+        let global_effects = self.global_effects.to_vec();
         let script_globals = self.capture_script_globals();
         timings.effects_globals = section.elapsed();
 
@@ -912,7 +912,7 @@ impl Engine {
             crew_info_order: self.crew_info_order.clone(),
             crew_object_infos: self.crew_object_infos.as_ref().clone(),
             crew_info_links: self.crew_info_links.as_ref().clone(),
-            global_effects: self.global_effects.clone(),
+            global_effects: self.global_effects.to_vec(),
             script_globals: self.capture_script_globals(),
             known_crew_owners,
             eliminated_crew_owners,
@@ -1181,7 +1181,7 @@ impl Engine {
                 .map(|(object, info)| (object.as_u64(), info.rank))
                 .collect(),
         );
-        self.global_effects = state.global_effects.clone();
+        self.global_effects = state.global_effects.clone().into();
         self.particles.clear();
         // The component already loaded in place above; without one the
         // particle snapshots below rebuild the system from scratch.
@@ -2158,7 +2158,7 @@ impl Engine {
             object_id,
             object,
             events,
-            global_view,
+            global_view.into(),
             environment,
             physics,
             frame,
@@ -2184,7 +2184,7 @@ impl Engine {
         object_id: ObjectId,
         object: &mut Object,
         events: Vec<EffectEvent>,
-        mut global_view: Vec<EffectState>,
+        mut global_view: SharedEffectStates,
         environment: &mut EnvironmentSettings,
         physics: PhysicsSettings,
         frame: u64,
@@ -2657,6 +2657,7 @@ impl Engine {
                 .as_ref()
                 .is_none_or(|resume| resume.receiver_available)
                 .then_some((snapshot_for_call, object_id));
+            world.global_effects = Some(global_view.clone());
             let call_result = match &event.kind {
                 EffectEventKind::Started => dispatch_definition
                     .call_effect_event_with_continuation(

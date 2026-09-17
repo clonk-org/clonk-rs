@@ -357,7 +357,7 @@ use compat::{
     HostWorldContext, HostWorldObject, LandscapeOperation, LazyHostWorldProvider,
     NextMissionCommand, ObjectOrderCommand, ObjectOrderFunction, PhysicsDelta, PlayerCommand,
 };
-use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
+use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason, SharedEffectStates};
 use material::{
     evaluate_corrosion, MaterialInteractionEvent, MaterialReaction, MaterialReactionKind,
 };
@@ -8702,7 +8702,7 @@ pub struct Engine {
     #[doc(hidden)]
     pub gamma: GammaControlState,
     sky: Option<SkyState>,
-    global_effects: Vec<EffectState>,
+    global_effects: SharedEffectStates,
     particles: Vec<ActiveParticle>,
     /// C4ParticleSystem port (def-based particles, src/C4Particles.cpp). The
     /// `particles` Vec above only serves def-less legacy fixture particles.
@@ -10989,7 +10989,7 @@ impl Engine {
             environment: EnvironmentSettings::default(),
             gamma: GammaControlState::default(),
             sky: None,
-            global_effects: Vec::new(),
+            global_effects: SharedEffectStates::default(),
             particles: Vec::new(),
             particle_system: particles::ParticleSystem::default(),
             pxs_system: pxs::PxsSystem::default(),

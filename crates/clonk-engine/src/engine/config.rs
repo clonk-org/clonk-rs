@@ -139,7 +139,7 @@ impl Engine {
             denumerate_loaded_effect(effect, &object_numbers, &object_definition_ids);
         }
         self.restore_script_globals(script_globals);
-        self.global_effects = global_effects;
+        self.global_effects = global_effects.into();
     }
 
     pub fn show_scenario_intro(&mut self, text: &str) {

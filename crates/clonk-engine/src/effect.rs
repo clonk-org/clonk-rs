@@ -1,5 +1,67 @@
 use clonk_script::{C4StringValue, Value, ValueMap};
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
+
+/// Callback views share an effect list until either owner writes it. Public
+/// snapshots still own ordinary vectors; this handle never enters saved state.
+#[derive(Clone, Debug)]
+pub(crate) enum SharedEffectStates {
+    Owned(Rc<Vec<EffectState>>),
+    Object(Rc<crate::ObjectState>),
+}
+
+impl Default for SharedEffectStates {
+    fn default() -> Self {
+        Vec::new().into()
+    }
+}
+
+impl From<Vec<EffectState>> for SharedEffectStates {
+    fn from(effects: Vec<EffectState>) -> Self {
+        Self::Owned(Rc::new(effects))
+    }
+}
+
+impl std::ops::Deref for SharedEffectStates {
+    type Target = Vec<EffectState>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(effects) => effects,
+            Self::Object(state) => &state.effects,
+        }
+    }
+}
+
+impl std::ops::DerefMut for SharedEffectStates {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Owned(effects) => Rc::make_mut(effects),
+            Self::Object(state) => {
+                *self = state.effects.clone().into();
+                self.deref_mut()
+            }
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a SharedEffectStates {
+    type Item = &'a EffectState;
+    type IntoIter = std::slice::Iter<'a, EffectState>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut SharedEffectStates {
+    type Item = &'a mut EffectState;
+    type IntoIter = std::slice::IterMut<'a, EffectState>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EffectVarValue {

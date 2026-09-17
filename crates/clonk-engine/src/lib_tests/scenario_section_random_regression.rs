@@ -213,7 +213,7 @@ global func FxSectionHighStop(object target, int number, int reason)
     low.number = 1;
     let mut high = EffectState::new("SectionHigh").with_priority(200);
     high.number = 2;
-    engine.global_effects = vec![low, high];
+    *engine.global_effects = vec![low, high];
     assert_eq!(
         engine
             .global_effects()
@@ -305,7 +305,7 @@ global func FxMutatingBornStop(object target, int number, int reason)
     low.number = 1;
     let mut high = EffectState::new("MutatingHigh").with_priority(200);
     high.number = 2;
-    engine.global_effects = vec![low, high];
+    *engine.global_effects = vec![low, high];
     let mut expected_rng = engine.rng.clone();
     let expected_draw = expected_rng.random(113);
 
@@ -410,7 +410,7 @@ public func ReadDirectDeleteTrace()
     middle.number = 2;
     let mut high = EffectState::new("SectionHigh").with_priority(300);
     high.number = 3;
-    engine.global_effects = vec![low, middle, high];
+    *engine.global_effects = vec![low, middle, high];
 
     assert!(engine.load_test_section("next", 0, Vec::new()));
 
@@ -465,7 +465,7 @@ global func FxInactiveSpawnStop(object target, int number, int reason)
     );
     let mut effect = EffectState::new("InactiveSpawn").with_priority(100);
     effect.number = 1;
-    engine.global_effects = vec![effect];
+    *engine.global_effects = vec![effect];
 
     assert!(engine.load_test_section("next", 0, Vec::new()));
 
@@ -1540,7 +1540,7 @@ fn scenario_section_clear_ignores_the_keep_effects_flag() {
     low.number = 1;
     let mut high = EffectState::new("SectionHigh").with_priority(200);
     high.number = 2;
-    engine.global_effects = vec![low, high];
+    *engine.global_effects = vec![low, high];
 
     assert!(engine.load_test_section("next", 4, Vec::new()));
 

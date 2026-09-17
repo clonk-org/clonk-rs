@@ -45,7 +45,7 @@ impl Engine {
                             vehicle_control: definition.vehicle_control(),
                             action_library: definition.shared_action_library_handle(),
                             control_transfer_callback: definition.control_transfer_callback(),
-                            action_graphics: definition.action_graphics().clone(),
+                            action_graphics: Rc::new(definition.action_graphics().clone()),
                             value: definition.value(),
                             allow_picture_stack: definition.allow_picture_stack(),
                             mass: definition.mass(),
@@ -1565,6 +1565,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn cloned_definition_metadata_shares_action_graphics() {
+        let metadata = DefinitionMetadata {
+            action_graphics: HashMap::from([(
+                "Walk".to_string(),
+                DefinitionActionGraphics::default(),
+            )])
+            .into(),
+            ..DefinitionMetadata::default()
+        };
+        let cloned = metadata.clone();
+        assert!(std::ptr::eq(
+            metadata.action_graphics.get("Walk").unwrap(),
+            cloned.action_graphics.get("Walk").unwrap(),
+        ));
+    }
 
     #[test]
     fn repeated_host_contexts_reuse_unchanged_solid_mask_state() {
