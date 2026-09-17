@@ -549,7 +549,7 @@ global func FxRenamedStop(object target, int number, int reason)
                 &trace,
             );
             effect_lifecycle_state(&mut engine, "LifecycleReset");
-            engine.global_effects = vec![
+            *engine.global_effects = vec![
                 effect_lifecycle_entry("Lower", 1, 100, 0, None, None),
                 effect_lifecycle_entry("Upper", 2, 200, 0, None, None),
             ];

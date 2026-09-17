@@ -422,9 +422,8 @@ mod tests {
     #[test]
     fn executing_a_script_attributes_each_lookup_to_its_own_family() {
         // The point of the instrument: a decision about interning has to name
-        // which family it is about, so a run that touches script functions,
-        // host functions and locals must report three distinct counts rather
-        // than one aggregate.
+        // which family it is about. Compiled parameter/local slots do not
+        // hash names, so they must not be counted as local-name probes.
         let engine = driver_engine();
 
         reset();
@@ -433,11 +432,7 @@ mod tests {
             .expect("profile driver script runs");
         let profile = snapshot();
 
-        for family in [
-            LookupFamily::ScriptFunction,
-            LookupFamily::HostFunction,
-            LookupFamily::Local,
-        ] {
+        for family in [LookupFamily::ScriptFunction, LookupFamily::HostFunction] {
             let counters = profile.family(family);
             assert!(
                 counters.lookups > 0,
@@ -448,6 +443,7 @@ mod tests {
                 "{family} hashes at least one byte per probe: {counters:?}"
             );
         }
+        assert_eq!(profile.family(LookupFamily::Local).lookups, 0);
         assert_eq!(
             profile.total_lookups(),
             LookupFamily::ALL
@@ -462,10 +458,8 @@ mod tests {
     fn function_name_lookups_do_not_scale_with_the_work_a_call_does() {
         // The measurement that decides where interning is worth anything.
         // The compiled executor resolves each call site once per invocation,
-        // so name lookups stay flat however long the callee loops; the
-        // callee's own identifiers are looked up by string on every access.
-        // Any interning work has to keep the first property and is only
-        // worth doing for the second.
+        // so name lookups stay flat however long the callee loops. Parameters
+        // and hoisted locals use their compiled frame indices throughout.
         let engine = driver_engine();
         let profile_for = |iterations: i32| {
             reset();
@@ -487,10 +481,8 @@ mod tests {
             long.family(LookupFamily::HostFunction).lookups,
             "the same holds for host call sites:\n{short}\n{long}"
         );
-        assert!(
-            long.family(LookupFamily::Local).lookups > short.family(LookupFamily::Local).lookups,
-            "the callee's own identifiers are still resolved by string per access:\n{long}"
-        );
+        assert_eq!(short.family(LookupFamily::Local).lookups, 0);
+        assert_eq!(long.family(LookupFamily::Local).lookups, 0);
     }
 
     #[test]

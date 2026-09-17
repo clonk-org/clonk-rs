@@ -53,6 +53,7 @@ impl HostWorldContext {
             next_pending_instance_token: Rc::new(Cell::new(1)),
             master_order: OnceCell::new(),
             inactive_order: Rc::new(engine.execution.inactive.iter().rev().copied().collect()),
+            global_effects: Some(engine.global_effects.clone()),
             landscape: OnceCell::new(),
             scenario_values: Rc::clone(&engine.scenario_values),
             scenario_sections: Rc::new(

@@ -448,10 +448,36 @@ pub type ValueCell = Rc<RefCell<Value>>;
 type SlotMap = Rc<RefCell<FxHashMap<i32, ValueCell>>>;
 type NamedLocalMap = Rc<RefCell<FxHashMap<String, ValueCell>>>;
 
+#[derive(Debug, Default, PartialEq)]
+struct FrameLayout {
+    parameters: Vec<Parameter>,
+    parameter_slots: FxHashMap<String, usize>,
+    function_var_slots: FxHashMap<String, usize>,
+}
+
+impl FrameLayout {
+    fn new(parameters: &[Parameter], function_vars: &[String]) -> Self {
+        Self {
+            parameters: parameters.to_vec(),
+            parameter_slots: parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| (parameter.name.clone(), index))
+                .collect(),
+            function_var_slots: function_vars
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.clone(), index))
+                .collect(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct FrameLocals {
     var_slots: RefCell<FxHashMap<i32, ValueCell>>,
-    function_vars: RefCell<FxHashMap<String, Binding>>,
+    layout: Arc<FrameLayout>,
+    function_vars: RefCell<Vec<Binding>>,
 }
 
 type FrameLocalMap = Rc<FrameLocals>;
@@ -1134,11 +1160,19 @@ fn frame_slot_cell(frame: &FrameLocals, index: i32) -> ValueCell {
 }
 
 impl FrameLocals {
+    fn function_var_binding(&self, name: &str) -> Option<Binding> {
+        lookup_profile::record(lookup_profile::LookupFamily::Local, name);
+        self.layout
+            .function_var_slots
+            .get(name)
+            .and_then(|&index| self.function_vars.borrow().get(index).cloned())
+    }
+
     fn clear_object_reference(&self, object_id: u64) {
         for cell in self.var_slots.borrow().values() {
             cell.borrow_mut().clear_object_reference(object_id);
         }
-        for binding in self.function_vars.borrow_mut().values_mut() {
+        for binding in self.function_vars.borrow_mut().iter_mut() {
             binding.clear_object_reference(object_id);
         }
     }
@@ -2318,6 +2352,117 @@ impl Clone for InlineBinding {
     }
 }
 
+// Retain only empty storage, bounded independently of script recursion. A slot
+// is reusable only after all frame aliases and continuations have released it.
+thread_local! {
+    static SCALAR_BINDING_POOL: RefCell<Vec<Rc<ScalarBinding>>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ScalarBinding {
+    initial: RefCell<TrackedValue>,
+    promoted: std::cell::OnceCell<(ValueCell, RawIdentityCell)>,
+}
+
+#[derive(Clone)]
+struct ReusableBinding(Rc<ScalarBinding>);
+
+impl ReusableBinding {
+    fn new(value: TrackedValue) -> Self {
+        let cached = SCALAR_BINDING_POOL.with(|pool| pool.borrow_mut().pop());
+        let mut slot = cached.unwrap_or_else(|| {
+            Rc::new(ScalarBinding {
+                initial: RefCell::new(TrackedValue::runtime(Value::Nil)),
+                promoted: std::cell::OnceCell::new(),
+            })
+        });
+        *Rc::get_mut(&mut slot)
+            .expect("pooled scalar slot has no live aliases")
+            .initial
+            .get_mut() = value;
+        Self(slot)
+    }
+
+    fn cells(&self) -> &(ValueCell, RawIdentityCell) {
+        self.0.promoted.get_or_init(|| {
+            let initial = self.0.initial.replace(TrackedValue::runtime(Value::Nil));
+            (
+                value_cell(initial.value),
+                Rc::new(RefCell::new(initial.identity)),
+            )
+        })
+    }
+
+    fn read_tracked(&self) -> TrackedValue {
+        self.0.promoted.get().map_or_else(
+            || self.0.initial.borrow().clone(),
+            |(value, identity)| {
+                let identity =
+                    legacy_identity_for_value_copy(value, &[], identity.borrow().clone());
+                TrackedValue {
+                    value: value.borrow().clone(),
+                    identity,
+                }
+            },
+        )
+    }
+
+    fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
+        if self.0.promoted.get().is_some() || tracked.value.contains_any_object_reference() {
+            return self.lvalue().write_tracked(tracked);
+        }
+        let mut current = self.0.initial.borrow_mut();
+        if !(c4_set_copy_is_zero_id(&tracked.value) && c4_set_copy_is_zero_id(&current.value)) {
+            *current = tracked.set_copy();
+        }
+        Ok(())
+    }
+
+    fn lvalue(&self) -> LValueRef {
+        let (value, identity) = self.cells();
+        LValueRef::tracked_cell(Rc::clone(value), Rc::clone(identity))
+    }
+
+    fn collect_object_reference_cells(&self, cells: &mut Vec<Weak<RefCell<Value>>>) {
+        if let Some((value, _)) = self.0.promoted.get() {
+            cells.push(Rc::downgrade(value));
+        } else if self
+            .0
+            .initial
+            .borrow()
+            .value
+            .contains_any_object_reference()
+        {
+            cells.push(Rc::downgrade(&self.cells().0));
+        }
+    }
+
+    fn clear_object_reference(&self, object: u64) {
+        if let Some((value, _)) = self.0.promoted.get() {
+            value.borrow_mut().clear_object_reference(object);
+        } else {
+            self.0.initial.borrow_mut().clear_object_reference(object);
+        }
+    }
+}
+
+impl Drop for ReusableBinding {
+    fn drop(&mut self) {
+        if let Some(slot) = Rc::get_mut(&mut self.0) {
+            // Escaped C4Value references own their promoted cells separately;
+            // dropping our handles never resets those still-live values.
+            slot.promoted.take();
+            *slot.initial.get_mut() = TrackedValue::runtime(Value::Nil);
+            let _ = SCALAR_BINDING_POOL.try_with(|pool| {
+                if let Ok(mut pool) = pool.try_borrow_mut() {
+                    if pool.len() < 256 {
+                        pool.push(Rc::clone(&self.0));
+                    }
+                }
+            });
+        }
+    }
+}
+
 enum Binding {
     Direct {
         value: ValueCell,
@@ -2326,6 +2471,7 @@ enum Binding {
     /// An unnamed C4Aul parameter slot. `Par()` and forwarded `...` can read
     /// it, but no source-level name can take its address or assign it.
     Inline(InlineBinding),
+    Reusable(ReusableBinding),
     Reference(LValueRef),
 }
 
@@ -2337,6 +2483,7 @@ impl Clone for Binding {
                 identity: identity.clone(),
             },
             Self::Inline(inline) => Self::Inline(inline.clone()),
+            Self::Reusable(slot) => Self::Reusable(slot.clone()),
             Self::Reference(reference) => Self::Reference(reference.clone()),
         }
     }
@@ -2357,6 +2504,7 @@ impl Binding {
                     cells.push(Rc::downgrade(&inline.cells().0));
                 }
             }
+            Self::Reusable(slot) => slot.collect_object_reference_cells(cells),
             Self::Reference(reference) => reference.collect_object_reference_cells(cells),
         }
     }
@@ -2373,6 +2521,7 @@ impl Binding {
                     inline.initial.clear_object_reference(object_id);
                 }
             }
+            Self::Reusable(slot) => slot.clear_object_reference(object_id),
             Self::Reference(reference) => reference.clear_object_reference(object_id),
         }
     }
@@ -2397,6 +2546,7 @@ impl Binding {
                 })
             }
             Binding::Inline(inline) => Ok(inline.read_tracked()),
+            Binding::Reusable(slot) => Ok(slot.read_tracked()),
             Binding::Reference(reference) => reference.read_tracked(),
         }
     }
@@ -2425,6 +2575,7 @@ impl Binding {
                 Ok(())
             }
             Binding::Inline(inline) => inline.lvalue().write_tracked(tracked),
+            Binding::Reusable(slot) => slot.write_tracked(tracked),
             Binding::Reference(reference) => reference.write_tracked(tracked),
         }
     }
@@ -2435,6 +2586,7 @@ impl Binding {
                 LValueRef::tracked_cell(value.clone(), identity.clone())
             }
             Binding::Inline(inline) => inline.lvalue(),
+            Binding::Reusable(slot) => slot.lvalue(),
             Binding::Reference(reference) => reference.clone(),
         }
     }
@@ -2444,6 +2596,7 @@ impl Binding {
             && match self {
                 Binding::Direct { value, .. } => c4_set_copy_is_zero_id(&value.borrow()),
                 Binding::Inline(inline) => c4_set_copy_is_zero_id(&inline.read_tracked().value),
+                Binding::Reusable(slot) => c4_set_copy_is_zero_id(&slot.read_tracked().value),
                 Binding::Reference(_) => false,
             }
     }
@@ -5808,8 +5961,8 @@ impl<'a> Vm<'a> {
         // environment so their cleanup is charged to the callee, not the
         // long-lived caller.
         let _object_reference_cells = ActiveObjectReferenceCellsGuard::enter_frame();
-        let mut env = Environment::new_with_params(
-            &function.params,
+        let mut env = Environment::new_with_layout(
+            Arc::clone(&compiled.frame_layout),
             &args,
             function.strict_level,
             object_state,
@@ -5850,9 +6003,6 @@ impl<'a> Vm<'a> {
         // like parameters, precede object locals in C4Aul's named-variable
         // table (C4AulParse.cpp:2709-2729). Hoist them first so an effect
         // callback's `var pClonk` cannot alias MART's persistent `pClonk`.
-        for name in &compiled.function_vars {
-            env.declare_hoisted(name);
-        }
         let function_var_count = env.frame_locals.function_vars.borrow().len();
         value_stack.grow(function_var_count)?;
 
@@ -7292,10 +7442,8 @@ impl<'a> Vm<'a> {
             match caller.and_then(|caller| {
                 caller
                     .frame_locals
-                    .function_vars
-                    .borrow()
-                    .get(&name)
-                    .map(Binding::lvalue)
+                    .function_var_binding(&name)
+                    .map(|binding| binding.lvalue())
             }) {
                 Some(reference) => ReturnValue::Reference(reference),
                 None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
@@ -8876,7 +9024,8 @@ impl ScriptContinuation {
 #[derive(Debug, Clone, PartialEq)]
 enum CompiledSlotKind {
     Bare,
-    FunctionVar,
+    Parameter(usize),
+    FunctionVar(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9007,7 +9156,7 @@ enum CompiledInstruction {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledFunction {
     slots: Vec<CompiledSlot>,
-    function_vars: Vec<String>,
+    frame_layout: Arc<FrameLayout>,
     instructions: Vec<CompiledInstruction>,
     call_sites: Vec<CompiledCallSite>,
     legacy_pin_instructions: Vec<bool>,
@@ -9165,11 +9314,11 @@ impl CompiledFunctionBuilder {
             returns_reference: function.returns_reference,
         };
 
-        for parameter in &function.params {
+        for (index, parameter) in function.params.iter().enumerate() {
             let slot = builder.slots.len();
             builder.slots.push(CompiledSlot {
                 name: parameter.name.clone(),
-                kind: CompiledSlotKind::Bare,
+                kind: CompiledSlotKind::Parameter(index),
             });
             // C4Aul's named parameter table keeps the last duplicate.
             builder.bare_slots.insert(parameter.name.clone(), slot);
@@ -9184,7 +9333,7 @@ impl CompiledFunctionBuilder {
             let slot = builder.slots.len();
             builder.slots.push(CompiledSlot {
                 name: name.clone(),
-                kind: CompiledSlotKind::FunctionVar,
+                kind: CompiledSlotKind::FunctionVar(builder.function_vars.len()),
             });
             builder.function_var_slots.insert(name.clone(), slot);
             builder.bare_slots.entry(name.clone()).or_insert(slot);
@@ -10388,7 +10537,7 @@ impl CompiledFunctionBuilder {
         Some(CompiledFunction {
             legacy_pin_instructions,
             slots: self.slots,
-            function_vars: self.function_vars,
+            frame_layout: Arc::new(FrameLayout::new(&function.params, &self.function_vars)),
             instructions: self.instructions,
             call_sites: self.call_sites,
             max_stack: self.max_stack,
@@ -10433,6 +10582,20 @@ fn read_compiled_path(
                 env,
                 &tracked.value,
                 tracked.identity.clone(),
+                segments,
+                env.strict_level,
+            )
+        }
+        Binding::Reusable(slot) => {
+            let tracked = slot.read_tracked();
+            if register_root {
+                vm.register_runtime_value(&tracked.value);
+            }
+            read_compiled_path_value(
+                vm,
+                env,
+                &tracked.value,
+                tracked.identity,
                 segments,
                 env.strict_level,
             )
@@ -10674,7 +10837,10 @@ impl CompiledFunction {
                     vm.global_variable_cell(&slot.name)
                         .map(|cell| Binding::Reference(vm.tracked_cell(cell)))
                 }),
-                CompiledSlotKind::FunctionVar => env.function_var_binding(&slot.name),
+                CompiledSlotKind::Parameter(index) => env.call_args.get(index).cloned(),
+                CompiledSlotKind::FunctionVar(index) => {
+                    env.frame_locals.function_vars.borrow().get(index).cloned()
+                }
             })
             .collect::<SmallVec<_>>();
         #[cfg(test)]
@@ -12250,7 +12416,6 @@ fn collect_function_var_names(body: &[Stmt], names: &mut Vec<String>) {
 #[derive(Clone)]
 struct Environment {
     scopes: SmallVec<[FxHashMap<String, Binding>; 2]>,
-    named_parameters: SmallVec<[(String, Binding); 4]>,
     /// Per-invocation storage for `Func->VarNamed`/`cthr->Vars`. A separate
     /// table is required because parameters win bare-name lookup while VarN
     /// can still address a same-name function variable.
@@ -12303,6 +12468,21 @@ impl Environment {
         strict_level: Option<u8>,
         object_state: ObjectState,
     ) -> Result<Self, RuntimeError> {
+        Self::new_with_layout(
+            Arc::new(FrameLayout::new(params, &[])),
+            args,
+            strict_level,
+            object_state,
+        )
+    }
+
+    fn new_with_layout(
+        layout: Arc<FrameLayout>,
+        args: &[CallArg],
+        strict_level: Option<u8>,
+        object_state: ObjectState,
+    ) -> Result<Self, RuntimeError> {
+        let params = &layout.parameters;
         let mut call_args = args
             .iter()
             .enumerate()
@@ -12317,7 +12497,7 @@ impl Environment {
                     CallArg::Reference(reference) if params[index].is_reference => {
                         Ok(Binding::Reference(reference.clone()))
                     }
-                    _ => Ok(Binding::tracked(arg.read_tracked()?)),
+                    _ => Ok(Binding::Reusable(ReusableBinding::new(arg.read_tracked()?))),
                 }
             })
             .collect::<Result<CallBindings, RuntimeError>>()?;
@@ -12328,21 +12508,17 @@ impl Environment {
         record_call_arg_heap_spill(call_args.spilled());
         let mut scopes: SmallVec<[FxHashMap<String, Binding>; 2]> = SmallVec::new();
         scopes.push(FxHashMap::default());
-        let mut named_parameters = SmallVec::<[(String, Binding); 4]>::new();
-        for (param, binding) in params.iter().zip(call_args.iter()) {
-            if let Some((_, current)) = named_parameters
-                .iter_mut()
-                .find(|(name, _)| name == &param.name)
-            {
-                *current = binding.clone();
-            } else {
-                named_parameters.push((param.name.clone(), binding.clone()));
-            }
-        }
+        let named_param_count = params.len();
+        let function_vars = (0..layout.function_var_slots.len())
+            .map(|_| Binding::Reusable(ReusableBinding::new(TrackedValue::runtime(Value::Nil))))
+            .collect();
         Ok(Self {
             scopes,
-            named_parameters,
-            frame_locals: Rc::new(FrameLocals::default()),
+            frame_locals: Rc::new(FrameLocals {
+                var_slots: RefCell::new(FxHashMap::default()),
+                layout,
+                function_vars: RefCell::new(function_vars),
+            }),
             strict_level,
             caller_owner_strict_level: strict_level,
             // invoke_script_function stamps the owning VM before executing the
@@ -12350,7 +12526,7 @@ impl Environment {
             caller_host_identity: ScriptHostIdentity(0),
             object_state,
             call_args,
-            named_param_count: params.len(),
+            named_param_count,
             inherited_target: None,
             function_name: String::new(),
             engine_scope: false,
@@ -12378,16 +12554,13 @@ impl Environment {
         for binding in &self.call_args {
             binding.collect_object_reference_cells(&mut cells);
         }
-        for binding in self.frame_locals.function_vars.borrow().values() {
+        for binding in self.frame_locals.function_vars.borrow().iter() {
             binding.collect_object_reference_cells(&mut cells);
         }
         for scope in &self.scopes {
             for binding in scope.values() {
                 binding.collect_object_reference_cells(&mut cells);
             }
-        }
-        for (_, binding) in &self.named_parameters {
-            binding.collect_object_reference_cells(&mut cells);
         }
         let depth = ACTIVE_OBJECT_REFERENCE_DEPTH.with(Cell::get);
         let scan_object_state = ACTIVE_OBJECT_REFERENCE_TABLES.with(|tables| {
@@ -12453,7 +12626,7 @@ impl Environment {
         for binding in &mut self.call_args {
             binding.clear_object_reference(object_id);
         }
-        for binding in self.frame_locals.function_vars.borrow_mut().values_mut() {
+        for binding in self.frame_locals.function_vars.borrow_mut().iter_mut() {
             binding.clear_object_reference(object_id);
         }
         for scope in &mut self.scopes {
@@ -12461,19 +12634,18 @@ impl Environment {
                 binding.clear_object_reference(object_id);
             }
         }
-        for (_, binding) in &mut self.named_parameters {
-            binding.clear_object_reference(object_id);
-        }
         self.object_state.clear_object_reference(object_id);
     }
 
     fn define_object_local(&mut self, name: &str, identity: RawIdentityCell) {
         let cell = self.object_state.named_local_cell(name);
         if self.scopes.iter().any(|scope| scope.contains_key(name))
+            || self.frame_locals.layout.parameter_slots.contains_key(name)
             || self
-                .named_parameters
-                .iter()
-                .any(|(parameter, _)| parameter == name)
+                .frame_locals
+                .layout
+                .function_var_slots
+                .contains_key(name)
         {
             return;
         }
@@ -12498,36 +12670,10 @@ impl Environment {
         }
     }
 
-    /// Pre-declare a hoisted `Func->VarNamed` slot. Bare-name lookup reuses
-    /// that binding unless a parameter already owns the name; VarN still sees
-    /// the distinct function-var slot in the collision case.
-    fn declare_hoisted(&mut self, name: &str) {
-        let binding = self
-            .frame_locals
-            .function_vars
-            .borrow_mut()
-            .entry(name.to_string())
-            .or_insert_with(|| Binding::direct(Value::Nil))
-            .clone();
-        if !self.scopes.iter().any(|scope| scope.contains_key(name))
-            && !self
-                .named_parameters
-                .iter()
-                .any(|(parameter, _)| parameter == name)
-        {
-            self.scopes
-                .first_mut()
-                .expect("environment has a base scope")
-                .insert(name.to_string(), binding);
-        }
-    }
-
     fn function_var_lvalue(&self, name: &str) -> Option<LValueRef> {
         self.frame_locals
-            .function_vars
-            .borrow()
-            .get(name)
-            .map(Binding::lvalue)
+            .function_var_binding(name)
+            .map(|binding| binding.lvalue())
     }
 
     fn get(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
@@ -12541,11 +12687,8 @@ impl Environment {
                 return value.read_tracked().map(Some);
             }
         }
-        self.named_parameters
-            .iter()
-            .rev()
-            .find(|(parameter, _)| parameter == name)
-            .map(|(_, value)| value.read_tracked())
+        self.named_binding(name)
+            .map(|binding| binding.read_tracked())
             .transpose()
     }
 
@@ -12555,18 +12698,16 @@ impl Environment {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
-            .or_else(|| {
-                self.named_parameters
-                    .iter()
-                    .rev()
-                    .find(|(parameter, _)| parameter == name)
-                    .map(|(_, binding)| binding.clone())
-            })
+            .or_else(|| self.named_binding(name))
     }
 
-    fn function_var_binding(&self, name: &str) -> Option<Binding> {
-        lookup_profile::record(lookup_profile::LookupFamily::Local, name);
-        self.frame_locals.function_vars.borrow().get(name).cloned()
+    fn named_binding(&self, name: &str) -> Option<Binding> {
+        self.frame_locals
+            .layout
+            .parameter_slots
+            .get(name)
+            .and_then(|&index| self.call_args.get(index).cloned())
+            .or_else(|| self.frame_locals.function_var_binding(name))
     }
 
     fn lvalue(&self, name: &str) -> Option<LValueRef> {
@@ -12575,11 +12716,7 @@ impl Environment {
                 return Some(value.lvalue());
             }
         }
-        self.named_parameters
-            .iter()
-            .rev()
-            .find(|(parameter, _)| parameter == name)
-            .map(|(_, binding)| binding.lvalue())
+        self.named_binding(name).map(|binding| binding.lvalue())
     }
 }
 
@@ -12619,11 +12756,24 @@ mod tests {
     }
 
     #[test]
+    fn promoted_reusable_binding_releases_replaced_string() {
+        // C4Value::Set releases the previous string reference immediately
+        // (C4Value.cpp:121-142), even while aliases to the slot remain live.
+        let value = crate::C4StringValue::from("old value");
+        let weak = value.downgrade();
+        let binding = ReusableBinding::new(TrackedValue::runtime(Value::String(value)));
+        let reference = binding.lvalue();
+        reference.write(Value::Nil).unwrap();
+        assert_eq!(binding.read_tracked().value, Value::Nil);
+        assert_eq!(weak.strong_count(), 0);
+    }
+
+    #[test]
     fn active_object_reference_collection_keeps_only_weak_owners() {
         let binding = Binding::tracked(TrackedValue::runtime(Value::Object(7)));
         let cell = match &binding {
             Binding::Direct { value, .. } => Rc::clone(value),
-            Binding::Inline(_) | Binding::Reference(_) => {
+            Binding::Inline(_) | Binding::Reusable(_) | Binding::Reference(_) => {
                 unreachable!("tracked bindings own a direct value cell")
             }
         };

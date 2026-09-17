@@ -2390,11 +2390,17 @@ where
         .with(|cell| cell.borrow().clone())
         .unwrap_or_default();
     HOST_CONTEXT.with(|cell| {
+        let global_effects = world
+            .global_effects
+            .as_ref()
+            .filter(|shared| std::ptr::eq(shared.as_slice(), global_effects))
+            .cloned()
+            .unwrap_or_else(|| global_effects.to_vec().into());
         let context = EffectHostContext::new(
             object,
             definition_context,
             script_object_context,
-            global_effects.to_vec(),
+            global_effects,
             world,
             next_object_id,
             audio_state,
@@ -3995,7 +4001,7 @@ impl EffectHostContext {
         object: Option<HostObjectContext<'_>>,
         definition_context: Option<DefinitionId>,
         script_object_context: Option<ObjectId>,
-        global_effects: Vec<EffectState>,
+        global_effects: crate::effect::SharedEffectStates,
         world: HostWorldContext,
         next_object_id: u64,
         audio: AudioRegistry,
@@ -4036,6 +4042,16 @@ impl EffectHostContext {
                 None
             };
         let mut object = object.map(|ctx| {
+            let effect_states = world
+                .get_shared(ctx.id)
+                .and_then(|object| {
+                    object
+                        .full_state()
+                        .filter(|state| std::ptr::eq(state.effects.as_slice(), ctx.effects))
+                        .cloned()
+                })
+                .map(crate::effect::SharedEffectStates::Object)
+                .unwrap_or_else(|| ctx.effects.to_vec().into());
             let HostObjectContext {
                 id,
                 definition_id,
@@ -4055,7 +4071,7 @@ impl EffectHostContext {
                 position,
                 velocity,
                 rotation,
-                effects,
+                effects: _,
                 action_name,
                 action_index,
                 action_ticks,
@@ -4104,7 +4120,7 @@ impl EffectHostContext {
                     position,
                     velocity,
                     rotation,
-                    effects.to_vec(),
+                    effect_states,
                     action_library,
                     action_name,
                     action_index,
@@ -6703,7 +6719,7 @@ impl EffectHostContext {
             state.position,
             state.velocity,
             state.rotation,
-            state.effects.clone(),
+            crate::effect::SharedEffectStates::Object(Rc::clone(state)),
             action_library,
             state.action.name.clone(),
             state.action.act_map_index,
@@ -8753,7 +8769,7 @@ impl LocalAudioWorld for EffectHostContext {
 }
 
 pub(crate) struct EffectScopeContext {
-    pub(crate) effects: Vec<EffectState>,
+    pub(crate) effects: crate::effect::SharedEffectStates,
     pub(crate) commands: Vec<EffectCommand>,
     /// C++ keeps dead effect nodes linked until the next Execute cleanup.
     /// Once a list head existed in this VM call, a later CheckEffect reaches
@@ -8763,7 +8779,8 @@ pub(crate) struct EffectScopeContext {
 }
 
 impl EffectScopeContext {
-    fn new(effects: Vec<EffectState>) -> Self {
+    fn new(effects: impl Into<crate::effect::SharedEffectStates>) -> Self {
+        let effects = effects.into();
         let had_list_head = !effects.is_empty();
         Self {
             effects,
@@ -8773,7 +8790,7 @@ impl EffectScopeContext {
     }
 
     pub(crate) fn snapshot(&self) -> Vec<EffectState> {
-        self.effects.clone()
+        self.effects.to_vec()
     }
 
     fn clear_object_references(&mut self, sweep: &mut clonk_script::ObjectReferenceSweep) {
@@ -8883,13 +8900,13 @@ impl EffectScopeContext {
             .effects
             .iter()
             .position(|effect| effect.number == effect_number as i32)?;
-        let effect = &mut self.effects[index];
         if let Some(value) = new_value {
+            let effect = &mut self.effects[index];
             effect.set_var(var_index, value);
             let updated = effect.clone();
             self.commands.push(EffectCommand::update(updated));
         }
-        Some(effect.var(var_index))
+        Some(self.effects[index].var(var_index))
     }
 
     pub(crate) fn change_effect(
@@ -9280,7 +9297,7 @@ impl ObjectScopeContext {
         position: Vector2,
         velocity: Vector2,
         rotation: i32,
-        effects: Vec<EffectState>,
+        effects: crate::effect::SharedEffectStates,
         action_library: SharedActionLibrary,
         action_name: String,
         action_index: Option<u32>,

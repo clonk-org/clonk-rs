@@ -668,7 +668,7 @@ pub(crate) struct DefinitionMetadata {
     /// the same direct callback as ordinary engine command execution.
     pub control_transfer_callback: Option<ScriptCallbackTarget>,
     /// Presentation facets used by FrameDecoration::SetByDef.
-    pub action_graphics: HashMap<String, crate::DefinitionActionGraphics>,
+    pub action_graphics: Rc<HashMap<String, crate::DefinitionActionGraphics>>,
     pub value: i32,
     /// DefCore AllowPictureStack APS_* exception bits, used by the live
     /// internal object-menu row grouping path.
@@ -2303,6 +2303,7 @@ pub struct HostWorldContext {
     /// `Game.Objects.InactiveObjects` from First -> Next. Unlike the master
     /// list this is small and copied eagerly into callback worlds.
     inactive_order: Rc<Vec<ObjectId>>,
+    pub(crate) global_effects: Option<crate::effect::SharedEffectStates>,
     /// Uninitialized until a host API actually reads or mutates terrain.
     landscape: OnceCell<Option<Arc<Landscape>>>,
     /// Fully defaulted, post-load `Game.C4S` reflection data. This remains
@@ -2618,6 +2619,7 @@ impl Default for HostWorldContext {
             next_pending_instance_token: Rc::new(Cell::new(1)),
             master_order: OnceCell::from(Rc::new(Vec::new())),
             inactive_order: Rc::new(Vec::new()),
+            global_effects: None,
             landscape: OnceCell::new(),
             scenario_values: Rc::new(ScenarioValueStore::default()),
             scenario_sections: Rc::new(HashSet::new()),
@@ -3063,6 +3065,7 @@ impl HostWorldContext {
             next_pending_instance_token: Rc::new(Cell::new(1)),
             master_order: OnceCell::from(Rc::clone(&order)),
             inactive_order: Rc::new(Vec::new()),
+            global_effects: None,
             landscape: OnceCell::from(landscape.map(Arc::new)),
             scenario_values,
             scenario_sections: Rc::new(HashSet::new()),

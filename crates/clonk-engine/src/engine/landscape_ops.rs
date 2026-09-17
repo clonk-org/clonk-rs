@@ -2556,7 +2556,7 @@ impl Engine {
         game_over_triggered: bool,
         mut rng: LcgRng,
         events: Vec<EffectEvent>,
-        global_effects: &mut Vec<EffectState>,
+        global_effects: &mut SharedEffectStates,
         environment: &mut EnvironmentSettings,
         physics: PhysicsSettings,
         frame: u64,
@@ -2705,6 +2705,7 @@ impl Engine {
             let callback_resume = resuming_callback.then(|| callback_resume.take()).flatten();
             let mut timer_kill = false;
             let mut stop_denied = false;
+            world.global_effects = Some(global_effects.clone());
             let call_result = match event.kind {
                 EffectEventKind::Timer => dispatch_global_effect_callback_with_continuation(
                     &event.effect,
