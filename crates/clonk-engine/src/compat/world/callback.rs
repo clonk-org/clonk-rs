@@ -1,6 +1,11 @@
 //! Engine-backed callback worlds, constructed without fixture placeholders.
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static SECTION_TABLE_BUILDS: Cell<usize> = const { Cell::new(0) };
+}
+
 impl HostWorldContext {
     /// Seed the shared engine resources directly. Mutable previews still get
     /// fresh callback-local storage; lazy reads retain the paused-engine
@@ -12,41 +17,8 @@ impl HostWorldContext {
         provider: LazyHostWorldProvider,
     ) -> Self {
         let tables = engine.host_definition_tables();
-        let player_order = engine.player_ids_in_order();
-        let local_players = engine.local_players.as_ref().map_or_else(
-            || player_order.iter().copied().collect(),
-            |players| players.iter().copied().collect(),
-        );
-        let player_states = player_order
-            .iter()
-            .copied()
-            .map(|id| (id, OnceCell::new()))
-            .collect();
-        // Preserve all three sources of known info IDs, including progress
-        // entries without a live player and zero-score entries.
-        let player_info_ids = engine
-            .player_info_league_progress_data
-            .keys()
-            .copied()
-            .chain(engine.players.values().map(crate::Player::player_info_id))
-            .filter(|id| *id != 0)
-            .chain(
-                engine
-                    .player_info_league_scores
-                    .keys()
-                    .copied()
-                    .filter(|id| *id > 0),
-            )
-            .collect();
         Self {
-            object_store: RefCell::new(Rc::new(HostWorldObjectStore {
-                objects: FxHashMap::default(),
-                order: Vec::new(),
-                indices: FxHashMap::default(),
-                removed: FxHashSet::default(),
-                order_dirty: false,
-                complete: false,
-            })),
+            object_store: RefCell::new(Rc::new(HostWorldObjectStore::reusable(false))),
             effect_spawn_previews: Rc::new(RefCell::new(Vec::new())),
             lazy_world: Some(provider),
             pending_instance_tokens: Rc::new(RefCell::new(HashMap::new())),
@@ -56,30 +28,14 @@ impl HostWorldContext {
             global_effects: Some(engine.global_effects.clone()),
             landscape: OnceCell::new(),
             scenario_values: Rc::clone(&engine.scenario_values),
-            scenario_sections: Rc::new(
-                engine
-                    .scenario_section_state
-                    .sections
-                    .values()
-                    .map(|section| section.name.to_ascii_lowercase())
-                    .collect(),
-            ),
-            scenario_section_landscape_extents: Rc::new(
-                engine
-                    .scenario_section_state
-                    .sections
-                    .values()
-                    .map(|section| {
-                        (
-                            section.name.to_ascii_lowercase(),
-                            section
-                                .landscape
-                                .as_ref()
-                                .map(crate::compat::landscape_extent),
-                        )
-                    })
-                    .collect(),
-            ),
+            // SAFETY: section storage is frozen until this callback returns.
+            scenario_sections: unsafe {
+                CallbackSnapshot::deferred(provider.source, scenario_sections)
+            },
+            // SAFETY: section storage is frozen until this callback returns.
+            scenario_section_landscape_extents: unsafe {
+                CallbackSnapshot::deferred(provider.source, scenario_section_landscape_extents)
+            },
             scenario_section_landscape_extent: None,
             scenario_section_switch_in_flight: engine.scenario_section_state.switch_in_flight,
             suspended_script_registrations: Some(Rc::clone(&engine.suspended_script_registrations)),
@@ -87,9 +43,9 @@ impl HostWorldContext {
             definitions: engine.definition_metadata_table(),
             solid_mask_metadata,
             solid_mask_bakes: Rc::clone(&solid_mask_state.bakes),
-            solid_mask_instance_sequences: Rc::new(RefCell::new(
-                solid_mask_state.instance_sequences.as_ref().clone(),
-            )),
+            solid_mask_instance_sequences: Rc::new(RefCell::new(Rc::clone(
+                &solid_mask_state.instance_sequences,
+            ))),
             next_solid_mask_instance_sequence: Rc::new(Cell::new(
                 solid_mask_state.next_instance_sequence,
             )),
@@ -108,24 +64,22 @@ impl HostWorldContext {
             pathfinder_level: engine.pathfinder_level,
             pathfinder_transfer_zones_enabled: engine.pathfinder_transfer_zones_enabled,
             pathfinder_debug: Rc::clone(&engine.pathfinder_debug),
-            local_players: Rc::new(local_players),
+            // SAFETY: the provider's paused-engine lifetime covers this table.
+            local_players: unsafe { CallbackSnapshot::deferred(provider.source, local_players) },
             physical_viewport_players: Rc::clone(&engine.physical_viewport_players),
             active_message_board_input: engine.active_message_board_input.clone(),
-            player_order: Rc::new(player_order),
-            player_info_ids: Rc::new(player_info_ids),
-            player_states: Rc::new(player_states),
-            player_fow_view_objects: Rc::new(
-                engine
-                    .players
-                    .values()
-                    .map(|player| {
-                        (
-                            player.id(),
-                            player.fow_view_objects().iter().copied().collect(),
-                        )
-                    })
-                    .collect(),
-            ),
+            // SAFETY: the provider's paused-engine lifetime covers this table.
+            player_order: unsafe { CallbackSnapshot::deferred(provider.source, player_order) },
+            // SAFETY: the provider's paused-engine lifetime covers this table.
+            player_info_ids: unsafe {
+                CallbackSnapshot::deferred(provider.source, player_info_ids)
+            },
+            // SAFETY: the provider's paused-engine lifetime covers this table.
+            player_states: unsafe { CallbackSnapshot::deferred(provider.source, player_states) },
+            // SAFETY: the provider's paused-engine lifetime covers this table.
+            player_fow_view_objects: unsafe {
+                CallbackSnapshot::deferred(provider.source, player_fow_view_objects)
+            },
             control_key_names: Rc::clone(&engine.control_key_names),
             teams: Rc::clone(&engine.team_state.teams),
             crew_selection: Rc::new(HashMap::new()),
@@ -141,13 +95,10 @@ impl HostWorldContext {
             game_tick_delay_revision: Rc::clone(&engine.game_tick_delay_revision),
             league_name: Rc::clone(&engine.league_name),
             player_info_league_progress_data: Rc::clone(&engine.player_info_league_progress_data),
-            player_info_league_scores: Rc::new(
-                engine
-                    .player_info_league_scores
-                    .iter()
-                    .filter_map(|(&id, &score)| (id > 0 && score != 0).then_some((id, score)))
-                    .collect(),
-            ),
+            // SAFETY: the provider's paused-engine lifetime covers this table.
+            player_info_league_scores: unsafe {
+                CallbackSnapshot::deferred(provider.source, player_info_league_scores)
+            },
             team_configuration: engine.team_state.team_configuration,
             network_game: engine.network_game,
             network_control_mode: engine.network_control_mode,
@@ -216,5 +167,185 @@ impl HostWorldContext {
             scoreboard: Rc::clone(&engine.scoreboard),
             scoreboard_presentations: Rc::clone(&engine.scoreboard_presentations),
         }
+    }
+}
+
+// These projections run only while the engine is paused in its synchronous
+// callback. Borrow raw fields individually to avoid aliasing the active object.
+unsafe fn player_order(source: *const ()) -> Vec<i32> {
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: both player fields are stable for the callback's lifetime.
+    let players = unsafe { &*std::ptr::addr_of!((*engine).players) };
+    let ledger = unsafe { &*std::ptr::addr_of!((*engine).player_order) };
+    if ledger.len() == players.len() && ledger.iter().all(|id| players.contains_key(id)) {
+        return ledger.clone();
+    }
+    let mut order = Vec::with_capacity(players.len());
+    let mut seen = HashSet::with_capacity(players.len());
+    order.extend(
+        ledger
+            .iter()
+            .copied()
+            .filter(|id| players.contains_key(id) && seen.insert(*id)),
+    );
+    let missing_start = order.len();
+    order.extend(players.keys().copied().filter(|id| seen.insert(*id)));
+    order[missing_start..].sort_unstable();
+    order
+}
+
+unsafe fn local_players(source: *const ()) -> HashSet<i32> {
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: these fields cannot change during a synchronous callback.
+    let local = unsafe { &*std::ptr::addr_of!((*engine).local_players) };
+    let players = unsafe { &*std::ptr::addr_of!((*engine).players) };
+    local.as_ref().map_or_else(
+        || players.keys().copied().collect(),
+        |local| local.iter().copied().collect(),
+    )
+}
+
+unsafe fn player_states(source: *const ()) -> HashMap<i32, OnceCell<PlayerState>> {
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: player storage is frozen; states remain projected on demand.
+    let players = unsafe { &*std::ptr::addr_of!((*engine).players) };
+    players.keys().map(|&id| (id, OnceCell::new())).collect()
+}
+
+unsafe fn player_fow_view_objects(source: *const ()) -> HashMap<i32, HashSet<ObjectId>> {
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: player storage is frozen for the synchronous callback.
+    let players = unsafe { &*std::ptr::addr_of!((*engine).players) };
+    players
+        .values()
+        .map(|player| {
+            (
+                player.id(),
+                player.fow_view_objects().iter().copied().collect(),
+            )
+        })
+        .collect()
+}
+
+unsafe fn player_info_ids(source: *const ()) -> HashSet<i32> {
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: these three registry fields stay unchanged until copy-out.
+    let progress = unsafe { &*std::ptr::addr_of!((*engine).player_info_league_progress_data) };
+    let players = unsafe { &*std::ptr::addr_of!((*engine).players) };
+    let scores = unsafe { &*std::ptr::addr_of!((*engine).player_info_league_scores) };
+    // Retain departed players' info IDs and zero-score entries too.
+    progress
+        .keys()
+        .copied()
+        .chain(players.values().map(crate::Player::player_info_id))
+        .filter(|id| *id != 0)
+        .chain(scores.keys().copied().filter(|id| *id > 0))
+        .collect()
+}
+
+unsafe fn player_info_league_scores(source: *const ()) -> BTreeMap<i32, i32> {
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: league scores are stable until callback copy-out.
+    let scores = unsafe { &*std::ptr::addr_of!((*engine).player_info_league_scores) };
+    scores
+        .iter()
+        .filter_map(|(&id, &score)| (id > 0 && score != 0).then_some((id, score)))
+        .collect()
+}
+
+unsafe fn scenario_sections(source: *const ()) -> HashSet<String> {
+    #[cfg(test)]
+    SECTION_TABLE_BUILDS.with(|count| count.set(count.get() + 1));
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: section registry storage is frozen throughout this callback.
+    let state = unsafe { &*std::ptr::addr_of!((*engine).scenario_section_state) };
+    state
+        .sections
+        .values()
+        .map(|section| section.name.to_ascii_lowercase())
+        .collect()
+}
+
+unsafe fn scenario_section_landscape_extents(
+    source: *const (),
+) -> HashMap<String, Option<(i32, i32)>> {
+    #[cfg(test)]
+    SECTION_TABLE_BUILDS.with(|count| count.set(count.get() + 1));
+    let engine = source.cast::<crate::Engine>();
+    // SAFETY: section landscapes are not changed until the callback returns.
+    let state = unsafe { &*std::ptr::addr_of!((*engine).scenario_section_state) };
+    state
+        .sections
+        .values()
+        .map(|section| {
+            (
+                section.name.to_ascii_lowercase(),
+                section
+                    .landscape
+                    .as_ref()
+                    .map(crate::compat::landscape_extent),
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callbacks_without_section_queries_leave_section_tables_unbuilt() {
+        let mut engine = crate::Engine::new();
+        engine
+            .register_script_definition("TEST", "Test", "func Probe() { return 42; }")
+            .unwrap();
+        engine
+            .spawn_object(crate::SpawnConfig::new("TEST"))
+            .unwrap();
+        SECTION_TABLE_BUILDS.with(|count| count.set(0));
+        assert_eq!(
+            engine.call_object_function(0, "Probe", Vec::new()).unwrap(),
+            Value::Int(42)
+        );
+        assert_eq!(SECTION_TABLE_BUILDS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn lazy_player_tables_preserve_order_retired_infos_and_callback_isolation() {
+        let mut engine = crate::Engine::new();
+        engine
+            .register_player(crate::PlayerConfig::new(20, "First").with_player_info_id(7))
+            .unwrap();
+        engine
+            .register_player(crate::PlayerConfig::new(10, "Second").with_player_info_id(8))
+            .unwrap();
+        // Exercise the supported fallback for fixtures with unledgered players.
+        engine
+            .players
+            .insert(30, crate::Player::new(30, "Unledgered"));
+        Rc::make_mut(&mut engine.player_info_league_scores).insert(91, 0);
+        Rc::make_mut(&mut engine.player_info_league_scores).insert(92, 12);
+        Rc::make_mut(&mut engine.player_info_league_progress_data).insert(93, None);
+        let expected = engine.player_ids_in_order();
+        {
+            let world = engine.host_world_context();
+            let clone = world.clone();
+            assert_eq!(world.player_ids(), expected);
+            assert_eq!(clone.player_ids(), expected);
+            for id in [7, 8, 91, 92, 93] {
+                assert!(world.player_info_id_known(id));
+            }
+            assert!(!world.player_info_id_known(0));
+            assert_eq!(world.player_info_league_score(91), Some(0));
+            assert_eq!(world.player_info_league_score(92), Some(12));
+            let edited = world.with_league_scores(Rc::new(BTreeMap::from([(92, 24)])));
+            assert_eq!(edited.player_info_league_score(92), Some(24));
+            assert_eq!(clone.player_info_league_score(92), Some(12));
+        }
+        Rc::make_mut(&mut engine.player_info_league_scores).insert(92, 36);
+        assert_eq!(
+            engine.host_world_context().player_info_league_score(92),
+            Some(36)
+        );
     }
 }

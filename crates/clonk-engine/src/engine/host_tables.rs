@@ -1627,6 +1627,44 @@ mod tests {
     }
 
     #[test]
+    fn callback_contexts_share_solid_mask_ages_until_mutation() {
+        let mut engine = Engine::new();
+        engine
+            .register_script_definition("TEST", "Test", "func Probe() { return 0; }")
+            .unwrap();
+        let id = engine.spawn_object(SpawnConfig::new("TEST")).unwrap();
+        engine.objects[0].solid_mask_instance_sequence = Some(7);
+        engine.note_solid_mask_host_state_changed();
+        let cached = engine.host_solid_mask_state();
+        let mut world = engine.host_world_context();
+        let sibling = world.clone();
+        assert!(std::ptr::eq(
+            cached.instance_sequences.get(&id).unwrap(),
+            world
+                .solid_mask_instance_sequences
+                .borrow()
+                .get(&id)
+                .unwrap(),
+        ));
+        // AssignRemoval is visible to cloned views in this callback, while
+        // the paused engine remains unchanged until copy-out (C4Object.cpp:312).
+        world.preview_object_destroyed(id);
+        assert!(!sibling
+            .solid_mask_instance_sequences
+            .borrow()
+            .contains_key(&id));
+        assert_eq!(cached.instance_sequences.get(&id), Some(&7));
+        assert_eq!(
+            engine
+                .host_world_context()
+                .solid_mask_instance_sequences
+                .borrow()
+                .get(&id),
+            Some(&7),
+        );
+    }
+
+    #[test]
     fn unchanged_scenario_definition_scripts_reuse_linked_name_tables() {
         // GetFirstFunc's namespace is established by linking, not rebuilt by
         // GameCall (C4Aul.cpp:545-552; C4Script.cpp:3483).

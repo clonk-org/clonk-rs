@@ -1,6 +1,8 @@
 use super::*;
+mod scratch;
 use crate::{LocalAudioPlayerView, LocalAudioWorld, LocalSoundStart};
 use clonk_core::log_target::SCRIPT_LOG_TARGET;
+use scratch::CallbackScratch;
 // `HostObjectContext::new` is the tests' positional constructor; the
 // engine builds scopes through `with_category`.
 #[cfg(test)]
@@ -3067,8 +3069,8 @@ fn call_world_object_reference_with(
         Err(clonk_script::ScriptError::Runtime(err)) => Err(err),
         Err(other) => Err(RuntimeError::new(other.to_string())),
     };
-    let stored_locals = cells.snapshot();
     if let Some(origin) = origin {
+        let stored_locals = cells.snapshot();
         with_host_context_mut((), |context| {
             let mut stored_locals = stored_locals;
             for ((object, name), slot) in &context.foreign_local_cells {
@@ -3201,7 +3203,7 @@ pub(crate) fn call_world_object_own_function_with_native_continuation(
     // nested scope is returned to its parent before the continuation can be
     // handed to the engine's section boundary. The guard also restores this
     // state if the VM unwinds while running a host callback.
-    let _ = context_guard.restore();
+    context_guard.restore();
     let call = call.map_err(native_nested_script_error);
 
     match call {
@@ -3265,14 +3267,16 @@ impl NestedCallbackContextGuard {
         }
     }
 
-    fn restore(&mut self) -> HashMap<String, Value> {
-        let stored_locals = self.cells.snapshot();
+    fn restore(&mut self) {
         if !self.active {
-            return stored_locals;
+            return;
         }
+        // An active same-object session already owns every local write.
+        // Only a scope being folded (or a newly created session) needs values.
+        let folded_locals = (self.origin.is_some() || self.previous_session.is_none())
+            .then(|| self.cells.snapshot());
         let target = self.target;
         let entry_locals = &self.entry_locals;
-        let mut folded_locals = stored_locals.clone();
         let origin = self.origin.take();
         let previous_session = self.previous_session.take();
         let previous_script_object = self.previous_script_object.take();
@@ -3286,6 +3290,9 @@ impl NestedCallbackContextGuard {
             } else {
                 context.session_local_cells.remove(&target);
             }
+            let Some(mut folded_locals) = folded_locals else {
+                return;
+            };
             if let Some(origin) = origin {
                 for ((object, name), slot) in &context.foreign_local_cells {
                     if *object != target {
@@ -3297,7 +3304,7 @@ impl NestedCallbackContextGuard {
                         folded_locals.insert(name.clone(), slot.borrow().clone());
                     }
                 }
-                context.finish_nested_call(target, origin, folded_locals.clone());
+                context.finish_nested_call(target, origin, folded_locals);
             } else {
                 for (name, value) in &folded_locals {
                     let slot = context.foreign_local_cell(target, name);
@@ -3305,13 +3312,12 @@ impl NestedCallbackContextGuard {
                 }
             }
         });
-        stored_locals
     }
 }
 
 impl Drop for NestedCallbackContextGuard {
     fn drop(&mut self) {
-        let _ = self.restore();
+        self.restore();
     }
 }
 
@@ -3459,7 +3465,7 @@ fn resume_nested_object_child(
         value,
         object_reference_value(target),
     );
-    let _stored_locals = context_guard.restore();
+    context_guard.restore();
     call.map_err(native_nested_script_error)
 }
 
@@ -3743,14 +3749,20 @@ fn call_world_object_function_with_options(
             context.session_local_cells.remove(&target);
         });
     }
-    let (result, stored_locals) = match call {
-        Ok(value) => (Ok(value), cells.snapshot()),
+    let result = match call {
+        Ok(value) => Ok(value),
         // Partial side effects before the error still fold (C++ mutates
         // live state) — the shared cells carry every write made before
         // the unwind.
-        Err(clonk_script::ScriptError::Runtime(err)) => (Err(err), cells.snapshot()),
-        Err(other) => (Err(RuntimeError::new(other.to_string())), cells.snapshot()),
+        Err(clonk_script::ScriptError::Runtime(err)) => Err(err),
+        Err(other) => Err(RuntimeError::new(other.to_string())),
     };
+    if origin.is_none() && !created_session {
+        // LocalN already hands out these same live cells. Copying their
+        // values back onto themselves adds no mutation visibility.
+        return Some(result);
+    }
+    let stored_locals = cells.snapshot();
     if let Some(origin) = origin {
         with_host_context_mut((), |context| {
             // Writes made by DEEPER same-scope calls (e.g. a
@@ -3911,7 +3923,7 @@ pub(crate) struct EffectHostContext {
     solid_mask_bakes: Rc<Vec<(ObjectId, crate::SolidMaskBake)>>,
     /// Live instance ages also cover eligible masks clipped fully outside
     /// the raster and therefore absent from `solid_mask_bakes`.
-    solid_mask_instance_sequences: Rc<RefCell<HashMap<ObjectId, u64>>>,
+    solid_mask_instance_sequences: Rc<RefCell<Rc<HashMap<ObjectId, u64>>>>,
     next_solid_mask_instance_sequence: Rc<Cell<u64>>,
     /// C4Object::UpdateSolidMask calls made by this VM invocation, retained
     /// independently of the outer/foreign object outcome split.
@@ -3925,7 +3937,7 @@ pub(crate) struct EffectHostContext {
     /// Live C4TeamList projection for this synchronous VM session. Runtime
     /// TEAMID_New generation must be visible to GetTeam* immediately and to
     /// callbacks nested later in the same outer call.
-    teams: Vec<TeamInfo>,
+    teams: Rc<Vec<TeamInfo>>,
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
     /// Same-VM-call logical Game.Objects view after global Resort(). The
@@ -4012,7 +4024,7 @@ impl EffectHostContext {
         let shared_bases = world.shared_bases();
         let scenario_script_counter = world.scenario_script_counter();
         let sky_adjustment = world.sky_adjustment();
-        let teams = world.teams().to_vec();
+        let teams = world.shared_teams();
         let solid_mask_bakes = Rc::clone(&world.solid_mask_bakes);
         let solid_mask_instance_sequences = Rc::clone(&world.solid_mask_instance_sequences);
         let next_solid_mask_instance_sequence = Rc::clone(&world.next_solid_mask_instance_sequence);
@@ -4215,6 +4227,7 @@ impl EffectHostContext {
             }
         }
         let global = Some(EffectScopeContext::new(global_effects));
+        let scratch = CallbackScratch::take();
         Box::new(Self {
             object,
             definition_context,
@@ -4256,16 +4269,16 @@ impl EffectHostContext {
             scenario_script_counter,
             script_counter_request: None,
             game_over_triggered,
-            dormant_scopes: Vec::new(),
+            dormant_scopes: scratch.dormant_scopes,
             global_call_contexts: Vec::new(),
-            nested_objects: HashMap::new(),
-            session_local_cells: HashMap::new(),
+            nested_objects: scratch.nested_objects,
+            session_local_cells: scratch.session_local_cells,
             removed_object_references: HashSet::new(),
             unlinked_content_links: HashSet::new(),
             relinked_content_links: HashSet::new(),
             contents_link_operations: Vec::new(),
-            nested_order: Vec::new(),
-            foreign_local_cells: HashMap::new(),
+            nested_order: scratch.nested_order,
+            foreign_local_cells: scratch.foreign_local_cells,
         })
     }
 
@@ -4522,7 +4535,7 @@ impl EffectHostContext {
     pub(crate) fn update_live_solid_mask(&mut self, id: ObjectId, recreate: bool) {
         let previous = self.remove_live_solid_mask(id);
         let Some(spec) = self.live_solid_mask_spec(id) else {
-            self.solid_mask_instance_sequences.borrow_mut().remove(&id);
+            Rc::make_mut(&mut self.solid_mask_instance_sequences.borrow_mut()).remove(&id);
             self.solid_mask_operations
                 .push(crate::HostSolidMaskOperation::Remove { object_id: id });
             return;
@@ -4540,8 +4553,7 @@ impl EffectHostContext {
         } else {
             (self.allocate_solid_mask_instance_sequence(), true)
         };
-        self.solid_mask_instance_sequences
-            .borrow_mut()
+        Rc::make_mut(&mut self.solid_mask_instance_sequences.borrow_mut())
             .insert(id, instance_sequence);
         if constructed {
             self.record_solid_mask_instance_sequence(id, instance_sequence);
@@ -6593,10 +6605,17 @@ impl EffectHostContext {
         allow_scope_without_world_object: bool,
         function_is_pinned: bool,
     ) -> Option<NestedCallPrep> {
-        let world_object = self.get_world_object(target);
-        if world_object.is_none()
-            && !(allow_scope_without_world_object && self.object_scope(target).is_some())
-        {
+        let active_session = self.object.as_ref().map(ObjectScopeContext::id) == Some(target)
+            && self.session_local_cells.contains_key(&target);
+        let world_object = (!active_session)
+            .then(|| self.get_world_object(target))
+            .flatten();
+        let present = if active_session {
+            self.pending_objects.contains_key(&target) || self.world.get_shared(target).is_some()
+        } else {
+            world_object.is_some()
+        };
+        if !present && !(allow_scope_without_world_object && self.object_scope(target).is_some()) {
             return None;
         }
         // Namespaced calls (`obj->ID::Func`) run the NAMED def's script in
@@ -6622,6 +6641,15 @@ impl EffectHostContext {
             || (host_fallback && script.has_host_function(function));
         if !resolvable {
             return None;
+        }
+        if active_session {
+            // C4AulExec keeps this object's live Local cells on re-entry
+            // (C4AulExec.cpp:343-352). No seed or copy-out snapshot is needed.
+            return Some(NestedCallPrep {
+                script,
+                local_vars: HashMap::new(),
+                origin: None,
+            });
         }
         // These locals only ever SEED a session. Both call sites consult
         // `session_local_cells` first (:2890, :3177), so a call onto an
@@ -7968,7 +7996,7 @@ impl EffectHostContext {
         };
         let color = crate::default_generated_team_color(id);
         let team = TeamInfo::new(id, format!("Team {id}"), color.unwrap_or(0));
-        self.teams.push(team.clone());
+        Rc::make_mut(&mut self.teams).push(team.clone());
         (Some(team), color)
     }
 
@@ -8522,7 +8550,7 @@ impl EffectHostContext {
                 .insert(name.clone(), cell.borrow().clone());
         }
         let mut other_objects = Vec::new();
-        for id in mem::take(&mut self.nested_order) {
+        for id in self.nested_order.drain(..) {
             let Some(NestedScopeState {
                 mut scope,
                 mut local_vars,
@@ -8690,7 +8718,11 @@ impl EffectHostContext {
                 inherit_landscape,
                 landscape,
                 solid_mask_bakes: self.solid_mask_bakes.as_ref().clone(),
-                solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
+                solid_mask_instance_sequences: self
+                    .solid_mask_instance_sequences
+                    .borrow()
+                    .as_ref()
+                    .clone(),
                 next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
             }
         });
@@ -8744,6 +8776,14 @@ impl EffectHostContext {
                 master_order,
             }
         });
+        CallbackScratch {
+            dormant_scopes: mem::take(&mut self.dormant_scopes),
+            nested_objects: mem::take(&mut self.nested_objects),
+            nested_order: mem::take(&mut self.nested_order),
+            session_local_cells: mem::take(&mut self.session_local_cells),
+            foreign_local_cells: mem::take(&mut self.foreign_local_cells),
+        }
+        .recycle();
         outcome
     }
 }
