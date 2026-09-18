@@ -1,7 +1,10 @@
 use super::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+mod buffers;
 mod callback;
+mod snapshot;
+use snapshot::CallbackSnapshot;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
@@ -2312,11 +2315,11 @@ pub struct HostWorldContext {
     scenario_values: Rc<ScenarioValueStore>,
     /// Scenario-section group names available to `LoadScenarioSection`,
     /// normalized to ASCII lowercase like C++'s `SEqualNoCase` lookup.
-    scenario_sections: Rc<HashSet<String>>,
+    scenario_sections: CallbackSnapshot<HashSet<String>>,
     /// Prepared target landscape extents keyed like `scenario_sections`.
     /// `LoadScenarioSection` is synchronous in C++, so later host calls in
     /// the same VM invocation must already read the target dimensions.
-    scenario_section_landscape_extents: Rc<HashMap<String, Option<(i32, i32)>>>,
+    scenario_section_landscape_extents: CallbackSnapshot<HashMap<String, Option<(i32, i32)>>>,
     scenario_section_landscape_extent: Option<(i32, i32)>,
     /// Whether the engine is already inside a section switch, i.e. whether
     /// this callback is one native would have dispatched from within
@@ -2343,7 +2346,7 @@ pub struct HostWorldContext {
     pub(crate) solid_mask_bakes: Rc<Vec<(ObjectId, crate::SolidMaskBake)>>,
     /// Live C4SolidMask instance ages, including eligible off-landscape
     /// masks that have no raster bake.
-    pub(crate) solid_mask_instance_sequences: Rc<RefCell<HashMap<ObjectId, u64>>>,
+    pub(crate) solid_mask_instance_sequences: Rc<RefCell<Rc<HashMap<ObjectId, u64>>>>,
     /// First unused instance age at callback entry.
     pub(crate) next_solid_mask_instance_sequence: Rc<Cell<u64>>,
     /// Definitions whose default graphics carry a ColorByOwner surface.
@@ -2382,24 +2385,24 @@ pub struct HostWorldContext {
     pathfinder_transfer_zones_enabled: bool,
     /// Shared process-presentation sink for the global Game.PathFinder graph.
     pub(crate) pathfinder_debug: Rc<RefCell<PathfinderDebugSnapshot>>,
-    /// Callback-local player snapshots. Engine contexts seed only the live
-    /// numeric IDs; each state is projected from the paused engine on first
-    /// access and then shared by every clone of this context.
-    player_states: Rc<HashMap<i32, OnceCell<PlayerState>>>,
+    /// Callback-local player snapshots. Both the live ID table and each
+    /// player's state are projected on first access. An initialized table
+    /// shares its backing when this context is cloned.
+    player_states: CallbackSnapshot<HashMap<i32, OnceCell<PlayerState>>>,
     /// Runtime-only `C4Player::FoWViewObjs` membership. PlayerState omits
     /// this list, but AssignDeath needs it before Death is called to decide
     /// whether a dead living object retains its view range.
-    player_fow_view_objects: Rc<HashMap<i32, HashSet<ObjectId>>>,
+    player_fow_view_objects: CallbackSnapshot<HashMap<i32, HashSet<ObjectId>>>,
     /// Process-local display names for configured keyboard/gamepad controls,
     /// keyed by the player's effective control-set number.
     control_key_names: Rc<HashMap<i32, Vec<crate::ControlKeyName>>>,
     /// IDs present in `Game.PlayerInfos`, including retained infos whose
     /// runtime C4Player has already retired. ID zero is the global-results
     /// sentinel and is never stored here.
-    player_info_ids: Rc<HashSet<i32>>,
-    player_order: Rc<Vec<i32>>,
+    player_info_ids: CallbackSnapshot<HashSet<i32>>,
+    player_order: CallbackSnapshot<Vec<i32>>,
     teams: Rc<Vec<TeamInfo>>,
-    pub(crate) local_players: Rc<HashSet<i32>>,
+    pub(crate) local_players: CallbackSnapshot<HashSet<i32>>,
     /// Ordered targets of this process's physical graphics viewports,
     /// including OWNER_NONE observer slots. C4Player's logical view state
     /// exists for remote players as well.
@@ -2443,7 +2446,7 @@ pub struct HostWorldContext {
     player_info_league_progress_data: Rc<BTreeMap<i32, Option<Vec<u8>>>>,
     /// Sparse C4PlayerInfo::iLeagueScore overrides keyed by player-info ID.
     /// Known infos absent from this map retain the native default score zero.
-    pub(crate) player_info_league_scores: Rc<BTreeMap<i32, i32>>,
+    pub(crate) player_info_league_scores: CallbackSnapshot<BTreeMap<i32, i32>>,
     /// Complete live `Game.Teams` configuration. Empty team lists cannot be
     /// used to infer these flags because present-empty and missing Teams.txt
     /// take different C++ paths.
@@ -2609,10 +2612,7 @@ pub(crate) struct HostRasterPreview {
 impl Default for HostWorldContext {
     fn default() -> Self {
         Self {
-            object_store: RefCell::new(Rc::new(HostWorldObjectStore {
-                complete: true,
-                ..HostWorldObjectStore::default()
-            })),
+            object_store: RefCell::new(Rc::new(HostWorldObjectStore::reusable(true))),
             effect_spawn_previews: Rc::new(RefCell::new(Vec::new())),
             lazy_world: None,
             pending_instance_tokens: Rc::new(RefCell::new(HashMap::new())),
@@ -2622,8 +2622,8 @@ impl Default for HostWorldContext {
             global_effects: None,
             landscape: OnceCell::new(),
             scenario_values: Rc::new(ScenarioValueStore::default()),
-            scenario_sections: Rc::new(HashSet::new()),
-            scenario_section_landscape_extents: Rc::new(HashMap::new()),
+            scenario_sections: CallbackSnapshot::new(HashSet::new()),
+            scenario_section_landscape_extents: CallbackSnapshot::new(HashMap::new()),
             scenario_section_landscape_extent: None,
             scenario_section_switch_in_flight: false,
             suspended_script_registrations: None,
@@ -2631,7 +2631,7 @@ impl Default for HostWorldContext {
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
             solid_mask_bakes: Rc::new(Vec::new()),
-            solid_mask_instance_sequences: Rc::new(RefCell::new(HashMap::new())),
+            solid_mask_instance_sequences: Rc::new(RefCell::new(Rc::new(HashMap::new()))),
             next_solid_mask_instance_sequence: Rc::new(Cell::new(1)),
             color_by_owner_definitions: Rc::new(HashSet::new()),
             base_auto_sell_definitions: Rc::new(HashSet::new()),
@@ -2648,13 +2648,13 @@ impl Default for HostWorldContext {
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
             pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
-            player_states: Rc::new(HashMap::new()),
-            player_fow_view_objects: Rc::new(HashMap::new()),
+            player_states: CallbackSnapshot::new(HashMap::new()),
+            player_fow_view_objects: CallbackSnapshot::new(HashMap::new()),
             control_key_names: Rc::new(HashMap::new()),
-            player_info_ids: Rc::new(HashSet::new()),
-            player_order: Rc::new(Vec::new()),
+            player_info_ids: CallbackSnapshot::new(HashSet::new()),
+            player_order: CallbackSnapshot::new(Vec::new()),
             teams: Rc::new(Vec::new()),
-            local_players: Rc::new(HashSet::new()),
+            local_players: CallbackSnapshot::new(HashSet::new()),
             physical_viewport_players: Rc::new(RefCell::new(Vec::new())),
             active_message_board_input: None,
             crew_selection: Rc::new(HashMap::new()),
@@ -2665,7 +2665,7 @@ impl Default for HostWorldContext {
             game_tick_delay_revision: Rc::new(Cell::new(0)),
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
-            player_info_league_scores: Rc::new(BTreeMap::new()),
+            player_info_league_scores: CallbackSnapshot::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             network_control_mode: false,
@@ -2742,7 +2742,7 @@ impl HostWorldContext {
             self.landscape = OnceCell::new();
         }
         if provider.player.is_some() {
-            self.player_states = Rc::new(
+            self.player_states = CallbackSnapshot::new(
                 self.player_order
                     .iter()
                     .copied()
@@ -3068,8 +3068,8 @@ impl HostWorldContext {
             global_effects: None,
             landscape: OnceCell::from(landscape.map(Arc::new)),
             scenario_values,
-            scenario_sections: Rc::new(HashSet::new()),
-            scenario_section_landscape_extents: Rc::new(HashMap::new()),
+            scenario_sections: CallbackSnapshot::new(HashSet::new()),
+            scenario_section_landscape_extents: CallbackSnapshot::new(HashMap::new()),
             scenario_section_landscape_extent: None,
             scenario_section_switch_in_flight: false,
             suspended_script_registrations: None,
@@ -3077,7 +3077,7 @@ impl HostWorldContext {
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
             solid_mask_bakes: Rc::new(Vec::new()),
-            solid_mask_instance_sequences: Rc::new(RefCell::new(HashMap::new())),
+            solid_mask_instance_sequences: Rc::new(RefCell::new(Rc::new(HashMap::new()))),
             next_solid_mask_instance_sequence: Rc::new(Cell::new(1)),
             color_by_owner_definitions: definition_tables.map_or_else(
                 || Rc::new(HashSet::new()),
@@ -3115,18 +3115,18 @@ impl HostWorldContext {
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
             pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
-            local_players: Rc::new(player_ids.iter().copied().collect()),
+            local_players: CallbackSnapshot::new(player_ids.iter().copied().collect()),
             physical_viewport_players: Rc::new(RefCell::new(Vec::new())),
             active_message_board_input: None,
-            player_order: Rc::new(player_ids),
-            player_info_ids: Rc::new(player_info_ids),
-            player_states: Rc::new(
+            player_order: CallbackSnapshot::new(player_ids),
+            player_info_ids: CallbackSnapshot::new(player_info_ids),
+            player_states: CallbackSnapshot::new(
                 players
                     .into_iter()
                     .map(|(id, state)| (id, OnceCell::from(state)))
                     .collect(),
             ),
-            player_fow_view_objects: Rc::new(HashMap::new()),
+            player_fow_view_objects: CallbackSnapshot::new(HashMap::new()),
             control_key_names: Rc::new(HashMap::new()),
             teams: Rc::new(Vec::new()),
             crew_selection: Rc::new(crew_selection),
@@ -3142,7 +3142,7 @@ impl HostWorldContext {
             game_tick_delay_revision: Rc::new(Cell::new(0)),
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
-            player_info_league_scores: Rc::new(BTreeMap::new()),
+            player_info_league_scores: CallbackSnapshot::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             network_control_mode: false,
@@ -3227,7 +3227,7 @@ impl HostWorldContext {
         I: IntoIterator<Item = (i32, O)>,
         O: IntoIterator<Item = ObjectId>,
     {
-        self.player_fow_view_objects = Rc::new(
+        self.player_fow_view_objects = CallbackSnapshot::new(
             players
                 .into_iter()
                 .map(|(player, objects)| (player, objects.into_iter().collect()))
@@ -3243,7 +3243,7 @@ impl HostWorldContext {
     }
 
     pub(crate) fn remove_player_fow_view_object(&mut self, player: i32, object: ObjectId) {
-        if let Some(objects) = Rc::make_mut(&mut self.player_fow_view_objects).get_mut(&player) {
+        if let Some(objects) = self.player_fow_view_objects.make_mut().get_mut(&player) {
             objects.remove(&object);
         }
     }
@@ -3262,7 +3262,7 @@ impl HostWorldContext {
         } else {
             self.player_order.as_ref().clone()
         };
-        let memberships = Rc::make_mut(&mut self.player_fow_view_objects);
+        let memberships = self.player_fow_view_objects.make_mut();
         for player in player_ids {
             let objects = memberships.entry(player).or_default();
             objects.remove(&object);
@@ -3286,7 +3286,7 @@ impl HostWorldContext {
         } else {
             self.player_order.as_ref().clone()
         };
-        let memberships = Rc::make_mut(&mut self.player_fow_view_objects);
+        let memberships = self.player_fow_view_objects.make_mut();
         for player in old_player_ids {
             if let Some(objects) = memberships.get_mut(&player) {
                 objects.remove(&object);
@@ -3337,7 +3337,7 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = i32>,
     {
-        self.local_players = Rc::new(players.into_iter().collect());
+        self.local_players = CallbackSnapshot::new(players.into_iter().collect());
         self
     }
 
@@ -3365,7 +3365,7 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = i32>,
     {
-        let player_order = Rc::make_mut(&mut self.player_order);
+        let player_order = self.player_order.make_mut();
         player_order.clear();
         for id in players {
             if self.player_states.contains_key(&id) && !player_order.contains(&id) {
@@ -3390,7 +3390,7 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = i32>,
     {
-        self.player_order = Rc::new(players.into_iter().collect());
+        self.player_order = CallbackSnapshot::new(players.into_iter().collect());
         self
     }
 
@@ -3420,7 +3420,7 @@ impl HostWorldContext {
     {
         let mut known = self.player_info_ids.as_ref().clone();
         known.extend(ids.into_iter().filter(|id| *id != 0));
-        self.player_info_ids = Rc::new(known);
+        self.player_info_ids = CallbackSnapshot::new(known);
         self
     }
 
@@ -3435,7 +3435,7 @@ impl HostWorldContext {
     ) -> Self {
         let mut known = self.player_info_ids.as_ref().clone();
         known.extend(progress_data.keys().copied().filter(|id| *id != 0));
-        self.player_info_ids = Rc::new(known);
+        self.player_info_ids = CallbackSnapshot::new(known);
         self.league_name = league_name;
         self.player_info_league_progress_data = progress_data;
         self
@@ -3466,8 +3466,8 @@ impl HostWorldContext {
     pub(crate) fn with_league_scores(mut self, scores: Rc<BTreeMap<i32, i32>>) -> Self {
         let mut known = self.player_info_ids.as_ref().clone();
         known.extend(scores.keys().copied().filter(|id| *id > 0));
-        self.player_info_ids = Rc::new(known);
-        self.player_info_league_scores = Rc::new(
+        self.player_info_ids = CallbackSnapshot::new(known);
+        self.player_info_league_scores = CallbackSnapshot::new(
             scores
                 .iter()
                 .filter_map(|(&id, &score)| (id > 0 && score != 0).then_some((id, score)))
@@ -3502,6 +3502,10 @@ impl HostWorldContext {
 
     pub(crate) fn teams(&self) -> &[TeamInfo] {
         self.teams.as_slice()
+    }
+
+    pub(crate) fn shared_teams(&self) -> Rc<Vec<TeamInfo>> {
+        Rc::clone(&self.teams)
     }
 
     pub(crate) fn league_game(&self) -> bool {
@@ -4522,7 +4526,7 @@ impl HostWorldContext {
                 sectors.set_master_order(master_order);
             }
         }
-        self.solid_mask_instance_sequences.borrow_mut().remove(&id);
+        Rc::make_mut(&mut self.solid_mask_instance_sequences.borrow_mut()).remove(&id);
     }
 
     /// Impose storage order before a reader observes `order`.
@@ -5047,7 +5051,7 @@ impl HostWorldContext {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.scenario_sections = Rc::new(
+        self.scenario_sections = CallbackSnapshot::new(
             sections
                 .into_iter()
                 .map(|name| name.as_ref().to_ascii_lowercase())
@@ -5061,7 +5065,7 @@ impl HostWorldContext {
         I: IntoIterator<Item = (S, Option<(i32, i32)>)>,
         S: AsRef<str>,
     {
-        self.scenario_section_landscape_extents = Rc::new(
+        self.scenario_section_landscape_extents = CallbackSnapshot::new(
             sections
                 .into_iter()
                 .map(|(name, extent)| (name.as_ref().to_ascii_lowercase(), extent))
@@ -5191,7 +5195,7 @@ impl HostWorldContext {
         sequences: HashMap<ObjectId, u64>,
         next_sequence: u64,
     ) -> Self {
-        self.solid_mask_instance_sequences = Rc::new(RefCell::new(sequences));
+        self.solid_mask_instance_sequences = Rc::new(RefCell::new(Rc::new(sequences)));
         self.next_solid_mask_instance_sequence = Rc::new(Cell::new(next_sequence));
         self
     }
@@ -5228,8 +5232,7 @@ impl HostWorldContext {
             let previous = remove_host_solid_mask_raster(landscape, bakes, object_id);
             match operation {
                 crate::HostSolidMaskOperation::Remove { .. } => {
-                    self.solid_mask_instance_sequences
-                        .borrow_mut()
+                    Rc::make_mut(&mut self.solid_mask_instance_sequences.borrow_mut())
                         .remove(&object_id);
                 }
                 crate::HostSolidMaskOperation::Put {
@@ -5238,8 +5241,7 @@ impl HostWorldContext {
                     instance_sequence,
                     ..
                 } => {
-                    self.solid_mask_instance_sequences
-                        .borrow_mut()
+                    Rc::make_mut(&mut self.solid_mask_instance_sequences.borrow_mut())
                         .insert(object_id, *instance_sequence);
                     self.next_solid_mask_instance_sequence.set(
                         self.next_solid_mask_instance_sequence.get().max(
@@ -5272,7 +5274,7 @@ impl HostWorldContext {
         }
         self.solid_mask_bakes = Rc::new(preview.solid_mask_bakes);
         self.solid_mask_instance_sequences =
-            Rc::new(RefCell::new(preview.solid_mask_instance_sequences));
+            Rc::new(RefCell::new(Rc::new(preview.solid_mask_instance_sequences)));
         self.next_solid_mask_instance_sequence =
             Rc::new(Cell::new(preview.next_solid_mask_instance_sequence));
     }
@@ -5283,7 +5285,11 @@ impl HostWorldContext {
             inherit_landscape,
             landscape,
             solid_mask_bakes: self.solid_mask_bakes.as_ref().clone(),
-            solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
+            solid_mask_instance_sequences: self
+                .solid_mask_instance_sequences
+                .borrow()
+                .as_ref()
+                .clone(),
             next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
         }
     }
