@@ -93,12 +93,16 @@ pub(crate) fn fair_crew_definition_context() -> Option<(DefinitionId, PhysicalIn
 
 impl WorldAccessor for EffectHostContext {
     fn query_object_position(&self, id: ObjectId) -> Option<Vector2> {
-        // Scope overlays include pending SetPosition/DoCon and nested writes.
-        // Only untouched objects can use the paused engine's scalar view.
-        if self.object_scope(id).is_some() || self.pending_objects.contains_key(&id) {
-            return self.get_world_object(id).map(|object| object.position());
-        }
-        self.world.query_object_position(id)
+        let position = self
+            .pending_objects
+            .get(&id)
+            .map(HostWorldObject::position)
+            .or_else(|| self.world.query_object_position(id))?;
+        Some(
+            self.object_scope(id)
+                .map(ObjectScopeContext::effective_position)
+                .unwrap_or(position),
+        )
     }
 
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
@@ -4362,7 +4366,7 @@ impl EffectHostContext {
                 if let Some(raw) = spawn.solid_mask.or(metadata.default_mask) {
                     if let Some(checked) = metadata.check_mask_rect(raw, None) {
                         if spawn.solid_mask.is_some() || checked != raw {
-                            if let Some(state) = preview.state.as_mut() {
+                            if let Some(state) = preview.full_state_mut() {
                                 Rc::make_mut(state).solid_mask_override = Some(checked);
                             }
                         }
@@ -5236,6 +5240,27 @@ impl EffectHostContext {
         self.get_world_object_preserving_contents_link(id, None)
     }
 
+    /// Read one field with the same scope precedence as get_world_object,
+    /// without copying the object's strings, commands, vertices or full state.
+    pub(crate) fn read_object_field<T>(
+        &self,
+        id: ObjectId,
+        read_world: impl FnOnce(&HostWorldObject) -> T,
+        read_scope: impl FnOnce(&ObjectScopeContext) -> T,
+    ) -> Option<T> {
+        if let Some(scope) = self.object_scope(id) {
+            // A scope alone does not establish world membership in legacy
+            // fixture contexts; retain the owned lookup's missing-object rule.
+            return (self.pending_objects.contains_key(&id)
+                || self.world.query_object_position(id).is_some())
+            .then(|| read_scope(scope));
+        }
+        if let Some(object) = self.pending_objects.get(&id) {
+            return Some(read_world(object));
+        }
+        self.world.get_shared(id).as_deref().map(read_world)
+    }
+
     /// Overlay one live object while optionally retaining one raw contents
     /// link whose child has already reached Status=0. AssignRemoval marks the
     /// child dead before `pCont->Contents.Remove(this)`, but registered C++
@@ -5291,17 +5316,19 @@ impl EffectHostContext {
             let construction = scope.construction();
             let own_mass = scope.own_mass();
             object.construction = construction;
-            if let Some(state) = object.state.as_mut() {
-                let state = Rc::make_mut(state);
+            if let Some(state) = object.full_state_mut() {
                 if state.construction != construction || state.own_mass != own_mass {
+                    let state = Rc::make_mut(state);
                     state.construction = construction;
                     state.own_mass = own_mass;
                 }
             }
             object.category = scope.category();
             if let Some(layer) = scope.pending_update.layer {
-                if let Some(state) = object.state.as_mut() {
-                    Rc::make_mut(state).layer = layer;
+                if let Some(state) = object.full_state_mut() {
+                    if state.layer != layer {
+                        Rc::make_mut(state).layer = layer;
+                    }
                 }
             }
             object.selected = scope.selected();
@@ -5313,8 +5340,10 @@ impl EffectHostContext {
             object.owner = scope.owner();
             object.controller = Some(scope.controller());
             if let Some(base) = scope.pending_update.base {
-                if let Some(state) = object.state.as_mut() {
-                    Rc::make_mut(state).base = base;
+                if let Some(state) = object.full_state_mut() {
+                    if state.base != base {
+                        Rc::make_mut(state).base = base;
+                    }
                 }
             }
             // Keep the whole-pixel mirror coherent for integer-velocity
@@ -6377,7 +6406,7 @@ impl EffectHostContext {
             }
         }
         for object in self.pending_objects.values_mut() {
-            if let Some(state) = object.state.as_mut() {
+            if let Some(state) = object.full_state_mut() {
                 let state = Rc::make_mut(state);
                 if state.layer == Some(target) {
                     state.layer = None;
@@ -8449,7 +8478,7 @@ impl EffectHostContext {
                     let base = self.pending_objects.get(id)?.clone();
                     let mut final_object = self.get_world_object(*id)?;
                     let scope = self.object_scope(*id)?;
-                    if let Some(state) = final_object.state.as_mut() {
+                    if let Some(state) = final_object.full_state_mut() {
                         let state = Rc::make_mut(state);
                         let mut delta = crate::ObjectDelta::default();
                         delta.merge_update(scope.pending_update.clone());
@@ -10582,6 +10611,10 @@ impl ObjectScopeContext {
         self.current_action_phase
     }
 
+    pub(crate) fn current_action_phase(&self) -> i32 {
+        self.current_action_phase
+    }
+
     pub(crate) fn set_action_phase(&mut self, phase: i32) {
         if self.current_action_phase == phase {
             if let Some(existing) = self
@@ -10661,6 +10694,10 @@ impl ObjectScopeContext {
 
     pub(crate) fn damage(&self) -> i32 {
         self.pending_update.damage.unwrap_or(self.current_damage)
+    }
+
+    pub(crate) fn current_damage(&self) -> i32 {
+        self.current_damage
     }
 
     fn set_damage(&mut self, damage: i32) {

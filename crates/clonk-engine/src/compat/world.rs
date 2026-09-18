@@ -6,6 +6,24 @@ mod callback;
 mod snapshot;
 use snapshot::CallbackSnapshot;
 
+/// Shared by callback-local views until one needs the full script state.
+#[derive(Debug)]
+struct DeferredObjectState {
+    source: *const crate::Object,
+    value: OnceCell<Rc<ObjectState>>,
+    controller: i32,
+}
+
+impl DeferredObjectState {
+    fn get(&self) -> &Rc<ObjectState> {
+        self.value.get_or_init(|| {
+            // SAFETY: with_deferred_state requires the source object to stay
+            // frozen and alive until every callback-local view is dropped.
+            Rc::new(unsafe { &*self.source }.script_state_snapshot())
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
     pub id: ObjectId,
@@ -87,7 +105,8 @@ pub(crate) struct HostWorldObject {
     /// Full object-state snapshot for nested script calls (Find_Func,
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
-    pub(crate) state: Option<Rc<ObjectState>>,
+    state: Option<Rc<ObjectState>>,
+    deferred_state: Option<Rc<DeferredObjectState>>,
     /// C4Object::Mass as loaded by Objects.txt. It is a cache, not a derived
     /// getter; keep it beside the full state because ObjectState does not
     /// serialize this object-wrapper field.
@@ -1398,6 +1417,7 @@ impl HostWorldObject {
             commands: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
             state: None,
+            deferred_state: None,
             compiled_mass: None,
             material_contents: Vec::new(),
             last_energy_loss_cause: OWNER_NONE,
@@ -1486,6 +1506,22 @@ impl HostWorldObject {
 
     pub(crate) fn with_full_state(mut self, state: Rc<ObjectState>) -> Self {
         self.state = Some(state);
+        self.deferred_state = None;
+        self
+    }
+
+    /// # Safety
+    /// The source must remain alive, at the same address and unmodified until
+    /// this view and all its clones are dropped. Only the paused engine's
+    /// foreign objects qualify; active and pending objects need owned snapshots.
+    pub(crate) unsafe fn with_deferred_state(mut self, source: *const crate::Object) -> Self {
+        self.state = None;
+        self.deferred_state = Some(Rc::new(DeferredObjectState {
+            source,
+            value: OnceCell::new(),
+            // SAFETY: the constructor requires a live, frozen source object.
+            controller: unsafe { &*source }.state.controller,
+        }));
         self
     }
 
@@ -1512,7 +1548,16 @@ impl HostWorldObject {
     /// The full state snapshot, when the context was built by the engine
     /// (`Engine::host_world_context`). See the `state` field docs.
     pub(crate) fn full_state(&self) -> Option<&Rc<ObjectState>> {
-        self.state.as_ref()
+        self.state
+            .as_ref()
+            .or_else(|| self.deferred_state.as_ref().map(|state| state.get()))
+    }
+
+    pub(crate) fn full_state_mut(&mut self) -> Option<&mut Rc<ObjectState>> {
+        if let Some(deferred) = self.deferred_state.take() {
+            self.state = Some(Rc::clone(deferred.get()));
+        }
+        self.state.as_mut()
     }
 
     pub fn alive(&self) -> bool {
@@ -1559,6 +1604,7 @@ impl HostWorldObject {
             self.state
                 .as_ref()
                 .map(|state| state.controller)
+                .or_else(|| self.deferred_state.as_ref().map(|state| state.controller))
                 .unwrap_or(self.owner)
         })
     }
@@ -4365,7 +4411,7 @@ impl HostWorldContext {
         if let Some(material_contents) = update.material_contents.as_ref() {
             object.material_contents = material_contents.clone();
         }
-        if let Some(state) = object.state.as_mut() {
+        if let Some(state) = object.full_state_mut() {
             let state = Rc::make_mut(state);
             if update.change_def.is_some() {
                 state.solid_mask_override = None;
@@ -4448,7 +4494,7 @@ impl HostWorldContext {
             return;
         };
         let object = Rc::make_mut(object);
-        if let Some(state) = object.state.as_mut() {
+        if let Some(state) = object.full_state_mut() {
             Rc::make_mut(state).effects = effects.to_vec();
         }
     }
@@ -4467,7 +4513,7 @@ impl HostWorldContext {
             return;
         };
         let object = Rc::make_mut(object);
-        if let Some(state) = object.state.as_mut() {
+        if let Some(state) = object.full_state_mut() {
             Rc::make_mut(state).local_vars = local_vars.clone();
         }
     }
@@ -4487,7 +4533,7 @@ impl HostWorldContext {
         if let Some(object) = store.objects.get_mut(&container) {
             let object = Rc::make_mut(object);
             object.contents = contents.to_vec();
-            if let Some(state) = object.state.as_mut() {
+            if let Some(state) = object.full_state_mut() {
                 Rc::make_mut(state).contents = contents.to_vec();
             }
         }
@@ -4495,7 +4541,7 @@ impl HostWorldContext {
             let Some(child) = store.objects.get_mut(&child) else {
                 continue;
             };
-            if let Some(state) = Rc::make_mut(child).state.as_mut() {
+            if let Some(state) = Rc::make_mut(child).full_state_mut() {
                 Rc::make_mut(state).contents_link_generation = generation;
             }
         }

@@ -423,7 +423,12 @@ impl Engine {
         let index = unsafe { Self::lazy_object_index(engine, objects, id) }?;
         let object = objects.get(index)?;
         let definitions = unsafe { &*std::ptr::addr_of!((*engine).definitions) };
-        Some((index, Self::host_world_object(definitions, object)))
+        // SAFETY: the provider's paused-engine contract also covers every
+        // callback-local clone of this foreign object's deferred state.
+        let view = unsafe {
+            Self::host_world_object_projection(definitions, object).with_deferred_state(object)
+        };
+        Some((index, view))
     }
 
     /// The generation- and identity-checked storage index of `id`, resolved
@@ -569,7 +574,12 @@ impl Engine {
             // SAFETY: skipped indices are the only entries that may be
             // exclusively borrowed by the callback wrapper.
             let object = unsafe { &*objects.as_ptr().add(index) };
-            result.push((index, Self::host_world_object(definitions, object)));
+            // SAFETY: excluded active objects were skipped; the remaining
+            // objects stay frozen for the lifetime of all callback views.
+            let view = unsafe {
+                Self::host_world_object_projection(definitions, object).with_deferred_state(object)
+            };
+            result.push((index, view));
         }
         result
     }
