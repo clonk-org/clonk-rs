@@ -278,4 +278,5 @@ mod tests {
     include!("compat/tests/part_09.rs");
     include!("compat/tests/part_10.rs");
     include!("compat/tests/part_11.rs");
+    include!("compat/tests/object_views.rs");
 }

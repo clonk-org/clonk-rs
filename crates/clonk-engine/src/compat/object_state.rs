@@ -2184,8 +2184,12 @@ pub(crate) fn get_damage(args: &[Value]) -> Result<Value, RuntimeError> {
                     return Ok(Value::Int(object.damage()));
                 }
             }
-            if let Some(other) = context.get_world_object(target) {
-                return Ok(Value::Int(other.damage()));
+            if let Some(value) = context.read_object_field(
+                target,
+                HostWorldObject::damage,
+                ObjectScopeContext::current_damage,
+            ) {
+                return Ok(Value::Int(value));
             }
             return Ok(Value::Nil);
         }
@@ -2928,8 +2932,12 @@ pub(crate) fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
 
-            if let Some(other) = context.get_world_object(target) {
-                return Ok(action_time(other.action_ticks()));
+            if let Some(ticks) =
+                context.read_object_field(target, HostWorldObject::action_ticks, |scope| {
+                    scope.current_action_ticks
+                })
+            {
+                return Ok(action_time(ticks));
             }
 
             return Ok(Value::Nil);
@@ -2960,13 +2968,21 @@ pub(crate) fn get_phase(args: &[Value]) -> Result<Value, RuntimeError> {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
                     object
-                } else if let Some(other) = context.get_world_object(target) {
-                    return Ok(Value::Int(other.action_phase()));
+                } else if let Some(phase) = context.read_object_field(
+                    target,
+                    HostWorldObject::action_phase,
+                    ObjectScopeContext::current_action_phase,
+                ) {
+                    return Ok(Value::Int(phase));
                 } else {
                     return Ok(Value::Nil);
                 }
-            } else if let Some(other) = context.get_world_object(target) {
-                return Ok(Value::Int(other.action_phase()));
+            } else if let Some(phase) = context.read_object_field(
+                target,
+                HostWorldObject::action_phase,
+                ObjectScopeContext::current_action_phase,
+            ) {
+                return Ok(Value::Int(phase));
             } else {
                 return Ok(Value::Nil);
             }
@@ -4560,8 +4576,12 @@ pub(crate) fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
             // Riding() PhaseCall does SetDir(GetDir(GetActionTarget()))
             // on the ridden vehicle — a Nil here flipped riders Left.
             return Ok(context
-                .get_world_object(target)
-                .map(|other| Value::Int(other.direction))
+                .read_object_field(
+                    target,
+                    |object| object.direction,
+                    |scope| scope.current_direction.to_script_value(),
+                )
+                .map(Value::Int)
                 .unwrap_or(Value::Nil));
         }
 
@@ -4777,8 +4797,7 @@ fn get_position_component(
                 }
             }
 
-            if let Some(other) = context.get_world_object(target) {
-                let position = other.position();
+            if let Some(position) = context.query_object_position(target) {
                 return Ok(Value::Int(component.extract(position)));
             }
 
@@ -4795,11 +4814,7 @@ fn get_position_component(
         let position = context
             .object_scope(target)
             .map(ObjectScopeContext::effective_position)
-            .or_else(|| {
-                context
-                    .get_world_object(target)
-                    .map(|object| object.position())
-            });
+            .or_else(|| context.query_object_position(target));
         Ok(position
             .map(|position| Value::Int(component.extract(position)))
             .unwrap_or(Value::Nil))
@@ -4829,7 +4844,7 @@ pub(crate) fn object_distance(args: &[Value]) -> Result<Value, RuntimeError> {
                     return Some(object.effective_position());
                 }
             }
-            context.get_world_object(id).map(|object| object.position())
+            context.query_object_position(id)
         };
 
         let anchor_position = if let Some(id) = reference_id {
@@ -4947,8 +4962,12 @@ fn get_velocity_component(
                 }
             }
 
-            if let Some(other) = context.get_world_object(target) {
-                return Ok(fetch_velocity(other.fixed_velocity()));
+            if let Some(velocity) = context.read_object_field(
+                target,
+                HostWorldObject::fixed_velocity,
+                ObjectScopeContext::fixed_velocity,
+            ) {
+                return Ok(fetch_velocity(velocity));
             }
 
             return Ok(Value::Nil);
@@ -6837,8 +6856,10 @@ pub(crate) fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
                     return Ok(Value::Int(object.owner()));
                 }
             }
-            if let Some(other) = context.get_world_object(target) {
-                return Ok(Value::Int(other.owner()));
+            if let Some(value) =
+                context.read_object_field(target, HostWorldObject::owner, ObjectScopeContext::owner)
+            {
+                return Ok(Value::Int(value));
             }
             return Ok(Value::Int(OWNER_NONE));
         }
@@ -6874,8 +6895,12 @@ pub(crate) fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
                     return Ok(Value::Int(object.controller()));
                 }
             }
-            if let Some(other) = context.get_world_object(target) {
-                return Ok(Value::Int(other.controller()));
+            if let Some(value) = context.read_object_field(
+                target,
+                HostWorldObject::controller,
+                ObjectScopeContext::controller,
+            ) {
+                return Ok(Value::Int(value));
             }
             return Ok(Value::Int(OWNER_NONE));
         }

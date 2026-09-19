@@ -5440,7 +5440,7 @@ impl CreateObjectContinuation {
                         scope.set_controller(controller);
                     }
                     if let Some(preview) = context.pending_objects.get_mut(&self.target) {
-                        if let Some(state) = preview.state.as_mut() {
+                        if let Some(state) = preview.full_state_mut() {
                             Rc::make_mut(state).controller = controller;
                         }
                     }
