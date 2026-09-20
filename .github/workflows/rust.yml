@@ -23,6 +23,12 @@ on:
         required: false
         type: boolean
         default: false
+      device_loss_platform:
+        description: Platform to qualify when device_loss is selected
+        required: false
+        type: choice
+        default: all
+        options: [all, linux, windows, macos]
 
 permissions:
   contents: read
@@ -37,6 +43,7 @@ jobs:
     uses: ./.github/workflows/device-loss-qualification.yml
     with:
       source-sha: ${{ github.sha }}
+      platforms: ${{ inputs.device_loss_platform == 'all' && '["linux", "windows", "macos"]' || format('["{0}"]', inputs.device_loss_platform) }}
 
   # Swatinem saves in a post-job hook and reports cache-service failures
   # without failing its producer. A cache-only bootstrap therefore proves both

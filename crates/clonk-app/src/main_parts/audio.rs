@@ -801,9 +801,9 @@ pub(crate) fn retained_gpu_device_loss_error(detail: String) -> anyhow::Error {
 /// Prefer the renderer's device-health diagnosis when presentation fails.
 ///
 /// Pixels can reject surface acquisition before invoking our render callback.
-/// If wgpu dispatched the device-loss callback first, that recorded diagnosis
-/// is more specific than Pixels' generic presentation error and must remain in
-/// the error chain so the event loop rebuilds the device.
+/// Callers poll pending device callbacks before taking this health snapshot.
+/// A recorded loss is more specific than the generic presentation error and
+/// must remain in the error chain so the event loop rebuilds the device.
 pub(crate) fn retained_gpu_presentation_error(
     presentation_error: anyhow::Error,
     renderer_health: std::result::Result<(), gpu_renderer::GpuRendererError>,
@@ -1318,11 +1318,11 @@ pub(crate) fn present_retained_gpu_frame_profiled(
         Ok(Err(error)) => {
             return Err(retained_gpu_presentation_error(
                 anyhow::Error::new(error).context("failed to submit retained GPU frame"),
-                renderer.check_health(),
+                renderer.poll_health(pixels.device()),
             ));
         }
         Err(payload) => {
-            let renderer_health = renderer.check_health();
+            let renderer_health = renderer.poll_health(pixels.device());
             if let Some(detail) = wgpu_device_loss_panic_detail(payload.as_ref()) {
                 return Err(retained_gpu_presentation_error(
                     retained_gpu_device_loss_error(detail),

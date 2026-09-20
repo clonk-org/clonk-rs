@@ -149,7 +149,11 @@ event-loop callback:
 
 Every surface owner drops the old configured `WindowSurface` before building a
 replacement. Device-loss notification takes precedence over a generic
-validation error or a narrowly recognized submission/readback panic. After a
+validation error or a narrowly recognized submission/readback panic. A failed
+presentation polls pending device callbacks before checking renderer health:
+wgpu defers its `Destroyed` callback until queue maintenance, and surface
+acquisition can fail before that happens. An unrelated validation error remains
+fatal when polling reports no device loss. After a
 replacement device is created, `RetainedGpuRenderer::recreate` advances the
 generation and the next self-contained scene repopulates device resources.
 Repeated loss while no frame can present follows the normal graphics cadence

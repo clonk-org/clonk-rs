@@ -7,11 +7,27 @@ import json
 import os
 import platform
 from pathlib import Path
+import shutil
 import subprocess
 
 import run_software_presentation_smoke as presentation
 
 REPOSITORY = Path(__file__).resolve().parent.parent
+
+
+def prepare_fixture(artifacts: Path) -> Path:
+    # A fresh user directory opens the new-player name editor, whose caret
+    # blinks. Use the real packed profile fixture to keep the reference static.
+    players = artifacts / "players"
+    players.mkdir(parents=True, exist_ok=True)
+    player = players / "Probe.c4p"
+    shutil.copyfile(REPOSITORY / "crates/clonk-engine/tests/fixtures/embedded_player.c4p", player)
+    config = artifacts / "Clonk.ini"
+    config.write_text(
+        f"[General]\nPlayerPath={players}\nParticipants={player}\n\n{presentation.SMOKE_CONFIG}",
+        encoding="utf-8",
+    )
+    return config
 
 
 def source_identity() -> dict:
@@ -99,8 +115,7 @@ def main(argv=None) -> int:
         raise SystemExit("release qualification requires committed source inputs")
     binary = presentation.build_binary(arguments.release)
     binary_sha256 = presentation.file_digest(binary)
-    config = artifacts / "Clonk.ini"
-    config.write_text(presentation.SMOKE_CONFIG, encoding="utf-8")
+    config = prepare_fixture(artifacts)
     environment = {
         key: value for key, value in os.environ.items()
         if not key.startswith(("LC_", "WGPU_"))
@@ -145,7 +160,7 @@ def main(argv=None) -> int:
         "rustc": subprocess.check_output(["rustc", "-vV"], cwd=REPOSITORY, text=True),
         "binary_sha256": binary_sha256,
         "artifacts": {name: presentation.file_digest(artifacts / name) for name in (
-            "report.json", "report.before.png", "report.after.png", "run.log",
+            "report.json", "report.before.png", "report.after.png", "run.log", "players/Probe.c4p",
         )},
     }
     (artifacts / "qualification.json").write_text(

@@ -3329,6 +3329,15 @@ impl RetainedGpuRenderer {
         }
     }
 
+    /// Dispatch pending loss callbacks before diagnosing a failed presentation.
+    /// Surface acquisition can fail before wgpu maintains the device queue.
+    pub fn poll_health(&self, device: &wgpu::Device) -> Result<(), GpuRendererError> {
+        if let Err(error) = device.poll(wgpu::PollType::Poll) {
+            tracing::warn!(?error, "failed to dispatch pending retained GPU callbacks");
+        }
+        self.check_health()
+    }
+
     /// Validate a scene as a self-contained recovery unit before touching GPU
     /// state. In particular, command resources must be declared in this scene,
     /// even if an earlier frame left a texture with the same id in the cache.
@@ -10170,6 +10179,25 @@ mod tests {
                 reason: RetainedGpuRecreateReason::DeviceLost,
                 ref detail,
             } if detail == "Destroyed"
+        ));
+    }
+
+    #[test]
+    fn failed_presentation_health_dispatches_a_deferred_device_loss() {
+        gpu_or_skip!(device, queue, "deferred retained device-loss callback");
+        let renderer = test_renderer(&device, &queue);
+        queue.submit([]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("drain pre-loss work");
+        device.destroy();
+
+        assert!(matches!(
+            renderer.poll_health(&device),
+            Err(GpuRendererError::DeviceRecreationRequired {
+                reason: RetainedGpuRecreateReason::DeviceLost,
+                ref detail,
+            }) if detail == "Destroyed"
         ));
     }
 

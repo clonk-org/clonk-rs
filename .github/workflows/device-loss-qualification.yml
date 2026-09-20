@@ -7,6 +7,10 @@ on:
         description: Exact source revision to qualify
         type: string
         required: true
+      platforms:
+        description: JSON platform list; releases qualify every desktop platform
+        type: string
+        default: '["linux", "windows", "macos"]'
 
 permissions:
   contents: read
@@ -17,8 +21,8 @@ env:
 
 jobs:
   recover:
-    name: Device loss / ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    name: Device loss / ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform == 'linux' && 'ubuntu-24.04' || matrix.platform == 'windows' && 'windows-latest' || 'macos-latest' }}
     timeout-minutes: 45
     defaults:
       run:
@@ -26,16 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux Vulkan and GL
-            runner: ubuntu-24.04
-            backends: vulkan gl
-          - name: Windows DX12
-            runner: windows-latest
-            backends: dx12
-          - name: macOS Metal
-            runner: macos-latest
-            backends: metal
+        platform: ${{ fromJSON(inputs.platforms) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,7 +43,7 @@ jobs:
       - name: Install Linux window and graphics dependencies
         if: runner.os == 'Linux'
         timeout-minutes: 10
-        run: scripts/install-apt-packages.sh libasound2-dev libudev-dev mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dri xvfb xauth
+        run: scripts/install-apt-packages.sh libasound2-dev libudev-dev mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dri libxkbcommon-x11-0 xvfb xauth
 
       - name: Configure the shipped MSVC runtime
         if: runner.os == 'Windows'
@@ -69,7 +64,7 @@ jobs:
 
       - name: Qualify every requested backend
         env:
-          PROBE_BACKENDS: ${{ matrix.backends }}
+          PROBE_BACKENDS: ${{ matrix.platform == 'linux' && 'vulkan gl' || matrix.platform == 'windows' && 'dx12' || 'metal' }}
         run: |
           python -m venv "$RUNNER_TEMP/device-loss-venv"
           if [[ "$RUNNER_OS" == Windows ]]; then

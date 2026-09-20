@@ -2,8 +2,10 @@
 
 `scripts/run_device_loss_probe.py` exercises device destruction and recovery
 inside the shipped application's window event loop. It leaves the startup
-screen idle, waits for 30 retained presentations, captures the last presented
-composition, then calls `wgpu::Device::destroy`. This is a backend-authoritative
+screen idle with an isolated copy of the real player-profile fixture (avoiding
+the first-start name editor and its blinking caret), waits for 30 retained
+presentations, captures the last presented composition, then calls
+`wgpu::Device::destroy`. This is a backend-authoritative
 injection, not an operating-system driver reset or a synthetic surface error.
 
 ```sh
