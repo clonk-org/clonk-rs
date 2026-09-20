@@ -201,33 +201,49 @@
       "id": "startup-options-scale-initial-reference",
       "area": "startup",
       "description": "Real scale confirmation at 12 seconds, composited over the shared four-band backdrop fixture.",
-      "status": "pending",
+      "status": "captured",
       "comparison": "pixel",
-      "resolution": "1280x720"
+      "resolution": "1280x720",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-scale-initial-reference.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-scale-initial-reference.png"
+      }
     },
     {
       "id": "startup-options-scale-decremented-reference",
       "area": "startup",
       "description": "Real scale confirmation at 11 seconds, composited over the shared four-band backdrop fixture.",
-      "status": "pending",
+      "status": "captured",
       "comparison": "pixel",
-      "resolution": "1280x720"
+      "resolution": "1280x720",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-scale-decremented-reference.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-scale-decremented-reference.png"
+      }
     },
     {
       "id": "startup-options-scale-initial-minimum",
       "area": "startup",
       "description": "Real scale confirmation at 12 seconds, composited over the shared four-band backdrop fixture.",
-      "status": "pending",
+      "status": "captured",
       "comparison": "pixel",
-      "resolution": "640x480"
+      "resolution": "640x480",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-scale-initial-minimum.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-scale-initial-minimum.png"
+      }
     },
     {
       "id": "startup-options-scale-decremented-minimum",
       "area": "startup",
       "description": "Real scale confirmation at 11 seconds, composited over the shared four-band backdrop fixture.",
-      "status": "pending",
+      "status": "captured",
       "comparison": "pixel",
-      "resolution": "640x480"
+      "resolution": "640x480",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-scale-decremented-minimum.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-scale-decremented-minimum.png"
+      }
     }
   ],
   "masks": [],
