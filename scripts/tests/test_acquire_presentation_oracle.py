@@ -37,6 +37,10 @@ EXPECTED_CASE_IDS = (
     "object-menu",
     "gameplay",
     "evaluation",
+    "startup-options-scale-initial-reference",
+    "startup-options-scale-decremented-reference",
+    "startup-options-scale-initial-minimum",
+    "startup-options-scale-decremented-minimum",
 )
 EXPECTED_LAYOUT_IDS = frozenset(
     (*EXPECTED_CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
@@ -162,7 +166,10 @@ def png_bytes(
 def write_capture_set(root, *, suffix=b""):
     root.mkdir(parents=True)
     for case_id in EXPECTED_CASE_IDS:
-        (root / f"{case_id}.png").write_bytes(png_bytes() + suffix)
+        (root / f"{case_id}.png").write_bytes(
+            png_bytes(width=640, height=480) + suffix if case_id.endswith("-minimum")
+            else png_bytes() + suffix
+        )
     for case_id in EXPECTED_LAYOUT_IDS:
         (root / f"{case_id}.layout.json").write_text(
             json.dumps(
@@ -464,7 +471,11 @@ def write_v2_candidate(root):
                 artifact_directory.mkdir(parents=True, exist_ok=True)
                 png_relative = f"{run_id}/{engine}/artifacts/{case_id}.png"
                 (root / png_relative).write_bytes(
-                    png_bytes(sample_byte=255 if case_id == "loader" else 0)
+                    png_bytes(
+                        width=640 if case_id.endswith("-minimum") else 1280,
+                        height=480 if case_id.endswith("-minimum") else 720,
+                        sample_byte=255 if case_id == "loader" else 0,
+                    )
                 )
                 artifacts = {"png": artifact_metadata(root, png_relative)}
                 if case_id in EXPECTED_LAYOUT_IDS:
@@ -721,7 +732,7 @@ def write_v2_candidate(root):
                 "path": "compat/presentation/case_specs.json",
                 "sha256": case_specs_sha256,
             },
-            "geometry": {"width": 1280, "height": 720, "scale": 100},
+            "geometry": copy.deepcopy(MODULE.EXPECTED_GEOMETRY),
             "normalization": dict(MODULE.EXPECTED_NORMALIZATION),
             "launcher": {
                 "source_path": "scripts/acquire_presentation_oracle.py",
@@ -836,7 +847,7 @@ def provenance_index(artifact_root):
         "fixture_content_commit": MODULE.FIXTURE_CONTENT_COMMIT,
         **fields,
         "capture_patch_sha256": "8" * 64,
-        "geometry": {"width": 1280, "height": 720, "scale": 100},
+        "geometry": copy.deepcopy(MODULE.EXPECTED_GEOMETRY),
         "normalization": dict(MODULE.EXPECTED_NORMALIZATION),
         "captures": captures,
     }
@@ -1343,13 +1354,27 @@ class PinAndGitTests(unittest.TestCase):
 
 
 class InventoryAndPngTests(unittest.TestCase):
+    def test_modal_capture_dimensions_are_bound_to_the_case(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "modal.png"
+            image.write_bytes(png_bytes(width=640, height=480))
+            for countdown in ("initial", "decremented"):
+                case = f"startup-options-scale-{countdown}-minimum"
+                self.assertEqual(MODULE.validate_png(image, case)["width"], 640)
+            for case in ("startup-options", "startup-options-scale-initial-reference"):
+                with self.assertRaisesRegex(MODULE.AcquisitionFailure, "PNG geometry"):
+                    MODULE.validate_png(image, case)
+            image.write_bytes(png_bytes())
+            with self.assertRaisesRegex(MODULE.AcquisitionFailure, "PNG geometry"):
+                MODULE.validate_png(image, "startup-options-scale-initial-minimum")
+
     def test_repository_contract_holds_accepted_presentation_evidence(self):
         manifest = MODULE.load_json(REPOSITORY / MODULE.CAPTURE_MANIFEST_SOURCE_PATH)
         profile = MODULE.load_json(REPOSITORY / "compat/profile.json")
 
         MODULE._validate_final_presentation_lifecycle(manifest, profile)
 
-    def test_case_inventory_requires_all_thirteen_and_exactly_eleven_layout_cases(self):
+    def test_case_inventory_requires_all_seventeen_and_exactly_eleven_layout_cases(self):
         MODULE.validate_case_inventory(EXPECTED_CASE_IDS, EXPECTED_LAYOUT_IDS)
         for capture_ids, layout_ids in (
             (EXPECTED_CASE_IDS[:-1], EXPECTED_LAYOUT_IDS),
@@ -1437,7 +1462,7 @@ class InventoryAndPngTests(unittest.TestCase):
             write_capture_set(second)
 
             artifacts = MODULE.validate_duplicate_runs(first, second)
-            self.assertEqual(len(artifacts), 24)
+            self.assertEqual(len(artifacts), 28)
 
             (second / "gameplay.png").write_bytes(png_bytes(sample_byte=1))
             with self.assertRaisesRegex(MODULE.AcquisitionFailure, "gameplay.png"):
@@ -2296,9 +2321,13 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             "startup-player-selection": "/startup:plrsel",
             "startup-options": "/startup:options",
             "startup-about": "/startup:about",
+            "startup-options-scale-initial-reference": "/startup:options",
+            "startup-options-scale-decremented-reference": "/startup:options",
+            "startup-options-scale-initial-minimum": "/startup:options",
+            "startup-options-scale-decremented-minimum": "/startup:options",
         }
         self.assertEqual(MODULE.CPP_STARTUP_ARGUMENTS, expected_startup_arguments)
-        self.assertEqual(tuple(MODULE.CPP_STARTUP_ARGUMENTS), EXPECTED_CASE_IDS[:6])
+        self.assertEqual(tuple(MODULE.CPP_STARTUP_ARGUMENTS), (*EXPECTED_CASE_IDS[:6], *EXPECTED_CASE_IDS[13:]))
         with mock.patch.object(MODULE, "_validate_staged_cpp_runtime_resources"):
             for case_id, startup_argument in expected_startup_arguments.items():
                 with self.subTest(case_id=case_id):

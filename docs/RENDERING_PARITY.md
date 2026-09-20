@@ -233,6 +233,25 @@ scales is not visual-parity evidence. The required screen set, the measured
 comparison terms, retained evidence paths and approved masks are machine-readable in
 `compat/presentation_captures.json`.
 
+The scale-confirmation modal also has a 640x480 audit baseline at 100% scale;
+this is a smaller test extent, not an enforced application minimum. Four pixel
+cases retain the initial 12-second text and the first timer update (11 seconds)
+at both sizes. Each invokes the production confirmation constructor above the
+real Options dialog. The minimum cases resize the drawable before constructing
+Options while preserving the canonical config file bytes. Wall-clock second
+callbacks are suspended; the decremented cases invoke exactly one production
+timer callback. Both captures retain Yes as the focused button and no icon,
+matching `C4StartupOptionsDlg.cpp:109-125` and `C4GuiDialogs.h:343`.
+
+These modal cases supply four opaque vertical color bands immediately before
+the production modal draw, with RGB values `(24,72,120)`, `(48,92,40)`,
+`(144,48,32)`, and `(86,86,118)`. The shared backdrop makes the translucent
+dialog's blending and layer order comparable despite the port's different
+Options paper artwork. It is an input fixture, with no pixel masks or
+post-capture normalization. Whole-frame comparison includes the title, wrapped
+countdown, focused buttons, close glyph, and cursor. The existing Options
+layout case continues to cover the real Options background and controls.
+
 ### Audited capture workflow
 
 The evidence gate does not accept manual F9 screenshots. The launcher archives

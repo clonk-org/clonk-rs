@@ -4,13 +4,16 @@
     "resolution": "1280x720",
     "scale": 100,
     "pointer": {
-      "position": [32, 32],
+      "position": [
+        32,
+        32
+      ],
       "button": "none",
       "modifiers": [],
       "help": false,
       "note": "Route this no-button logical position through each engine's production input path immediately before every capture render. The inset keeps the native 50-pixel CursorLarge glyph fully visible and makes ambient host pointer position irrelevant without suppressing product output."
     },
-    "note": "One resolution, scale, and pointer input for every screen: a comparison across different geometry or ambient mouse state proves nothing, and 1280x720 at scale 100 is what docs/RENDERING_PARITY.md's live C++ captures already use."
+    "note": "Default geometry for existing screens. Timed scale confirmations additionally bind a 640x480 audit baseline through their per-screen resolution; it is not an enforced application minimum. All captures use scale 100 and the fixed pointer input."
   },
   "tolerance": {
     "cpu_max_channel_delta": 0,
@@ -193,6 +196,38 @@
       "port_assets": [
         "branding"
       ]
+    },
+    {
+      "id": "startup-options-scale-initial-reference",
+      "area": "startup",
+      "description": "Real scale confirmation at 12 seconds, composited over the shared four-band backdrop fixture.",
+      "status": "pending",
+      "comparison": "pixel",
+      "resolution": "1280x720"
+    },
+    {
+      "id": "startup-options-scale-decremented-reference",
+      "area": "startup",
+      "description": "Real scale confirmation at 11 seconds, composited over the shared four-band backdrop fixture.",
+      "status": "pending",
+      "comparison": "pixel",
+      "resolution": "1280x720"
+    },
+    {
+      "id": "startup-options-scale-initial-minimum",
+      "area": "startup",
+      "description": "Real scale confirmation at 12 seconds, composited over the shared four-band backdrop fixture.",
+      "status": "pending",
+      "comparison": "pixel",
+      "resolution": "640x480"
+    },
+    {
+      "id": "startup-options-scale-decremented-minimum",
+      "area": "startup",
+      "description": "Real scale confirmation at 11 seconds, composited over the shared four-band backdrop fixture.",
+      "status": "pending",
+      "comparison": "pixel",
+      "resolution": "640x480"
     }
   ],
   "masks": [],

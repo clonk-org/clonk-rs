@@ -32,6 +32,9 @@ pub struct CaptureScreen {
     pub description: String,
     /// `pending` until a capture pair exists, then `captured`.
     pub status: String,
+    /// Explicit extent for a case that differs from the default capture geometry.
+    #[serde(default)]
+    pub resolution: Option<String>,
     /// Which term this screen is compared on — `pixel` or `layout`.
     ///
     /// A screen that renders port-authored assets cannot meet a pixel term at
@@ -127,7 +130,7 @@ pub struct CaptureMask {
     pub authority: String,
 }
 
-/// The geometry every capture shares.
+/// Default capture geometry, unless a screen declares its own resolution.
 #[derive(Clone, Debug, Deserialize)]
 pub struct CaptureGeometry {
     pub resolution: String,
@@ -185,7 +188,7 @@ pub fn port_assets() -> &'static [PortAsset] {
     &manifest().port_assets
 }
 
-/// The geometry every capture shares.
+/// Default capture geometry, unless a screen declares its own resolution.
 pub fn geometry() -> &'static CaptureGeometry {
     &manifest().capture
 }
@@ -332,7 +335,7 @@ pub fn compare_capture(
         });
     }
 
-    let expected_geometry = &geometry().resolution;
+    let expected_geometry = terms.resolution.as_ref().unwrap_or(&geometry().resolution);
     let actual_geometry = format!("{width}x{height}");
     if actual_geometry != *expected_geometry {
         return Err(CaptureMismatch::Geometry {
@@ -856,7 +859,7 @@ mod tests {
     fn every_presentation_capture_is_held_by_the_landing_gate() {
         assert_eq!(
             screens().len(),
-            13,
+            17,
             "the promised screen set must stay complete"
         );
         assert!(

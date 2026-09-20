@@ -520,6 +520,27 @@ index b68423c74..5274a79a3 100644
  void GroupBox::DrawElement(C4FacetEx &cgo)
  {
  	// draw background
+diff --git a/src/C4GuiDialogs.cpp b/src/C4GuiDialogs.cpp
+index 576cd1af3..7bbf897a1 100644
+--- a/src/C4GuiDialogs.cpp
++++ b/src/C4GuiDialogs.cpp
+@@ -26,6 +26,7 @@
+ #include <C4FullScreen.h>
+ #include <C4LoaderScreen.h>
+ #include <C4Application.h>
++#include <C4Startup.h>
+ #include <C4Viewport.h>
+ #include <C4Console.h>
+ #include <C4Def.h>
+@@ -522,6 +523,8 @@ void Dialog::Draw(C4FacetEx &cgo)
+ 	// separate window: Clear background
+ 	if (pWindow)
+ 		lpDDraw->DrawBoxDw(cgo.Surface, rcBounds.x, rcBounds.y, rcBounds.Wdt - 1, rcBounds.Hgt - 1, C4GUI_StandardBGColor & 0xffffff);
++	// Capture fixture input, before the unchanged native modal renderer.
++	C4Startup::DrawScaleCaptureBackdrop(this, cgo);
+ 	// draw window + contents (evaluates IsVisible)
+ 	Window::Draw(cgo);
+ 	// reset blit modulation
 diff --git a/src/C4GuiDialogs.h b/src/C4GuiDialogs.h
 index 9e83e51f0..c41cb3ba0 100644
 --- a/src/C4GuiDialogs.h
@@ -1080,10 +1101,10 @@ index f6d50fece..c176860e9 100644
  
  void Randomize3();
 diff --git a/src/C4Startup.cpp b/src/C4Startup.cpp
-index 9542728ef..5ef7978f5 100644
+index 9542728ef..08d532bb6 100644
 --- a/src/C4Startup.cpp
 +++ b/src/C4Startup.cpp
-@@ -26,9 +26,1318 @@
+@@ -26,9 +26,1324 @@
  #include <C4StartupOptionsDlg.h>
  #include <C4StartupAboutDlg.h>
  #include <C4StartupPlrSelDlg.h>
@@ -1141,10 +1162,10 @@ index 9542728ef..5ef7978f5 100644
 +	constexpr std::string_view ObjectsManifestSha256 = "a0030a62c311e29d893dcd4ad178ee162ce8223d4686f6737b4c8f6ca8d23088";
 +	constexpr std::string_view MaterialManifestSha256 = "1fe714cea5c3f824633ba2b3cf98561866f76b1c577ac0ffe8dea741b35bdc90";
 +	constexpr std::string_view CaptureCapabilityMarker =
-+		"CLONK_PRESENTATION_CAPTURE_CAPABILITIES_V1=startup-main,startup-scenario-selection,startup-network-browser,startup-player-selection,startup-options,startup-about,network-lobby,loader,hud,ingame-menu,object-menu,gameplay,evaluation;layout=hud,ingame-menu,object-menu,gameplay,evaluation";
-+	constexpr std::array<std::string_view, 6> StartupCaptureCapabilities{
++		"CLONK_PRESENTATION_CAPTURE_CAPABILITIES_V1=startup-main,startup-scenario-selection,startup-network-browser,startup-player-selection,startup-options,startup-about,network-lobby,loader,hud,ingame-menu,object-menu,gameplay,evaluation,startup-options-scale-initial-reference,startup-options-scale-decremented-reference,startup-options-scale-initial-minimum,startup-options-scale-decremented-minimum;layout=hud,ingame-menu,object-menu,gameplay,evaluation";
++	constexpr std::array<std::string_view, 10> StartupCaptureCapabilities{
 +		"startup-main", "startup-scenario-selection", "startup-network-browser",
-+		"startup-player-selection", "startup-options", "startup-about"};
++		"startup-player-selection", "startup-options", "startup-about", "startup-options-scale-initial-reference", "startup-options-scale-decremented-reference", "startup-options-scale-initial-minimum", "startup-options-scale-decremented-minimum"};
 +	constexpr std::array<std::string_view, 5> RuntimeLayoutCapabilities{
 +		"hud", "ingame-menu", "object-menu", "gameplay", "evaluation"};
 +	constexpr std::array<std::string_view, 6> CaptureEnvironment{
@@ -2195,7 +2216,9 @@ index 9542728ef..5ef7978f5 100644
 +
 +	bool OwnsRuntimeClock()
 +	{
-+		return RuntimeCapture.mode != RuntimeMode::None && RuntimeCapture.spec && RuntimeCapture.spec->stateFrame > 0;
++		const char *captureCase = std::getenv("CLONK_PRESENTATION_CASE");
++		return (captureCase && std::string_view{captureCase}.starts_with("startup-options-scale-")) ||
++			(RuntimeCapture.mode != RuntimeMode::None && RuntimeCapture.spec && RuntimeCapture.spec->stateFrame > 0);
 +	}
 +
 +	uint32_t GuiEditTime(const uint32_t liveTime)
@@ -2267,7 +2290,11 @@ index 9542728ef..5ef7978f5 100644
 +
 +	void BeforeRender()
 +	{
-+		if (RuntimeCapture.mode == RuntimeMode::None) return;
++		if (RuntimeCapture.mode == RuntimeMode::None)
++		{
++			const char *captureCase = std::getenv("CLONK_PRESENTATION_CASE");
++			if (!captureCase || !std::string_view{captureCase}.starts_with("startup-options-scale-")) return;
++		}
 +		Game.GraphicsSystem.MouseMove(C4MC_Button_None, CapturePointerX, CapturePointerY, 0, nullptr);
 +	}
 +
@@ -2402,7 +2429,7 @@ index 9542728ef..5ef7978f5 100644
  
  bool C4StartupGraphics::LoadFile(C4FacetExID &rToFct, const char *szFilename)
  {
-@@ -149,6 +1458,241 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
+@@ -149,6 +1464,271 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
  	pInstance = this;
  }
  
@@ -2443,7 +2470,7 @@ index 9542728ef..5ef7978f5 100644
 +		presentationCaptureDialog = SDID_PlrSel;
 +		expectedStartup = "plrsel";
 +	}
-+	else if (presentationCaptureCase == "startup-options")
++	else if (presentationCaptureCase == "startup-options" || std::string_view{presentationCaptureCase}.starts_with("startup-options-scale-"))
 +	{
 +		presentationCaptureDialog = SDID_Options;
 +		expectedStartup = "options";
@@ -2537,6 +2564,11 @@ index 9542728ef..5ef7978f5 100644
 +		!SEqual(C4Config::GetCharsetCodeName(Config.General.LanguageCharset), "CP1252"))
 +		CaptureFailure("capture config locale must resolve to US / CP1252");
 +
++	if (std::string_view{presentationCaptureCase}.ends_with("-minimum"))
++	{
++		FullScreen.SetSize(640, 480);
++		if (!Application.SetResolution(640, 480)) CaptureFailure("cannot set minimum modal capture extent");
++	}
 +	presentationCaptureStableRenderOrdinal = 0;
 +	fPresentationCaptureEnabled = true;
 +}
@@ -2545,7 +2577,16 @@ index 9542728ef..5ef7978f5 100644
 +{
 +	if (!fPresentationCaptureEnabled) return;
 +	if (!pCurrDlg || !pCurrDlg->IsShown()) CaptureFailure("target startup dialog disappeared before capture");
-+	if (Game.pGUI->GetTopDialog() != pCurrDlg)
++	const bool scaleCapture = std::string_view{presentationCaptureCase}.starts_with("startup-options-scale-");
++	auto *options = scaleCapture ? dynamic_cast<C4StartupOptionsDlg *>(pCurrDlg) : nullptr;
++	if (scaleCapture && !options) CaptureFailure("scale capture requires the real options dialog");
++	if (scaleCapture && !pCurrDlg->IsFading() && Game.pGUI->GetTopDialog() == pCurrDlg)
++	{
++		options->StageScaleConfirmationCapture();
++		presentationCaptureStableRenderOrdinal = 0;
++		return;
++	}
++	if (Game.pGUI->GetTopDialog() != pCurrDlg && (!options || !options->IsScaleConfirmationCapture(Game.pGUI->GetTopDialog())))
 +		CaptureFailure("an unexpected modal obscured the target startup dialog");
 +	if (pCurrDlg->IsFading())
 +	{
@@ -2568,8 +2609,9 @@ index 9542728ef..5ef7978f5 100644
 +	if (presentationCaptureStableRenderOrdinal != 2) CaptureFailure("capture render ordinal advanced past 2");
 +	if (!Application.DDraw || !Application.DDraw->lpBack)
 +		CaptureFailure("composed back buffer is unavailable");
-+	if (Application.DDraw->lpBack->Wdt != CaptureWidth || Application.DDraw->lpBack->Hgt != CaptureHeight || Application.GetScale() != 1.0f)
-+		CaptureFailure("actual composed back-buffer geometry differs from 1280x720 at scale 100");
++	const bool minimum = std::string_view{presentationCaptureCase}.ends_with("-minimum");
++	if (Application.DDraw->lpBack->Wdt != (minimum ? 640 : CaptureWidth) || Application.DDraw->lpBack->Hgt != (minimum ? 480 : CaptureHeight) || Application.GetScale() != 1.0f)
++		CaptureFailure(std::format("actual composed back-buffer geometry {}x{} scale {} differs from modal case extent", Application.DDraw->lpBack->Wdt, Application.DDraw->lpBack->Hgt, Application.GetScale()));
 +	if (RandomHold != CaptureSeed || RandomCount != 0 || SafeRandomSeed != CaptureSeed || SafeRandomCount != 0)
 +		CaptureFailure(std::format("startup RNG contract drift: simulation seed={} calls={}, presentation seed={} calls={}",
 +			RandomHold, RandomCount, SafeRandomSeed, SafeRandomCount));
@@ -2594,7 +2636,9 @@ index 9542728ef..5ef7978f5 100644
 +		else if (auto *dialog = dynamic_cast<C4StartupPlrSelDlg *>(pCurrDlg))
 +			layout = dialog->BuildPresentationLayoutTrace();
 +		else if (auto *dialog = dynamic_cast<C4StartupOptionsDlg *>(pCurrDlg))
-+			layout = dialog->BuildPresentationLayoutTrace();
++		{
++			if (!scaleCapture) layout = dialog->BuildPresentationLayoutTrace();
++		}
 +		else if (auto *dialog = dynamic_cast<C4StartupAboutDlg *>(pCurrDlg))
 +			layout = dialog->BuildPresentationLayoutTrace();
 +		else CaptureFailure(std::format("{} resolved to an unsupported dialog type", presentationCaptureCase));
@@ -2614,26 +2658,39 @@ index 9542728ef..5ef7978f5 100644
 +	if (!Application.DDraw->lpBack->SavePNG(temporaryPng.string().c_str(), false, !Config.Graphics.Shader, false, Application.GetScale()))
 +		CaptureFailure("could not encode the composed pre-pageflip frame as PNG");
 +	PromoteAtomic(temporaryPng, pngPath);
-+	WriteAtomic(layoutPath, layout, presentationCaptureNonce);
++	if (!scaleCapture) WriteAtomic(layoutPath, layout, presentationCaptureNonce);
 +
 +	const std::string artifactPrefix = presentationCaptureRunID + "/cpp/artifacts/";
 +	const FileRecord png = ReadFileRecord(pngPath, artifactPrefix + pngPath.filename().string());
-+	const FileRecord layoutRecord = ReadFileRecord(layoutPath, artifactPrefix + layoutPath.filename().string());
++	const std::string artifacts = "\"png\":" + FileRecordJson(png) + (scaleCapture ? "" :
++		",\"layout\":" + FileRecordJson(ReadFileRecord(layoutPath, artifactPrefix + layoutPath.filename().string())));
++	const std::string trigger = scaleCapture ? "options-scale-confirmation-backdrop-v1" : "direct-startup-dialog";
++	const std::string checkpoint = presentationCaptureCase + (scaleCapture ? "/render-ordinal-2" : "/fade-complete");
 +	const FileRecord binary = ReadFileRecord(presentationCaptureBinaryPath, "");
 +	const FileRecord config = ReadFileRecord(presentationCaptureConfigPath, "");
 +	const FileRecord player = ReadFileRecord(presentationCapturePlayerPath, "");
 +	const FileRecord networkReferences = ReadFileRecord(presentationCaptureNetworkReferencesPath, "");
 +	const auto language = TextEncodingConverter.ClonkToUtf8<char>(Config.General.Language);
 +	const std::string receipt = std::format(
-+		R"({{"schema":"clonk-rs/presentation-engine-receipt/v2","run_id":"{}","launcher_nonce":"{}","engine":"cpp","producer":"legacyclonk-capture-patch-v1","case_id":"{}","binary_sha256":"{}","source_tree":"{}","content_tree":"{}","profile":"oracle-native","config_sha256":"{}","player_sha256":"{}","network_references_sha256":"{}","runtime_resources":{{"graphics":{{"tree":"{}","manifest_sha256":"{}"}},"system":{{"tree":"{}","manifest_sha256":"{}"}}}},"locale":{{"language":"{}","charset":"Windows-1252","lang":"C","lc_all":"C","tz":"UTC"}},"seeds":{{"simulation":{{"seed":587,"calls":0}},"presentation":{{"algorithm":"darwin-libc-rand-park-miller-v1","seed":587,"calls":0,"trace_sha256":"{}"}}}},"trigger":{{"id":"direct-startup-dialog"}},"scenario":{{"path":null,"content_tree":"{}"}},"frame":{{"checkpoint":"{}/fade-complete","number":2}},"artifacts":{{"png":{},"layout":{}}}}})",
++		R"({{"schema":"clonk-rs/presentation-engine-receipt/v2","run_id":"{}","launcher_nonce":"{}","engine":"cpp","producer":"legacyclonk-capture-patch-v1","case_id":"{}","binary_sha256":"{}","source_tree":"{}","content_tree":"{}","profile":"oracle-native","config_sha256":"{}","player_sha256":"{}","network_references_sha256":"{}","runtime_resources":{{"graphics":{{"tree":"{}","manifest_sha256":"{}"}},"system":{{"tree":"{}","manifest_sha256":"{}"}}}},"locale":{{"language":"{}","charset":"Windows-1252","lang":"C","lc_all":"C","tz":"UTC"}},"seeds":{{"simulation":{{"seed":587,"calls":0}},"presentation":{{"algorithm":"darwin-libc-rand-park-miller-v1","seed":587,"calls":0,"trace_sha256":"{}"}}}},"trigger":{{"id":"{}"}},"scenario":{{"path":null,"content_tree":"{}"}},"frame":{{"checkpoint":"{}","number":2}},"artifacts":{{{}}}}})",
 +		JsonEscape(presentationCaptureRunID), presentationCaptureNonce, JsonEscape(presentationCaptureCase),
 +		binary.sha256, OracleSourceTree, FixtureContentTree, config.sha256, player.sha256, networkReferences.sha256,
 +		OracleGraphicsTree, OracleGraphicsManifestSha256, OracleSystemTree, OracleSystemManifestSha256, JsonEscape(language), safeRandomTraceSha256,
-+		FixtureContentTree, JsonEscape(presentationCaptureCase), FileRecordJson(png), FileRecordJson(layoutRecord));
++		trigger, FixtureContentTree, JsonEscape(checkpoint), artifacts);
 +	WriteAtomic(presentationCaptureReceiptPath, receipt, presentationCaptureNonce);
 +	std::fprintf(stdout, "LegacyClonk presentation capture complete: %s render ordinal 2\n", presentationCaptureCase.c_str());
 +	std::fflush(nullptr);
 +	std::_Exit(EXIT_SUCCESS);
++}
++
++void C4Startup::DrawScaleCaptureBackdrop(C4GUI::Dialog *dialog, C4FacetEx &cgo)
++{
++	if (!pInstance || !std::string_view{pInstance->presentationCaptureCase}.starts_with("startup-options-scale-")) return;
++	auto *options = dynamic_cast<C4StartupOptionsDlg *>(pInstance->pCurrDlg);
++	if (!options || !options->IsScaleConfirmationCapture(dialog)) return;
++	constexpr std::array<uint32_t, 4> colors{0x00184878, 0x00305c28, 0x00903020, 0x00565676};
++	for (int i = 0; i < 4; ++i)
++		lpDDraw->DrawBoxDw(cgo.Surface, i * Config.Graphics.ResX / 4, 0, (i + 1) * Config.Graphics.ResX / 4 - 1, Config.Graphics.ResY - 1, colors[i]);
 +}
 +
 +void C4Startup::PresentationCaptureAfterRender()
@@ -2644,7 +2701,7 @@ index 9542728ef..5ef7978f5 100644
  C4Startup::~C4Startup()
  {
  	pInstance = nullptr;
-@@ -269,6 +1813,8 @@ bool C4Startup::DoStartup()
+@@ -269,6 +1849,8 @@ bool C4Startup::DoStartup()
  	delete pLastDlg; pLastDlg = nullptr;
  	delete pCurrDlg; pCurrDlg = nullptr;
  
@@ -2653,7 +2710,7 @@ index 9542728ef..5ef7978f5 100644
  	// start with the last dlg that was shown - at first startup main dialog
  	if (!SwitchDialog(eLastDlgID)) return false;
  
-@@ -370,9 +1916,19 @@ void C4Startup::Unload()
+@@ -370,9 +1952,19 @@ void C4Startup::Unload()
  
  bool C4Startup::Execute()
  {
@@ -2674,7 +2731,7 @@ index 9542728ef..5ef7978f5 100644
  	bool fResult = pStartup->DoStartup();
  	return fResult;
 diff --git a/src/C4Startup.h b/src/C4Startup.h
-index 65d33045c..2d4adb2f6 100644
+index 65d33045c..7f814784a 100644
 --- a/src/C4Startup.h
 +++ b/src/C4Startup.h
 @@ -22,6 +22,9 @@
@@ -2768,11 +2825,12 @@ index 65d33045c..2d4adb2f6 100644
  
  	friend class C4StartupMainDlg;
  	friend class C4StartupNetDlg;
-@@ -128,6 +189,7 @@ public:
+@@ -128,6 +189,8 @@ public:
  	static void Unload(); // make sure startup data is destroyed
  	static bool Execute(); // run startup - return false if game is to be closed
  	static bool SetStartScreen(const char *szScreen); // set screen that is shown first by case insensitive identifier
 +	static void PresentationCaptureAfterRender(); // called after composition and before PageFlip
++	static void DrawScaleCaptureBackdrop(C4GUI::Dialog *dialog, C4FacetEx &cgo);
  
  	static C4Startup *Get() { assert(pInstance); return pInstance; }
  };
@@ -3202,7 +3260,7 @@ index 62a7fa643..e492e8beb 100644
  	bool DoBack(); // abort dialog
  	void DoRefresh(); // restart network search
 diff --git a/src/C4StartupOptionsDlg.cpp b/src/C4StartupOptionsDlg.cpp
-index cebd24ff4..fc68a50d9 100644
+index cebd24ff4..0d561419b 100644
 --- a/src/C4StartupOptionsDlg.cpp
 +++ b/src/C4StartupOptionsDlg.cpp
 @@ -35,6 +35,9 @@
@@ -3252,7 +3310,7 @@ index cebd24ff4..fc68a50d9 100644
  	btn->SetToolTip(LoadResStr(C4ResStrTableKey::IDS_DLGTIP_BACKMAIN));
  
  	// main config area tabular
-@@ -1045,6 +1062,76 @@ C4StartupOptionsDlg::~C4StartupOptionsDlg()
+@@ -1045,6 +1062,91 @@ C4StartupOptionsDlg::~C4StartupOptionsDlg()
  	delete pKeyBack;
  }
  
@@ -3326,11 +3384,26 @@ index cebd24ff4..fc68a50d9 100644
 +	return C4PresentationCapture::Serialize("startup-options", elements);
 +}
 +
++C4GUI::Dialog *C4StartupOptionsDlg::StageScaleConfirmationCapture()
++{
++	if (presentationScaleConfirmation) return presentationScaleConfirmation;
++	presentationScaleConfirmation = new ResChangeConfirmDlg;
++	if (const char *captureCase = std::getenv("CLONK_PRESENTATION_CASE"); captureCase && std::string_view{captureCase}.find("-decremented-") != std::string_view::npos)
++		presentationScaleConfirmation->OnSec1Timer();
++	Game.pGUI->ShowRemoveDlg(presentationScaleConfirmation);
++	return presentationScaleConfirmation;
++}
++
++bool C4StartupOptionsDlg::IsScaleConfirmationCapture(const C4GUI::Dialog *dialog) const
++{
++	return presentationScaleConfirmation && dialog == presentationScaleConfirmation;
++}
++
  void C4StartupOptionsDlg::OnClosed(bool fOK)
  {
  	// callback when dlg got closed - save config
 diff --git a/src/C4StartupOptionsDlg.h b/src/C4StartupOptionsDlg.h
-index d8dc7013a..f01c1ed1c 100644
+index d8dc7013a..41467290d 100644
 --- a/src/C4StartupOptionsDlg.h
 +++ b/src/C4StartupOptionsDlg.h
 @@ -35,6 +35,7 @@ private:
@@ -3341,15 +3414,17 @@ index d8dc7013a..f01c1ed1c 100644
  	C4GUI::Tabular *pOptionsTabular;
  
  protected:
-@@ -57,6 +58,7 @@ public:
+@@ -57,6 +58,9 @@ public:
  
  public:
  	void RecreateDialog(bool fFade);
 +	std::string BuildPresentationLayoutTrace();
++	C4GUI::Dialog *StageScaleConfirmationCapture();
++	bool IsScaleConfirmationCapture(const C4GUI::Dialog *dialog) const;
  
  	// program tab
  private:
-@@ -69,6 +71,7 @@ private:
+@@ -69,6 +73,7 @@ private:
  	public:
  		SmallButton(const char *szText, const C4Rect &rtBounds)
  			: C4GUI::Button(szText, rtBounds) {}
@@ -3357,6 +3432,15 @@ index d8dc7013a..f01c1ed1c 100644
  		static int32_t GetDefaultButtonHeight();
  	};
  
+@@ -123,6 +128,8 @@ private:
+ 		void UpdateText() override;
+ 	};
+ 
++	ResChangeConfirmDlg *presentationScaleConfirmation = nullptr;
++
+ 	void OnEffectsSliderChange(int32_t iNewVal);
+ 
+ 	C4GUI::ScrollBar *pEffectLevelSlider;
 diff --git a/src/C4StartupPlrSelDlg.cpp b/src/C4StartupPlrSelDlg.cpp
 index f9b00f822..beac67d20 100644
 --- a/src/C4StartupPlrSelDlg.cpp

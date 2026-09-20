@@ -155,6 +155,10 @@ CASE_IDS = (
     "object-menu",
     "gameplay",
     "evaluation",
+    "startup-options-scale-initial-reference",
+    "startup-options-scale-decremented-reference",
+    "startup-options-scale-initial-minimum",
+    "startup-options-scale-decremented-minimum",
 )
 LAYOUT_CASE_IDS = frozenset(
     (*CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
@@ -212,6 +216,12 @@ EXPECTED_GEOMETRY = {
     "width": CAPTURE_WIDTH,
     "height": CAPTURE_HEIGHT,
     "scale": CAPTURE_SCALE,
+    "case_dimensions": {
+        "startup-options-scale-initial-reference": [1280, 720],
+        "startup-options-scale-decremented-reference": [1280, 720],
+        "startup-options-scale-initial-minimum": [640, 480],
+        "startup-options-scale-decremented-minimum": [640, 480],
+    },
 }
 EXPECTED_POINTER_INPUT = {
     "position": [32, 32],
@@ -247,6 +257,10 @@ CPP_STARTUP_ARGUMENTS = {
     "startup-player-selection": "/startup:plrsel",
     "startup-options": "/startup:options",
     "startup-about": "/startup:about",
+    "startup-options-scale-initial-reference": "/startup:options",
+    "startup-options-scale-decremented-reference": "/startup:options",
+    "startup-options-scale-initial-minimum": "/startup:options",
+    "startup-options-scale-decremented-minimum": "/startup:options",
 }
 CPP_RUNTIME_SCENARIOS = {
     "network-lobby": "Tutorial.c4f/Tutorial01.c4s",
@@ -810,6 +824,7 @@ def capture_manifest_contract_value_sha256(manifest: Any) -> str:
                 "id": screen["id"],
                 "comparison": screen.get("comparison", "pixel"),
                 "port_assets": screen.get("port_assets", []),
+                "resolution": screen.get("resolution", capture["resolution"]),
             }
         )
     masks = manifest.get("masks", [])
@@ -1183,7 +1198,16 @@ class _PngScanlineStream:
         )
 
 
-def validate_png(path: Path) -> dict[str, int]:
+def capture_dimensions(case_id: str | None) -> tuple[int, int]:
+    if case_id in {
+        "startup-options-scale-initial-minimum",
+        "startup-options-scale-decremented-minimum",
+    }:
+        return (640, 480)
+    return (CAPTURE_WIDTH, CAPTURE_HEIGHT)
+
+
+def validate_png(path: Path, case_id: str | None = None) -> dict[str, int]:
     """Validate a complete, decodable canonical capture PNG."""
 
     _regular_file(path, "PNG")
@@ -1258,9 +1282,9 @@ def validate_png(path: Path) -> dict[str, int]:
                         interlace,
                     ) = struct.unpack(">IIBBBBB", payload)
                     _require(
-                        (width, height) == (CAPTURE_WIDTH, CAPTURE_HEIGHT),
+                        (width, height) == capture_dimensions(case_id),
                         "PNG geometry is "
-                        f"{width}x{height}, expected {CAPTURE_WIDTH}x{CAPTURE_HEIGHT}: {path}",
+                        f"{width}x{height}, expected {capture_dimensions(case_id)}: {path}",
                     )
                     _require(bit_depth == 8, f"PNG must be 8-bit: {path}")
                     _require(color_type in {2, 6}, f"PNG must be RGB or RGBA: {path}")
@@ -1412,8 +1436,8 @@ def validate_duplicate_runs(first: Path, second: Path) -> list[Path]:
         _regular_file(left, name)
         _regular_file(right, name)
         if name.endswith(".png"):
-            validate_png(left)
-            validate_png(right)
+            validate_png(left, name.removesuffix(".png"))
+            validate_png(right, name.removesuffix(".png"))
         else:
             case_id = name.removesuffix(".layout.json")
             validate_layout_trace(left, case_id)
@@ -3155,7 +3179,7 @@ def _validate_v2_provenance_index(
                     expected_path=f"{run_id}/{engine}/artifacts/{case_id}.png",
                     label=f"{run_id} {engine} {case_id} PNG artifact",
                 )
-                validate_png(png)
+                validate_png(png, case_id)
                 accepted.append(png)
                 repeat_artifacts[engine][run_id][f"{case_id}.png"] = artifacts[
                     "png"
@@ -3733,7 +3757,7 @@ def _validate_current_rust_case(
         expected_path=f"{run_id}/rust/artifacts/{case_id}.png",
         label=f"current Rust {run_id} {case_id} PNG",
     )
-    validate_png(png)
+    validate_png(png, case_id)
     hashes[f"{case_id}.png"] = artifacts["png"]["sha256"]
     if case_id in LAYOUT_CASE_IDS:
         layout = _validate_v2_file_record(
