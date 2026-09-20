@@ -287,15 +287,7 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
         self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
         let body_depth = self.brace_depth;
-        // Only a `global func` can name a declaring host's `local`
-        // (`C4AulParse.cpp:2000-2004`), so only its body collects candidates.
-        self.parsing_global_function = access == AccessLevel::Global;
-        self.global_local_candidates.clear();
-        self.global_function_shadowing_names.clear();
-        if self.parsing_global_function {
-            self.global_function_shadowing_names
-                .extend(params.iter().map(|param| param.name.clone()));
-        }
+        self.begin_global_local_tracking(access, &params);
 
         let mut description = None;
         let mut body = Vec::new();
@@ -347,6 +339,20 @@ impl<'a> Parser<'a> {
             },
             error,
         ))
+    }
+
+    /// Start a function body's bookkeeping for the named-`local` check. Only a
+    /// `global func` can name a declaring host's `local`
+    /// (`C4AulParse.cpp:2000-2004`), so only its body collects candidates, and
+    /// its parameters are the first names that shadow one.
+    fn begin_global_local_tracking(&mut self, access: AccessLevel, params: &[Parameter]) {
+        self.parsing_global_function = access == AccessLevel::Global;
+        self.global_local_candidates.clear();
+        self.global_function_shadowing_names.clear();
+        if self.parsing_global_function {
+            self.global_function_shadowing_names
+                .extend(params.iter().map(|param| param.name.clone()));
+        }
     }
 
     fn parse_old_style_function_recovering(
