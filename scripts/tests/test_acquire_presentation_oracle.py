@@ -2307,6 +2307,37 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             "the drift message does not report the trace digest beside the counts",
         )
 
+    def test_cpp_capture_patch_refuses_window_pointer_input(self):
+        # With the display unlocked, the real pointer crossing the oracle window
+        # was drawn into a startup capture (clonk-org/clonk-rs#1666): only the
+        # runtime cases and `startup-options-scale-*` re-pin the pointer each
+        # frame. The capture build refuses pointer events at the one entry every
+        # platform's window code shares, and makes its own pin under a guard.
+        patch = (REPOSITORY / MODULE.CAPTURE_PATCH_SOURCE_PATH).read_text(
+            encoding="utf-8"
+        )
+        added = [
+            line[1:]
+            for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+
+        self.assertTrue(
+            any(
+                line == "\tif (C4PresentationCapture::RejectsPointerInput()) return;"
+                for line in added
+            ),
+            "window pointer events still reach MouseMove in a capture process",
+        )
+        pins = [
+            index
+            for index, line in enumerate(added)
+            if "Game.GraphicsSystem.MouseMove(C4MC_Button_None, CapturePointerX" in line
+        ]
+        self.assertEqual(len(pins), 1, "the pointer is pinned from one guarded place")
+        self.assertEqual(added[pins[0] - 1].strip(), "InjectingCapturePointer = true;")
+        self.assertEqual(added[pins[0] + 1].strip(), "InjectingCapturePointer = false;")
+
     def test_repeat_drift_names_the_artifacts_that_differ(self):
         # "cpp repeat capture artifacts differ" on its own sent the reader to
         # decode PNG scanlines to learn that one startup capture had a cursor in

@@ -231,7 +231,7 @@ index 816f92344..9bf79631c 100644
  	static bool is_shown;
  	C4Sec1TimerCallback<C4GameOverDlg> *pSec1Timer; // engine timer hook for player list update
 diff --git a/src/C4GraphicsSystem.cpp b/src/C4GraphicsSystem.cpp
-index c49bfe065..e58365953 100644
+index c49bfe065..97a3452f3 100644
 --- a/src/C4GraphicsSystem.cpp
 +++ b/src/C4GraphicsSystem.cpp
 @@ -30,6 +30,7 @@
@@ -274,6 +274,14 @@ index c49bfe065..e58365953 100644
  	FinishDrawing();
  }
  
+@@ -444,6 +449,7 @@ void C4GraphicsSystem::SortViewportsByPlayerControl()
+ 
+ void C4GraphicsSystem::MouseMove(int32_t iButton, int32_t iX, int32_t iY, uint32_t dwKeyParam, class C4Viewport *pVP)
+ {
++	if (C4PresentationCapture::RejectsPointerInput()) return;
+ 	const auto scale = Application.GetScale();
+ 	iX = static_cast<int32_t>(ceilf(iX / scale));
+ 	iY = static_cast<int32_t>(ceilf(iY / scale));
 diff --git a/src/C4Gui.cpp b/src/C4Gui.cpp
 index 03dc81679..f04f9898c 100644
 --- a/src/C4Gui.cpp
@@ -1101,10 +1109,10 @@ index f6d50fece..c176860e9 100644
  
  void Randomize3();
 diff --git a/src/C4Startup.cpp b/src/C4Startup.cpp
-index 9542728ef..08d532bb6 100644
+index 9542728ef..e1cce5d6a 100644
 --- a/src/C4Startup.cpp
 +++ b/src/C4Startup.cpp
-@@ -26,9 +26,1324 @@
+@@ -26,9 +26,1338 @@
  #include <C4StartupOptionsDlg.h>
  #include <C4StartupAboutDlg.h>
  #include <C4StartupPlrSelDlg.h>
@@ -1148,6 +1156,7 @@ index 9542728ef..08d532bb6 100644
 +	constexpr int32_t CaptureScale = 100;
 +	constexpr int32_t CapturePointerX = 32;
 +	constexpr int32_t CapturePointerY = 32;
++	bool InjectingCapturePointer{false};
 +	constexpr uint32_t CaptureSeed = 587;
 +	constexpr std::string_view OracleSourceTree = "3859b3715b7f58d0c461cf45dc226593a2b0d687";
 +	constexpr std::string_view FixtureContentTree = "fecec2213a6de006508c640b42d86281136a0faa";
@@ -2288,6 +2297,19 @@ index 9542728ef..08d532bb6 100644
 +		PinRuntimeRandomStreams();
 +	}
 +
++	bool RejectsPointerInput()
++	{
++		return !InjectingCapturePointer &&
++			(IsCaptureEnvironmentPresent() || RuntimeCapture.mode != RuntimeMode::None);
++	}
++
++	void MovePointer()
++	{
++		InjectingCapturePointer = true;
++		Game.GraphicsSystem.MouseMove(C4MC_Button_None, CapturePointerX, CapturePointerY, 0, nullptr);
++		InjectingCapturePointer = false;
++	}
++
 +	void BeforeRender()
 +	{
 +		if (RuntimeCapture.mode == RuntimeMode::None)
@@ -2295,7 +2317,7 @@ index 9542728ef..08d532bb6 100644
 +			const char *captureCase = std::getenv("CLONK_PRESENTATION_CASE");
 +			if (!captureCase || !std::string_view{captureCase}.starts_with("startup-options-scale-")) return;
 +		}
-+		Game.GraphicsSystem.MouseMove(C4MC_Button_None, CapturePointerX, CapturePointerY, 0, nullptr);
++		MovePointer();
 +	}
 +
 +	void OnInitProgress(const int32_t progress)
@@ -2429,7 +2451,7 @@ index 9542728ef..08d532bb6 100644
  
  bool C4StartupGraphics::LoadFile(C4FacetExID &rToFct, const char *szFilename)
  {
-@@ -149,6 +1464,271 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
+@@ -149,6 +1478,271 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
  	pInstance = this;
  }
  
@@ -2701,7 +2723,7 @@ index 9542728ef..08d532bb6 100644
  C4Startup::~C4Startup()
  {
  	pInstance = nullptr;
-@@ -269,6 +1849,8 @@ bool C4Startup::DoStartup()
+@@ -269,6 +1863,8 @@ bool C4Startup::DoStartup()
  	delete pLastDlg; pLastDlg = nullptr;
  	delete pCurrDlg; pCurrDlg = nullptr;
  
@@ -2710,7 +2732,7 @@ index 9542728ef..08d532bb6 100644
  	// start with the last dlg that was shown - at first startup main dialog
  	if (!SwitchDialog(eLastDlgID)) return false;
  
-@@ -370,9 +1952,19 @@ void C4Startup::Unload()
+@@ -370,9 +1966,19 @@ void C4Startup::Unload()
  
  bool C4Startup::Execute()
  {
@@ -2726,12 +2748,12 @@ index 9542728ef..08d532bb6 100644
  	C4Startup *pStartup = EnsureLoaded();
  	if (!pStartup) return false;
 +	if (IsCaptureEnvironmentPresent())
-+		Game.GraphicsSystem.MouseMove(C4MC_Button_None, CapturePointerX, CapturePointerY, 0, nullptr);
++		C4PresentationCapture::MovePointer();
  	// exec it
  	bool fResult = pStartup->DoStartup();
  	return fResult;
 diff --git a/src/C4Startup.h b/src/C4Startup.h
-index 65d33045c..7f814784a 100644
+index 65d33045c..c5118ed45 100644
 --- a/src/C4Startup.h
 +++ b/src/C4Startup.h
 @@ -22,6 +22,9 @@
@@ -2744,7 +2766,7 @@ index 65d33045c..7f814784a 100644
  #define C4CFN_StartupBackgroundMain "LoaderGoldmine1"
  
  // special colors for startup designs
-@@ -90,6 +93,50 @@ public:
+@@ -90,6 +93,54 @@ public:
  	C4StartupDlg(const char *szTitle) : C4GUI::FullscreenDialog(szTitle, nullptr) {}
  };
  
@@ -2790,12 +2812,16 @@ index 65d33045c..7f814784a 100644
 +	void AfterRandomInitialization();
 +	void BeforeRender();
 +	void AfterRender();
++	// The capture owns the pointer. Window pointer events are refused, so the
++	// only position the oracle ever sees is the one MovePointer sets.
++	bool RejectsPointerInput();
++	void MovePointer();
 +}
 +
  class C4Startup
  {
  public:
-@@ -103,8 +150,20 @@ public:
+@@ -103,8 +154,20 @@ public:
  
  private:
  	bool fInStartup, fAborted, fLastDlgWasBack;
@@ -2816,7 +2842,7 @@ index 65d33045c..7f814784a 100644
  
  	C4StartupDlg *pLastDlg, *pCurrDlg; // startup dlg that is currently shown, and dialog that was last shown
  
-@@ -115,6 +174,8 @@ protected:
+@@ -115,6 +178,8 @@ protected:
  
  	bool DoStartup(); // run main dlg
  	class C4StartupDlg *SwitchDialog(DialogID eToDlg, bool fFade = true); // do transition to another dialog
@@ -2825,7 +2851,7 @@ index 65d33045c..7f814784a 100644
  
  	friend class C4StartupMainDlg;
  	friend class C4StartupNetDlg;
-@@ -128,6 +189,8 @@ public:
+@@ -128,6 +193,8 @@ public:
  	static void Unload(); // make sure startup data is destroyed
  	static bool Execute(); // run startup - return false if game is to be closed
  	static bool SetStartScreen(const char *szScreen); // set screen that is shown first by case insensitive identifier
