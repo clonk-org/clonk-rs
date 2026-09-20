@@ -16,8 +16,11 @@ can be exercised anywhere Xvfb is installed.
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -26,11 +29,15 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parent.parent
 
 REPORT_KIND = "clonk_software_present_smoke"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
-#: The probe reads this and refuses to run without it, so that a machine with a
-#: working adapter cannot quietly qualify the GPU presenter instead.
+#: Force software directly; the alternative disables GPU backends explicitly
+#: and checks that ordinary startup chooses software after GPU attempts fail.
 FORCE_SOFTWARE_ENVIRONMENT = "LC_SOFTWARE_PRESENTATION"
+SMOKE_CONFIG = (
+    "[Graphics]\nResolutionX=800\nResolutionY=600\nDisplayMode=1\nMaximized=false\n"
+    "\n[Sound]\nSound=false\nMusic=false\nMenuMusic=false\nMenuSound=false\n"
+)
 
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -50,6 +57,14 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="never wrap the probe in xvfb-run, even without a display",
     )
+    parser.add_argument(
+        "--check-input", action="store_true",
+        help="require a native pointer event mapped at application scale 2",
+    )
+    parser.add_argument(
+        "--automatic-fallback", action="store_true",
+        help="disable all GPU backends and require automatic software fallback",
+    )
     return parser.parse_args(argv)
 
 
@@ -64,14 +79,24 @@ def refuse_to_run_as_root() -> None:
 
 def build_binary(release: bool) -> Path:
     profile = ["--release"] if release else []
+    # Preserve feature unification with the other shipped Windows executables.
+    # The release job validates this same graph and its static-CRT imports.
+    targets = (
+        ["-p", "clonk-app", "-p", "clonk-game", "-p", "clonk-c4group"]
+        if release and sys.platform == "win32"
+        else ["-p", "clonk-app", "--bin", "clonk-app"]
+    )
     subprocess.run(
-        ["cargo", "build", "--locked", "-p", "clonk-app", "--bin", "clonk-app", *profile],
+        ["cargo", "build", "--locked", *targets, *profile],
         cwd=REPOSITORY,
         check=True,
     )
     target = os.environ.get("CARGO_TARGET_DIR")
     root = Path(target) if target else REPOSITORY / "target"
-    binary = root / ("release" if release else "debug") / "clonk-app"
+    if triple := os.environ.get("CARGO_BUILD_TARGET"):
+        root /= triple
+    executable = "clonk-app.exe" if sys.platform == "win32" else "clonk-app"
+    binary = root / ("release" if release else "debug") / executable
     if not binary.is_file():
         raise SystemExit(f"cargo reported success but {binary} is not there")
     return binary
@@ -99,7 +124,44 @@ def launch_prefix(*, no_xvfb: bool) -> list[str]:
     return ["xvfb-run", "-a", "--server-args=-screen 0 1024x768x24"]
 
 
-def check_report(report_path: Path) -> dict:
+def file_digest(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def source_identity() -> dict:
+    def git(*args, root=REPOSITORY):
+        return subprocess.check_output(["git", "-C", str(root), *args])
+
+    inputs = [".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "crates",
+              "scripts/run_software_presentation_smoke.py",
+              "scripts/configure-msvc-runtime.sh", "scripts/validate-msvc-runtime.sh"]
+    paths = git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *inputs)
+    sources = {
+        name: file_digest(REPOSITORY / name) if (REPOSITORY / name).is_file() else "missing"
+        for name in sorted(set(paths.decode().split("\0"))) if name
+    }
+    content = git("rev-parse", "HEAD", root=REPOSITORY / "content").decode().strip()
+    if content != git("rev-parse", "HEAD:content").decode().strip():
+        raise SystemExit("content checkout differs from the pinned content revision")
+    if (git("diff", "--name-only", "HEAD", root=REPOSITORY / "content").strip()
+            or git("ls-files", "--others", "--exclude-standard", root=REPOSITORY / "content").strip()):
+        raise SystemExit("content checkout has modified parity input")
+    return {
+        "commit": git("rev-parse", "HEAD").decode().strip(),
+        "content_commit": content,
+        "sources_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
+        "source_dirty": bool(
+            git("diff", "--name-only", "HEAD", "--", *inputs).strip()
+            or git("ls-files", "--others", "--exclude-standard", "--", *inputs).strip()
+        ),
+    }
+
+
+def check_report(
+    report_path: Path, *, check_input: bool = False, automatic_fallback: bool = False,
+    expected_backend: str | None = None,
+) -> dict:
     if not report_path.is_file():
         raise SystemExit(f"the probe wrote no report to {report_path}")
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -112,6 +174,37 @@ def check_report(report_path: Path) -> dict:
         )
 
     failures = []
+    if expected_backend and report.get("display_backend") != expected_backend:
+        failures.append(f"window backend is not {expected_backend}: {report.get('display_backend')}")
+    attempts = report.get("gpu_attempt_backends")
+    if automatic_fallback:
+        if (report.get("software_reason") != "no-adapter"
+                or not isinstance(attempts, list) or not attempts
+                or any(backends != [] for backends in attempts)):
+            failures.append("automatic fallback did not follow failed GPU attempts with no backends")
+    elif report.get("software_reason") != "forced" or attempts != []:
+        failures.append("forced software presentation attempted GPU startup")
+    if check_input and report.get("input_mapping") != {
+        "window_position": [128, 96], "gui_position": [64, 48], "scale": 2,
+    }:
+        failures.append("no correctly mapped native pointer event at application scale 2")
+    from PIL import Image
+
+    for suffix, extent in (
+        (".screenshot.png", report.get("resized_extent")),
+        (".thumbnail.png", [200, 150]),
+    ):
+        capture = report_path.with_suffix(suffix)
+        try:
+            with Image.open(capture) as decoded:
+                if list(decoded.size) != extent:
+                    failures.append(f"{capture.name} has incorrect dimensions: {decoded.size}")
+                if decoded.convert("RGBA").getextrema() != (
+                    (0x6f, 0x6f), (0x2f, 0x2f), (0xa8, 0xa8), (255, 255),
+                ):
+                    failures.append(f"{capture.name} does not contain the presented pixels")
+        except (OSError, ValueError) as error:
+            failures.append(f"cannot decode {capture.name}: {error}")
     if not report.get("presented_before_resize"):
         failures.append("no frame reached the window before the resize")
     if not report.get("presented_after_resize"):
@@ -160,31 +253,97 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parse_arguments(argv)
     refuse_to_run_as_root()
 
-    artifacts = arguments.artifact_dir or (REPOSITORY / "target" / "software-present-smoke")
+    artifacts = (arguments.artifact_dir or (REPOSITORY / "target" / "software-present-smoke")).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     report_path = artifacts / "report.json"
     # The probe refuses to overwrite an existing report, so a stale one from a
     # previous run would fail before it started.
     report_path.unlink(missing_ok=True)
+    for name in ("report.screenshot.png", "report.thumbnail.png", "qualification.json"):
+        (artifacts / name).unlink(missing_ok=True)
 
+    source_before = source_identity()
+    if arguments.release and source_before.get("source_dirty"):
+        raise SystemExit("release qualification requires committed source inputs")
     binary = build_binary(arguments.release)
+    binary_sha256 = file_digest(binary)
+    config = artifacts / "Clonk.ini"
+    config.write_text(SMOKE_CONFIG, encoding="utf-8")
     environment = dict(os.environ)
-    environment[FORCE_SOFTWARE_ENVIRONMENT] = "1"
+    for key in tuple(environment):
+        if key.startswith(("LC_APP_", "WGPU_")) or key in (
+            "LC_CONFIG_FILE", "LC_GAME_UPDATE_NOTICE", "LC_LANGUAGE_OVERRIDE", "LC_LOG",
+        ):
+            environment.pop(key)
+    environment.update({
+        "LC_INSTALL_ROOT": str(REPOSITORY),
+        "LC_CONTENT_DIR": str(REPOSITORY / "content"),
+        "LC_USER_DATA_DIR": str(artifacts / "user-data"),
+        "LC_CACHE_DIR": str(artifacts / "cache"),
+        "LC_LOGS_DIR": str(artifacts / "logs"),
+        "LC_TEMP_DIR": str(artifacts / "temp"),
+        "LC_GAME_UPDATE_RECOVERY_COMPLETE": "1",
+    })
+    if arguments.automatic_fallback:
+        environment.pop(FORCE_SOFTWARE_ENVIRONMENT, None)
+        environment["WGPU_BACKEND"] = ""
+    else:
+        environment[FORCE_SOFTWARE_ENVIRONMENT] = "1"
 
     command = [
         *launch_prefix(no_xvfb=arguments.no_xvfb),
         str(binary),
+        "--config", str(config),
         "--software-present-smoke",
         str(report_path),
     ]
-    completed = subprocess.run(command, cwd=REPOSITORY, env=environment, check=False)
+    if arguments.check_input:
+        command.append("--software-present-input")
+    with (artifacts / "run.log").open("w", encoding="utf-8") as output:
+        try:
+            completed = subprocess.run(
+                command, cwd=REPOSITORY, env=environment, check=False,
+                stdout=output, stderr=subprocess.STDOUT, timeout=60,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise SystemExit(f"software probe timed out; see {artifacts / 'run.log'}") from error
 
-    report = check_report(report_path)
+    report = check_report(
+        report_path, check_input=arguments.check_input,
+        automatic_fallback=arguments.automatic_fallback,
+        expected_backend={"win32": "windows", "darwin": "appkit"}.get(sys.platform),
+    )
     if completed.returncode != 0:
         raise SystemExit(
             f"the probe reported success but exited {completed.returncode}; "
             "treat the exit code as authoritative"
         )
+    if source_identity() != source_before:
+        raise SystemExit("source changed during software presentation qualification")
+    if file_digest(binary) != binary_sha256:
+        raise SystemExit("the software presentation executable changed during the run")
+    evidence = {
+        "schema_version": 1,
+        "kind": "clonk_software_presentation_qualification",
+        "recorded_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        **source_before,
+        "os": platform.platform(),
+        "os_version": platform.version(),
+        "architecture": platform.machine(),
+        "build_profile": "release" if arguments.release else "debug",
+        "build_target": os.environ.get("CARGO_BUILD_TARGET"),
+        "rustflags": os.environ.get("RUSTFLAGS"),
+        "encoded_rustflags": os.environ.get("CARGO_ENCODED_RUSTFLAGS"),
+        "rustc": subprocess.check_output(["rustc", "-vV"], cwd=REPOSITORY, text=True),
+        "binary_sha256": binary_sha256,
+        "window_backend": report["display_backend"],
+        "automatic_fallback": arguments.automatic_fallback,
+        "native_input_checked": arguments.check_input,
+        "artifacts": {name: file_digest(artifacts / name) for name in (
+            "report.json", "report.screenshot.png", "report.thumbnail.png", "run.log",
+        )},
+    }
+    (artifacts / "qualification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
     print(
         "software presentation smoke passed: presented at "

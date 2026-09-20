@@ -291,6 +291,9 @@ pub(crate) struct Cli {
     )]
     pub(crate) software_present_smoke: Option<std::path::PathBuf>,
 
+    #[arg(long, requires = "software_present_smoke", hide = true)]
+    pub(crate) software_present_input: bool,
+
     #[arg(
         long = "dump-frame",
         value_name = "PATH",

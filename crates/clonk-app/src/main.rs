@@ -1227,6 +1227,8 @@ fn run() -> Result<()> {
                 software_present_smoke::SoftwarePresentSmoke::start(
                     report_path,
                     &mut developer_windows,
+                    cli.software_present_input,
+                    presentation_choice,
                 )
             })
             .transpose()?;
@@ -1250,9 +1252,16 @@ fn run() -> Result<()> {
                         window_id,
                         event: WindowEvent::RedrawRequested,
                     } => (
-                        smoke.redraw(*window_id, event_target, &mut developer_windows),
+                        smoke.redraw(*window_id, event_target, &mut developer_windows, &mut app),
                         true,
                     ),
+                    Event::WindowEvent {
+                        window_id,
+                        event: WindowEvent::CursorMoved { position, .. },
+                    } => {
+                        smoke.note_pointer(*window_id, *position);
+                        (Ok(()), false)
+                    }
                     _ => (Ok(()), false),
                 };
                 if let Err(error) = outcome {
@@ -1499,13 +1508,21 @@ fn run() -> Result<()> {
                     if window_id == window.id()
                         && !matches!(event, WindowEvent::RedrawRequested) =>
                 {
-                    let Some(pixels) = pixels_slot.as_mut() else {
+                    let Some(mut pixels) = pixels_slot
+                        .as_mut()
+                        .map(crate::cpu_target::CpuTarget::Gpu)
+                        .or_else(|| {
+                            software_slot
+                                .as_mut()
+                                .map(crate::cpu_target::CpuTarget::Software)
+                        })
+                    else {
                         return;
                     };
                     if let Err(err) = handle_window_event(
                         window,
                         &mut app,
-                        pixels,
+                        &mut pixels,
                         presenter,
                         &mut display_options,
                         event,
