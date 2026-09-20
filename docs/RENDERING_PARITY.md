@@ -252,6 +252,15 @@ post-capture normalization. Whole-frame comparison includes the title, wrapped
 countdown, focused buttons, close glyph, and cursor. The existing Options
 layout case continues to cover the real Options background and controls.
 
+The Options reset confirmation uses the same backdrop and the same two audit
+extents. Its native capture invokes the unchanged `OnResetConfigBtn` callback
+(`C4StartupOptionsDlg.cpp:1073-1091`), records the dialog created by
+`Screen::ShowMessageModal`, and captures two renders inside the actual modal
+loop. Rust dispatches the production `ResetConfiguration` action. Neither
+producer answers the dialog: the evidence pins its notification icon, Yes/No
+order, default Yes focus, caption, body layout, and translucent composition
+while leaving reset and exit behavior to the existing interaction tests.
+
 ### Audited capture workflow
 
 The evidence gate does not accept manual F9 screenshots. The launcher archives

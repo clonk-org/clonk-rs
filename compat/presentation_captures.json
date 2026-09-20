@@ -244,6 +244,22 @@
         "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-scale-decremented-minimum.png",
         "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-scale-decremented-minimum.png"
       }
+    },
+    {
+      "id": "startup-options-reset-reference",
+      "area": "startup",
+      "description": "Real Options reset confirmation, composited over the shared four-band backdrop fixture.",
+      "status": "pending",
+      "comparison": "pixel",
+      "resolution": "1280x720"
+    },
+    {
+      "id": "startup-options-reset-minimum",
+      "area": "startup",
+      "description": "Real Options reset confirmation, composited over the shared four-band backdrop fixture.",
+      "status": "pending",
+      "comparison": "pixel",
+      "resolution": "640x480"
     }
   ],
   "masks": [],
