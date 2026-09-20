@@ -44,10 +44,10 @@
       "size_bytes": 6160
     },
     {
-      "git_oid": "055167756f77603153d9d9c6b4c8e9aa32bd9460",
+      "git_oid": "7c89c3f7c821cdacaacc9507155a20eabc5df8de",
       "mode": "100644",
       "path": "compat/presentation/case_specs.json",
-      "sha256": "9faf6e8f41671a5f64e5c375ae156ee755363960e56d2cb54509a85a0c157818",
+      "sha256": "cc32801bc48c0183a0c66c4a7f2ba87fc7f5bcb067326551bc96dfecdf4f5af3",
       "size_bytes": 30737
     },
     {
@@ -4083,11 +4083,11 @@
       "size_bytes": 2945
     },
     {
-      "git_oid": "88a41c4660a4faeb6f687255d09bd22019bca288",
+      "git_oid": "7360171d19a554622ab980446dba4c7d2d065afe",
       "mode": "100644",
       "path": "crates/clonk-engine/tests/it/western_sack_pickup.rs",
-      "sha256": "0dc9fe2be01ecebf1313adf21c4f468275cb0ce33f26c68f4bc8c57ae7d4ba15",
-      "size_bytes": 5345
+      "sha256": "fa83b8cc934f740163fecd50f01b0dd03b7d74ccb42de2f30f2756eade9403ec",
+      "size_bytes": 9019
     },
     {
       "git_oid": "019e32bc4096cf1eecb4ac90e9688d5ffb005ca7",
@@ -7114,10 +7114,10 @@
       "size_bytes": 12565
     },
     {
-      "git_oid": "1965d9420383fc90eab8fd00d5f10d8206f44190",
+      "git_oid": "d774e72af65d96c6a88734e5adad59ce50b55412",
       "mode": "100644",
       "path": "parity/oracle/presentation_capture.patch",
-      "sha256": "356ffa83e579fa43bfb705c0e5f9aaecdffaa9a0258e5f5be21d018dee22def8",
+      "sha256": "ad7837fd2ce222dd7fbfacca80f6fa38eb44efd1120ea15bc88d1c717cf3b607",
       "size_bytes": 176349
     },
     {
@@ -7968,10 +7968,10 @@
       "size_bytes": 86
     },
     {
-      "git_oid": "c79433e5344a8eeee70b00dcd2c8952b63db1ce8",
+      "git_oid": "39a7215266be54ea68b71c62b35a38e4548c0c35",
       "mode": "100755",
       "path": "scripts/acquire_presentation_oracle.py",
-      "sha256": "3abcbcfebce748c8a93ebc726d267cc54e72cffa2971e7d52689a80f608b9391",
+      "sha256": "9ad0c3f46834ada9d644750a31b111407ff9d844f9034a6fc476e0a7748c0a61",
       "size_bytes": 219084
     },
     {
@@ -8067,5 +8067,5 @@
     }
   ],
   "schema": "clonk-rs/presentation-rust-source-inputs/v1",
-  "sha256": "001bbfb5379bf0404b8dde5e75de64ed8ef3fcfc03f95c9a2b0e6b3b1347c66b"
+  "sha256": "935202e82cc000a2ec62b2ada068159866fa850d1299cfc13c2bfb02fb5cf5c1"
 }
