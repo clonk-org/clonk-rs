@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-2/rust/artifacts/startup-options-reset-reference.png",
+    "sha256": "7fd69f18395f78f047c82a3685f84078bfedfa51a4c221dba4ab8d245c3d4984"
+  },
+  "case_id": "startup-options-reset-reference",
+  "comparator": {
+    "binary_sha256": "924c6d4a1e7abb4024c2c62f05cb70d833c3a0e6718cac6352c82daa234b7e32",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "pixel",
+  "reference": {
+    "path": "run-2/cpp/artifacts/startup-options-reset-reference.png",
+    "sha256": "f8fa00c5ccf235234ee4bf5af58b03fac4ae9017fe1fc8b6fee6659a19932d5f"
+  },
+  "run_id": "run-2",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"startup-options-reset-reference\",\"comparison\":\"pixel\",\"status\":\"match\"}\n"
+}

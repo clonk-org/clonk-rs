@@ -249,17 +249,25 @@
       "id": "startup-options-reset-reference",
       "area": "startup",
       "description": "Real Options reset confirmation, composited over the shared four-band backdrop fixture.",
-      "status": "pending",
+      "status": "captured",
       "comparison": "pixel",
-      "resolution": "1280x720"
+      "resolution": "1280x720",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-reset-reference.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-reset-reference.png"
+      }
     },
     {
       "id": "startup-options-reset-minimum",
       "area": "startup",
       "description": "Real Options reset confirmation, composited over the shared four-band backdrop fixture.",
-      "status": "pending",
+      "status": "captured",
       "comparison": "pixel",
-      "resolution": "640x480"
+      "resolution": "640x480",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-reset-minimum.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-reset-minimum.png"
+      }
     }
   ],
   "masks": [],
