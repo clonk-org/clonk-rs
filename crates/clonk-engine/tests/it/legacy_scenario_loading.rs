@@ -20,6 +20,33 @@ global func Initialize(state, random) { return 0; }
 global func Step(state, frame, random) { return 0; }
 "#;
 
+/// Imported scenarios name their definitions in whatever case their author
+/// typed (`Definition3=FANTASY.c4d` for a `Fantasy.c4d` on disk). C4Group and
+/// the app's resolver match ASCII case-insensitively, so such a scenario
+/// loads everywhere; the real-scenario fixture asked the file system, which
+/// only agrees on a case-insensitive one. The answer is the path as it is
+/// spelled on disk, so this holds on macOS as well as on Linux.
+#[test]
+fn the_real_scenario_fixture_finds_a_definition_named_in_another_case(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    fs::create_dir_all(temp.path().join("Packs.c4f/Fantasy.c4d"))?;
+
+    let found = crate::support::real_scenario::existing_path_ignoring_ascii_case(
+        temp.path(),
+        "packs.C4F/FANTASY.c4d",
+    );
+    assert_eq!(found, Some(temp.path().join("Packs.c4f/Fantasy.c4d")));
+    assert_eq!(
+        crate::support::real_scenario::existing_path_ignoring_ascii_case(
+            temp.path(),
+            "Packs.c4f/Knights.c4d"
+        ),
+        None
+    );
+    Ok(())
+}
+
 #[test]
 fn defcore_rct_all_timer_call_trailing_space_misses_exact_runtime_lookup(
 ) -> Result<(), Box<dyn std::error::Error>> {
