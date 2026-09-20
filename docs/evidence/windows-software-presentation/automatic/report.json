@@ -1,0 +1,95 @@
+{
+  "schema_version": 3,
+  "kind": "clonk_software_present_smoke",
+  "success": true,
+  "failure": null,
+  "initial_extent": [
+    800,
+    600
+  ],
+  "resized_extent": [
+    760,
+    560
+  ],
+  "presented_before_resize": true,
+  "presented_after_resize": true,
+  "phases": [
+    {
+      "name": "windowed",
+      "frame_extent": [
+        760,
+        560
+      ],
+      "drawable_extent": [
+        760,
+        560
+      ],
+      "scale": 1,
+      "clip_rect": [
+        0,
+        0,
+        760,
+        560
+      ],
+      "presented": true
+    },
+    {
+      "name": "fullscreen",
+      "frame_extent": [
+        760,
+        560
+      ],
+      "drawable_extent": [
+        1520,
+        1120
+      ],
+      "scale": 2,
+      "clip_rect": [
+        0,
+        0,
+        1520,
+        1120
+      ],
+      "presented": true
+    },
+    {
+      "name": "windowed-again",
+      "frame_extent": [
+        760,
+        560
+      ],
+      "drawable_extent": [
+        760,
+        560
+      ],
+      "scale": 1,
+      "clip_rect": [
+        0,
+        0,
+        760,
+        560
+      ],
+      "presented": true
+    }
+  ],
+  "registry_empty_at_exit": true,
+  "input_mapping": {
+    "window_position": [
+      128.0,
+      96.0
+    ],
+    "gui_position": [
+      64.0,
+      48.0
+    ],
+    "scale": 2.0
+  },
+  "software_reason": "no-adapter",
+  "gpu_attempt_backends": [
+    [],
+    []
+  ],
+  "display_backend": "windows",
+  "target_os": "windows",
+  "target_arch": "x86_64"
+}

@@ -1,3 +1,5 @@
 parity/bridge/oracle-weather.patch -whitespace
 parity/bridge/oracle-group-bridge.patch -whitespace
 parity/oracle/presentation_capture.patch -whitespace
+# Retain captured artifact bytes, including the Windows qualification JSON's CRLF.
+docs/evidence/windows-software-presentation/** -text -whitespace

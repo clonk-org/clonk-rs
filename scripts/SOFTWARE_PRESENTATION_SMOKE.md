@@ -188,7 +188,16 @@ Earlier schema-2 reference runs passed on:
   1 → 2 → 1, no window left behind.
 
 These are path-specific reference runs, not a claim about every `softbuffer`
-platform. Windows qualification is tracked by clonk-org/clonk-rs#1254.
+platform.
+
+**Windows schema-3 qualification passed on 2026-09-20:** Windows Server 2025
+(`10.0.26100`), AMD64, Win32, shipped `x86_64-pc-windows-msvc` release build with
+static CRT and LLD ThinLTO. Source `9c774f82275f4595938ad950e7f9b71fc159280d`,
+content `9a01c8f55f0fbdccfa2dcf3a67e3cfcfcac7c009`. Both forced and automatic
+fallback passed with `--check-input`; every stage above completed. The executable
+hash matches the workflow's successful static-CRT validation. The
+[reports, capture images, logs and qualification metadata](../docs/evidence/windows-software-presentation/README.md)
+are retained in the repository, with links to the original run and artifact.
 
 The schema-3 procedure can be dispatched against a branch using the existing
 **Main validation** workflow with `software_presentation=true`. Its Windows
