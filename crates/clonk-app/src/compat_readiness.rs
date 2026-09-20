@@ -116,7 +116,88 @@ fn manifest() -> &'static Manifest {
 /// exist yet**: the behaviour may well be right, but nothing proves it, and an
 /// unproven promise is not one worth making to a lockstep peer.
 pub fn blockers() -> Vec<CompatBlocker> {
-    blockers_in(manifest())
+    blockers_in(active_manifest())
+}
+
+/// The contract readiness is computed from: the shipped one, unless a test on
+/// this thread holds a [`ContractWithGaps`] guard.
+fn active_manifest() -> &'static Manifest {
+    #[cfg(test)]
+    if let Some(manifest) = CONTRACT_OVERRIDE.with(std::cell::Cell::get) {
+        return manifest;
+    }
+    manifest()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTRACT_OVERRIDE: std::cell::Cell<Option<&'static Manifest>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// While it lives, this thread computes readiness from a contract that records
+/// gaps. The blocked paths - the host and client notices, the withheld claim,
+/// the unadvertised profile - have to stay tested after the shipped contract
+/// stopped recording any, and a test must not depend on which state ships.
+#[cfg(test)]
+pub(crate) struct ContractWithGaps(Option<&'static Manifest>);
+
+#[cfg(test)]
+impl ContractWithGaps {
+    pub(crate) fn install() -> Self {
+        let gaps: &'static Manifest = Box::leak(Box::new(contract_with_gaps()));
+        Self(CONTRACT_OVERRIDE.with(|active| active.replace(Some(gaps))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ContractWithGaps {
+    fn drop(&mut self) {
+        CONTRACT_OVERRIDE.with(|active| active.set(self.0));
+    }
+}
+
+/// A contract that records gaps: one open divergence and five unproven
+/// promises, one more blocker than a report names individually.
+#[cfg(test)]
+fn contract_with_gaps() -> Manifest {
+    let pending = |issue: u32| {
+        serde_json::json!({
+            "kind": "issue",
+            "value": format!("clonk-org/clonk-rs#{issue}"),
+            "status": "pending"
+        })
+    };
+    serde_json::from_value(serde_json::json!({
+        "promise": {
+            "simulation": {"evidence": [
+                {"kind": "command", "value": "cargo xtask parity verify", "status": "held"},
+                pending(1), pending(2), pending(3)
+            ]},
+            "transport": {"evidence": [
+                pending(4),
+                {"kind": "test", "value": "crates/clonk-network", "status": "pending"}
+            ]}
+        },
+        "divergences": [
+            {
+                "id": "div-open-gap",
+                "area": "simulation",
+                "summary": "a defect that has not been fixed",
+                "disposition": "open-gap",
+                "profile_action": "blocked",
+                "owner": "clonk-org/clonk-rs#5"
+            },
+            {
+                "id": "div-accepted",
+                "area": "content",
+                "summary": "a difference the contract accepts",
+                "disposition": "accepted",
+                "profile_action": "kept"
+            }
+        ]
+    }))
+    .expect("the synthetic contract has the manifest's shape")
 }
 
 /// [`blockers`] for any manifest, so the mapping is testable on a contract
@@ -359,48 +440,17 @@ mod tests {
         }
     }
 
-    /// A contract that records gaps: one open divergence and five unproven
-    /// promises, one more blocker than a report names individually. The
-    /// blocked paths are tested against this rather than the shipped contract,
-    /// so they stay covered whether or not the shipped one still has gaps.
-    fn contract_with_gaps() -> Manifest {
-        let pending = |issue: u32| {
-            serde_json::json!({
-                "kind": "issue",
-                "value": format!("clonk-org/clonk-rs#{issue}"),
-                "status": "pending"
-            })
-        };
-        serde_json::from_value(serde_json::json!({
-            "promise": {
-                "simulation": {"evidence": [
-                    {"kind": "command", "value": "cargo xtask parity verify", "status": "held"},
-                    pending(1), pending(2), pending(3)
-                ]},
-                "transport": {"evidence": [
-                    pending(4),
-                    {"kind": "test", "value": "crates/clonk-network", "status": "pending"}
-                ]}
-            },
-            "divergences": [
-                {
-                    "id": "div-open-gap",
-                    "area": "simulation",
-                    "summary": "a defect that has not been fixed",
-                    "disposition": "open-gap",
-                    "profile_action": "blocked",
-                    "owner": "clonk-org/clonk-rs#5"
-                },
-                {
-                    "id": "div-accepted",
-                    "area": "content",
-                    "summary": "a difference the contract accepts",
-                    "disposition": "accepted",
-                    "profile_action": "kept"
-                }
-            ]
-        }))
-        .expect("the synthetic contract has the manifest's shape")
+    #[test]
+    fn a_held_guard_makes_the_thread_read_a_contract_with_gaps_and_restores_on_drop() {
+        let before = blockers().len();
+        {
+            let _gaps = ContractWithGaps::install();
+            assert_eq!(blockers().len(), 6);
+            assert!(!is_ready());
+            assert!(!blocked_profile_report("LegacyClonk").is_empty());
+            assert!(!blocked_join_report("LegacyClonk").is_empty());
+        }
+        assert_eq!(blockers().len(), before);
     }
 
     #[test]
