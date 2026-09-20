@@ -75,7 +75,7 @@ enum PresentationLaunchRequest {
     Discover(PresentationCaptureCase),
 }
 
-const CANONICAL_CASE_IDS: [&str; 17] = [
+const CANONICAL_CASE_IDS: [&str; 19] = [
     "startup-main",
     "startup-scenario-selection",
     "startup-network-browser",
@@ -93,6 +93,8 @@ const CANONICAL_CASE_IDS: [&str; 17] = [
     "startup-options-scale-decremented-reference",
     "startup-options-scale-initial-minimum",
     "startup-options-scale-decremented-minimum",
+    "startup-options-reset-reference",
+    "startup-options-reset-minimum",
 ];
 const PIXEL_CASES: [PixelCaptureCase; 7] = [
     PixelCaptureCase::NetworkLobby,
@@ -118,6 +120,7 @@ enum PresentationCaptureCase {
     Layout(LayoutCaptureCase),
     Pixel(PixelCaptureCase),
     ScaleConfirmation(ScaleConfirmationCaptureCase),
+    ResetConfirmation(ResetConfirmationCaptureCase),
 }
 
 impl PresentationCaptureCase {
@@ -126,6 +129,7 @@ impl PresentationCaptureCase {
             .map(Self::Layout)
             .or_else(|| PixelCaptureCase::from_id(id).map(Self::Pixel))
             .or_else(|| ScaleConfirmationCaptureCase::from_id(id).map(Self::ScaleConfirmation))
+            .or_else(|| ResetConfirmationCaptureCase::from_id(id).map(Self::ResetConfirmation))
     }
 
     const fn id(self) -> &'static str {
@@ -133,6 +137,7 @@ impl PresentationCaptureCase {
             Self::Layout(case) => case.id(),
             Self::Pixel(case) => case.id(),
             Self::ScaleConfirmation(case) => case.id(),
+            Self::ResetConfirmation(case) => case.id(),
         }
     }
 
@@ -140,7 +145,7 @@ impl PresentationCaptureCase {
         match self {
             Self::Layout(_) => true,
             Self::Pixel(case) => case.uses_layout_comparison(),
-            Self::ScaleConfirmation(_) => false,
+            Self::ScaleConfirmation(_) | Self::ResetConfirmation(_) => false,
         }
     }
 }
@@ -195,6 +200,38 @@ impl ScaleConfirmationCaptureCase {
 
     const fn decremented(self) -> bool {
         matches!(self, Self::DecrementedReference | Self::DecrementedMinimum)
+    }
+
+    fn checkpoint(self) -> String {
+        format!("{}/render-ordinal-2", self.id())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetConfirmationCaptureCase {
+    Reference,
+    Minimum,
+}
+
+impl ResetConfirmationCaptureCase {
+    const ALL: [Self; 2] = [Self::Reference, Self::Minimum];
+
+    fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|case| case.id() == id)
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Reference => "startup-options-reset-reference",
+            Self::Minimum => "startup-options-reset-minimum",
+        }
+    }
+
+    const fn dimensions(self) -> (u32, u32) {
+        match self {
+            Self::Reference => (1280, 720),
+            Self::Minimum => (640, 480),
+        }
     }
 
     fn checkpoint(self) -> String {
@@ -530,7 +567,8 @@ fn build_engine_receipt(
         checkpoint.render_ordinal
             == match case {
                 PresentationCaptureCase::Layout(_)
-                | PresentationCaptureCase::ScaleConfirmation(_) => 2,
+                | PresentationCaptureCase::ScaleConfirmation(_)
+                | PresentationCaptureCase::ResetConfirmation(_) => 2,
                 PresentationCaptureCase::Pixel(case) => case.render_ordinal(),
             },
         "render ordinal does not match the typed case checkpoint"
@@ -618,8 +656,13 @@ fn trusted_case_spec_from_bytes(
             "{} comparison term differs from the capture manifest",
             spec.id
         );
-        if let Some(case) = ScaleConfirmationCaptureCase::from_id(&spec.id) {
-            let (width, height) = case.dimensions();
+        if let Some((width, height)) = ScaleConfirmationCaptureCase::from_id(&spec.id)
+            .map(ScaleConfirmationCaptureCase::dimensions)
+            .or_else(|| {
+                ResetConfirmationCaptureCase::from_id(&spec.id)
+                    .map(ResetConfirmationCaptureCase::dimensions)
+            })
+        {
             anyhow::ensure!(
                 screen.resolution.as_deref() == Some(format!("{width}x{height}").as_str()),
                 "{} manifest resolution differs from its typed capture extent",
@@ -705,6 +748,17 @@ fn trusted_case_spec_from_bytes(
         .find(|spec| spec.id == case.id())
         .ok_or_else(|| anyhow::anyhow!("trusted case contract does not contain {}", case.id()))?;
     match case {
+        PresentationCaptureCase::ResetConfirmation(case) => {
+            anyhow::ensure!(
+                spec.comparison == "pixel"
+                    && spec.trigger.id == "options-reset-confirmation-backdrop-v1"
+                    && spec.scenario.path.is_none()
+                    && spec.frame.checkpoint == case.checkpoint()
+                    && spec.frame.number == 2,
+                "{} differs from the reset confirmation contract",
+                case.id()
+            );
+        }
         PresentationCaptureCase::ScaleConfirmation(case) => {
             anyhow::ensure!(
                 spec.comparison == "pixel"
@@ -1690,6 +1744,53 @@ fn capture_scale_confirmation(
     Ok((checkpoint, png))
 }
 
+fn capture_reset_confirmation(
+    app: &mut crate::GameApp,
+    case: ResetConfirmationCaptureCase,
+    network_references: &[u8],
+) -> Result<(
+    crate::presentation_pixel_startup::StartupPixelCheckpoint,
+    Vec<u8>,
+)> {
+    let (width, height) = case.dimensions();
+    app.resize(width, height)?;
+    let mut checkpoint =
+        stage_layout_checkpoint(app, LayoutCaptureCase::Options, network_references)?;
+    anyhow::ensure!(
+        app.dialogs.messages.is_empty(),
+        "unexpected modal before reset"
+    );
+    // C4StartupOptionsDlg.cpp:1073-1091: use the production Reset button
+    // callback, stopping at the real modal before either Yes or No is chosen.
+    app.process_options_dialog_actions(vec![
+        clonk_frontend::startup_options_dlg::OptionsDlgAction::ResetConfiguration,
+    ])?;
+    anyhow::ensure!(
+        app.dialogs.messages.len() == 1 && !app.config.reset_requested,
+        "reset confirmation did not remain pending"
+    );
+    // Reuse the identical audited input backdrop from the scale modal cases.
+    SCALE_CONFIRMATION_BACKDROP.set(true);
+    let _backdrop = ScaleConfirmationBackdrop;
+    let mut frame = vec![0; width as usize * height as usize * 4];
+    let mut presenter = clonk_scaling::FramePresenter::new(1.0, width, height);
+    for ordinal in 1..=2 {
+        route_canonical_capture_pointer(app)?;
+        let refreshed = presenter.present(&mut frame, |logical| {
+            app.render_ordered_native_base(logical)
+        })?;
+        anyhow::ensure!(refreshed, "{} ordinal {ordinal} did not refresh", case.id());
+        let mut composer = presenter.ordered_composer(&mut frame);
+        app.replay_pending_native_presentation(&mut composer)?;
+    }
+    checkpoint.simulation_seed = app.engine.random_seed();
+    checkpoint.random_count = u64::try_from(app.engine.sync_check(0).random_count)?;
+    Ok((
+        checkpoint,
+        crate::encode_screenshot_png(width, height, &frame)?,
+    ))
+}
+
 fn capture_layout_case_with_app(
     app: &mut crate::GameApp,
     case: LayoutCaptureCase,
@@ -1757,6 +1858,9 @@ fn discover_capture_case_with_app(
     mut output: impl Write,
 ) -> Result<()> {
     let checkpoint = match case {
+        PresentationCaptureCase::ResetConfirmation(case) => {
+            capture_reset_confirmation(app, case, network_references)?.0
+        }
         PresentationCaptureCase::ScaleConfirmation(case) => {
             capture_scale_confirmation(app, case, network_references)?.0
         }
@@ -2216,6 +2320,11 @@ fn run_capture_request(
         random.pin_runtime_streams();
     }
     let (checkpoint, png, layout) = match case {
+        PresentationCaptureCase::ResetConfirmation(case) => {
+            let (checkpoint, png) =
+                capture_reset_confirmation(&mut app, case, &inputs.network_references)?;
+            (checkpoint, png, None)
+        }
         PresentationCaptureCase::ScaleConfirmation(case) => {
             let (checkpoint, png) =
                 capture_scale_confirmation(&mut app, case, &inputs.network_references)?;
@@ -2674,6 +2783,12 @@ fn write_pixel_capabilities(mut output: impl Write) -> Result<()> {
                         artifacts: vec!["png"],
                     }
                 }))
+                .chain(ResetConfirmationCaptureCase::ALL.into_iter().map(|case| {
+                    PresentationCapabilityCase {
+                        id: case.id(),
+                        artifacts: vec!["png"],
+                    }
+                }))
                 .collect(),
         },
     )?;
@@ -3081,6 +3196,50 @@ mod tests {
     }
 
     #[test]
+    fn options_reset_frames_match_the_native_oracle() -> Result<()> {
+        // C4StartupOptionsDlg.cpp:1073-1091 invokes ShowMessageModal;
+        // C4GuiDialogs.cpp:1060-1092 constructs and runs the actual dialog.
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("clonk-app belongs to the workspace");
+        for case in ResetConfirmationCaptureCase::ALL {
+            let (_environment, mut app) = canonical_install_root_capture_app()?;
+            let (_checkpoint, png) = capture_reset_confirmation(&mut app, case, b"")?;
+            let oracle = repository.join("compat/presentation/oracle/v1/run-1/cpp/artifacts");
+            let reference = std::fs::read(oracle.join(format!("{}.png", case.id())))?;
+            assert_eq!(
+                compare_artifact_bytes(case.id(), &reference, &png)?,
+                "pixel"
+            );
+            assert!(!app.config.reset_requested);
+            assert!(!app.take_exit_request());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn options_reset_capture_contract_pins_both_sizes() -> Result<()> {
+        // C4StartupOptionsDlg.cpp:1073-1091 shows the real reset modal;
+        // capture it before either button changes configuration or quits.
+        for size in ["reference", "minimum"] {
+            let id = format!("startup-options-reset-{size}");
+            let case = PresentationCaptureCase::from_id(&id)
+                .ok_or_else(|| anyhow::anyhow!("missing reset-dialog capture {id}"))?;
+            assert!(!case.uses_layout_comparison());
+            let spec = trusted_case_spec_from_bytes(
+                include_bytes!("../../../compat/presentation/case_specs.json"),
+                case,
+            )?;
+            assert_eq!(spec.trigger.id, "options-reset-confirmation-backdrop-v1");
+            assert_eq!(spec.frame.checkpoint, format!("{id}/render-ordinal-2"));
+            assert_eq!(spec.frame.number, 2);
+            assert!(spec.scenario.path.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn canonical_capture_player_enables_object_context_menu() -> Result<()> {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -3278,6 +3437,7 @@ mod tests {
                 let pixel = PixelCaptureCase::from_id(&screen.id);
                 let layout = LayoutCaptureCase::from_id(&screen.id);
                 let scale = ScaleConfirmationCaptureCase::from_id(&screen.id);
+                let reset = ResetConfirmationCaptureCase::from_id(&screen.id);
                 let comparison = match screen.comparison {
                     crate::presentation_captures::ComparisonTerm::Pixel => "pixel",
                     crate::presentation_captures::ComparisonTerm::Layout => "layout",
@@ -3309,9 +3469,12 @@ mod tests {
                             "trace_sha256": EMPTY_SHA256
                         }
                     },
-                    "trigger": {"id": scale.map_or_else(
-                        || pixel.map_or("direct-startup-dialog", PixelCaptureCase::trigger),
-                        |_| "options-scale-confirmation-backdrop-v1",
+                    "trigger": {"id": reset.map_or_else(
+                        || scale.map_or_else(
+                            || pixel.map_or("direct-startup-dialog", PixelCaptureCase::trigger),
+                            |_| "options-scale-confirmation-backdrop-v1",
+                        ),
+                        |_| "options-reset-confirmation-backdrop-v1",
                     )},
                     "scenario": {
                         "path": pixel.map(PixelCaptureCase::scenario),
@@ -3319,9 +3482,12 @@ mod tests {
                     },
                     "frame": {
                         "checkpoint": pixel.map_or_else(
-                            || scale.map_or_else(
-                                || layout.expect("every synthetic screen is typed").checkpoint(),
-                                ScaleConfirmationCaptureCase::checkpoint,
+                            || reset.map_or_else(
+                                || scale.map_or_else(
+                                    || layout.expect("every synthetic screen is typed").checkpoint(),
+                                    ScaleConfirmationCaptureCase::checkpoint,
+                                ),
+                                ResetConfirmationCaptureCase::checkpoint,
                             ),
                             |case| case.checkpoint().to_owned(),
                         ),
@@ -4723,7 +4889,9 @@ mod tests {
                     {"id": "startup-options-scale-initial-reference", "artifacts": ["png"]},
                     {"id": "startup-options-scale-decremented-reference", "artifacts": ["png"]},
                     {"id": "startup-options-scale-initial-minimum", "artifacts": ["png"]},
-                    {"id": "startup-options-scale-decremented-minimum", "artifacts": ["png"]}
+                    {"id": "startup-options-scale-decremented-minimum", "artifacts": ["png"]},
+                    {"id": "startup-options-reset-reference", "artifacts": ["png"]},
+                    {"id": "startup-options-reset-minimum", "artifacts": ["png"]}
                 ]
             })
         );

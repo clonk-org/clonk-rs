@@ -41,6 +41,8 @@ EXPECTED_CASE_IDS = (
     "startup-options-scale-decremented-reference",
     "startup-options-scale-initial-minimum",
     "startup-options-scale-decremented-minimum",
+    "startup-options-reset-reference",
+    "startup-options-reset-minimum",
 )
 EXPECTED_LAYOUT_IDS = frozenset(
     (*EXPECTED_CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
@@ -1354,6 +1356,22 @@ class PinAndGitTests(unittest.TestCase):
 
 
 class InventoryAndPngTests(unittest.TestCase):
+    def test_reset_modal_capture_dimensions_are_bound_to_the_case(self):
+        # C4StartupOptionsDlg.cpp:1073-1091: the real reset dialog is captured
+        # at both audit extents, without changing the canonical config bytes.
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "reset.png"
+            image.write_bytes(png_bytes(width=640, height=480))
+            self.assertEqual(
+                MODULE.validate_png(image, "startup-options-reset-minimum")["width"],
+                640,
+            )
+            with self.assertRaisesRegex(MODULE.AcquisitionFailure, "PNG geometry"):
+                MODULE.validate_png(image, "startup-options-reset-reference")
+            image.write_bytes(png_bytes())
+            with self.assertRaisesRegex(MODULE.AcquisitionFailure, "PNG geometry"):
+                MODULE.validate_png(image, "startup-options-reset-minimum")
+
     def test_modal_capture_dimensions_are_bound_to_the_case(self):
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "modal.png"
@@ -1374,7 +1392,7 @@ class InventoryAndPngTests(unittest.TestCase):
 
         MODULE._validate_final_presentation_lifecycle(manifest, profile)
 
-    def test_case_inventory_requires_all_seventeen_and_exactly_eleven_layout_cases(self):
+    def test_case_inventory_requires_every_case_and_exactly_eleven_layout_cases(self):
         MODULE.validate_case_inventory(EXPECTED_CASE_IDS, EXPECTED_LAYOUT_IDS)
         for capture_ids, layout_ids in (
             (EXPECTED_CASE_IDS[:-1], EXPECTED_LAYOUT_IDS),
@@ -1462,7 +1480,7 @@ class InventoryAndPngTests(unittest.TestCase):
             write_capture_set(second)
 
             artifacts = MODULE.validate_duplicate_runs(first, second)
-            self.assertEqual(len(artifacts), 28)
+            self.assertEqual(len(artifacts), 30)
 
             (second / "gameplay.png").write_bytes(png_bytes(sample_byte=1))
             with self.assertRaisesRegex(MODULE.AcquisitionFailure, "gameplay.png"):
@@ -2375,6 +2393,8 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             "startup-options-scale-decremented-reference": "/startup:options",
             "startup-options-scale-initial-minimum": "/startup:options",
             "startup-options-scale-decremented-minimum": "/startup:options",
+            "startup-options-reset-reference": "/startup:options",
+            "startup-options-reset-minimum": "/startup:options",
         }
         self.assertEqual(MODULE.CPP_STARTUP_ARGUMENTS, expected_startup_arguments)
         self.assertEqual(tuple(MODULE.CPP_STARTUP_ARGUMENTS), (*EXPECTED_CASE_IDS[:6], *EXPECTED_CASE_IDS[13:]))

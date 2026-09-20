@@ -159,6 +159,8 @@ CASE_IDS = (
     "startup-options-scale-decremented-reference",
     "startup-options-scale-initial-minimum",
     "startup-options-scale-decremented-minimum",
+    "startup-options-reset-reference",
+    "startup-options-reset-minimum",
 )
 LAYOUT_CASE_IDS = frozenset(
     (*CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
@@ -221,6 +223,8 @@ EXPECTED_GEOMETRY = {
         "startup-options-scale-decremented-reference": [1280, 720],
         "startup-options-scale-initial-minimum": [640, 480],
         "startup-options-scale-decremented-minimum": [640, 480],
+        "startup-options-reset-reference": [1280, 720],
+        "startup-options-reset-minimum": [640, 480],
     },
 }
 EXPECTED_POINTER_INPUT = {
@@ -261,6 +265,8 @@ CPP_STARTUP_ARGUMENTS = {
     "startup-options-scale-decremented-reference": "/startup:options",
     "startup-options-scale-initial-minimum": "/startup:options",
     "startup-options-scale-decremented-minimum": "/startup:options",
+    "startup-options-reset-reference": "/startup:options",
+    "startup-options-reset-minimum": "/startup:options",
 }
 CPP_RUNTIME_SCENARIOS = {
     "network-lobby": "Tutorial.c4f/Tutorial01.c4s",
@@ -1216,6 +1222,7 @@ def capture_dimensions(case_id: str | None) -> tuple[int, int]:
     if case_id in {
         "startup-options-scale-initial-minimum",
         "startup-options-scale-decremented-minimum",
+        "startup-options-reset-minimum",
     }:
         return (640, 480)
     return (CAPTURE_WIDTH, CAPTURE_HEIGHT)
