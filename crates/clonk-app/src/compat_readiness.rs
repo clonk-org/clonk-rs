@@ -532,6 +532,26 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_contract_records_no_gaps_so_the_profile_is_claimable() {
+        // clonk-org/clonk-rs#498: every contract-required child has landed, so
+        // the shipped manifest holds its evidence and blocks no divergence.
+        // A host that asks for the profile may claim it, and neither report
+        // has anything to say. Naming the leftovers makes a regression in the
+        // contract read as one.
+        let outstanding = blockers()
+            .into_iter()
+            .map(|blocker| blocker.id)
+            .collect::<Vec<_>>();
+        assert!(
+            outstanding.is_empty(),
+            "the shipped contract still records gaps: {outstanding:?}"
+        );
+        assert!(is_ready());
+        assert!(blocked_profile_report("LegacyClonk").is_empty());
+        assert!(blocked_join_report("LegacyClonk").is_empty());
+    }
+
+    #[test]
     fn the_profile_is_not_claimable_while_the_contract_records_gaps() {
         // The manifest is the authority, so this test states the rule rather
         // than a count that would have to be edited every time the contract

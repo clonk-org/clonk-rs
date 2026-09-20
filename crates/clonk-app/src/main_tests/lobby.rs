@@ -7471,7 +7471,9 @@ fn compatibility_profile_notice_cannot_reopen_a_client_after_go_or_pause() {
     // dialogs are then destroyed (src/C4Network2.cpp:451-461,490-507,
     // 1501-1510). A port-only notice must therefore be a child of the already
     // open lobby, so the same close removes its continuation before it can
-    // recreate a lobby the network status has left.
+    // recreate a lobby the network status has left. A client only gets the
+    // notice while its request cannot be honoured, so the contract has gaps.
+    let _gaps = crate::compat_readiness::ContractWithGaps::install();
     for state in [
         clonk_network::NETWORK_STATE_GO,
         clonk_network::NETWORK_STATE_PAUSE,
@@ -7541,6 +7543,7 @@ fn cancelling_compatibility_profile_notice_fully_tears_down_the_visible_lobby() 
 
 #[test]
 fn headless_or_console_blocked_profile_preserves_lobby_transition_without_a_notice() {
+    let _gaps = crate::compat_readiness::ContractWithGaps::install();
     for (headless, console_mode) in [(true, false), (false, true)] {
         let (mut host, _host_events, _host_commands) = networked_host_lobby_with_commands(
             new_menu_app(640, 480),
@@ -7563,6 +7566,16 @@ fn headless_or_console_blocked_profile_preserves_lobby_transition_without_a_noti
 
 #[test]
 fn host_reports_the_session_profile_while_a_client_reports_only_its_own_refusal() {
+    host_and_client_profile_reports_follow_the_active_contract();
+}
+
+#[test]
+fn host_and_client_profile_reports_hold_while_the_contract_records_gaps() {
+    let _gaps = crate::compat_readiness::ContractWithGaps::install();
+    host_and_client_profile_reports_follow_the_active_contract();
+}
+
+fn host_and_client_profile_reports_follow_the_active_contract() {
     // A successful host report states a property of the *session*, and only the
     // host's setting decides that: `session_control_mode` resolves the host's
     // `initial_status.control_mode` (`game_app/network.rs:5612,7190`) and every
@@ -7624,6 +7637,16 @@ fn host_reports_the_session_profile_while_a_client_reports_only_its_own_refusal(
 
 #[test]
 fn a_joining_client_is_told_its_own_requested_profile_is_unavailable() {
+    let _gaps = crate::compat_readiness::ContractWithGaps::install();
+    a_joining_clients_profile_notice_follows_the_active_contract();
+}
+
+#[test]
+fn a_joining_client_whose_profile_is_claimable_gets_no_notice() {
+    a_joining_clients_profile_notice_follows_the_active_contract();
+}
+
+fn a_joining_clients_profile_notice_follows_the_active_contract() {
     // clonk-org/clonk-rs#588 wants the contract explained before hosting *or*
     // joining, and forbids a silent downgrade of the requested profile. A
     // client still must not announce a profile as the session's -- the host
@@ -7689,6 +7712,7 @@ fn a_blocked_compatibility_profile_is_reported_and_not_claimed_to_peers() {
     // The requested profile is never rewritten — a player who asked for it
     // still sees that they asked — but what the session may claim to a peer is
     // the honest answer, and any refusal is visible over the active lobby.
+    let _gaps = crate::compat_readiness::ContractWithGaps::install();
     let (mut host, _host_events, _host_commands) = networked_host_lobby_with_commands(
         new_menu_app(640, 480),
         NetworkLobbyState::new(0, "Host".to_string(), true),
