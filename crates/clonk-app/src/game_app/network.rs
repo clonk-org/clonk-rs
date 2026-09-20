@@ -6240,7 +6240,7 @@ impl GameApp {
             password_needed: !staged.options.password.is_empty(),
             use_fair_crew: staged.lobby.fair_crew,
             max_players: staged.lobby.max_players,
-            game: "LegacyClonk".to_string(),
+            game: clonk_network::CURRENT_GAME_NAME.to_string(),
             version: clonk_network::CURRENT_GAME_VERSION,
             build: clonk_network::CURRENT_GAME_BUILD,
             addresses: addresses.clone(),

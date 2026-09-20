@@ -5307,3 +5307,24 @@ fn savegame_resume_logs_localized_unassociated_player_removals() {
     main_assert_eq!(regular_before => vec!["localized remaining 1".to_string()]);
     main_assert_eq!(regular_after => vec!["localized removed Unclaimed player".to_string()]);
 }
+
+#[test]
+fn a_preparing_host_advertises_the_port_beside_the_compatibility_version() {
+    // C4Network2Reference::InitLocal sends C4ENGINENAME as Game, and a client
+    // compares Version and Build only (src/C4Network2Reference.cpp:100-102;
+    // src/C4GameVersion.h:45-48), so the name is this port's to choose.
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let content = tempdir();
+    let frontend = install_minimal_prepared_host_fixture(content.path());
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+    let app = new_menu_app_with_paths(640, 480, &paths);
+    let staged = prepare_minimal_host_lobby(&app, frontend);
+
+    let reference = GameApp::preparing_host_game_reference(&staged, Vec::new(), 0).test_value();
+
+    main_assert_eq!(reference.summary().game => clonk_network::CURRENT_GAME_NAME);
+    main_assert_eq!(reference.summary().version => clonk_network::CURRENT_GAME_VERSION);
+    main_assert_eq!(reference.summary().build => clonk_network::CURRENT_GAME_BUILD);
+    reset_cached_app_paths();
+}

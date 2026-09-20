@@ -112,4 +112,19 @@ mod tests {
 
         assert_eq!(validate_name_no_empty(value).as_bytes(), b">Alice");
     }
+
+    #[test]
+    fn the_advertised_engine_name_reaches_a_stock_client_unchanged() {
+        // C4GameVersion holds sEngineName as a VAL_NameAllowEmpty string
+        // (src/C4GameVersion.h:26), so a stock client shows whatever survives
+        // the brace, markup, trim and 30-byte rules above. The port's name must
+        // survive them whole, whatever the workspace version grows to.
+        let advertised =
+            LegacyCString::from_bytes(clonk_core::version::PORT_ENGINE_NAME.as_bytes().to_vec())
+                .unwrap();
+        assert_eq!(
+            validate_name_allow_empty(advertised.clone()).as_bytes(),
+            advertised.as_bytes()
+        );
+    }
 }

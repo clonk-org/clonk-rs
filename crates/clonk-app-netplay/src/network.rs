@@ -11484,7 +11484,7 @@ mod tests {
                 parameters.league_address.as_bytes(),
             ),
             max_players: parameters.max_players,
-            game: "LegacyClonk".to_string(),
+            game: clonk_network::CURRENT_GAME_NAME.to_string(),
             version: clonk_network::CURRENT_GAME_VERSION,
             build: clonk_network::CURRENT_GAME_BUILD,
             source_address: SocketAddr::V6(std::net::SocketAddrV6::new(

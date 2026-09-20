@@ -45,6 +45,11 @@ const DEFAULT_MULTICAST_INTERFACE: u32 = 0;
 const SCOPED_IPV6_REQUEST_HOST: &str = "clonk-rust-lan.invalid";
 pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
+/// The `Game` a local host's reference carries, where C++ sends
+/// `C4ENGINENAME`. Clients compare [`CURRENT_GAME_VERSION`] and
+/// [`CURRENT_GAME_BUILD`] only, so this is what they display, not what they
+/// match on.
+pub const CURRENT_GAME_NAME: &str = clonk_core::version::PORT_ENGINE_NAME;
 pub const CURRENT_GAME_VERSION: [i32; 4] = [4, 9, 11, 0];
 pub const CURRENT_GAME_BUILD: i32 = 362;
 
