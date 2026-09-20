@@ -208,6 +208,12 @@ matching pixels followed by three presentations on the new renderer generation.
 These are Mesa/WARP software GPU adapters and Apple's paravirtual Metal device;
 the evidence does not qualify physical driver resets or every hardware driver.
 
+The machine-readable entry still records clonk-org/clonk-rs#1241 as pending.
+Updating it changes the profile hash bound into the accepted C++ presentation
+captures, so that status transition belongs to the combined evidence reconciliation
+and fresh capture acquisition tracked by clonk-org/clonk-rs#498. The retained
+platform proof above is complete; the manifest reconciliation remains pending.
+
 ### Save and replay
 
 Savegames carry the pinned `C4XVer` header and the `C4GameSave` component
@@ -371,11 +377,12 @@ matching what a C++ peer computes, not passing its resource negotiation. The
 entry is kept in the manifest rather than removed, so the limitation is stated
 where the contract is read.
 
-The nine pending evidence entries name eight issues:
+The ten pending manifest entries name nine issues (including the completed
+platform qualification above, whose status update awaits reconciliation):
 clonk-org/clonk-rs#1261, clonk-org/clonk-rs#1240, clonk-org/clonk-rs#516, and
 clonk-org/clonk-rs#1243 (simulation),
 clonk-org/clonk-rs#586 (control and transport, once each),
-clonk-org/clonk-rs#583 (transport), and
+clonk-org/clonk-rs#583 (transport), clonk-org/clonk-rs#1241 (presentation), and
 clonk-org/clonk-rs#524 and
 clonk-org/clonk-rs#527 (save and replay).
 
