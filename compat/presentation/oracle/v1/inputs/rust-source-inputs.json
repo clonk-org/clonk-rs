@@ -44,10 +44,10 @@
       "size_bytes": 6160
     },
     {
-      "git_oid": "c06ad9f5a04836913f327edc4b25f3e65cf549fa",
+      "git_oid": "055167756f77603153d9d9c6b4c8e9aa32bd9460",
       "mode": "100644",
       "path": "compat/presentation/case_specs.json",
-      "sha256": "96bc82c4ba9be68d8d0bfc53ae9b07713d904fdec1d31ed8734d9e274253460f",
+      "sha256": "9faf6e8f41671a5f64e5c375ae156ee755363960e56d2cb54509a85a0c157818",
       "size_bytes": 30737
     },
     {
@@ -3222,11 +3222,11 @@
       "size_bytes": 4304
     },
     {
-      "git_oid": "d24838b7455b2b73def60543fbb5811b673e0d4a",
+      "git_oid": "c962fdd89060a9d49232f1f74dc4d69fd009b702",
       "mode": "100644",
       "path": "crates/clonk-engine/tests/it/collection_authored_script_fixes.rs",
-      "sha256": "4a86568b996f804320b3f7d709abb49e3df8562319385030ce43951d0cb131c2",
-      "size_bytes": 2826
+      "sha256": "3f2ab7c08f454ba0ac6dd410eb424418753ff33ccdec24f5f253403a515b7196",
+      "size_bytes": 5155
     },
     {
       "git_oid": "d966819208d99279f99be0e692e3d4026b11e883",
@@ -7114,10 +7114,10 @@
       "size_bytes": 12565
     },
     {
-      "git_oid": "b11d64957f80f1af1b174d260152eba57d90f377",
+      "git_oid": "1965d9420383fc90eab8fd00d5f10d8206f44190",
       "mode": "100644",
       "path": "parity/oracle/presentation_capture.patch",
-      "sha256": "750572fe5fcd0b9b26ba4c1628d316825956c50fadee7430066ce918570fabbe",
+      "sha256": "356ffa83e579fa43bfb705c0e5f9aaecdffaa9a0258e5f5be21d018dee22def8",
       "size_bytes": 176349
     },
     {
@@ -7968,10 +7968,10 @@
       "size_bytes": 86
     },
     {
-      "git_oid": "4efbd8de4a46edebec03c1cc7ffb5aac79d08e44",
+      "git_oid": "c79433e5344a8eeee70b00dcd2c8952b63db1ce8",
       "mode": "100755",
       "path": "scripts/acquire_presentation_oracle.py",
-      "sha256": "3648ff743fb2f471e68c8a33cc8f05a764f3c355c20ebbe00b9ff0c22e56f693",
+      "sha256": "3abcbcfebce748c8a93ebc726d267cc54e72cffa2971e7d52689a80f608b9391",
       "size_bytes": 219084
     },
     {
@@ -8067,5 +8067,5 @@
     }
   ],
   "schema": "clonk-rs/presentation-rust-source-inputs/v1",
-  "sha256": "1900bb0ed6b00a67142782fea555be7c0ae11ed7690388d487f8c478f9c47a74"
+  "sha256": "001bbfb5379bf0404b8dde5e75de64ed8ef3fcfc03f95c9a2b0e6b3b1347c66b"
 }
