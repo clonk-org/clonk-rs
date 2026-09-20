@@ -37,7 +37,7 @@ SHA-256 identities from the generated build record and differential result:
 | Resources `src/group.rs` | `5ef5fff1915f2ce15ec26e770ee04d775523e10cd66fd037d6d98e28dd0b6fb3` |
 | Pinned `lc_group_ffi.h` | `7e46a35646f875cec19254ab2daf7cf3205dcd7e34fc697508c62f4c69e86b3d` |
 
-The generated record also binds 1,027 current-tree source files and 195 linked
+The generated record also binds 1,028 current-tree source files and 195 linked
 artifacts/build inputs. The runner verifies it before and after the fixtures.
 Rebuilding creates a new record; timestamps and paths can change binary hashes.
 Use the documented commands to regenerate the per-fixture logs, probe link
@@ -46,7 +46,8 @@ command, build record and `result.json` in a fresh evidence directory.
 The full-engine `run-group-differential.sh --leaks` also passed after integrating
 clonk-org/clonk-rs#1648, including C++-packed and Rust-packed inputs, the real
 system folder, and its read/open fault hooks. Its two leak checks retained the
-known three AppKit allocations (320 bytes) each; none reached the group bridge.
+three allocations from the oracle's `GetNonTranslocatedPath` CoreFoundation URL
+creation (320 and 336 bytes); none reached the group bridge.
 
 This qualification covers the group ABI and observer only. It does not assert
 full-scenario simulation parity or qualify another operating system.
