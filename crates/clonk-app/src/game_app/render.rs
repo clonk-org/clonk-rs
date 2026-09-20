@@ -790,6 +790,10 @@ impl GameApp {
             .is_clonk_text_capture_active();
         let now = Instant::now();
         for index in 0..=last {
+            #[cfg(any(test, feature = "presentation-capture"))]
+            crate::presentation_pixel_capture::draw_scale_confirmation_backdrop(
+                self.rendering.graphics.surface_mut(),
+            );
             let keyboard_active = Some(index) == active_index && self.context_menus.open.is_none();
             let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
             self.dialogs.messages[index].state.render_at(

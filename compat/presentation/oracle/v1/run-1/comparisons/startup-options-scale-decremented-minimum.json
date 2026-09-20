@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-1/rust/artifacts/startup-options-scale-decremented-minimum.png",
+    "sha256": "f2d3b28a7defd93dc0557482b13f1177244612a0d098ce03ea78b7bed002a0de"
+  },
+  "case_id": "startup-options-scale-decremented-minimum",
+  "comparator": {
+    "binary_sha256": "f552e6d5126aa9a17d169055b3dfab013fd37a80a6d947d783bf3be4b07bc064",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "pixel",
+  "reference": {
+    "path": "run-1/cpp/artifacts/startup-options-scale-decremented-minimum.png",
+    "sha256": "abb3968ba0ae04237bf32f31d7231cefaa309c48d98386752d9b57bae6051c30"
+  },
+  "run_id": "run-1",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"startup-options-scale-decremented-minimum\",\"comparison\":\"pixel\",\"status\":\"match\"}\n"
+}

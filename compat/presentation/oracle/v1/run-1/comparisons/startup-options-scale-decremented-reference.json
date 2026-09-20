@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-1/rust/artifacts/startup-options-scale-decremented-reference.png",
+    "sha256": "deb9448c18de7b9d91e60ae2b53e8c8edff4eb590adc4695258c72708b57c194"
+  },
+  "case_id": "startup-options-scale-decremented-reference",
+  "comparator": {
+    "binary_sha256": "f552e6d5126aa9a17d169055b3dfab013fd37a80a6d947d783bf3be4b07bc064",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "pixel",
+  "reference": {
+    "path": "run-1/cpp/artifacts/startup-options-scale-decremented-reference.png",
+    "sha256": "ab0e53edcf066c61acba8a81f527e342af781a82ec1e569a442c7cd1dc43ad90"
+  },
+  "run_id": "run-1",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"startup-options-scale-decremented-reference\",\"comparison\":\"pixel\",\"status\":\"match\"}\n"
+}

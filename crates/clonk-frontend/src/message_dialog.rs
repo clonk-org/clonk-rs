@@ -33,6 +33,10 @@ const BUTTON_WIDTH: i32 = 120;
 const BUTTON_HEIGHT: i32 = 32;
 const BUTTON_GAP: i32 = 10;
 const CLIENT_VERTICAL_ROOM: i32 = 80;
+// TimedDialog::SetText centers a 10px alignment target in the 40px button
+// area, retaining the actual 32px button height (C4GuiDialogs.cpp:1301-1342).
+const TIMED_BUTTON_TOP_OFFSET: i32 = 25;
+const TIMED_VERTICAL_ROOM: i32 = TIMED_BUTTON_TOP_OFFSET + BUTTON_HEIGHT + BUTTON_GAP;
 const PROGRESS_VERTICAL_ROOM: i32 = 150;
 const PROGRESS_HEIGHT: i32 = 30;
 const PROGRESS_BUTTON_AREA_HEIGHT: i32 = 40;
@@ -310,6 +314,7 @@ pub struct MessageDialogState {
     size: MessageDialogSize,
     default_no: bool,
     force_centered_message: bool,
+    timed_text_update: bool,
     checkbox: Option<MessageDialogCheckbox>,
     progress: Option<u8>,
     checkbox_changes: Vec<bool>,
@@ -348,6 +353,7 @@ impl MessageDialogState {
             size,
             default_no,
             force_centered_message: false,
+            timed_text_update: false,
             checkbox: None,
             progress: None,
             checkbox_changes: Vec::new(),
@@ -395,6 +401,14 @@ impl MessageDialogState {
 
     pub fn with_centered_message(mut self) -> Self {
         self.force_centered_message = true;
+        self
+    }
+
+    /// Preserve the empty native TimedDialog constructor's centered label,
+    /// then apply ResChangeConfirmDlg's unmarked full-client-width wrapping
+    /// and TimedDialog::SetText's button and height update.
+    pub fn with_timed_text_update(mut self) -> Self {
+        self.timed_text_update = true;
         self
     }
 
@@ -578,6 +592,7 @@ impl MessageDialogState {
         let is_progress = self.progress.is_some();
         let centered = is_progress
             || self.force_centered_message
+            || self.timed_text_update
             || self.size != MessageDialogSize::Regular
             || (unbroken_width <= width - 140 && unbroken_height <= font.line_height);
         let message_width = if is_progress {
@@ -587,7 +602,19 @@ impl MessageDialogState {
         } else {
             width - 80
         };
-        let message_text = break_message(font, &self.message, message_width);
+        let message_text = if self.timed_text_update {
+            break_message_with_options(
+                font,
+                &self.message,
+                width,
+                BreakMessageOptions {
+                    markup: false,
+                    ..BreakMessageOptions::default()
+                },
+            )
+        } else {
+            break_message(font, &self.message, message_width)
+        };
         let (_, message_height) = font.measure(&message_text, true);
         let checkbox_size = self.checkbox.as_ref().map(|checkbox| {
             let (label_width, label_height) = font.measure(&checkbox.raw_label, true);
@@ -596,6 +623,9 @@ impl MessageDialogState {
         let (client_height, height) = if is_progress {
             let height = message_height.max(ICON_SIZE) + PROGRESS_VERTICAL_ROOM;
             (height - title_height, height)
+        } else if self.timed_text_update {
+            let client_height = message_height + TIMED_VERTICAL_ROOM;
+            (client_height, title_height + client_height)
         } else {
             let client_height = message_height
                 + checkbox_size.map_or(CLIENT_VERTICAL_ROOM, |(_, height)| height + 100);
@@ -670,6 +700,8 @@ impl MessageDialogState {
         let button_y = if is_progress {
             client_y + client_height - DIALOG_INDENT - PROGRESS_BUTTON_AREA_HEIGHT
                 + (PROGRESS_BUTTON_AREA_HEIGHT - BUTTON_HEIGHT) / 2
+        } else if self.timed_text_update {
+            client_y + message_height + TIMED_BUTTON_TOP_OFFSET
         } else {
             client_y
                 + message_height

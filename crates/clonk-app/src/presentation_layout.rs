@@ -29,7 +29,12 @@ pub(crate) fn expected_port_asset_exemptions(screen: &str) -> Option<BTreeMap<St
         )],
         "startup-options" => &[("startup/options/tabs/paper", "super-resolved-startup-art")],
         "startup-about" => &[("startup/about/branding/fan-project", "branding")],
-        "network-lobby" | "loader" => &[],
+        "network-lobby"
+        | "loader"
+        | "startup-options-scale-initial-reference"
+        | "startup-options-scale-decremented-reference"
+        | "startup-options-scale-initial-minimum"
+        | "startup-options-scale-decremented-minimum" => &[],
         "hud" | "ingame-menu" | "object-menu" | "gameplay" | "evaluation" => {
             &[("game/upper-board/branding/logo", "branding")]
         }
