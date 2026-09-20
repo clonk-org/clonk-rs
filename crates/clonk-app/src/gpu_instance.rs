@@ -144,6 +144,21 @@ pub(crate) fn begin_retained_instance_evidence_capture() {
     registry.capture_acquisitions = true;
 }
 
+/// Diagnostic snapshot of live surface IDs, taken between destruction and
+/// replacement by the device-loss probe. Ordinary frames never query this.
+pub(crate) fn live_surface_count() -> Option<usize> {
+    registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entries
+        .iter()
+        .try_fold(0, |count, entry| {
+            entry.instance.generate_report().map(|report| {
+                count + report.surfaces.num_allocated + report.surfaces.num_kept_from_user
+            })
+        })
+}
+
 /// Snapshot the registry evidence used by the headed lifecycle gate.
 ///
 /// Each successful surface must be preceded by one acquisition carrying the

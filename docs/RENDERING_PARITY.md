@@ -170,18 +170,21 @@ destroyed generation, on a software presenter taking over, on a failed
 rebuild, or after 15 s without recovery; the exit code is 0, 2 or 1 (report
 unwritable), and the report carries the OS, backend, adapter, driver, both
 generations, the callback diagnosis, the rebuild outcome and the recovery
-time. Run it on a scenario that presents continuously, for example:
+time. Schema 2 also checks actual surface destruction, complete source-texture
+uploads, and byte-identical pre-loss/post-loss presentation readbacks. Run it
+on the idle startup screen so intentional animation cannot change the reference:
 
 ```sh
 WGPU_BACKEND=metal target/release/clonk-app --config <config.ini> \
-  --device-loss-probe device-loss-metal.json \
-  content/Collection.c4f/Magus.c4f/SkyBridge.c4s <player.c4p>
+  --device-loss-probe device-loss-metal.json
 ```
 
 The window must be visible: an occluded or locked display presents nothing,
 and the probe then reports zero presentations before the loss rather than a
 recovery. Unit injection is still not reported as platform qualification;
-`docs/COMPAT_PROFILE.md` records which backends have a probe report.
+`docs/COMPAT_PROFILE.md` records which backends have a probe report. The
+[qualification runner](DEVICE_LOSS_QUALIFICATION.md) binds images and resource
+evidence to committed source, content, executable, OS, and toolchain identities.
 
 ## Software composition and presentation
 

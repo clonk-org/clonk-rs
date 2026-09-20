@@ -1118,6 +1118,7 @@ pub(crate) fn rebuild_retained_gpu_device(
     window: &Arc<Window>,
     pixels: &mut Option<WindowSurface>,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
+    probe: Option<&mut crate::device_loss_probe::DeviceLossProbe>,
 ) -> Result<()> {
     let size = enforce_min_size(window.inner_size());
     let previous = pixels
@@ -1126,7 +1127,13 @@ pub(crate) fn rebuild_retained_gpu_device(
     let previous_width = previous.buffer_extent().0;
     let previous_height = previous.buffer_extent().1;
     let previous_frame = previous.frame().to_vec();
+    let surfaces_before = probe
+        .as_ref()
+        .and_then(|_| gpu_instance::live_surface_count());
     replace_after_drop(pixels, || {
+        if let Some(probe) = probe {
+            probe.note_surface_drop(surfaces_before, gpu_instance::live_surface_count())?;
+        }
         let mut replacement =
             build_framebuffer(window, size).context("failed to rebuild retained GPU surface")?;
         replacement

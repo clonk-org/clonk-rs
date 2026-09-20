@@ -62,7 +62,7 @@ class CiLatencyTests(unittest.TestCase):
             path.read_text(encoding="utf-8") for path in WORKFLOWS.glob("*.yml")
         )
 
-        self.assertEqual(workflows.count("scripts/install-apt-packages.sh"), 6)
+        self.assertEqual(workflows.count("scripts/install-apt-packages.sh"), 7)
         self.assertNotIn("apt_install()", workflows)
         self.assertTrue(APT_INSTALLER.stat().st_mode & 0o111)
         self.assertLess(installer.index("apt_install"), installer.index("apt_refresh"))
@@ -107,7 +107,7 @@ class CiLatencyTests(unittest.TestCase):
                 self.assertIsNotNone(minutes, f"{path.name} bounds no apt step")
                 steps.append(int(minutes.group(1)) * 60)
 
-        self.assertEqual(len(steps), 6)
+        self.assertEqual(len(steps), 7)
         self.assertLess(budget, min(steps))
 
     def test_restore_only_landing_caches_have_trusted_main_producers(self):
