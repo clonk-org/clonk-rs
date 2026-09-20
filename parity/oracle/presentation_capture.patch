@@ -971,10 +971,10 @@ index e1727fced..1fb0b7102 100644
  		// subcomponents
  		C4GUI::Icon *pIcon; // player icon
 diff --git a/src/C4Random.h b/src/C4Random.h
-index f6d50fece..91243d00f 100644
+index f6d50fece..c176860e9 100644
 --- a/src/C4Random.h
 +++ b/src/C4Random.h
-@@ -23,11 +23,19 @@
+@@ -23,20 +23,84 @@
  #endif
  
  #include <cstdint>
@@ -991,16 +991,43 @@ index f6d50fece..91243d00f 100644
 +inline std::string SafeRandomTrace;
 +inline bool RawRandomAuditEnabled{false};
 +inline std::string RawRandomAuditTrace;
++
++// SafeRandom's own generator state. libc rand() is process-global, so an
++// unaudited rand() anywhere in the process, on any thread, moves every later
++// draw; two of them shifted the network lobby's loader draws in about 6% of
++// capture runs. This is the recurrence Darwin's rand() runs (do_rand: a zero
++// seed becomes 123459876, then x = 16807 * x mod 2^31 - 1), so it yields the
++// values the preflight pins and nothing else in the process can advance it.
++inline uint64_t PresentationRandomState{123459876};
++
++inline void SeedPresentationRandom(uint32_t dwSeed)
++{
++	// A state of zero, or any multiple of the modulus, would stay zero.
++	const uint64_t reduced = dwSeed % 2147483647u;
++	PresentationRandomState = reduced ? reduced : 123459876;
++}
++
++inline int NextPresentationRandom()
++{
++	PresentationRandomState = PresentationRandomState * 16807 % 2147483647;
++	return static_cast<int>(PresentationRandomState);
++}
  
  inline void FixedRandom(uint32_t dwSeed)
  {
-@@ -37,6 +45,38 @@ inline void FixedRandom(uint32_t dwSeed)
+ 	// for SafeRandom
+-	srand(static_cast<unsigned>(time(nullptr)));
++	const auto now = static_cast<unsigned>(time(nullptr));
++	srand(now);
++	SeedPresentationRandom(now);
+ 	RandomHold = dwSeed;
  	RandomCount = 0;
  }
  
 +inline void FixedSafeRandom(uint32_t dwSeed)
 +{
 +	srand(dwSeed);
++	SeedPresentationRandom(dwSeed);
 +	SafeRandomSeed = dwSeed;
 +	SafeRandomCount = 0;
 +}
@@ -1033,14 +1060,14 @@ index f6d50fece..91243d00f 100644
  inline FILE *LcRngTraceFile()
  {
  	static FILE *rngTrace = []() -> FILE * {
-@@ -93,8 +133,16 @@ inline unsigned int SeededRandom(unsigned int iSeed, unsigned int iRange)
+@@ -93,8 +157,16 @@ inline unsigned int SeededRandom(unsigned int iSeed, unsigned int iRange)
  
  inline int SafeRandom(int range)
  {
 -	if (!range) return 0;
 -	return rand() % range;
 +	SafeRandomCount++;
-+	const int result = range ? rand() % range : 0;
++	const int result = range ? NextPresentationRandom() % range : 0;
 +	if (SafeRandomTraceEnabled)
 +	{
 +		SafeRandomTrace += std::to_string(range);
@@ -1053,10 +1080,10 @@ index f6d50fece..91243d00f 100644
  
  void Randomize3();
 diff --git a/src/C4Startup.cpp b/src/C4Startup.cpp
-index 9542728ef..cdb481c90 100644
+index 9542728ef..5ef7978f5 100644
 --- a/src/C4Startup.cpp
 +++ b/src/C4Startup.cpp
-@@ -26,9 +26,1311 @@
+@@ -26,9 +26,1318 @@
  #include <C4StartupOptionsDlg.h>
  #include <C4StartupAboutDlg.h>
  #include <C4StartupPlrSelDlg.h>
@@ -1377,6 +1404,12 @@ index 9542728ef..cdb481c90 100644
 +		for (const int value : expected)
 +			if (rand() != value)
 +				CaptureFailure("native libc rand does not match darwin-libc-rand-park-miller-v1 seed-587 preflight");
++		// SafeRandom draws from its own state, not libc's; it has to be the
++		// same stream, or every trusted trace digest would mean something else.
++		SeedPresentationRandom(CaptureSeed);
++		for (const int value : expected)
++			if (NextPresentationRandom() != value)
++				CaptureFailure("private presentation generator does not match darwin-libc-rand-park-miller-v1 seed-587 preflight");
 +		FixedSafeRandom(CaptureSeed);
 +		ResetSafeRandomTrace();
 +		ResetRawRandomAuditTrace();
@@ -2105,7 +2138,8 @@ index 9542728ef..cdb481c90 100644
 +			if (spec.simulationCalls < 0 || spec.presentationCalls < 0 || spec.presentationTraceSha256.empty())
 +				CaptureFailure(std::format("{} trusted RNG call contract is unavailable; run CLONK_PRESENTATION_DISCOVER first", spec.id));
 +			if (RandomCount != spec.simulationCalls || SafeRandomCount != spec.presentationCalls || safeRandomTraceSha256 != spec.presentationTraceSha256)
-+				CaptureFailure(std::format("{} RNG contract drift: simulation calls={}, presentation calls={}", spec.id, RandomCount, SafeRandomCount));
++				CaptureFailure(std::format("{} RNG contract drift: simulation calls={} (expected {}), presentation calls={} (expected {}), presentation trace {} (expected {})",
++					spec.id, RandomCount, spec.simulationCalls, SafeRandomCount, spec.presentationCalls, safeRandomTraceSha256, spec.presentationTraceSha256));
 +			const bool hasLayout = std::ranges::find(RuntimeLayoutCapabilities, spec.id) != RuntimeLayoutCapabilities.end();
 +			std::string layout;
 +			if (hasLayout)
@@ -2368,7 +2402,7 @@ index 9542728ef..cdb481c90 100644
  
  bool C4StartupGraphics::LoadFile(C4FacetExID &rToFct, const char *szFilename)
  {
-@@ -149,6 +1451,241 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
+@@ -149,6 +1458,241 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
  	pInstance = this;
  }
  
@@ -2610,7 +2644,7 @@ index 9542728ef..cdb481c90 100644
  C4Startup::~C4Startup()
  {
  	pInstance = nullptr;
-@@ -269,6 +1806,8 @@ bool C4Startup::DoStartup()
+@@ -269,6 +1813,8 @@ bool C4Startup::DoStartup()
  	delete pLastDlg; pLastDlg = nullptr;
  	delete pCurrDlg; pCurrDlg = nullptr;
  
@@ -2619,7 +2653,7 @@ index 9542728ef..cdb481c90 100644
  	// start with the last dlg that was shown - at first startup main dialog
  	if (!SwitchDialog(eLastDlgID)) return false;
  
-@@ -370,9 +1909,19 @@ void C4Startup::Unload()
+@@ -370,9 +1916,19 @@ void C4Startup::Unload()
  
  bool C4Startup::Execute()
  {
