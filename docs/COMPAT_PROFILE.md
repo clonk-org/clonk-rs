@@ -18,10 +18,17 @@ is refused rather than approximated.
 
 The profile fails closed while any promised evidence is pending. Configuration,
 synchronized-default overlays, and readiness diagnostics are implemented in
-clonk-org/clonk-rs#582, clonk-org/clonk-rs#584, and clonk-org/clonk-rs#588.
-Per-route connection enforcement remains incomplete in
-clonk-org/clonk-rs#583. The coordination tracker for the whole effort is
-clonk-org/clonk-rs#498.
+clonk-org/clonk-rs#582, clonk-org/clonk-rs#584, and clonk-org/clonk-rs#588, and
+advertisement and admission in clonk-org/clonk-rs#583. The coordination tracker
+for the whole effort was clonk-org/clonk-rs#498.
+
+As of the reconciliation that closed that tracker, no evidence is pending and
+no divergence is blocked, so the profile may be claimed. Not every held entry
+is the same kind of proof, and the manifest's notes say which is which: some
+are C++ differentials a gate runs, some are Rust tests that cite the C++ they
+mirror, and three (the live shadow diff, the mixed-engine sessions and the
+device-loss probe) are recorded measurements that need a locally built oracle
+or a visible window, which no gate re-runs. Each area below names its own.
 
 ## What the profile pins
 
@@ -95,14 +102,19 @@ the fields carried by its comparison ABI matched. The historical
 `parity/reports/goldrush_seed_424242.json` remains scoped to its bundled
 revision.
 
-Pending: clonk-org/clonk-rs#1261 adds independently evolving weather and
-environment state to the live comparison; clonk-org/clonk-rs#1240 adds the
-live landscape and material planes. clonk-org/clonk-rs#516 owns the missing
-attached-`DoMovement` raw-state differential matrix, and
-clonk-org/clonk-rs#1243 owns landscape-aware `LineConnect` routing. Until those
-issues close, the bounded primitive golden and a clean shadow-diff run do not
-prove the corresponding parts of the simulation promise; the golden's keys are
-the authoritative inventory of what `cargo xtask parity verify` covers.
+Also held, each with a limit the manifest note records. The live comparison now
+carries independently evolving weather and environment state
+(clonk-org/clonk-rs#1261) and the landscape and material planes
+(clonk-org/clonk-rs#1240); the handoff tests in `crates/clonk-engine/src/ffi.rs`
+run in the gates, and the live comparison itself still needs a locally built
+oracle. The attachment search and the attached `DoMovement` walk are C++
+differentials in the `shape_attach` and `do_movement_attached` golden sections
+(clonk-org/clonk-rs#516), with no case of their own for friction or
+contact-callback ordering. Landscape-aware `LineConnect` routing is the
+`line_connect_routing` section (clonk-org/clonk-rs#1243); the `DFA_CONNECT`
+lifecycle after a failed connect is covered only for the vertex-count guard
+path. The golden's keys remain the authoritative inventory of what
+`cargo xtask parity verify` covers.
 
 ### Control
 
@@ -116,8 +128,12 @@ and the PreSend and latency-budget tests in
 `crates/clonk-app-netplay/src/network.rs`, which keep the ACT rolling average
 and its 1..15 clamp bit-exact with C++.
 
-Pending: clonk-org/clonk-rs#586, real stock-C++/Rust host-client interoperation
-in both directions.
+Also held: real stock-C++/Rust host-client sessions with control delivery in
+both directions (clonk-org/clonk-rs#586), driven by
+`scripts/run_loopback_netgame_rounds.py --direction {control,cpp-host,cpp-client}`.
+It is a recorded measurement, not a gate: 6 of 6 rounds measurable and 0
+desynced each way on 2026-08-27, after clonk-org/clonk-rs#1369, and it needs a
+locally built oracle to repeat.
 
 ### Transport
 
@@ -132,8 +148,13 @@ Held: the ReliableUDP, NetPuncher, and session-protocol conformance tests in
 comparison; and `crates/clonk-network/src/capabilities.rs`, which pins what a
 released port build reads from this build's announcement and datagrams.
 
-Pending: clonk-org/clonk-rs#583 (restart, rejoin, and per-route connection
-enforcement) and clonk-org/clonk-rs#586.
+Also held: advertisement and admission of the profile between port peers
+(clonk-org/clonk-rs#583), two capability bits with a refusal only when both
+sides announced and disagree, so a stock peer that announces nothing is still
+admitted. The unit and session tests cover admission; restart, rejoin and
+per-route handshakes have no test of their own. The mixed-engine measurement
+above (clonk-org/clonk-rs#586) is the interoperation evidence for this area
+too.
 
 ### Content and resources
 
@@ -208,11 +229,10 @@ matching pixels followed by three presentations on the new renderer generation.
 These are Mesa/WARP software GPU adapters and Apple's paravirtual Metal device;
 the evidence does not qualify physical driver resets or every hardware driver.
 
-The machine-readable entry still records clonk-org/clonk-rs#1241 as pending.
-Updating it changes the profile hash bound into the accepted C++ presentation
-captures, so that status transition belongs to the combined evidence reconciliation
-and fresh capture acquisition tracked by clonk-org/clonk-rs#498. The retained
-platform proof above is complete; the manifest reconciliation remains pending.
+The machine-readable entry records that evidence as held. Changing any entry
+changes the profile hash bound into the accepted C++ presentation captures, so
+the status transition shipped together with a fresh capture acquisition in the
+reconciliation that closed clonk-org/clonk-rs#498.
 
 ### Save and replay
 
@@ -228,13 +248,16 @@ the savegame component serialization tests in
 `crates/clonk-app/src/main_tests/saves.rs`, plus the component-level checkpoint,
 resync, and post-mortem tests in `crates/clonk-network`.
 
-Pending: clonk-org/clonk-rs#524. Its component-selection and ordering tests are
-held, but representative C++/Rust save bytes, callback traces, restored state,
-and the first post-load tick remain without the differential evidence the
-issue requires. clonk-org/clonk-rs#527 likewise remains pending: its component
-tests do not differentially compare the complete checkpoint decision,
-post-mortem transcript, attribution, recovery state, and subsequent tick
-against C++.
+Also held, as the kinds of evidence they are. For clonk-org/clonk-rs#524 the
+exact-save step is a C++ differential, the `scenario_sections` golden section
+over `C4GameSave::SaveScenarioSections`; the save component set and the
+restore-info ordering are Rust tests that cite the C++ lines; and
+representative save bytes, callback traces, restored state and the first
+post-load tick have no oracle differential. For clonk-org/clonk-rs#527 the
+evidence is one composed Rust test in `crates/clonk-network/src/post_mortem.rs`
+that takes a divergent client through checkpoints, resync, the post-mortem
+exchange, recovery and cleanup, pinned to `src/C4Network2IO.cpp:1390-1407`; it
+is a cited Rust test, not a differential run against the oracle.
 
 ## Accepted divergences
 
@@ -353,17 +376,25 @@ combination, what happens, and what the refusal rests on.
 | `fc-save-version` | A savegame, recording, or scenario whose `C4XVer` header or record type does not match the pinned engine version. | Refuse to load, exactly as C++ does. No attempt to repair or reinterpret foreign-version data. |
 | `fc-config-conflict` | A saved configuration sets a profile-forced key (the Remaster family, `RenderInactive`, the scale cap, the first-run scale seed, or the game tick delay). | The profile value wins and shadows the saved value for the duration of the profile. The saved value is never merged in, and the normal profile is left untouched on exit. |
 
-## Readiness: what the profile may not claim today
+## Readiness: what the profile may claim today
 
 `fc-readiness` is the rule that keeps this document honest, and today it says
-no. `cargo xtask compat verify` prints the count it acts on: the pending
+yes. `cargo xtask compat verify` prints the count it acts on: the pending
 evidence entries and the blocked divergences. While either is non-zero the
-profile must not be presented to a player as compatible.
+profile must not be presented to a player as compatible; both are zero, so a
+host that asks for the profile may claim it.
 
-No open gap blocks it any more. What remains is unproven promises, not known
-defects.
+That is a statement about the contract as written, not a claim that every
+promise is proven to the same depth. The entries reconciled last are held with
+their limits stated beside them, in the manifest notes and in each area above:
+the live shadow diff, the mixed-engine sessions and the device-loss probe are
+recorded measurements no gate re-runs, and the resync, restore-ordering and
+profile-admission evidence is Rust tests that cite the C++ they mirror rather
+than oracle differentials. A defect found in any of them reopens its entry as
+`pending` with a new qualified issue, and the rule says no again.
 
-The last one, `content-system-group-identity`, is now `accepted` rather than
+No open gap blocks the profile. The last one, `content-system-group-identity`,
+is `accepted` rather than
 blocked, by a product decision recorded on 2026-08-26. `planet/System.c4g`
 carries port-authored files stock LegacyClonk does not, so the group's
 `ContentsCRC` differs and a stock peer aborts the join before any script runs;
@@ -377,14 +408,12 @@ matching what a C++ peer computes, not passing its resource negotiation. The
 entry is kept in the manifest rather than removed, so the limitation is stated
 where the contract is read.
 
-The ten pending manifest entries name nine issues (including the completed
-platform qualification above, whose status update awaits reconciliation):
-clonk-org/clonk-rs#1261, clonk-org/clonk-rs#1240, clonk-org/clonk-rs#516, and
-clonk-org/clonk-rs#1243 (simulation),
+The ten entries that were pending until that reconciliation named nine issues,
+all closed: clonk-org/clonk-rs#1261, clonk-org/clonk-rs#1240,
+clonk-org/clonk-rs#516, and clonk-org/clonk-rs#1243 (simulation),
 clonk-org/clonk-rs#586 (control and transport, once each),
 clonk-org/clonk-rs#583 (transport), clonk-org/clonk-rs#1241 (presentation), and
-clonk-org/clonk-rs#524 and
-clonk-org/clonk-rs#527 (save and replay).
+clonk-org/clonk-rs#524 and clonk-org/clonk-rs#527 (save and replay).
 
 ## Changing this contract
 

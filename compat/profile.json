@@ -42,28 +42,28 @@
           "note": "The current-tree full-scenario C++ shadow-diff bridge is operational (clonk-org/clonk-rs#585). It compares the fields its ABI carries; it does not claim weather or live-landscape coverage."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#1261",
-          "status": "pending",
-          "note": "The live shadow diff does not carry or compare independently evolving weather and environment state."
+          "kind": "test",
+          "value": "crates/clonk-engine/src/ffi.rs (runtime weather comparison tests)",
+          "status": "held",
+          "note": "The live shadow diff carries the C++ weather and environment state every frame and compares it before object state (clonk-org/clonk-rs#1261; parity/bridge/README.md, Weather/environment handoff). These tests pin the handoff, the first-difference report and its fail-closed rules. The live comparison itself needs a locally built oracle, so no gate runs it."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#1240",
-          "status": "pending",
-          "note": "The normal non-authoritative live loop does not compare independently evolving landscape and material planes."
+          "kind": "test",
+          "value": "crates/clonk-engine/src/ffi.rs (runtime landscape comparison tests)",
+          "status": "held",
+          "note": "The normal non-authoritative live loop compares the independently evolving landscape and material planes, PXS, mass movers and material cores (clonk-org/clonk-rs#1240; parity/bridge/README.md, Landscape/material handoff). These tests pin the handoff, the first-pixel report and the injected native and Rust faults. The live comparison itself needs a locally built oracle, so no gate runs it."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#516",
-          "status": "pending",
-          "note": "Attached DoMovement still lacks the required raw-state C++ differential matrix for attachment search, friction, contact response, and callback ordering."
+          "kind": "test",
+          "value": "crates/clonk-engine/src/parity_differential.rs (shape_attach and do_movement_attached golden sections)",
+          "status": "held",
+          "note": "C++ differential run by cargo xtask parity verify (clonk-org/clonk-rs#516): 11 attachment-search cases and 14 attached-walk cases on raw C4Fixed position and velocity, per-probe traces and RNG state, including both coordinate corrections, a lost attachment, a contact that aborts the walk, a live solid-mask wall and border clamping. Friction and contact-callback ordering have no case of their own in these sections."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#1243",
-          "status": "pending",
-          "note": "The `line_connect_routing` golden section now covers the landscape-aware routing itself - endpoint move, bend search, old-endpoint fallback, the C4D_MaxVertex refusal and the resulting ordered vertex list. The immediate DFA_CONNECT lifecycle handoff - the LineBreak callback trace and object status that follow a failed connect - is still only covered for the vertex-count guard path by `connect_geometry_break_removal`."
+          "kind": "test",
+          "value": "crates/clonk-engine/src/parity_differential.rs (line_connect_routing golden section)",
+          "status": "held",
+          "note": "C++ differential run by cargo xtask parity verify (clonk-org/clonk-rs#1243): endpoint move, bend search, old-endpoint fallback, the C4D_MaxVertex refusal and the resulting ordered vertex list. The DFA_CONNECT lifecycle handoff after a failed connect - the LineBreak callback trace and object status - is covered only for the vertex-count guard path, by connect_geometry_break_removal."
         },
         {
           "kind": "document",
@@ -95,10 +95,10 @@
           "note": "The ACT rolling average and the 1..15 clamp stay bit-exact with C++; the divergent horizon sizing is pinned separately."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#586",
-          "status": "pending",
-          "note": "Real stock-C++/Rust host-client interoperation in both directions, including control delivery."
+          "kind": "command",
+          "value": "python3 scripts/run_loopback_netgame_rounds.py --direction cpp-host --oracle <clonk>",
+          "status": "held",
+          "note": "Real stock-C++/Rust sessions on loopback with control delivery, in both directions plus a Rust/Rust control (clonk-org/clonk-rs#586). Measured once, on 2026-08-27 after clonk-org/clonk-rs#1369: 6 of 6 rounds measurable and 0 desynced with C++ hosting, with Rust hosting, and in the control. It needs a locally built oracle, so no gate re-runs it."
         }
       ]
     },
@@ -112,16 +112,16 @@
           "note": "Wire-format conformance and version admission, including the C4Network2.cpp:1291-1299 build comparison."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#583",
-          "status": "pending",
-          "note": "Advertising and enforcing the profile during connection setup."
+          "kind": "test",
+          "value": "crates/clonk-network/src/capabilities.rs (compatibility-profile admission bits)",
+          "status": "held",
+          "note": "A host advertises the profile it claims and port peers enforce it at admission: two capability bits, with a refusal only when both sides announced and disagree, so a stock C++ peer that announces nothing is still admitted (clonk-org/clonk-rs#583). Unit and session tests in this crate and crates/clonk-app/src/main_tests/netplay_1.rs; restart, rejoin and per-route handshakes have no test of their own."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#586",
-          "status": "pending",
-          "note": "Real stock-C++/Rust interoperation, both directions."
+          "kind": "command",
+          "value": "python3 scripts/run_loopback_netgame_rounds.py --direction cpp-client --oracle <clonk>",
+          "status": "held",
+          "note": "Real stock-C++/Rust interoperation over the pinned wire protocol, both directions (clonk-org/clonk-rs#586). Measured once, on 2026-08-27 after clonk-org/clonk-rs#1369: 6 of 6 rounds measurable and 0 desynced in each direction. It needs a locally built oracle, so no gate re-runs it."
         },
         {
           "kind": "test",
@@ -176,10 +176,10 @@
           "note": "The landing gate revalidates accepted C++/Rust evidence for all thirteen screens: six startup screens with port-authored branding or art and five runtime screens carrying the Clonk Rust logo use the layout term approved by clonk-org/clonk-rs#1298, while network-lobby and loader use the pixel term."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#1241",
-          "status": "pending",
-          "note": "The shipped event loop lacks live platform evidence for complete retained-GPU device-loss recovery and the first correct post-rebuild presentation."
+          "kind": "document",
+          "value": "docs/evidence/live-gpu-recovery/README.md",
+          "status": "held",
+          "note": "Headed device-loss probe reports from the shipped event loop on Metal, Vulkan, DX12 and GL, each with the qualification record, the run log and frames from before and after the rebuild (clonk-org/clonk-rs#1241, clonk-org/clonk-rs#1659). Recorded evidence from real windows on Mesa and WARP software adapters and Apple's paravirtual Metal device; it does not qualify physical driver resets. The probe needs a visible display, so no gate re-runs it."
         }
       ]
     },
@@ -199,16 +199,16 @@
           "note": "Component order, player-info embedding, and group layout."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#524",
-          "status": "pending",
-          "note": "Differential check of save serialization and restore ordering."
+          "kind": "test",
+          "value": "crates/clonk-engine/src/parity_differential.rs (scenario_sections golden section)",
+          "status": "held",
+          "note": "C++ differential run by cargo xtask parity verify over C4GameSave::SaveScenarioSections, the exact-save step, in six rows (clonk-org/clonk-rs#524). The save component set and the restore-info ordering are pinned beside it in crates/clonk-engine/src/live_c4_save.rs by Rust tests that cite the C++ lines, not by an oracle run. Representative save bytes, callback traces, restored state and the first post-load tick have no oracle differential."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#527",
-          "status": "pending",
-          "note": "The component tests do not yet differentially compare the complete checkpoint decision, post-mortem transcript, client attribution, recovery state, and subsequent tick against C++."
+          "kind": "test",
+          "value": "crates/clonk-network/src/post_mortem.rs (composed resync and post-mortem recovery)",
+          "status": "held",
+          "note": "One composed Rust test takes a divergent client through checkpoints, resync initiation and application, the post-mortem exchange, recovery and cleanup beside two healthy peers, each step pinned to the C++ it mirrors (src/C4Network2IO.cpp:1390-1407) and shown load-bearing by removing the one-post-mortem guard (clonk-org/clonk-rs#527). It is a cited Rust test, not a differential run against the oracle."
         }
       ]
     }

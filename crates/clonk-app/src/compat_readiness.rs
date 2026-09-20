@@ -116,7 +116,93 @@ fn manifest() -> &'static Manifest {
 /// exist yet**: the behaviour may well be right, but nothing proves it, and an
 /// unproven promise is not one worth making to a lockstep peer.
 pub fn blockers() -> Vec<CompatBlocker> {
-    let manifest = manifest();
+    blockers_in(active_manifest())
+}
+
+/// The contract readiness is computed from: the shipped one, unless a test on
+/// this thread holds a [`ContractWithGaps`] guard.
+fn active_manifest() -> &'static Manifest {
+    #[cfg(test)]
+    if let Some(manifest) = CONTRACT_OVERRIDE.with(std::cell::Cell::get) {
+        return manifest;
+    }
+    manifest()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTRACT_OVERRIDE: std::cell::Cell<Option<&'static Manifest>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// While it lives, this thread computes readiness from a contract that records
+/// gaps. The blocked paths - the host and client notices, the withheld claim,
+/// the unadvertised profile - have to stay tested after the shipped contract
+/// stopped recording any, and a test must not depend on which state ships.
+#[cfg(test)]
+pub(crate) struct ContractWithGaps(Option<&'static Manifest>);
+
+#[cfg(test)]
+impl ContractWithGaps {
+    pub(crate) fn install() -> Self {
+        let gaps: &'static Manifest = Box::leak(Box::new(contract_with_gaps()));
+        Self(CONTRACT_OVERRIDE.with(|active| active.replace(Some(gaps))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ContractWithGaps {
+    fn drop(&mut self) {
+        CONTRACT_OVERRIDE.with(|active| active.set(self.0));
+    }
+}
+
+/// A contract that records gaps: one open divergence and five unproven
+/// promises, one more blocker than a report names individually.
+#[cfg(test)]
+fn contract_with_gaps() -> Manifest {
+    let pending = |issue: u32| {
+        serde_json::json!({
+            "kind": "issue",
+            "value": format!("clonk-org/clonk-rs#{issue}"),
+            "status": "pending"
+        })
+    };
+    serde_json::from_value(serde_json::json!({
+        "promise": {
+            "simulation": {"evidence": [
+                {"kind": "command", "value": "cargo xtask parity verify", "status": "held"},
+                pending(1), pending(2), pending(3)
+            ]},
+            "transport": {"evidence": [
+                pending(4),
+                {"kind": "test", "value": "crates/clonk-network", "status": "pending"}
+            ]}
+        },
+        "divergences": [
+            {
+                "id": "div-open-gap",
+                "area": "simulation",
+                "summary": "a defect that has not been fixed",
+                "disposition": "open-gap",
+                "profile_action": "blocked",
+                "owner": "clonk-org/clonk-rs#5"
+            },
+            {
+                "id": "div-accepted",
+                "area": "content",
+                "summary": "a difference the contract accepts",
+                "disposition": "accepted",
+                "profile_action": "kept"
+            }
+        ]
+    }))
+    .expect("the synthetic contract has the manifest's shape")
+}
+
+/// [`blockers`] for any manifest, so the mapping is testable on a contract
+/// that records gaps whether or not the shipped one still does.
+fn blockers_in(manifest: &Manifest) -> Vec<CompatBlocker> {
     let mut blockers = manifest
         .divergences
         .iter()
@@ -196,7 +282,11 @@ const REPORTED_BLOCKERS: usize = 4;
 /// the first line says the profile was requested and is not being claimed, which
 /// is the thing a player has to know before anyone joins.
 pub fn blocked_profile_report(profile: &str) -> Vec<String> {
-    let blockers = blockers();
+    profile_report_for(profile, &blockers())
+}
+
+/// [`blocked_profile_report`] for any blocker list.
+fn profile_report_for(profile: &str, blockers: &[CompatBlocker]) -> Vec<String> {
     if blockers.is_empty() {
         return Vec::new();
     }
@@ -205,7 +295,7 @@ pub fn blocked_profile_report(profile: &str) -> Vec<String> {
          item(s). This session runs as an ordinary one.",
         blockers.len()
     )];
-    lines.extend(named_blockers(&blockers));
+    lines.extend(named_blockers(blockers));
     lines
 }
 
@@ -218,7 +308,11 @@ pub fn blocked_profile_report(profile: &str) -> Vec<String> {
 /// request and says only what the client can answer for. Empty when the profile
 /// is claimable, so a caller can use it as the whole decision.
 pub fn blocked_join_report(profile: &str) -> Vec<String> {
-    let blockers = blockers();
+    join_report_for(profile, &blockers())
+}
+
+/// [`blocked_join_report`] for any blocker list.
+fn join_report_for(profile: &str, blockers: &[CompatBlocker]) -> Vec<String> {
     if blockers.is_empty() {
         return Vec::new();
     }
@@ -227,7 +321,7 @@ pub fn blocked_join_report(profile: &str) -> Vec<String> {
          unresolved contract item(s). It joins as an ordinary client.",
         blockers.len()
     )];
-    lines.extend(named_blockers(&blockers));
+    lines.extend(named_blockers(blockers));
     lines
 }
 
@@ -347,6 +441,19 @@ mod tests {
     }
 
     #[test]
+    fn a_held_guard_makes_the_thread_read_a_contract_with_gaps_and_restores_on_drop() {
+        let before = blockers().len();
+        {
+            let _gaps = ContractWithGaps::install();
+            assert_eq!(blockers().len(), 6);
+            assert!(!is_ready());
+            assert!(!blocked_profile_report("LegacyClonk").is_empty());
+            assert!(!blocked_join_report("LegacyClonk").is_empty());
+        }
+        assert_eq!(blockers().len(), before);
+    }
+
+    #[test]
     fn every_blocker_names_a_recovery_action() {
         // clonk-org/clonk-rs#588: a blocker is only actionable if it carries a
         // recovery action as well as a diagnostic. Evidence of kind `issue`
@@ -354,7 +461,7 @@ mod tests {
         // issue recorded" beside it is a defect in the report rather than a
         // gap in the manifest -- and a blocker whose recovery is a placeholder
         // tells a player nothing they can act on.
-        for blocker in blockers() {
+        for blocker in blockers_in(&contract_with_gaps()) {
             assert!(
                 !blocker.recovery.starts_with("no "),
                 "blocker `{}` reports no recovery action: {}",
@@ -375,7 +482,8 @@ mod tests {
         // useful if a host is told before anyone joins. The report must say
         // the profile is not claimed, and must stay quotable — every named
         // line carries a manifest id and its recovery.
-        let lines = blocked_profile_report("LegacyClonk");
+        let blockers = blockers_in(&contract_with_gaps());
+        let lines = profile_report_for("LegacyClonk", &blockers);
         assert!(
             !lines.is_empty(),
             "the contract records gaps, so a report is owed"
@@ -390,7 +498,6 @@ mod tests {
             "the report names the profile that was requested"
         );
 
-        let blockers = blockers();
         let named = lines.len().saturating_sub(1).min(REPORTED_BLOCKERS);
         for (line, blocker) in lines[1..=named].iter().zip(&blockers) {
             assert!(line.contains(&blocker.id), "{line} must quote its id");
@@ -399,14 +506,49 @@ mod tests {
                 "{line} must name what closes it"
             );
         }
-        if blockers.len() > REPORTED_BLOCKERS {
-            assert!(
-                lines
-                    .last()
-                    .is_some_and(|line| line.contains("more") && line.contains("COMPAT_PROFILE")),
-                "the remainder must be counted and pointed at the contract"
-            );
-        }
+        assert!(
+            blockers.len() > REPORTED_BLOCKERS,
+            "the synthetic contract has to overflow the named lines"
+        );
+        assert!(
+            lines
+                .last()
+                .is_some_and(|line| line.contains("more") && line.contains("COMPAT_PROFILE")),
+            "the remainder must be counted and pointed at the contract"
+        );
+    }
+
+    #[test]
+    fn a_client_is_told_its_own_request_cannot_be_honoured() {
+        let blockers = blockers_in(&contract_with_gaps());
+        let lines = join_report_for("LegacyClonk", &blockers);
+        assert!(
+            lines[0].contains("cannot honour it") && lines[0].contains("LegacyClonk"),
+            "a client answers for its own request only: {}",
+            lines[0]
+        );
+        assert!(join_report_for("LegacyClonk", &[]).is_empty());
+        assert!(profile_report_for("LegacyClonk", &[]).is_empty());
+    }
+
+    #[test]
+    fn the_shipped_contract_records_no_gaps_so_the_profile_is_claimable() {
+        // clonk-org/clonk-rs#498: every contract-required child has landed, so
+        // the shipped manifest holds its evidence and blocks no divergence.
+        // A host that asks for the profile may claim it, and neither report
+        // has anything to say. Naming the leftovers makes a regression in the
+        // contract read as one.
+        let outstanding = blockers()
+            .into_iter()
+            .map(|blocker| blocker.id)
+            .collect::<Vec<_>>();
+        assert!(
+            outstanding.is_empty(),
+            "the shipped contract still records gaps: {outstanding:?}"
+        );
+        assert!(is_ready());
+        assert!(blocked_profile_report("LegacyClonk").is_empty());
+        assert!(blocked_join_report("LegacyClonk").is_empty());
     }
 
     #[test]
@@ -415,12 +557,11 @@ mod tests {
         // than a count that would have to be edited every time the contract
         // moves: every blocked divergence and every pending promise is a
         // blocker, and any of them makes the profile unclaimable.
-        let blockers = blockers();
+        let blockers = blockers_in(&contract_with_gaps());
         assert!(
             !blockers.is_empty(),
-            "the contract still records gaps, so the profile must not be claimable"
+            "a contract that records gaps must not be claimable"
         );
-        assert!(!is_ready());
 
         for blocker in &blockers {
             assert!(!blocker.id.is_empty(), "a blocker must be quotable by id");
@@ -438,7 +579,7 @@ mod tests {
 
     #[test]
     fn blocked_divergences_and_pending_evidence_are_both_reported() {
-        let manifest = manifest();
+        let manifest = contract_with_gaps();
         let blocked = manifest
             .divergences
             .iter()
@@ -453,18 +594,13 @@ mod tests {
 
         // Both kinds count, and neither is allowed to mask the other: an open
         // gap and an unproven promise are different failures with different
-        // fixes, which is why the contract keeps their dispositions apart.
-        //
-        // `blocked` is zero today -- every open gap has been closed or
-        // accepted -- so this deliberately does NOT require one to exist.
-        // Reaching zero is the goal, not a broken fixture. The sum still pins
-        // that both kinds are summed, and the per-kind checks below pin the
-        // mapping itself, so a blocked divergence added later cannot go
-        // unreported.
-        assert!(pending > 0, "an unproven promise is still outstanding");
-        assert_eq!(blockers().len(), blocked + pending);
+        // fixes, which is why the contract keeps their dispositions apart. An
+        // accepted divergence and held evidence are neither.
+        assert_eq!((blocked, pending), (1, 5));
+        let blockers = blockers_in(&manifest);
+        assert_eq!(blockers.len(), blocked + pending);
 
-        let reported = blockers()
+        let reported = blockers
             .into_iter()
             .map(|blocker| blocker.id)
             .collect::<Vec<_>>();

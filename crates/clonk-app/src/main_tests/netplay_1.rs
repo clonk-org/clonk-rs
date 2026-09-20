@@ -3298,12 +3298,26 @@ fn a_running_host_advertises_only_the_profile_it_can_claim() {
         app.config.compat_profile => crate::settings::CompatProfile::LegacyClonk,
         "and the request is never rewritten by publishing"
     );
-    if !crate::compat_readiness::is_ready() {
-        main_assert_eq!(
-            advertised => None,
-            "a blocked profile is not advertised at all"
-        );
-    }
+    main_assert_eq!(
+        advertised => Some(
+            crate::settings::CompatProfile::LegacyClonk
+                .display_name()
+                .to_string()
+        ),
+        "the shipped contract records no gaps, so the profile is advertised by name"
+    );
+
+    // Under a contract with gaps the same request publishes nothing.
+    let _gaps = crate::compat_readiness::ContractWithGaps::install();
+    app.publish_running_host_reference();
+    main_assert_eq!(
+        app.netplay.advertised_game_reference
+            .test_ref()
+            .summary()
+            .compat_profile
+            .clone() => None,
+        "a blocked profile is not advertised at all"
+    );
 }
 
 /// clonk-org/clonk-rs#583: mixed incompatible Rust profiles must be rejected
@@ -3318,8 +3332,13 @@ fn a_running_host_advertises_only_the_profile_it_can_claim() {
 fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
     let mut app = new_menu_app(640, 480);
     let silent = clonk_network::NetworkGameReference::default();
+    // What a host writes is its profile's display name
+    // (`publish_running_host_reference`), so that is what a browser reads. A
+    // shorter made-up name here once hid that two sessions on the same profile
+    // refused each other.
+    let legacy_name = crate::settings::CompatProfile::LegacyClonk.display_name();
     let legacy = clonk_network::NetworkGameReference {
-        compat_profile: Some("LegacyClonk".to_string()),
+        compat_profile: Some(legacy_name.to_string()),
         ..Default::default()
     };
 
@@ -3332,24 +3351,35 @@ fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
     );
     let refusal = app.network_reference_profile_refusal(&legacy).test_value();
     main_assert!(
-        refusal.contains("LegacyClonk") && refusal.contains("desync"),
+        refusal.contains(legacy_name) && refusal.contains("desync"),
         "the refusal names the profile and why: {refusal}"
+    );
+    main_assert!(
+        !refusal.contains("compatibility compatibility"),
+        "the advertised name already says what it is: {refusal}"
     );
 
     // Asking for the host's profile does not by itself make the join legal —
     // what matters is whether this session can *claim* it.
     app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
-    let claimed = app.claimed_compat_profile();
-    let matched = app.network_reference_profile_refusal(&legacy);
-    if claimed == crate::settings::CompatProfile::LegacyClonk {
+    main_assert_eq!(
+        app.claimed_compat_profile() => crate::settings::CompatProfile::LegacyClonk,
+        "the shipped contract records no gaps, so the profile is claimable"
+    );
+    main_assert_eq!(
+        app.network_reference_profile_refusal(&legacy) => None,
+        "a session that can claim the advertised profile joins"
+    );
+    {
+        let _gaps = crate::compat_readiness::ContractWithGaps::install();
         main_assert_eq!(
-            matched => None,
-            "a session that can claim the advertised profile joins"
+            app.claimed_compat_profile() => crate::settings::CompatProfile::Normal,
+            "a contract with gaps backs no profile"
         );
-    } else {
-        let refusal = matched.test_value();
+        let refusal = app.network_reference_profile_refusal(&legacy).test_value();
         main_assert!(
-            refusal.contains("cannot currently claim"),
+            refusal.contains("cannot currently claim")
+                && !refusal.contains("compatibility compatibility"),
             "an unclaimable profile must say the mismatch is ours: {refusal}"
         );
     }
@@ -3365,7 +3395,7 @@ fn a_reference_naming_a_profile_this_client_cannot_match_is_refused() {
     // names the same one. The refusal text quotes the peer's own spelling, so
     // compare the decision rather than the message.
     let lowercase = clonk_network::NetworkGameReference {
-        compat_profile: Some("legacyclonk".to_string()),
+        compat_profile: Some(legacy_name.to_lowercase()),
         ..Default::default()
     };
     main_assert_eq!(

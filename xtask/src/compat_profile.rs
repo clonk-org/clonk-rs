@@ -1039,14 +1039,25 @@ mod tests {
     #[test]
     fn readiness_counts_pending_evidence_and_blocked_divergences() {
         let (pending, blocked) = readiness(&shipped_manifest()).expect("readiness");
-        // The shipped contract deliberately carries pending issue evidence,
-        // so it must currently report the profile as not advertisable.
-        assert!(pending > 0, "pending evidence entries must be counted");
-        // Every open gap is now closed or accepted (clonk-org/clonk-rs#1094), so
-        // the shipped manifest reports none. That is the goal, not a broken
-        // fixture -- but the counting still has to work, so prove it on a
-        // manifest that does carry one rather than requiring the contract to.
-        assert_eq!(blocked, 0, "the shipped manifest records no open gap");
+        // Every open gap is closed or accepted (clonk-org/clonk-rs#1094) and
+        // every contract-required child has landed (clonk-org/clonk-rs#498), so
+        // the shipped manifest reports neither kind. That is the goal, not a
+        // broken fixture -- but the counting still has to work, so prove each
+        // half on a manifest that does carry one rather than requiring the
+        // contract to.
+        assert_eq!(
+            (pending, blocked),
+            (0, 0),
+            "the shipped manifest holds all of its evidence and records no open gap"
+        );
+        let (injected_pending, _) = readiness(&tampered(|value| {
+            value["promise"]["save_replay"]["evidence"][2]["status"] = "pending".into();
+        }))
+        .expect("readiness of the manifest with unproven evidence");
+        assert_eq!(
+            injected_pending, 1,
+            "pending evidence entries must be counted"
+        );
         let (_, injected) =
             readiness(&tampered_with_open_gap(|_| {})).expect("readiness of the tampered manifest");
         assert_eq!(injected, 1, "blocked open-gap divergences must be counted");

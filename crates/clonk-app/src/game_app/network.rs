@@ -5965,14 +5965,16 @@ impl GameApp {
             // The mismatch is ours: this session asked for a profile it cannot
             // claim. Say so, rather than leave the player comparing two names
             // that look like they already agree.
+            // `advertised` is the host's display name, which already says it
+            // is a compatibility profile.
             return Some(format!(
-                "This game runs the {advertised} compatibility profile, which this session \
-                 cannot currently claim. Joining would desync."
+                "This game runs the {advertised} profile, which this session cannot currently \
+                 claim. Joining would desync."
             ));
         }
         Some(format!(
-            "This game runs the {advertised} compatibility profile and this session runs {}. \
-             Joining would desync.",
+            "This game runs the {advertised} profile and this session runs {}. Joining would \
+             desync.",
             claimed.display_name()
         ))
     }
