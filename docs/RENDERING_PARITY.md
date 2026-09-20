@@ -148,7 +148,12 @@ event-loop callback:
   callback.
 
 Every surface owner drops the old configured `WindowSurface` before building a
-replacement. Device-loss notification takes precedence over a generic
+replacement. The game and launcher retain the event loop's owned display
+connection when creating GPU instances; GLES requires that connection to
+present to windows instead of creating a surfaceless context. Holding the
+display connection does not keep a closed window alive.
+
+Device-loss notification takes precedence over a generic
 validation error or a narrowly recognized submission/readback panic. A failed
 presentation polls pending device callbacks before checking renderer health:
 wgpu defers its `Destroyed` callback until queue maintenance, and surface

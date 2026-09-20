@@ -15,9 +15,15 @@ const BUFFER_BYTES_PER_PIXEL: u32 = 4;
 /// Exposed separately because an instance must outlive every window that
 /// borrows it — see `clonk-app`'s instance registry for why destroying one
 /// while another window still presents takes the process down.
-pub fn create_instance(backends: wgpu::Backends) -> wgpu::Instance {
+/// Supply the event loop's owned display handle for window presentation:
+/// wgpu's GLES backend cannot present from a surfaceless instance.
+pub fn create_instance(
+    backends: wgpu::Backends,
+    display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+) -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
+        display,
         ..wgpu::InstanceDescriptor::new_without_display_handle().with_env()
     })
 }

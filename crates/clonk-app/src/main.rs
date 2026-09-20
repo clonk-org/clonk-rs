@@ -933,6 +933,7 @@ fn run() -> Result<()> {
     let benchmark_exit_code = Arc::new(AtomicI32::new(0));
     let event_handler_exit_code = Arc::clone(&benchmark_exit_code);
     let initializer: RuntimeInitializer = Box::new(move |event_target| {
+        gpu_instance::set_display_handle(event_target.owned_display_handle());
         // The active event loop is the first portable point at which monitors can
         // be queried and a native window plus render surface can be created.
         if let Some(scale_factor) = event_target

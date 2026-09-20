@@ -34,7 +34,7 @@ use serde::Serialize;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, TouchPhase, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -73,13 +73,15 @@ impl LauncherShell {
 
         let size = window.inner_size();
         let (initial_width, initial_height) = enforce_min_size(size);
-        let pixels = build_launcher_framebuffer(&window, initial_width, initial_height)
+        let display = event_loop.owned_display_handle();
+        let pixels = build_launcher_framebuffer(&window, &display, initial_width, initial_height)
             .context("failed to create pixel framebuffer")?;
         let app = LauncherApp::new(&window).context("failed to initialise launcher shell")?;
 
         let mut runtime = LauncherRuntime {
             window_focused: window.has_focus(),
             window,
+            display,
             pixels: Some(pixels),
             app,
             ime_allowed: false,
@@ -183,6 +185,7 @@ impl ApplicationHandler for LauncherShell {
 
 struct LauncherRuntime {
     window: Arc<Window>,
+    display: OwnedDisplayHandle,
     pixels: Option<WindowSurface>,
     app: LauncherApp,
     window_focused: bool,
@@ -218,7 +221,7 @@ const fn launcher_present_outcome(render_callback_invoked: bool) -> LauncherPres
 /// libwayland-client dispatch table (clonk-org/clonk-rs#53). The launcher has
 /// only one window, but its surface is rebuilt on every loss, so holding the
 /// instance here keeps those rebuilds from cycling the instance with it.
-fn retained_instance() -> clonk_surface::wgpu::Instance {
+fn retained_instance(display: &OwnedDisplayHandle) -> clonk_surface::wgpu::Instance {
     static INSTANCE: std::sync::OnceLock<clonk_surface::wgpu::Instance> =
         std::sync::OnceLock::new();
     INSTANCE
@@ -226,6 +229,7 @@ fn retained_instance() -> clonk_surface::wgpu::Instance {
             clonk_surface::create_instance(
                 clonk_surface::wgpu::Backends::from_env()
                     .unwrap_or_else(clonk_surface::wgpu::Backends::all),
+                Some(Box::new(display.clone())),
             )
         })
         .clone()
@@ -238,11 +242,12 @@ fn retained_instance() -> clonk_surface::wgpu::Instance {
 /// launcher's hit-testing assumes neither.
 fn build_launcher_framebuffer(
     window: &Arc<Window>,
+    display: &OwnedDisplayHandle,
     width: u32,
     height: u32,
 ) -> std::result::Result<WindowSurface, clonk_surface::SurfaceError> {
     WindowSurface::build(
-        &retained_instance(),
+        &retained_instance(display),
         Arc::clone(window),
         (width, height),
         (width, height),
@@ -393,7 +398,7 @@ impl LauncherRuntime {
             // still unprocessed; both are passed through rather than reconciled
             // so a rebuild presents exactly what the previous surface would have.
             let mut replacement = WindowSurface::build(
-                &retained_instance(),
+                &retained_instance(&self.display),
                 Arc::clone(&self.window),
                 (buffer_width, buffer_height),
                 (surface_width, surface_height),
