@@ -268,7 +268,14 @@ def main(argv: list[str] | None = None) -> int:
     binary = build_binary(arguments.release)
     binary_sha256 = file_digest(binary)
     config = artifacts / "Clonk.ini"
-    config.write_text(SMOKE_CONFIG, encoding="utf-8")
+    screenshots = artifacts / "screenshots"
+    screenshots.mkdir(exist_ok=True)
+    # C++ appends ScreenshotFolder to the install root as raw text, even for
+    # absolute paths. Use a relative path and precreate its parent directories.
+    screenshot_folder = os.path.relpath(screenshots, REPOSITORY)
+    config.write_text(
+        f"[General]\nScreenshotFolder={screenshot_folder}\n\n{SMOKE_CONFIG}", encoding="utf-8",
+    )
     environment = dict(os.environ)
     for key in tuple(environment):
         if key.startswith(("LC_APP_", "WGPU_")) or key in (

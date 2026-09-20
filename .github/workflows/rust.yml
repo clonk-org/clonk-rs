@@ -258,7 +258,9 @@ jobs:
   diagnostic-admission:
     name: Admit post-merge diagnostics
     needs: linux-landing-cache
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cache_only }}
+    if: >-
+      ${{ (github.event_name != 'workflow_dispatch' || !inputs.cache_only)
+        && !inputs.software_presentation }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:

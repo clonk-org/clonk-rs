@@ -1,4 +1,5 @@
 import importlib.util
+import configparser
 import json
 import tempfile
 import unittest
@@ -45,6 +46,30 @@ def write_captures(report_path):
 
 
 class SoftwarePresentationRunnerTests(unittest.TestCase):
+    def test_native_screenshots_stay_inside_the_artifact_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifacts = Path(temporary)
+            binary = artifacts / "clonk-app.exe"
+            binary.touch()
+
+            def execute(command, **_options):
+                config = configparser.ConfigParser()
+                config.read(command[command.index("--config") + 1])
+                folder = config.get("General", "ScreenshotFolder", fallback="Screenshots")
+                destination = (MODULE.REPOSITORY / folder).resolve()
+                self.assertEqual(destination, (artifacts / "screenshots").resolve())
+                self.assertTrue(destination.is_dir())
+                raise RuntimeError("checked native screenshot destination")
+
+            with (
+                mock.patch.object(MODULE, "refuse_to_run_as_root"),
+                mock.patch.object(MODULE, "build_binary", return_value=binary),
+                mock.patch.object(MODULE, "source_identity", return_value={}),
+                mock.patch.object(MODULE.subprocess, "run", side_effect=execute),
+                self.assertRaisesRegex(RuntimeError, "checked native screenshot destination"),
+            ):
+                MODULE.main(["--artifact-dir", str(artifacts), "--no-xvfb"])
+
     def test_windows_release_preserves_the_shipped_package_graph(self):
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "release" / "clonk-app.exe"
@@ -64,6 +89,8 @@ class SoftwarePresentationRunnerTests(unittest.TestCase):
     def test_windows_dispatch_qualifies_both_modes_on_the_shipped_runtime(self):
         workflow = (SCRIPT.parent.parent / ".github/workflows/rust.yml").read_text()
         self.assertIn("      software_presentation:\n", workflow)
+        admission = workflow[workflow.index("  diagnostic-admission:"):workflow.index("  exact-sha-qualification:")]
+        self.assertIn("!inputs.software_presentation", admission)
         job = workflow[workflow.index("  windows-release-tools:"):]
         validation = job.index("run: scripts/validate-msvc-runtime.sh")
         smoke = job.index("python scripts/run_software_presentation_smoke.py")
