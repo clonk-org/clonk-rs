@@ -113,16 +113,104 @@ fn pushed_sack_pick_up_row_collects_it_for_a_clonk_with_full_hands() {
     assert_eq!(collected.definition_id, "SAC1");
 }
 
+/// clonk-org/clonk-rs-content#95: the row used to be offered to a Clonk that
+/// already carries a `SAC1` and then refused without a word, because the
+/// annotation had no `Condition`. It now carries one that mirrors the
+/// callback's own `FindContents(SAC1, pClonk)` guard, and a context row's
+/// condition receives the asking Clonk (C4ObjectMenu.cpp:635), so the row is
+/// simply not there. The callback keeps its guard either way.
 #[test]
-fn pushed_sack_pick_up_row_refuses_a_clonk_already_carrying_a_sack() {
+fn pushed_sack_hides_its_pick_up_row_from_a_clonk_already_carrying_a_sack() {
     let (mut engine, owner, clonk, sack) = totem_hunt_with_a_pushed_sack();
     engine.spawn_test_object(SpawnConfig::new("SAC1").with_container(clonk));
-    enter_pick_up_row(&mut engine, owner, sack);
 
-    let refused = engine.test_object_snapshot(sack);
+    engine
+        .player_context_command(owner, sack)
+        .expect("right-click queues the sack context command");
+    engine.tick_without_snapshot().test_value();
+
+    let offered = engine
+        .cursor_object_menu(owner)
+        .map(|(_, menu)| menu.clone())
+        .is_some_and(|menu| {
+            menu.items
+                .iter()
+                .any(|item| item.command.contains("ControlDigDouble"))
+        });
+    assert!(!offered, "a row that can only refuse must not be offered");
     assert_eq!(
-        refused.container, None,
-        "`FindContents(SAC1, pClonk)` returns before Enter, silently"
+        engine.test_object_snapshot(sack).container,
+        None,
+        "and the sack stays where it was"
     );
-    assert_eq!(refused.definition_id, "SACK");
+}
+
+/// clonk-org/clonk-rs-content#96: `MainTipi::ContextJoinClan` was offered on
+/// every tipi, while `ContainedDig` behind it returns at once for an ownerless
+/// tipi, a hostile owner, or a Clonk already in the tipi's clan, without a
+/// message. The annotation now carries a `Condition` mirroring those guards,
+/// so an ownerless tipi, which is how a scenario places one, does not offer a
+/// row that cannot act.
+#[test]
+fn an_ownerless_main_tipi_does_not_offer_join_the_clan() {
+    let mut engine = load_installed_scenario("Western.c4f/TotemHunt.c4s", 0);
+    let owner = join_local_player_on_team(&mut engine, "Tipi context parity", 1);
+    let clonk = engine.crew_cursor(owner).test_value();
+    for _ in 0..SETTLE_FRAMES {
+        engine.tick_without_snapshot().test_value();
+    }
+    let standing = engine.test_object_snapshot(clonk).position;
+    let tipi = engine.spawn_test_object(SpawnConfig::new("MTIP").with_position(standing));
+
+    engine
+        .player_context_command(owner, tipi)
+        .expect("right-click queues the tipi context command");
+    engine.tick_without_snapshot().test_value();
+
+    let offered = engine
+        .cursor_object_menu(owner)
+        .map(|(_, menu)| menu.clone())
+        .is_some_and(|menu| {
+            menu.items
+                .iter()
+                .any(|item| item.command.contains("ContextJoinClan"))
+        });
+    assert!(
+        !offered,
+        "an ownerless tipi has no clan to join, so the row must not be offered"
+    );
+}
+
+/// The other half of clonk-org/clonk-rs-content#96's condition: where joining
+/// can act, the row is still there. `GetClan` answers a per-player clan until
+/// players merge (`MainTipi.c4d/Script.c`, `GetClan`), so an ally's tipi is a
+/// different clan that a non-hostile Clonk may join.
+#[test]
+fn an_allys_main_tipi_still_offers_join_the_clan() {
+    let mut engine = load_installed_scenario("Western.c4f/TotemHunt.c4s", 0);
+    let owner = join_local_player_on_team(&mut engine, "Tipi visitor", 1);
+    let ally = join_local_player_on_team(&mut engine, "Tipi owner", 1);
+    let clonk = engine.crew_cursor(owner).test_value();
+    for _ in 0..SETTLE_FRAMES {
+        engine.tick_without_snapshot().test_value();
+    }
+    let standing = engine.test_object_snapshot(clonk).position;
+    let tipi = engine.spawn_test_object(
+        SpawnConfig::new("MTIP")
+            .with_position(standing)
+            .with_owner(ally),
+    );
+
+    engine
+        .player_context_command(owner, tipi)
+        .expect("right-click queues the tipi context command");
+    engine.tick_without_snapshot().test_value();
+
+    let menu = engine.cursor_object_menu(owner).test_value().1.clone();
+    assert!(
+        menu.items
+            .iter()
+            .any(|item| item.command.contains("ContextJoinClan")),
+        "an ally's tipi is a clan this Clonk can join: {menu:?}"
+    );
 }

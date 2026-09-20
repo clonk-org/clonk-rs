@@ -5,7 +5,7 @@
   },
   "case_id": "network-lobby",
   "comparator": {
-    "binary_sha256": "8852f5afa3e3925fac3c613fa1c78ce4bd289d0a9db7873954a8607883d9b00d",
+    "binary_sha256": "22e1c928c5f935210fd3bc0b954a47035389484f30f8508a9e1b590c42cd8bc2",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "pixel",
