@@ -1,7 +1,7 @@
 # Software presentation smoke
 
 This opt-in probe drives the shipped `clonk-app` event handler through a real
-window that has **no wgpu instance, adapter or device behind it**. It exercises
+window presented without a wgpu adapter or device. It exercises
 the fallback for environments below the retained GPU floor established in
 clonk-org/clonk-rs#298. GLES 2.0-only Raspberry Pi 0–3 / VideoCore IV is one
 intended route, but this smoke's X11/macOS evidence does not qualify those
@@ -16,24 +16,42 @@ to report.
 python3 scripts/run_software_presentation_smoke.py
 ```
 
-The runner sets `LC_SOFTWARE_PRESENTATION`, which the probe requires: without it
-the probe refuses to start rather than quietly qualifying the GPU presenter on a
-machine that has a working adapter.
+The runner requires Python 3.11 or newer and Pillow. By default it sets
+`LC_SOFTWARE_PRESENTATION=1` and verifies that no GPU startup was attempted.
+`--automatic-fallback` instead removes that setting and supplies an explicitly
+empty `WGPU_BACKEND`. The report must show failed GPU attempts with empty backend
+sets followed by software selection. An attempt using another backend fails the
+check. This exercises the real startup ladder on a machine with a working GPU.
+
+Use `--release` for qualification of a committed release build. The runner honors
+`CARGO_BUILD_TARGET`, including the shipped `x86_64-pc-windows-msvc` target, and
+isolates configuration, user data, cache, logs and temporary files.
 
 ## What it exercises
 
-1. Open the shell window and build a software presenter for it, with no wgpu
-   instance created for the presentation path.
+1. Open the shell window and build a software presenter for it. Record the
+   actual selection reason, attempted GPU backends and native window backend.
 2. Paint a full frame and present it through that presenter.
-3. **Shrink** the drawable and present again. A shrink rather than a grow: a
+3. Request a real window resize and wait for the ordinary OS event to resize
+   the software drawable, frame buffer and input presenter. **Shrink** and
+   present again. A shrink rather than a grow: a
    window manager can silently clamp a grow, which would let the resize phase
    pass without resizing anything.
-4. Grow the drawable to twice the window's extent **while holding the frame**,
+4. With `--check-input`, request a native cursor move to physical `(128, 96)`
+   at application scale 2. Require both the OS event and the application's
+   mapped `(64, 48)` position. This is opt-in because some compositors prohibit
+   cursor warping; a missing event fails qualification.
+5. Grow the drawable to twice the window's extent **while holding the frame**,
    and present again. This is what a windowed-to-fullscreen transition does to
    the presenter: the renderer keeps drawing at its logical resolution and the
    destination changes underneath it.
-5. Restore the windowed drawable and present a third time.
-6. Exit the event loop and confirm the window registry is empty, so no window
+6. Restore the windowed drawable and present a third time.
+7. Request an F9 screenshot through the application and encode a 200×150 save
+   thumbnail from the presented software frame. Decode both PNGs and check
+   dimensions and every pixel. This covers thumbnail encoding, not insertion
+   into a saved game or full savegame parity. F9 is dispatched through the
+   application key handler; the native input check covers cursor events.
+8. Exit the event loop and confirm the window registry is empty, so no window
    outlived the loop.
 
 Resize is the phase worth having. A drawable that is not resized with its window
@@ -47,14 +65,9 @@ scale above one, and the report records the resulting scale and clip rectangle
 for each phase so a transform kept across a transition is visible rather than
 inferred.
 
-Steps 4 and 5 change the drawable directly rather than asking the window manager
-to go fullscreen. That is deliberate and is the same reasoning as the shrink in
-step 3: a compositor may refuse or defer a fullscreen request, which would make
-the phase pass without transitioning anything. What the presenter sees during a
-real transition is a drawable that changed without the frame, and that is what
-is reproduced here. Driving a real compositor through the transition is platform
-breadth, owned by clonk-org/clonk-rs#1249, clonk-org/clonk-rs#1254 and
-clonk-org/clonk-rs#1255.
+Steps 5 and 6 change the drawable directly. Their historical `fullscreen` phase
+name describes the presenter's scale/clip exercise; it does not prove an OS
+fullscreen transition. Step 3 does require an actual window resize.
 
 ## Running without a desktop session
 
@@ -91,10 +104,20 @@ or to `--artifact-dir`. A passing run:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "kind": "clonk_software_present_smoke",
   "success": true,
   "failure": null,
+  "software_reason": "forced",
+  "gpu_attempt_backends": [],
+  "display_backend": "windows",
+  "target_os": "windows",
+  "target_arch": "x86_64",
+  "input_mapping": {
+    "window_position": [128, 96],
+    "gui_position": [64, 48],
+    "scale": 2
+  },
   "initial_extent": [800, 600],
   "resized_extent": [760, 560],
   "presented_before_resize": true,
@@ -129,6 +152,14 @@ or to `--artifact-dir`. A passing run:
 }
 ```
 
+The example includes `--check-input`; otherwise `input_mapping` is null. The
+runner also writes `run.log`, `report.screenshot.png`, `report.thumbnail.png`,
+and `qualification.json`. The latter records the commit, pinned content
+revision, source/binary/artifact SHA-256 hashes, OS version, architecture,
+compiler, build profile/target/flags, native backend and checked mode. It rejects
+changed content, source changes during the run, executable replacement, and
+uncommitted source inputs for a release qualification.
+
 The runner treats the process exit code as authoritative and additionally
 rejects:
 
@@ -144,7 +175,7 @@ rejects:
 
 ## Coverage
 
-Run and passing on:
+Earlier schema-2 reference runs passed on:
 
 - **Linux / X11 under Xvfb** — `aarch64`, Debian-based `rust:1.98.0` container,
   no GPU present.
@@ -157,7 +188,30 @@ Run and passing on:
   1 → 2 → 1, no window left behind.
 
 These are path-specific reference runs, not a claim about every `softbuffer`
-platform. Windows qualification is tracked by clonk-org/clonk-rs#1254.
+platform.
+
+**Windows schema-3 qualification passed on 2026-09-20:** Windows Server 2025
+(`10.0.26100`), AMD64, Win32, shipped `x86_64-pc-windows-msvc` release build with
+static CRT and LLD ThinLTO. Source `9c774f82275f4595938ad950e7f9b71fc159280d`,
+content `9a01c8f55f0fbdccfa2dcf3a67e3cfcfcac7c009`. Both forced and automatic
+fallback passed with `--check-input`; every stage above completed. The executable
+hash matches the workflow's successful static-CRT validation. The
+[reports, capture images, logs and qualification metadata](../docs/evidence/windows-software-presentation/README.md)
+are retained in the repository, with links to the original run and artifact.
+
+The schema-3 procedure can be dispatched against a branch using the existing
+**Main validation** workflow with `software_presentation=true`. Its Windows
+release tooling job configures and validates the shipped static-CRT MSVC build,
+then runs both modes with `--release --check-input`. It uploads the
+`windows-software-presentation` artifact even on failure. Run the same commands
+on a Windows desktop after configuring the shipped build:
+
+```sh
+python scripts/run_software_presentation_smoke.py --release --check-input \
+  --artifact-dir target/windows-software-presentation/forced
+python scripts/run_software_presentation_smoke.py --release --check-input \
+  --automatic-fallback --artifact-dir target/windows-software-presentation/automatic
+```
 
 The native Wayland run above was taken on a board with no monitor attached, so
 the compositor had no physical output. It exercises the Wayland protocol path,

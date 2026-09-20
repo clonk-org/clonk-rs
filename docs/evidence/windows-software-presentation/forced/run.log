@@ -1,0 +1,15 @@
+2026-09-20T07:43:29.907472Z  INFO clonk_app: engine session log initialized path=D:\a\clonk-rs\clonk-rs\target\windows-software-presentation\forced\logs\Clonk.log
+2026-09-20T07:43:29.907639Z  INFO clonk_logging: starting clonk port_version="0.27.5" engine_version="4.9.11.0 [362]" os="windows" arch="x86_64" debug_assertions=false
+2026-09-20T07:43:29.907700Z  INFO clonk_app: no interrupted component update to recover
+2026-09-20T07:43:29.995409Z  WARN clonk_app: presenting in software reason=software presentation was requested
+2026-09-20T07:43:31.103949Z  INFO clonk_app::main_resources: loaded material definitions path=D:\a\clonk-rs\clonk-rs\content\Material.c4g count=21
+2026-09-20T07:43:32.983324Z ERROR clonk_audio::mixer: no audio output device available
+2026-09-20T07:43:33.034699Z  INFO clonk_app::software_present_smoke: starting software presentation probe check_input=true
+2026-09-20T07:43:33.041499Z  INFO clonk_app::software_present_smoke: software presentation probe advanced previous_phase=PresentInitial phase=AwaitWindowResize
+2026-09-20T07:43:33.042537Z  INFO clonk_app::software_present_smoke: software presentation probe advanced previous_phase=AwaitWindowResize phase=PresentAfterResize
+2026-09-20T07:43:33.044913Z  INFO clonk_app::software_present_smoke: software presentation probe advanced previous_phase=PresentAfterResize phase=AwaitPointer
+2026-09-20T07:43:33.098929Z  INFO clonk_app::software_present_smoke: software presentation probe advanced previous_phase=AwaitPointer phase=BeginLetterboxed
+2026-09-20T07:43:33.099204Z  INFO clonk_app::software_present_smoke: software presentation probe advanced previous_phase=BeginLetterboxed phase=PresentLetterboxed
+2026-09-20T07:43:33.106050Z  INFO clonk_app::software_present_smoke: software presentation probe advanced previous_phase=PresentLetterboxed phase=PresentRestored
+2026-09-20T07:43:33.112563Z  INFO clonk_app::software_present_smoke: software presentation probe advanced previous_phase=PresentRestored phase=AwaitLoopExit
+2026-09-20T07:43:33.113567Z  INFO clonk_logging: stopping clonk reason="the event loop ended"

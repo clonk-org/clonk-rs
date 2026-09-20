@@ -2198,7 +2198,7 @@ fn handle_developer_console_text(
 fn handle_developer_console_window_event(
     window: &Window,
     app: &mut GameApp,
-    pixels: &mut WindowSurface,
+    pixels: &mut crate::cpu_target::CpuTarget<'_>,
     presenter: &mut clonk_scaling::FramePresenter,
     event: WindowEvent,
     event_loop: &winit::event_loop::ActiveEventLoop,
@@ -2374,7 +2374,7 @@ fn handle_developer_console_window_event(
 pub(crate) fn handle_window_event(
     window: &Window,
     app: &mut GameApp,
-    pixels: &mut WindowSurface,
+    pixels: &mut crate::cpu_target::CpuTarget<'_>,
     presenter: &mut clonk_scaling::FramePresenter,
     display_options: &mut DisplayOptions,
     event: WindowEvent,

@@ -60,6 +60,16 @@ impl CpuTarget<'_> {
         }
     }
 
+    /// Follow a window resize in the active presentation backend.
+    pub(crate) fn resize_surface(&mut self, width: u32, height: u32) -> Result<(), CpuTargetError> {
+        match self {
+            Self::Gpu(surface) => surface.resize_surface(width, height).map_err(Into::into),
+            Self::Software(presenter) => presenter
+                .resize_drawable((width, height))
+                .map_err(Into::into),
+        }
+    }
+
     /// Present the composed frame, reporting whether it actually reached the
     /// window.
     ///

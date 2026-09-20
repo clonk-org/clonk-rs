@@ -13,6 +13,11 @@ on:
         required: false
         type: boolean
         default: false
+      software_presentation:
+        description: Qualify forced and automatic software presentation on Windows
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -253,7 +258,9 @@ jobs:
   diagnostic-admission:
     name: Admit post-merge diagnostics
     needs: linux-landing-cache
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cache_only }}
+    if: >-
+      ${{ (github.event_name != 'workflow_dispatch' || !inputs.cache_only)
+        && !inputs.software_presentation }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -366,6 +373,7 @@ jobs:
       # Release invokes this binary on the Windows host. Build its real release
       # graph here without serializing it ahead of the merge-critical runtime.
       - name: Build the Windows packaging tool
+        if: ${{ !inputs.software_presentation }}
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
       - name: Configure the shipped MSVC runtime
@@ -401,10 +409,38 @@ jobs:
             exit 1
           fi
           export CFLAGS_x86_64_pc_windows_msvc="-I$zlib_dir"
+          echo "CFLAGS_x86_64_pc_windows_msvc=$CFLAGS_x86_64_pc_windows_msvc" >> "$GITHUB_ENV"
           cargo build --release -p clonk-app -p clonk-game -p clonk-c4group --locked --timings
 
       - name: Validate the shipped MSVC runtime
         run: scripts/validate-msvc-runtime.sh
+
+      - name: Prepare Windows software presentation qualification
+        if: inputs.software_presentation
+        run: |
+          git submodule update --init --recursive
+          python -m pip install Pillow
+
+      - name: Qualify forced Windows software presentation
+        if: inputs.software_presentation
+        run: >-
+          python scripts/run_software_presentation_smoke.py --release --check-input
+          --artifact-dir target/windows-software-presentation/forced
+
+      - name: Qualify automatic Windows software presentation
+        if: ${{ !cancelled() && inputs.software_presentation }}
+        run: >-
+          python scripts/run_software_presentation_smoke.py --release --check-input
+          --automatic-fallback --artifact-dir target/windows-software-presentation/automatic
+
+      - name: Preserve Windows software presentation evidence
+        if: ${{ always() && inputs.software_presentation }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-software-presentation
+          path: target/windows-software-presentation
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Publish trusted ThinLTO cache
         if: >-

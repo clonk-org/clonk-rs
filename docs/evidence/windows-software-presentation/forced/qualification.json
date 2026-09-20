@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "kind": "clonk_software_presentation_qualification",
+  "recorded_at": "2026-09-20T07:43:34.700680+00:00",
+  "commit": "9c774f82275f4595938ad950e7f9b71fc159280d",
+  "content_commit": "9a01c8f55f0fbdccfa2dcf3a67e3cfcfcac7c009",
+  "sources_sha256": "2661a00a88cebf60c623d56f9857aaad3f534122fdbe7fc445f9ef208944bf7e",
+  "source_dirty": false,
+  "os": "Windows-2025Server-10.0.26100-SP0",
+  "os_version": "10.0.26100",
+  "architecture": "AMD64",
+  "build_profile": "release",
+  "build_target": "x86_64-pc-windows-msvc",
+  "rustflags": "-Ctarget-feature=+crt-static -Clinker-plugin-lto -Clinker-flavor=lld-link -Clink-arg=/lldltocache:D:/a/_temp/clonk-msvc-thinlto -Clink-arg=/lldltocachepolicy:cache_size=0%:cache_size_bytes=512m -Clink-arg=/DEBUG:NONE -Clink-arg=/OPT:REF,ICF -Clink-arg=/TIME -Clink-arg=/Brepro",
+  "encoded_rustflags": null,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "binary_sha256": "477c8c02105e9ebe7d694537b1363f47f9c2516bd615a55ec06f7638c7679f7e",
+  "window_backend": "windows",
+  "automatic_fallback": false,
+  "native_input_checked": true,
+  "artifacts": {
+    "report.json": "03b842774f06a9c30d3b1ffa3648286381df3de6e947a353ba2ba8974f7a0833",
+    "report.screenshot.png": "cbd5c886f4103497a513d2c283c1fa4bc333a69869fa2a17a0bffee52584858f",
+    "report.thumbnail.png": "0e8c3c582e905ff017ed79c2cab5db4bdda662bd3b9b9f9b9983a0c23bfc5ca3",
+    "run.log": "4b2fceae036e5bb1dfd39d569856e710413f7939cbaf20c6458d2438c1d3e759"
+  }
+}
