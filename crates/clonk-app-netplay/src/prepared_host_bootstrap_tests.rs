@@ -949,6 +949,25 @@ fn deferred_host_inputs_match_the_frozen_packed_publication_and_keep_one_launch(
 }
 
 #[test]
+fn the_initial_reference_advertises_the_port_beside_the_compatibility_version() {
+    // C4Network2Reference::InitLocal sends C4ENGINENAME as Game, and a client
+    // compares Version and Build only (src/C4Network2Reference.cpp:100-102;
+    // src/C4GameVersion.h:45-48). The name is this port's to choose; the tuple
+    // is what keeps stock clients listing the game as compatible.
+    let fixture = minimal_install(None);
+    let reference = prepare(&fixture, &[])
+        .unwrap()
+        .initial_host_game_reference(true, &[])
+        .unwrap();
+    assert_eq!(reference.summary().game, clonk_network::CURRENT_GAME_NAME);
+    assert_eq!(
+        reference.summary().version,
+        clonk_network::CURRENT_GAME_VERSION
+    );
+    assert_eq!(reference.summary().build, clonk_network::CURRENT_GAME_BUILD);
+}
+
+#[test]
 fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
     // C4Game owns one C4S member: OpenScenario loads it before InitNetworkHost,
     // and the same loaded value survives the lobby and is consumed by InitGame

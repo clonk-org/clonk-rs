@@ -6153,94 +6153,16 @@ impl GameApp {
     /// OpenScenario data and the already-bound transport; the prepared host
     /// replaces it atomically before admission opens.
     pub(crate) fn start_preparing_network_game_advertiser(&mut self, network: &NetworkManager) {
-        let reference = (|| -> Result<clonk_network::HostGameReference> {
-            let staged = self
-                .netplay
-                .staged_host_scenario
-                .as_ref()
-                .context("the preparing host has no staged scenario")?;
-            let legacy = |value: &str, field: &str| {
-                clonk_resources::encode_legacy_script_text(value)
-                    .and_then(clonk_engine::LegacyCString::from_bytes)
-                    .ok_or_else(|| anyhow!("the preparing host {field} is not legacy text"))
-            };
-            let title = legacy(&staged.frontend.title, "title")?;
-            let scenario_filename = legacy(&staged.frontend.identifier, "scenario filename")?;
-            let host_name = legacy(&staged.lobby.local_name, "name")?;
-            let host_nick = legacy(&staged.lobby.nick, "nick")?;
-            let comment = legacy(&staged.options.comment, "comment")?;
-            let local_core = clonk_engine::ClientCoreControlData {
-                client_id: 0,
-                activated: true,
-                observer: false,
-                name: host_name.clone(),
-                nick: host_nick.clone(),
-                lobby_ready: false,
-            };
-            let parameters = clonk_network::JoinGameParametersEnvelope {
-                random_seed: 0,
-                startup_player_count: 0,
-                max_players: staged.lobby.max_players,
-                use_fair_crew: staged.lobby.fair_crew,
-                fair_crew_forced: staged.lobby.fair_crew_forced,
-                fair_crew_strength: staged.lobby.fair_crew_strength,
-                allow_debug: true,
-                is_network_game: true,
-                control_rate: 2,
-                auto_frame_skip: true,
-                rules: Vec::new(),
-                goals: Vec::new(),
-                league: clonk_engine::LegacyCString::default(),
-                league_address: clonk_engine::LegacyCString::default(),
-                title,
-                scenario: clonk_engine::NetworkResourceCore {
-                    resource_type: clonk_network::HostResourceType::Scenario as u8,
-                    id: 0,
-                    filename: scenario_filename,
-                    ..Default::default()
-                },
-                game_resources: Vec::new(),
-                player_infos: clonk_network::PlayerInfoListSnapshot::default(),
-                restore_player_infos: clonk_network::PlayerInfoListSnapshot::default(),
-                teams: clonk_network::JoinTeamListSnapshot::default(),
-                clients: clonk_network::JoinClientRegistrySnapshot::new(vec![local_core]),
-            };
-            let (_, addresses) = network.netpuncher_state();
-            let summary = clonk_network::NetworkGameReference {
-                icon: staged.frontend.icon_index.unwrap_or_default(),
-                title: staged.frontend.title.clone(),
-                host_name: staged.lobby.local_name.clone(),
-                host_nick: staged.lobby.nick.clone(),
-                state: "Lobby".to_string(),
-                control_mode: 2,
-                start_time: i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX),
-                comment: staged.options.comment.clone(),
-                join_allowed: false,
-                password_needed: !staged.options.password.is_empty(),
-                use_fair_crew: staged.lobby.fair_crew,
-                max_players: staged.lobby.max_players,
-                game: "LegacyClonk".to_string(),
-                version: clonk_network::CURRENT_GAME_VERSION,
-                build: clonk_network::CURRENT_GAME_BUILD,
-                addresses: addresses.clone(),
-                tcp_addresses: addresses
-                    .iter()
-                    .filter_map(|address| {
-                        (address.protocol == clonk_network::NetworkProtocol::Tcp)
-                            .then_some(address.endpoint)
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            let metadata = clonk_network::HostGameReferenceMetadata {
-                icon: summary.icon,
-                comment,
-                addresses,
-                ..Default::default()
-            };
-            clonk_network::HostGameReference::new(summary, metadata, parameters)
-                .map_err(anyhow::Error::new)
-        })();
+        let reference = self
+            .netplay
+            .staged_host_scenario
+            .as_ref()
+            .context("the preparing host has no staged scenario")
+            .and_then(|staged| {
+                let (_, addresses) = network.netpuncher_state();
+                let start_time = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+                Self::preparing_host_game_reference(staged, addresses, start_time)
+            });
         match reference {
             Ok(reference) => {
                 let config = load_network_advertiser_settings(self.app_paths.as_ref());
@@ -6250,6 +6172,95 @@ impl GameApp {
                 tracing::warn!(%error, "preparing network game reference unavailable");
             }
         }
+    }
+
+    /// The closed-admission Lobby reference of a host whose standalones are
+    /// still being packed, from OpenScenario data and the bound transport only.
+    pub(crate) fn preparing_host_game_reference(
+        staged: &StagedNetworkHostScenario,
+        addresses: Vec<clonk_network::NetworkAddress>,
+        start_time: i64,
+    ) -> Result<clonk_network::HostGameReference> {
+        let legacy = |value: &str, field: &str| {
+            clonk_resources::encode_legacy_script_text(value)
+                .and_then(clonk_engine::LegacyCString::from_bytes)
+                .ok_or_else(|| anyhow!("the preparing host {field} is not legacy text"))
+        };
+        let title = legacy(&staged.frontend.title, "title")?;
+        let scenario_filename = legacy(&staged.frontend.identifier, "scenario filename")?;
+        let host_name = legacy(&staged.lobby.local_name, "name")?;
+        let host_nick = legacy(&staged.lobby.nick, "nick")?;
+        let comment = legacy(&staged.options.comment, "comment")?;
+        let local_core = clonk_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            observer: false,
+            name: host_name.clone(),
+            nick: host_nick.clone(),
+            lobby_ready: false,
+        };
+        let parameters = clonk_network::JoinGameParametersEnvelope {
+            random_seed: 0,
+            startup_player_count: 0,
+            max_players: staged.lobby.max_players,
+            use_fair_crew: staged.lobby.fair_crew,
+            fair_crew_forced: staged.lobby.fair_crew_forced,
+            fair_crew_strength: staged.lobby.fair_crew_strength,
+            allow_debug: true,
+            is_network_game: true,
+            control_rate: 2,
+            auto_frame_skip: true,
+            rules: Vec::new(),
+            goals: Vec::new(),
+            league: clonk_engine::LegacyCString::default(),
+            league_address: clonk_engine::LegacyCString::default(),
+            title,
+            scenario: clonk_engine::NetworkResourceCore {
+                resource_type: clonk_network::HostResourceType::Scenario as u8,
+                id: 0,
+                filename: scenario_filename,
+                ..Default::default()
+            },
+            game_resources: Vec::new(),
+            player_infos: clonk_network::PlayerInfoListSnapshot::default(),
+            restore_player_infos: clonk_network::PlayerInfoListSnapshot::default(),
+            teams: clonk_network::JoinTeamListSnapshot::default(),
+            clients: clonk_network::JoinClientRegistrySnapshot::new(vec![local_core]),
+        };
+        let summary = clonk_network::NetworkGameReference {
+            icon: staged.frontend.icon_index.unwrap_or_default(),
+            title: staged.frontend.title.clone(),
+            host_name: staged.lobby.local_name.clone(),
+            host_nick: staged.lobby.nick.clone(),
+            state: "Lobby".to_string(),
+            control_mode: 2,
+            start_time,
+            comment: staged.options.comment.clone(),
+            join_allowed: false,
+            password_needed: !staged.options.password.is_empty(),
+            use_fair_crew: staged.lobby.fair_crew,
+            max_players: staged.lobby.max_players,
+            game: clonk_network::CURRENT_GAME_NAME.to_string(),
+            version: clonk_network::CURRENT_GAME_VERSION,
+            build: clonk_network::CURRENT_GAME_BUILD,
+            addresses: addresses.clone(),
+            tcp_addresses: addresses
+                .iter()
+                .filter_map(|address| {
+                    (address.protocol == clonk_network::NetworkProtocol::Tcp)
+                        .then_some(address.endpoint)
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let metadata = clonk_network::HostGameReferenceMetadata {
+            icon: summary.icon,
+            comment,
+            addresses,
+            ..Default::default()
+        };
+        clonk_network::HostGameReference::new(summary, metadata, parameters)
+            .map_err(anyhow::Error::new)
     }
 
     pub(crate) fn start_network_game_advertiser_with_reference(

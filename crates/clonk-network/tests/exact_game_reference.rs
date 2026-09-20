@@ -9,6 +9,7 @@ use clonk_network::{
     JoinTeamListSnapshot, JoinTeamSnapshot, LeagueEndRecord, LeagueHeartbeat, LeagueHostSession,
     LeagueReferenceRequestEncodeError, NetpuncherGameIds, NetworkAddress, NetworkGameAdvertiser,
     NetworkGameAdvertiserConfig, NetworkGameReference, NetworkProtocol, PlayerInfoListSnapshot,
+    CURRENT_GAME_NAME,
 };
 use clonk_protocol::{
     ClientCoreControlData, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
@@ -134,6 +135,28 @@ fn cpp_reference_serializes_the_complete_game_parameters_snapshot_in_compile_ord
         .as_bytes()
     );
     assert_eq!(parse_reference_response(&encoded).unwrap(), vec![summary]);
+}
+
+#[test]
+fn the_ports_engine_name_crosses_the_reference_quoted_and_whole() {
+    // sEngineName compiles as an escaped string, so C++ reads a name with a
+    // space only when it arrives quoted (src/C4InputValidation.h:80-82;
+    // src/C4Network2Reference.cpp:100).
+    let mut summary = fixture_summary();
+    summary.game = CURRENT_GAME_NAME.to_string();
+    let reference =
+        HostGameReference::new(summary, fixture_metadata(), complete_parameters()).unwrap();
+
+    let encoded = encode_host_game_reference_response(&reference).unwrap();
+
+    let expected = format!("Game=\"{CURRENT_GAME_NAME}\"\r\n");
+    assert!(encoded
+        .windows(expected.len())
+        .any(|window| window == expected.as_bytes()));
+    assert_eq!(
+        parse_reference_response(&encoded).unwrap()[0].game,
+        CURRENT_GAME_NAME
+    );
 }
 
 #[test]

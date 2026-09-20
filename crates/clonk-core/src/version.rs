@@ -37,6 +37,15 @@ pub const ENGINE_VERSION_TEXT: &str = concat!(engine_version_str!(), " ");
 /// This port's own release version, inherited from the workspace.
 pub const PORT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The engine name a host running this port advertises in its game reference
+/// (`Game=`), where C++ sends `C4ENGINENAME`.
+///
+/// It is status text only: `C4GameVersion::operator==` compares `iVer` and
+/// `iBuild` and never `sEngineName` (`C4GameVersion.h:26,45-48`), so a stock
+/// client lists the game as compatible on [`ENGINE_VERSION`] alone and merely
+/// shows this name beside it.
+pub const PORT_ENGINE_NAME: &str = concat!("clonk-rs ", env!("CARGO_PKG_VERSION"));
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +72,10 @@ mod tests {
         // Guards against the port version silently becoming a per-crate value.
         assert_eq!(PORT_VERSION, env!("CARGO_PKG_VERSION"));
         assert!(!PORT_VERSION.is_empty());
+    }
+
+    #[test]
+    fn port_engine_name_is_the_project_name_and_the_port_version() {
+        assert_eq!(PORT_ENGINE_NAME, format!("clonk-rs {PORT_VERSION}"));
     }
 }

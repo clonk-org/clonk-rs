@@ -38,9 +38,9 @@ use clonk_network::{
     JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope,
     JoinTeamListSnapshot, LeagueHttpTransportConfig, LeagueStartResponse, NetworkAddress,
     NetworkGameReference, NetworkProtocol, NetworkStatus, PlayerInfoListSnapshot,
-    ResourceFileOwnership, ReusableStandalone, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
-    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
-    NETWORK_STATE_PAUSE,
+    ResourceFileOwnership, ReusableStandalone, CURRENT_GAME_BUILD, CURRENT_GAME_NAME,
+    CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
+    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 use clonk_resources::{decode_legacy_script_text, localize_script_source_with_components};
 use clonk_resources::{Group, GroupError, LanguagePacks};
@@ -970,7 +970,7 @@ impl PreparedHostBootstrap {
             ),
             max_players: parameters.max_players,
             player_names,
-            game: "LegacyClonk".to_string(),
+            game: CURRENT_GAME_NAME.to_string(),
             version: CURRENT_GAME_VERSION,
             build: CURRENT_GAME_BUILD,
             addresses: addresses.to_vec(),
