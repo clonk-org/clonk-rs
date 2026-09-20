@@ -106,10 +106,11 @@ class OracleGroupPatchTests(unittest.TestCase):
                 bridge.mkdir(parents=True)
                 for name in (
                     "build-oracle-validation.sh", "oracle-weather.patch",
-                    "oracle-group-bridge.patch", "lc_engine_ffi.h",
-                    "lc_config_ffi.h", "lc_group_ffi.h", "lc_platform_ffi.h",
+                    "oracle-group-bridge.patch",
                 ):
                     shutil.copy2(BRIDGE / name, bridge / name)
+                for header in BRIDGE.glob("lc_*_ffi.h"):
+                    shutil.copy2(header, bridge / header.name)
                 commands = root / "bin"
                 commands.mkdir()
                 for name, body in (
