@@ -177,7 +177,17 @@ cmake -S "$ORACLE_ROOT" -B "$ORACLE_ROOT/$BUILD_DIR" \
 	-DCURL_INCLUDE_DIR="$ORACLE_ROOT/deps/include" \
 	-DCURL_LIBRARY="$sdk/usr/lib/libcurl.tbd" >/dev/null
 
-cmake --build "$ORACLE_ROOT/$BUILD_DIR" --target clonk -j 8
+if [ "$USE_RUST_GROUP_VALIDATION" = ON ]; then
+	python3 "$REPO_ROOT/parity/bridge/oracle_group_record.py" capture \
+		--oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
+fi
+# The pin imports this exact directory. An inherited Cargo override must not
+# build elsewhere while CMake links old archives left here.
+CARGO_TARGET_DIR="$REPO_ROOT/target" cmake --build "$ORACLE_ROOT/$BUILD_DIR" --target clonk -j 8
+if [ "$USE_RUST_GROUP_VALIDATION" = ON ]; then
+	python3 "$REPO_ROOT/parity/bridge/oracle_group_record.py" record \
+		--oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
+fi
 
 cat <<-DONE
 
@@ -210,6 +220,10 @@ if [ "$USE_RUST_GROUP_VALIDATION" = ON ]; then
 		packed fixtures, fault injection, reads, frees) with:
 
 		    parity/bridge/run-group-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
+
+		The ordered ABI probe additionally checks arrays and nested groups:
+
+		    python3 parity/bridge/run-group-differential.py --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR" --leaks
 	GROUP
 fi
 if [ "$USE_RUST_PLATFORM_PATHS" = ON ]; then

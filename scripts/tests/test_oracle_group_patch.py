@@ -131,6 +131,8 @@ class OracleGroupPatchTests(unittest.TestCase):
                 fake_bin.mkdir()
                 for command, body in (
                     ("cmake", "#!/bin/sh\nexit 0\n"),
+                    # This fixture tests patch layering, not an artifact build.
+                    ("python3", "#!/bin/sh\nexit 0\n"),
                     ("xcrun", "#!/bin/sh\nprintf '/tmp/fake-sdk\\n'\n"),
                 ):
                     executable = fake_bin / command

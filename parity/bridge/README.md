@@ -388,9 +388,51 @@ bridge to run at all, so a group Rust cannot open is only reachable by handing
 Rust another path. `--leaks` runs the folder and a packed group in deep mode
 under `leaks --atExit`; only AppKit's three Foundation objects remain.
 
-Slash canonicalisation is exercised only as far as both readers report the
-same names: an entry name carrying a backslash needs a pack made on Windows,
-which neither packer here produces.
+The live packed fixtures exercise names produced by the local packers.
+`test_oracle_group_observer.py` additionally compiles the actual patched
+observer with small entry enumerators to pin slash/trailing-separator
+canonicalization and both permitted C++ argument evaluation orders. Those
+enumerators are diagnostic unit fixtures, not parser parity evidence.
+
+For ordered arrays, nested group handles, empty groups and independent fault
+fixtures, run the additional ABI probe after building the oracle:
+
+```sh
+python3 parity/bridge/run-group-differential.py --oracle-root <pin-worktree> \
+    --build-dir build-group --out <fresh-evidence-directory> --leaks
+```
+
+The builder currently targets macOS with Homebrew dependencies. The build
+record and Python probe require Python 3.11 or newer. The builder sets Cargo's
+target directory to this checkout's `target/`, overriding an inherited
+`CARGO_TARGET_DIR`, because pinned CMake imports that exact location.
+
+`group-link-record.json` binds the actual resources archive, oracle binary,
+linked native objects, headers and source hashes. Inputs are captured before
+the build and checked again afterwards. Both differential runners verify the
+record before and after their fixtures; missing, changed or foreign artifacts,
+changed sources, and header drift fail before a stale build can be qualified.
+
+The Python probe uses the oracle's real C4Group parser and compiled engine
+objects in a separate executable, preserving the native globals and renaming
+the original entry point. C++ writes its packed fixtures. The resources ABI
+returns the native folder scan order required by the pinned contract; engine
+resource listings retain their documented canonical packed order. Packed ABI
+arrays retain their entry-table order.
+
+Agreeing folders, packed groups, empty groups and nested child handles compare
+entry order, names, types, sizes, existence, binary/empty buffers, maker and
+root strings. All handles, arrays, buffers and strings are freed. The probe
+listens at warning level, so agreement emits no mismatch diagnostic. Its four
+fault cases redirect only the probe's Rust open boundary to another real packed
+group, leaving both parsers unchanged. Each must emit exactly its missing-entry,
+additional-entry, size or type diagnostic. `--leaks` checks every fixture for
+retained allocations through the bridge or Rust resources code.
+
+The [recorded macOS qualification](group-validation-qualification.md) lists the
+results and exact artifact identities. The runner writes per-fixture logs, its
+link command and `result.json` in the evidence directory. The required CI shard
+runs the resources ABI tests explicitly with `ffi` enabled.
 
 #### The platform-path bridge
 

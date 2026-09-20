@@ -17,6 +17,14 @@ def matrix_entry(workflow, name):
 
 
 class ParityWorkflowTests(unittest.TestCase):
+    def test_group_abi_tests_are_required_with_the_ffi_feature(self):
+        units = matrix_entry(LANDING.read_text(encoding="utf-8"), "engine and frontend unit and parity")
+        self.assertIn(
+            "cargo nextest run -p clonk-resources --features ffi --locked --no-tests=fail "
+            "-E 'test(/^ffi::tests::/)' || failed=1",
+            units,
+        )
+
     def test_each_comparator_is_required_in_the_existing_shard_graph(self):
         workflow = LANDING.read_text(encoding="utf-8")
         app = matrix_entry(workflow, "app 4+9/12")

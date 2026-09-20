@@ -335,6 +335,7 @@ jobs:
             command: |
               failed=0
               cargo nextest run -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked --features clonk-engine-unit-tests/ffi || failed=1
+              cargo nextest run -p clonk-resources --features ffi --locked --no-tests=fail -E 'test(/^ffi::tests::/)' || failed=1
               # These comparators already belong to this required unit row.
               # Run each package separately so the no-tests failure policy detects an
               # absent or renamed comparator instead of succeeding on the

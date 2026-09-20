@@ -588,7 +588,7 @@ class CiLatencyTests(unittest.TestCase):
             )
         self.assertEqual(
             engine_unit_and_parity.count("--no-tests=fail"),
-            2,
+            3,  # two parity comparators and the resources ABI tests
         )
         self.assertNotIn("          - name: frontend unit\n", workflow)
         dedicated_packages = {
@@ -652,7 +652,7 @@ class CiLatencyTests(unittest.TestCase):
         self.assertNotIn("cargo xtask parity verify", unit_and_parity)
         self.assertEqual(
             unit_and_parity.count("--no-tests=fail"),
-            2,
+            3,  # two parity comparators and the resources ABI tests
         )
         self.assertIn("cargo clippy --version || failed=1", quality)
         self.assertIn("rustfmt --version || failed=1", quality)

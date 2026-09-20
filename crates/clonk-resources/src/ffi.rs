@@ -78,7 +78,7 @@ pub extern "C" fn lc_group_entries(
         return ptr::null_mut();
     }
     let handle = unsafe { &*handle };
-    let Ok(entries) = handle.0.entries() else {
+    let Ok(entries) = handle.0.validation_entries() else {
         unsafe { *out_len = 0 };
         return ptr::null_mut();
     };
@@ -213,6 +213,38 @@ pub extern "C" fn lc_group_string_free(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_entry_array_preserves_native_scan_order() {
+        // C4Group.cpp:1980-2003 delegates FindNextEntry to SearchNextEntry;
+        // its GRPF_Folder branch uses DirectoryIterator without sorting.
+        // StdFile.cpp:823-836 advances that iterator with readdir on Unix.
+        let directory = tempdir();
+        for name in ["Alpha.txt", "Beta.txt", "Empty.txt", "Zulu.txt", "mike.txt"] {
+            std::fs::write(directory.path().join(name), name).unwrap();
+        }
+        let expected: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let path = CString::new(directory.path().to_string_lossy().as_bytes()).unwrap();
+        let handle = lc_group_open(path.as_ptr());
+        assert!(!handle.is_null());
+        let mut length = 0;
+        let entries = lc_group_entries(handle, &mut length);
+        assert!(!entries.is_null());
+        let actual: Vec<_> = unsafe { std::slice::from_raw_parts(entries, length) }
+            .iter()
+            .map(|entry| {
+                unsafe { CStr::from_ptr(entry.path) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        lc_group_entries_free(entries, length);
+        lc_group_free(handle);
+        assert_eq!(actual, expected);
+    }
 
     /// `Group::open` refuses a dot-prefixed directory as an ignored group
     /// entry, and `tempfile`'s default prefix is `.tmp`. The crate's own tests
