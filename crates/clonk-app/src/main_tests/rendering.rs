@@ -3733,6 +3733,20 @@ fn options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
 }
 
 #[test]
+fn options_scale_confirmation_uses_the_oracle_icon_and_default_focus() {
+    use clonk_frontend::message_dialog::{MessageDialogButton, MessageDialogIcon};
+
+    // C4StartupOptionsDlg.cpp:109-112 passes Ico_None to TimedDialog;
+    // C4GuiDialogs.h:343 defaults defaultNo to false (the Yes button).
+    let mut app = new_classic_menu_app(640, 480);
+    app.open_options_menu();
+    app.begin_options_scale_test(100, 150).test_value();
+    let confirm = &app.dialogs.messages.last().test_value().state;
+    main_assert_eq!(confirm.icon() => MessageDialogIcon::None);
+    main_assert_eq!(confirm.focused_button() => Some(MessageDialogButton::Yes));
+}
+
+#[test]
 fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     use clonk_frontend::message_dialog::MessageDialogResult;
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;

@@ -1597,9 +1597,9 @@ impl GameApp {
             self.options_scale_test_message(12),
             self.runtime_resource_text("IDS_MNU_SWITCHRESOLUTION", "Switch resolution"),
             clonk_frontend::message_dialog::MessageDialogButtons::YES_NO,
-            clonk_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+            clonk_frontend::message_dialog::MessageDialogIcon::None,
             clonk_frontend::message_dialog::MessageDialogSize::Regular,
-            true,
+            false,
         );
         self.push_message_dialog(
             dialog,
