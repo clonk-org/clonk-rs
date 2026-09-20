@@ -1,0 +1,120 @@
+diff --git a/src/rust/RustPlatformBridge.cpp b/src/rust/RustPlatformBridge.cpp
+index f7d36441e..364b8c2d1 100644
+--- a/src/rust/RustPlatformBridge.cpp
++++ b/src/rust/RustPlatformBridge.cpp
+@@ -4,7 +4,10 @@
+ 
+ #include "lc_platform_ffi.h"
+ 
++#include <cstdio>
++#include <cstdlib>
+ #include <optional>
++#include <string_view>
+ #include <string>
+ #include <utility>
+ 
+@@ -21,8 +24,21 @@ std::optional<std::string> TakeString(char *raw) {
+     return value;
+ }
+ 
+-std::optional<std::string> Fetch(StringGetter getter) {
+-    return TakeString(getter());
++// C4ConfigGeneral::DeterminePaths runs inside C4Config::Load, before
++// LogSystem.OpenLog, so the report goes to stderr where a differential can
++// read it. LC_RUST_PLATFORM_FAULT=<getter name> discards that getter's answer
++// after freeing it, which is the only way to reach the incomplete-set path:
++// the pinned contract has C++ fall back to its own paths the moment one
++// answer is null.
++std::optional<std::string> Fetch(StringGetter getter, const char *name) {
++    auto value = TakeString(getter());
++    if (const char *fault = std::getenv("LC_RUST_PLATFORM_FAULT"); fault && std::string_view{fault} == name) {
++        value.reset();
++    }
++    if (!value) {
++        std::fprintf(stderr, "Rust platform paths unavailable (%s returned null); legacy paths used\n", name);
++    }
++    return value;
+ }
+ 
+ } // namespace
+@@ -30,35 +46,35 @@ std::optional<std::string> Fetch(StringGetter getter) {
+ namespace RustPlatformBridge {
+ 
+ std::optional<Paths> DiscoverPaths() {
+-    auto install_root = Fetch(&lc_platform_install_root);
++    auto install_root = Fetch(&lc_platform_install_root, "lc_platform_install_root");
+     if (!install_root) {
+         return std::nullopt;
+     }
+-    auto planet_dir = Fetch(&lc_platform_planet_dir);
++    auto planet_dir = Fetch(&lc_platform_planet_dir, "lc_platform_planet_dir");
+     if (!planet_dir) {
+         return std::nullopt;
+     }
+-    auto system_group = Fetch(&lc_platform_system_group_path);
++    auto system_group = Fetch(&lc_platform_system_group_path, "lc_platform_system_group_path");
+     if (!system_group) {
+         return std::nullopt;
+     }
+-    auto user_data = Fetch(&lc_platform_user_data_dir);
++    auto user_data = Fetch(&lc_platform_user_data_dir, "lc_platform_user_data_dir");
+     if (!user_data) {
+         return std::nullopt;
+     }
+-    auto cache = Fetch(&lc_platform_cache_dir);
++    auto cache = Fetch(&lc_platform_cache_dir, "lc_platform_cache_dir");
+     if (!cache) {
+         return std::nullopt;
+     }
+-    auto logs = Fetch(&lc_platform_logs_dir);
++    auto logs = Fetch(&lc_platform_logs_dir, "lc_platform_logs_dir");
+     if (!logs) {
+         return std::nullopt;
+     }
+-    auto temp = Fetch(&lc_platform_temp_dir);
++    auto temp = Fetch(&lc_platform_temp_dir, "lc_platform_temp_dir");
+     if (!temp) {
+         return std::nullopt;
+     }
+-    auto config = Fetch(&lc_platform_config_dir);
++    auto config = Fetch(&lc_platform_config_dir, "lc_platform_config_dir");
+     if (!config) {
+         return std::nullopt;
+     }
+@@ -72,11 +88,18 @@ std::optional<Paths> DiscoverPaths() {
+     paths.logs_dir = std::move(*logs);
+     paths.temp_dir = std::move(*temp);
+     paths.config_dir = std::move(*config);
++    std::fprintf(stderr,
++                 "Rust platform paths: install='%s' planet='%s' system='%s' user='%s' cache='%s' logs='%s' temp='%s' config='%s'\n",
++                 paths.install_root.c_str(), paths.planet_dir.c_str(), paths.system_group_path.c_str(),
++                 paths.user_data_dir.c_str(), paths.cache_dir.c_str(), paths.logs_dir.c_str(),
++                 paths.temp_dir.c_str(), paths.config_dir.c_str());
+     return paths;
+ }
+ 
+ bool EnsureUserDirectories() {
+-    return lc_platform_ensure_user_dirs();
++    const bool created = lc_platform_ensure_user_dirs();
++    std::fprintf(stderr, "Rust platform user directories: %s\n", created ? "ensured" : "FAILED");
++    return created;
+ }
+ 
+ } // namespace RustPlatformBridge
+diff --git a/src/rust/RustPlatformBridge.h b/src/rust/RustPlatformBridge.h
+index 6fb7e9d0c..a6be1bbf5 100644
+--- a/src/rust/RustPlatformBridge.h
++++ b/src/rust/RustPlatformBridge.h
+@@ -1,5 +1,12 @@
+ #pragma once
+ 
++// Only the engine links RustPlatformBridge.cpp and the Rust archive; the
++// c4group tool compiles C4Config.cpp with the same option and cannot link the
++// discovery call, so it gets the inline stubs below instead.
++#if defined(USE_RUST_PLATFORM_PATHS) && !defined(C4ENGINE)
++#undef USE_RUST_PLATFORM_PATHS
++#endif
++
+ #include <optional>
+ #include <string>
+ 
