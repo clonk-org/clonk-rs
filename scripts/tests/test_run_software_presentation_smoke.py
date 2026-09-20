@@ -92,6 +92,8 @@ class SoftwarePresentationRunnerTests(unittest.TestCase):
         admission = workflow[workflow.index("  diagnostic-admission:"):workflow.index("  exact-sha-qualification:")]
         self.assertIn("!inputs.software_presentation", admission)
         job = workflow[workflow.index("  windows-release-tools:"):]
+        packaging = job[job.index("      - name: Build the Windows packaging tool"):job.index("      - name: Configure the shipped MSVC runtime")]
+        self.assertIn("if: ${{ !inputs.software_presentation }}", packaging)
         validation = job.index("run: scripts/validate-msvc-runtime.sh")
         smoke = job.index("python scripts/run_software_presentation_smoke.py")
         self.assertLess(validation, smoke)

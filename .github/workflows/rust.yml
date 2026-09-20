@@ -373,6 +373,7 @@ jobs:
       # Release invokes this binary on the Windows host. Build its real release
       # graph here without serializing it ahead of the merge-critical runtime.
       - name: Build the Windows packaging tool
+        if: ${{ !inputs.software_presentation }}
         run: cargo build --release --locked -p xtask --features engine-tools --bin xtask-engine-tools
 
       - name: Configure the shipped MSVC runtime

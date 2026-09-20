@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, ensure, Context, Result};
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use serde::Serialize;
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
 use crate::cpu_target::CpuTarget;
 use crate::developer_host::DeveloperHost;
@@ -143,6 +143,7 @@ impl SoftwarePresentSmoke {
         check_input: bool,
         choice: clonk_surface::capability::PresentationChoice,
     ) -> Result<Self> {
+        tracing::info!(check_input, "starting software presentation probe");
         let shell = windows
             .shell_mut()
             .and_then(DeveloperHost::as_shell_mut)
@@ -225,6 +226,9 @@ impl SoftwarePresentSmoke {
             windows.request_redraw_visible();
             self.next_retry = now + SMOKE_RETRY_INTERVAL;
         }
+        // This probe consumes AboutToWait before the normal frame scheduler.
+        // Without a wakeup, an idle Windows loop never retries or times out.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_retry.min(self.deadline)));
         Ok(())
     }
 
@@ -242,6 +246,7 @@ impl SoftwarePresentSmoke {
         if os_window_id != self.shell_os_window_id {
             return Ok(());
         }
+        let previous_phase = self.phase;
         match self.phase {
             SmokePhase::PresentInitial => {
                 self.presented_before_resize |= present_shell(windows, [0x2f, 0x6f, 0xa8, 0xff])?;
@@ -333,6 +338,9 @@ impl SoftwarePresentSmoke {
             }
             SmokePhase::AwaitLoopExit => event_loop.exit(),
             SmokePhase::Failed => unreachable!("failed probes exit above"),
+        }
+        if self.phase != previous_phase {
+            tracing::info!(?previous_phase, phase = ?self.phase, "software presentation probe advanced");
         }
         Ok(())
     }
