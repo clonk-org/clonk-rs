@@ -199,12 +199,20 @@ reads that file rather than a second copy of the list, and its tests fail if a
 screen is dropped, a mask hides pixels without a stated reason, or the software
 tolerance stops being exact.
 
-Pending: clonk-org/clonk-rs#1241, live platform qualification of complete
-retained-GPU device-loss recovery through the shipped event loop. The probe
-exists (`clonk-app --device-loss-probe <REPORT.json>` with one explicit
-`WGPU_BACKEND`, described in `docs/RENDERING_PARITY.md`); what is pending is a
-report from a visible window on each backend that can inject a loss, and the
-backends that cannot are to be named rather than counted.
+Held: `docs/DEVICE_LOSS_QUALIFICATION.md` documents live release-build recovery
+through the shipped event loop on Vulkan, GL, DX12, and Metal
+(clonk-org/clonk-rs#1241). The [retained evidence](evidence/live-gpu-recovery/README.md)
+records the destroyed-device callback, release of the old surface before
+replacement, complete uploads of the current scene's source textures, and
+matching pixels followed by three presentations on the new renderer generation.
+These are Mesa/WARP software GPU adapters and Apple's paravirtual Metal device;
+the evidence does not qualify physical driver resets or every hardware driver.
+
+The machine-readable entry still records clonk-org/clonk-rs#1241 as pending.
+Updating it changes the profile hash bound into the accepted C++ presentation
+captures, so that status transition belongs to the combined evidence reconciliation
+and fresh capture acquisition tracked by clonk-org/clonk-rs#498. The retained
+platform proof above is complete; the manifest reconciliation remains pending.
 
 ### Save and replay
 
@@ -369,7 +377,8 @@ matching what a C++ peer computes, not passing its resource negotiation. The
 entry is kept in the manifest rather than removed, so the limitation is stated
 where the contract is read.
 
-The ten pending evidence entries name nine issues:
+The ten pending manifest entries name nine issues (including the completed
+platform qualification above, whose status update awaits reconciliation):
 clonk-org/clonk-rs#1261, clonk-org/clonk-rs#1240, clonk-org/clonk-rs#516, and
 clonk-org/clonk-rs#1243 (simulation),
 clonk-org/clonk-rs#586 (control and transport, once each),

@@ -801,9 +801,9 @@ pub(crate) fn retained_gpu_device_loss_error(detail: String) -> anyhow::Error {
 /// Prefer the renderer's device-health diagnosis when presentation fails.
 ///
 /// Pixels can reject surface acquisition before invoking our render callback.
-/// If wgpu dispatched the device-loss callback first, that recorded diagnosis
-/// is more specific than Pixels' generic presentation error and must remain in
-/// the error chain so the event loop rebuilds the device.
+/// Callers poll pending device callbacks before taking this health snapshot.
+/// A recorded loss is more specific than the generic presentation error and
+/// must remain in the error chain so the event loop rebuilds the device.
 pub(crate) fn retained_gpu_presentation_error(
     presentation_error: anyhow::Error,
     renderer_health: std::result::Result<(), gpu_renderer::GpuRendererError>,
@@ -1118,6 +1118,7 @@ pub(crate) fn rebuild_retained_gpu_device(
     window: &Arc<Window>,
     pixels: &mut Option<WindowSurface>,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
+    probe: Option<&mut crate::device_loss_probe::DeviceLossProbe>,
 ) -> Result<()> {
     let size = enforce_min_size(window.inner_size());
     let previous = pixels
@@ -1126,7 +1127,13 @@ pub(crate) fn rebuild_retained_gpu_device(
     let previous_width = previous.buffer_extent().0;
     let previous_height = previous.buffer_extent().1;
     let previous_frame = previous.frame().to_vec();
+    let surfaces_before = probe
+        .as_ref()
+        .and_then(|_| gpu_instance::live_surface_count());
     replace_after_drop(pixels, || {
+        if let Some(probe) = probe {
+            probe.note_surface_drop(surfaces_before, gpu_instance::live_surface_count())?;
+        }
         let mut replacement =
             build_framebuffer(window, size).context("failed to rebuild retained GPU surface")?;
         replacement
@@ -1311,11 +1318,11 @@ pub(crate) fn present_retained_gpu_frame_profiled(
         Ok(Err(error)) => {
             return Err(retained_gpu_presentation_error(
                 anyhow::Error::new(error).context("failed to submit retained GPU frame"),
-                renderer.check_health(),
+                renderer.poll_health(pixels.device()),
             ));
         }
         Err(payload) => {
-            let renderer_health = renderer.check_health();
+            let renderer_health = renderer.poll_health(pixels.device());
             if let Some(detail) = wgpu_device_loss_panic_detail(payload.as_ref()) {
                 return Err(retained_gpu_presentation_error(
                     retained_gpu_device_loss_error(detail),

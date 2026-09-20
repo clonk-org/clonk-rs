@@ -933,6 +933,7 @@ fn run() -> Result<()> {
     let benchmark_exit_code = Arc::new(AtomicI32::new(0));
     let event_handler_exit_code = Arc::clone(&benchmark_exit_code);
     let initializer: RuntimeInitializer = Box::new(move |event_target| {
+        gpu_instance::set_display_handle(event_target.owned_display_handle());
         // The active event loop is the first portable point at which monitors can
         // be queried and a native window plus render surface can be created.
         if let Some(scale_factor) = event_target
@@ -1218,7 +1219,18 @@ fn run() -> Result<()> {
             })
             .transpose()?;
         let mut device_loss_probe = cli.device_loss_probe.clone().map(|report_path| {
-            device_loss_probe::DeviceLossProbe::new(report_path, cli.device_loss_probe_after_frames)
+            let mut probe = device_loss_probe::DeviceLossProbe::new(
+                report_path,
+                cli.device_loss_probe_after_frames,
+            );
+            if let Some(pixels) = developer_windows
+                .shell_mut()
+                .and_then(developer_host::DeveloperHost::as_shell_mut)
+                .and_then(|shell| shell.pixels.as_ref())
+            {
+                probe.record_adapter(&pixels.device().adapter_info());
+            }
+            probe
         });
         let mut software_present_smoke = cli
             .software_present_smoke
@@ -1939,8 +1951,9 @@ fn run() -> Result<()> {
                             Ok(RetainedGpuProfiledOutcome::Presented(profile)) => {
                                 surface_rebuild.note_presented();
                                 if let Some(probe) = device_loss_probe.as_mut() {
-                                    match probe.note_retained_presentation(
-                                        retained_gpu_renderer.generation(),
+                                    match probe.observe_retained_presentation(
+                                        retained_gpu_renderer,
+                                        pixels,
                                         Instant::now(),
                                     ) {
                                         Some(device_loss_probe::ProbeStep::Inject) => {
@@ -2024,6 +2037,7 @@ fn run() -> Result<()> {
                                             window,
                                             pixels_slot,
                                             retained_gpu_renderer,
+                                            device_loss_probe.as_mut(),
                                         ) {
                                             Ok(()) => {
                                                 if let Some(probe) = device_loss_probe.as_mut() {
@@ -2312,9 +2326,12 @@ fn run() -> Result<()> {
                                 // Software presentation owns no GPU device,
                                 // so there is nothing for it to rebuild.
                                 let rebuild = match retained_gpu_renderer.as_mut() {
-                                    Some(renderer) => {
-                                        rebuild_retained_gpu_device(window, pixels_slot, renderer)
-                                    }
+                                    Some(renderer) => rebuild_retained_gpu_device(
+                                        window,
+                                        pixels_slot,
+                                        renderer,
+                                        None,
+                                    ),
                                     None => Ok(()),
                                 };
                                 match rebuild {

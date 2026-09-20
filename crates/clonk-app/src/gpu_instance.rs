@@ -72,6 +72,7 @@ pub(crate) struct InstanceRegistryEvidence {
 
 #[derive(Default)]
 struct InstanceRegistry {
+    display: Option<winit::event_loop::OwnedDisplayHandle>,
     entries: Vec<InstanceEntry>,
     acquisitions: Vec<InstanceAcquisitionEvidence>,
     capture_acquisitions: bool,
@@ -81,6 +82,15 @@ struct InstanceRegistry {
 fn registry() -> &'static Mutex<InstanceRegistry> {
     static REGISTRY: OnceLock<Mutex<InstanceRegistry>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(InstanceRegistry::default()))
+}
+
+/// Keep the compositor connection alive independently of any one window.
+/// GLES requires this connection when the first instance is constructed.
+pub(crate) fn set_display_handle(display: winit::event_loop::OwnedDisplayHandle) {
+    registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .display = Some(display);
 }
 
 /// The process's instance for `backends`, created on first use.
@@ -111,7 +121,13 @@ pub(crate) fn retained_instance(backends: wgpu::Backends) -> wgpu::Instance {
             let entry = InstanceEntry {
                 id: registry.next_entry_id,
                 backends,
-                instance: clonk_surface::create_instance(backends),
+                instance: clonk_surface::create_instance(
+                    backends,
+                    registry
+                        .display
+                        .clone()
+                        .map(|display| Box::new(display) as _),
+                ),
                 acquisitions: 1,
             };
             let result = (entry.id, entry.instance.clone(), true);
@@ -142,6 +158,23 @@ pub(crate) fn begin_retained_instance_evidence_capture() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     registry.acquisitions.clear();
     registry.capture_acquisitions = true;
+}
+
+/// Diagnostic snapshot of live surface IDs, taken between destruction and
+/// replacement by the device-loss probe. Ordinary frames never query this.
+pub(crate) fn live_surface_count() -> Option<usize> {
+    registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entries
+        .iter()
+        .try_fold(0, |count, entry| {
+            entry.instance.generate_report().map(|report| {
+                // wgpu-core's Registry::generate_report counts an occupied
+                // surface in both num_allocated and num_kept_from_user.
+                count + report.surfaces.num_allocated
+            })
+        })
 }
 
 /// Snapshot the registry evidence used by the headed lifecycle gate.

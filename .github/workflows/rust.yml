@@ -18,6 +18,17 @@ on:
         required: false
         type: boolean
         default: false
+      device_loss:
+        description: Qualify live device-loss recovery on desktop GPU backends
+        required: false
+        type: boolean
+        default: false
+      device_loss_platform:
+        description: Platform to qualify when device_loss is selected
+        required: false
+        type: choice
+        default: all
+        options: [all, linux, windows, macos]
 
 permissions:
   contents: read
@@ -27,6 +38,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  device-loss:
+    if: inputs.device_loss
+    uses: ./.github/workflows/device-loss-qualification.yml
+    with:
+      source-sha: ${{ github.sha }}
+      platforms: ${{ inputs.device_loss_platform == 'all' && '["linux", "windows", "macos"]' || format('["{0}"]', inputs.device_loss_platform) }}
+
   # Swatinem saves in a post-job hook and reports cache-service failures
   # without failing its producer. A cache-only bootstrap therefore proves both
   # Rust entries are visible from fresh dependent jobs before reporting green.
@@ -89,6 +107,7 @@ jobs:
   # coalesce to one rolling lane; an explicit bootstrap keeps an exact-SHA lane
   # so a newer push cannot replace its pending prerequisite.
   content-landing-cache:
+    if: ${{ !inputs.device_loss }}
     name: Publish the pinned content checkout
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -260,7 +279,7 @@ jobs:
     needs: linux-landing-cache
     if: >-
       ${{ (github.event_name != 'workflow_dispatch' || !inputs.cache_only)
-        && !inputs.software_presentation }}
+        && !inputs.software_presentation && !inputs.device_loss }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -312,6 +331,7 @@ jobs:
       upload-diagnostics: true
 
   windows-landing-cache:
+    if: ${{ !inputs.device_loss }}
     name: Warm the Windows landing cache
     runs-on: windows-latest
     timeout-minutes: 45

@@ -1,0 +1,26 @@
+2026-09-20T10:05:37.777430Z  INFO clonk_app: engine session log initialized path=/home/runner/work/clonk-rs/clonk-rs/target/device-loss/vulkan/logs/Clonk.log
+2026-09-20T10:05:37.777482Z  INFO clonk_logging: starting clonk port_version="0.27.5" engine_version="4.9.11.0 [362]" os="linux" arch="x86_64" debug_assertions=false
+2026-09-20T10:05:37.777493Z  INFO clonk_app: no interrupted component update to recover
+2026-09-20T10:05:37.786217Z  WARN winit::platform_impl::linux::x11::xdisplay: error setting XSETTINGS; Xft options won't reload automatically
+2026-09-20T10:05:37.892234Z  WARN winit::platform_impl::linux::x11::util::randr: XRandR reported that the display's 0mm in size, which is certifiably insane
+2026-09-20T10:05:37.930333Z  WARN {}{task_name="org.a11y.Status proxy caching"}: zbus::proxy: Failed to populate properties cache via GetAll: org.freedesktop.DBus.Error.ServiceUnknown: The name org.a11y.Bus was not provided by any .service files. Property change streams will not produce values.
+2026-09-20T10:05:38.769813Z  WARN clonk_app::main_audio: no surface-compatible hardware adapter was offered; running on a software adapter backends=Backends(VULKAN) adapter=llvmpipe (LLVM 20.1.2, 256 bits)
+2026-09-20T10:05:39.741095Z  INFO clonk_app::main_resources: loaded material definitions path=/home/runner/work/clonk-rs/clonk-rs/content/Material.c4g count=21
+ALSA lib confmisc.c:855:(parse_card) cannot find card '0'
+ALSA lib conf.c:5208:(_snd_config_evaluate) function snd_func_card_inum returned error: No such file or directory
+ALSA lib confmisc.c:422:(snd_func_concat) error evaluating strings
+ALSA lib conf.c:5208:(_snd_config_evaluate) function snd_func_concat returned error: No such file or directory
+ALSA lib confmisc.c:1342:(snd_func_refer) error evaluating name
+ALSA lib conf.c:5208:(_snd_config_evaluate) function snd_func_refer returned error: No such file or directory
+ALSA lib conf.c:5731:(snd_config_expand) Evaluate error: No such file or directory
+ALSA lib pcm.c:2721:(snd_pcm_open_noupdate) Unknown PCM default
+2026-09-20T10:05:41.257602Z ERROR clonk_audio::mixer: failed to create audio stream: failed to enumerate output formats: The requested audio device is not available. It may have been disconnected.
+2026-09-20T10:05:43.115847Z  WARN clonk_app: device-loss probe: destroying the live GPU device generation=1
+2026-09-20T10:05:43.120550Z ERROR clonk_app_render::gpu_renderer: retained GPU device lost reason=Destroyed detail=Destroyed
+2026-09-20T10:05:43.120579Z  WARN clonk_app: retained GPU device requires recreation error=failed to submit retained GPU frame
+
+Caused by:
+    retained GPU device recreation required after DeviceLost: Destroyed
+2026-09-20T10:05:43.136649Z  WARN clonk_app::main_audio: no surface-compatible hardware adapter was offered; running on a software adapter backends=Backends(VULKAN) adapter=llvmpipe (LLVM 20.1.2, 256 bits)
+LC_APP_DEVICE_LOSS_PROBE result=recovered backend=vulkan generation_before=1 generation_after=2 presented_after=3 recovery_ms=188 report=/home/runner/work/clonk-rs/clonk-rs/target/device-loss/vulkan/report.json
+2026-09-20T10:05:43.273656Z  INFO clonk_logging: stopping clonk reason="the event loop ended"

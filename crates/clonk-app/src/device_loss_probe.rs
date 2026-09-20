@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::gpu_renderer::{GpuReadbackFrame, GpuRendererStats, RetainedGpuRenderer};
 use crate::headed_surface_smoke::AdapterEvidence;
+use clonk_surface::WindowSurface;
 
 /// Retained presentations to let through before the device is destroyed.
 pub(crate) const DEFAULT_INJECT_AFTER_FRAMES: u32 = 30;
@@ -69,6 +71,7 @@ pub(crate) struct DeviceLossProbe {
     phase: Phase,
     presented_before: u32,
     injected_at: Option<Instant>,
+    started_at: Instant,
     generation_before: Option<u64>,
     generation_after: Option<u64>,
     presented_after: u32,
@@ -78,6 +81,48 @@ pub(crate) struct DeviceLossProbe {
     adapter: Option<AdapterEvidence>,
     failure: Option<String>,
     reported: bool,
+    reference_frame: Option<GpuReadbackFrame>,
+    reference_textures: Vec<clonk_graphics::GpuTextureId>,
+    reference_resident_textures: usize,
+    resource_recovery: Option<ResourceRecoveryEvidence>,
+    surface_counts_at_drop: Option<[usize; 2]>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ResourceRecoveryEvidence {
+    extent: [u32; 2],
+    texture_ids_before: Vec<u64>,
+    texture_ids_after: Vec<u64>,
+    resident_textures_before: usize,
+    textures_before: usize,
+    textures_after: usize,
+    recreated_textures: usize,
+    full_upload_calls: usize,
+    full_upload_bytes: u64,
+    pixels_identical: bool,
+}
+
+fn validate_recovered_frame(
+    before: &GpuReadbackFrame,
+    after: &GpuReadbackFrame,
+    textures_before: usize,
+    stats: &GpuRendererStats,
+) -> Result<()> {
+    ensure!(before == after, "the first recovered frame differs from the pre-loss frame; use an idle, static screen for qualification");
+    ensure!(
+        textures_before > 0
+            && stats.resident_source_textures == textures_before
+            && stats.created_source_textures == textures_before
+            && stats.full_upload_calls >= textures_before
+            && stats.full_upload_bytes > 0,
+        "the replacement device did not recreate and upload every presented source texture: \
+         expected {textures_before}, resident {}, created {}, full uploads {}, bytes {}",
+        stats.resident_source_textures,
+        stats.created_source_textures,
+        stats.full_upload_calls,
+        stats.full_upload_bytes,
+    );
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +143,8 @@ struct DeviceLossProbeReport {
     rebuild_ok: Option<bool>,
     presented_after_recovery: u32,
     recovery_ms: Option<u128>,
+    resource_recovery: Option<ResourceRecoveryEvidence>,
+    surface_counts_at_drop: Option<[usize; 2]>,
 }
 
 impl DeviceLossProbe {
@@ -108,6 +155,7 @@ impl DeviceLossProbe {
             phase: Phase::Armed,
             presented_before: 0,
             injected_at: None,
+            started_at: Instant::now(),
             generation_before: None,
             generation_after: None,
             presented_after: 0,
@@ -117,7 +165,103 @@ impl DeviceLossProbe {
             adapter: None,
             failure: None,
             reported: false,
+            reference_frame: None,
+            reference_textures: Vec::new(),
+            reference_resident_textures: 0,
+            resource_recovery: None,
+            surface_counts_at_drop: None,
         }
+    }
+
+    /// Inspect the composition actually presented, without requesting another
+    /// scene or changing the normal renderer's resource-restoration path.
+    pub(crate) fn observe_retained_presentation(
+        &mut self,
+        renderer: &RetainedGpuRenderer,
+        surface: &WindowSurface,
+        now: Instant,
+    ) -> Option<ProbeStep> {
+        if self.phase == Phase::Injected
+            && renderer.generation() <= self.generation_before.unwrap_or(0)
+        {
+            return self.note_retained_presentation(renderer.generation(), now);
+        }
+        if (self.phase == Phase::Armed && self.presented_before + 1 >= self.inject_after)
+            || (self.phase == Phase::Injected && self.presented_after == 0)
+        {
+            if let Err(error) = self.capture_presented_frame(renderer, surface) {
+                return Some(
+                    self.fail(format!("resource recovery verification failed: {error:#}")),
+                );
+            }
+        }
+        self.note_retained_presentation(renderer.generation(), now)
+    }
+
+    fn capture_presented_frame(
+        &mut self,
+        renderer: &RetainedGpuRenderer,
+        surface: &WindowSurface,
+    ) -> Result<()> {
+        let mut encoder =
+            surface
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("device_loss_probe_readback"),
+                });
+        let ticket = renderer
+            .readback_last_presentation(surface.device(), &mut encoder)?
+            .context("the renderer has no presented composition")?;
+        surface.queue().submit([encoder.finish()]);
+        let frame = ticket.read(surface.device())?;
+        let stats = renderer.last_stats();
+        let texture_ids = renderer.last_scene_texture_ids();
+        let suffix = if self.phase == Phase::Armed {
+            "before.png"
+        } else {
+            "after.png"
+        };
+        let path = self.report_path.with_extension(suffix);
+        let png =
+            crate::main_resources::encode_rgba_png(frame.extent[0], frame.extent[1], &frame.rgba)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?
+            .write_all(&png)?;
+        if self.phase == Phase::Armed {
+            ensure!(
+                !texture_ids.is_empty(),
+                "the pre-loss frame used no source textures"
+            );
+            self.reference_textures = texture_ids;
+            self.reference_resident_textures = stats.resident_source_textures;
+            self.reference_frame = Some(frame);
+        } else {
+            let reference = self
+                .reference_frame
+                .as_ref()
+                .context("no pre-loss frame was captured")?;
+            self.generation_after = Some(renderer.generation());
+            self.resource_recovery = Some(ResourceRecoveryEvidence {
+                extent: frame.extent,
+                texture_ids_before: self.reference_textures.iter().map(|id| id.get()).collect(),
+                texture_ids_after: texture_ids.iter().map(|id| id.get()).collect(),
+                resident_textures_before: self.reference_resident_textures,
+                textures_before: self.reference_textures.len(),
+                textures_after: stats.resident_source_textures,
+                recreated_textures: stats.created_source_textures,
+                full_upload_calls: stats.full_upload_calls,
+                full_upload_bytes: stats.full_upload_bytes,
+                pixels_identical: reference == &frame,
+            });
+            ensure!(
+                texture_ids == self.reference_textures,
+                "the first recovered scene uses different source texture identities"
+            );
+            validate_recovered_frame(reference, &frame, self.reference_textures.len(), &stats)?;
+        }
+        Ok(())
     }
 
     /// A retained presentation completed on renderer `generation`.
@@ -142,6 +286,14 @@ impl DeviceLossProbe {
                     return Some(self.fail(format!(
                         "a frame presented on generation {generation} after the device was destroyed: the loss was ignored or the old swapchain was retained"
                     )));
+                }
+                if self.rebuild_ok != Some(true)
+                    || !self
+                        .callback_diagnosis
+                        .as_deref()
+                        .is_some_and(|diagnosis| diagnosis.contains("Destroyed"))
+                {
+                    return Some(self.fail("a replacement presented without an observed device loss and successful rebuild"));
                 }
                 self.generation_after = Some(generation);
                 self.presented_after += 1;
@@ -168,6 +320,21 @@ impl DeviceLossProbe {
         }
     }
 
+    pub(crate) fn note_surface_drop(
+        &mut self,
+        before: Option<usize>,
+        after: Option<usize>,
+    ) -> Result<()> {
+        let before = before.context("wgpu cannot report the old surface lifetime")?;
+        let after = after.context("wgpu cannot report surface destruction")?;
+        self.surface_counts_at_drop = Some([before, after]);
+        ensure!(
+            before > 0 && after == before - 1,
+            "the old configured surface is still live before replacement: {before} -> {after}"
+        );
+        Ok(())
+    }
+
     /// The software presenter presented a frame.
     pub(crate) fn note_software_presentation(&mut self) -> Option<ProbeStep> {
         (self.phase == Phase::Injected).then(|| {
@@ -177,6 +344,12 @@ impl DeviceLossProbe {
 
     /// Called every loop iteration so a loss that never recovers still ends.
     pub(crate) fn check_deadline(&mut self, now: Instant) -> Option<ProbeStep> {
+        if self.phase == Phase::Armed && now.duration_since(self.started_at) > RECOVERY_TIMEOUT {
+            return Some(self.fail(format!(
+                "only {} retained presentations before injection within {} s; the window must be visible",
+                self.presented_before, RECOVERY_TIMEOUT.as_secs()
+            )));
+        }
         let waited = self.injected_at.filter(|_| self.phase == Phase::Injected)?;
         (now.duration_since(waited) > RECOVERY_TIMEOUT).then(|| {
             self.fail(format!(
@@ -218,6 +391,11 @@ impl DeviceLossProbe {
             return Ok(());
         }
         self.reported = true;
+        if self.phase == Phase::Recovered
+            && (self.resource_recovery.is_none() || self.surface_counts_at_drop.is_none())
+        {
+            self.fail("recovery lacked surface destruction, resource uploads, or matching presented pixels");
+        }
         if self.phase != Phase::Recovered {
             let phase = self.phase;
             self.fail(format!(
@@ -225,7 +403,7 @@ impl DeviceLossProbe {
             ));
         }
         let report = DeviceLossProbeReport {
-            schema_version: 1,
+            schema_version: 2,
             kind: "clonk_device_loss_probe",
             success: self.succeeded(),
             failure: self.failure.clone(),
@@ -241,6 +419,8 @@ impl DeviceLossProbe {
             rebuild_ok: self.rebuild_ok,
             presented_after_recovery: self.presented_after,
             recovery_ms: self.recovered_after.map(|elapsed| elapsed.as_millis()),
+            resource_recovery: self.resource_recovery.clone(),
+            surface_counts_at_drop: self.surface_counts_at_drop,
         };
         let bytes = serde_json::to_vec_pretty(&report)
             .context("failed to serialize the device-loss probe report")?;
@@ -321,6 +501,47 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_pixels_without_restored_textures_do_not_qualify() {
+        let frame = crate::gpu_renderer::GpuReadbackFrame {
+            extent: [1, 1],
+            rgba: vec![12, 34, 56, 255],
+        };
+        assert!(validate_recovered_frame(
+            &frame,
+            &frame,
+            1,
+            &crate::gpu_renderer::GpuRendererStats::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_new_generation_without_observing_the_loss_is_not_recovery() {
+        let mut probe = probe();
+        let start = Instant::now();
+        probe.note_retained_presentation(1, start);
+        probe.note_retained_presentation(1, start);
+        assert_eq!(
+            probe.note_retained_presentation(2, start),
+            Some(ProbeStep::Failed)
+        );
+        assert!(!probe.succeeded());
+    }
+
+    #[test]
+    fn a_surface_error_without_the_destroyed_callback_is_not_recovery() {
+        let mut probe = probe();
+        let start = Instant::now();
+        probe.note_retained_presentation(1, start);
+        probe.note_retained_presentation(1, start);
+        probe.note_rebuild("surface was lost".to_owned(), true);
+        assert_eq!(
+            probe.note_retained_presentation(2, start),
+            Some(ProbeStep::Failed)
+        );
+    }
+
+    #[test]
     fn a_presentation_on_the_destroyed_generation_is_an_ignored_loss() {
         let mut probe = probe();
         let start = Instant::now();
@@ -356,13 +577,23 @@ mod tests {
     }
 
     #[test]
+    fn a_window_that_never_presents_times_out_before_injection() {
+        let mut probe = probe();
+        assert_eq!(
+            probe.check_deadline(Instant::now() + Duration::from_secs(16)),
+            Some(ProbeStep::Failed)
+        );
+        assert_eq!(probe.presented_before, 0);
+    }
+
+    #[test]
     fn a_loss_that_never_recovers_times_out() {
         let mut probe = probe();
         let start = Instant::now();
         assert_eq!(
-            probe.check_deadline(start + Duration::from_secs(60)),
+            probe.check_deadline(start + Duration::from_secs(1)),
             None,
-            "nothing is pending before the loss"
+            "the startup deadline has not elapsed"
         );
         probe.note_retained_presentation(1, start);
         probe.note_retained_presentation(1, start);

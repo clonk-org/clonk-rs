@@ -28,6 +28,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  device-loss:
+    name: Live GPU recovery
+    if: ${{ !inputs.upload-diagnostics }}
+    uses: ./.github/workflows/device-loss-qualification.yml
+    with:
+      source-sha: ${{ inputs.source-sha }}
+
   coverage-fragments:
     name: Rust coverage / ${{ matrix.name }}
     runs-on: ubuntu-24.04

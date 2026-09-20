@@ -1,0 +1,12 @@
+2026-09-20T10:07:17.202722Z  INFO clonk_app: engine session log initialized path=/Users/runner/work/clonk-rs/clonk-rs/target/device-loss/metal/logs/Clonk.log
+2026-09-20T10:07:17.202856Z  INFO clonk_logging: starting clonk port_version="0.27.5" engine_version="4.9.11.0 [362]" os="macos" arch="aarch64" debug_assertions=false
+2026-09-20T10:07:17.202880Z  INFO clonk_app: no interrupted component update to recover
+2026-09-20T10:07:22.440866Z  INFO clonk_app::main_resources: loaded material definitions path=/Users/runner/work/clonk-rs/clonk-rs/content/Material.c4g count=21
+2026-09-20T10:07:26.975703Z  WARN clonk_app: device-loss probe: destroying the live GPU device generation=1
+2026-09-20T10:07:26.979580Z ERROR clonk_app_render::gpu_renderer: retained GPU device lost reason=Destroyed detail=Destroyed
+2026-09-20T10:07:26.979637Z  WARN clonk_app: retained GPU device requires recreation error=failed to submit retained GPU frame
+
+Caused by:
+    retained GPU device recreation required after DeviceLost: Destroyed
+LC_APP_DEVICE_LOSS_PROBE result=recovered backend=metal generation_before=1 generation_after=2 presented_after=3 recovery_ms=98 report=/Users/runner/work/clonk-rs/clonk-rs/target/device-loss/metal/report.json
+2026-09-20T10:07:27.059073Z  INFO clonk_logging: stopping clonk reason="the event loop ended"

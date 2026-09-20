@@ -3329,6 +3329,15 @@ impl RetainedGpuRenderer {
         }
     }
 
+    /// Dispatch pending loss callbacks before diagnosing a failed presentation.
+    /// Surface acquisition can fail before wgpu maintains the device queue.
+    pub fn poll_health(&self, device: &wgpu::Device) -> Result<(), GpuRendererError> {
+        if let Err(error) = device.poll(wgpu::PollType::Poll) {
+            tracing::warn!(?error, "failed to dispatch pending retained GPU callbacks");
+        }
+        self.check_health()
+    }
+
     /// Validate a scene as a self-contained recovery unit before touching GPU
     /// state. In particular, command resources must be declared in this scene,
     /// even if an earlier frame left a texture with the same id in the cache.
@@ -3350,6 +3359,18 @@ impl RetainedGpuRenderer {
 
     pub fn last_stats(&self) -> GpuRendererStats {
         self.last_stats
+    }
+
+    /// Source identities used by the last scene, excluding idle cached textures.
+    /// Only diagnostics request this allocated, ordered snapshot.
+    pub fn last_scene_texture_ids(&self) -> Vec<GpuTextureId> {
+        let mut ids = self
+            .texture_live_scratch
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     pub fn timestamp_queries_enabled(&self) -> bool {
@@ -10174,6 +10195,25 @@ mod tests {
     }
 
     #[test]
+    fn failed_presentation_health_dispatches_a_deferred_device_loss() {
+        gpu_or_skip!(device, queue, "deferred retained device-loss callback");
+        let renderer = test_renderer(&device, &queue);
+        queue.submit([]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("drain pre-loss work");
+        device.destroy();
+
+        assert!(matches!(
+            renderer.poll_health(&device),
+            Err(GpuRendererError::DeviceRecreationRequired {
+                reason: RetainedGpuRecreateReason::DeviceLost,
+                ref detail,
+            }) if detail == "Destroyed"
+        ));
+    }
+
+    #[test]
     fn fatal_device_health_supersedes_a_pending_recreation() {
         let state = Mutex::new(RetainedGpuRendererHealth::Healthy);
         record_renderer_health(
@@ -14715,6 +14755,30 @@ mod tests {
             }
         });
         assert_eq!(allocations, 0, "unchanged texture frames reuse bookkeeping");
+    }
+
+    #[test]
+    fn presented_texture_evidence_excludes_cached_art_from_an_earlier_screen() {
+        gpu_or_skip!(device, queue, "presented source texture evidence");
+        let mut renderer = test_renderer(&device, &queue);
+        let loading = reduction_source_scene(GpuTextureId::fresh(), [2, 2]);
+        render_extent_readback(&mut renderer, &device, &queue, &loading, [2, 2]);
+        let menu_id = GpuTextureId::fresh();
+        let menu = reduction_source_scene(menu_id, [2, 2]);
+        let before = render_extent_readback(&mut renderer, &device, &queue, &menu, [2, 2]);
+
+        assert_eq!(renderer.last_stats().resident_source_textures, 2);
+        assert_eq!(renderer.last_scene_texture_ids(), [menu_id]);
+
+        renderer.recreate(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let after = render_extent_readback(&mut renderer, &device, &queue, &menu, [2, 2]);
+        assert_eq!(after, before);
+        assert_eq!(renderer.last_scene_texture_ids(), [menu_id]);
+        let stats = renderer.last_stats();
+        assert_eq!(stats.resident_source_textures, 1);
+        assert_eq!(stats.created_source_textures, 1);
+        assert_eq!(stats.full_upload_calls, 1);
+        assert_eq!(stats.full_upload_bytes, 16);
     }
 
     #[test]
