@@ -5,7 +5,7 @@
   },
   "case_id": "gameplay",
   "comparator": {
-    "binary_sha256": "22e1c928c5f935210fd3bc0b954a47035389484f30f8508a9e1b590c42cd8bc2",
+    "binary_sha256": "963dbeb34513f78de90785be969117c91071b56a8b7be745e72f746ec9d906f1",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",

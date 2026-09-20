@@ -4,7 +4,8 @@
 //! tests pin that the shipped scripts now run, against the real content.
 
 use crate::support::real_scenario::{
-    join_local_player, join_local_player_on_team, load_installed_scenario, object_with_definition,
+    join_local_player, join_local_player_on_team, load_installed_scenario,
+    load_installed_scenario_with_selected_definitions, object_with_definition,
 };
 use crate::support::EngineTestExt;
 use clonk_engine::{Engine, ObjectId, SpawnConfig};
@@ -61,6 +62,71 @@ fn a_cold_skies_clonk_departs_without_the_teamview_rule() {
         .expect("the joined player has a crew member");
 
     call(&mut engine, clonk, "Departure");
+}
+
+/// clonk-org/clonk-rs-content#92: m0Xeron Settlement's `InitializePlayer` puts
+/// the player's skeleton into a targetless `Build` action as its arrival pose
+/// (`m0XeronSettlement.c4s/Script.c:286`), and the scenario's `BACC` rule
+/// dereferenced `GetActionTarget()` on every Clonk it found in `Build`. The
+/// engine stops a targetless builder on its next action cycle
+/// (C4Object.cpp:5010-5015), but the rule's first pass can come before that.
+/// It now resolves the target once and skips a builder that has none.
+#[test]
+fn the_m0xeron_build_accelerator_skips_a_builder_without_a_target() {
+    // The scenario names no definitions of its own, so it runs on the
+    // player's startup selection.
+    let mut engine = load_installed_scenario_with_selected_definitions(
+        "Collection.c4f/Settling.c4f/m0XeronSettlement.c4s",
+        0,
+        &["Objects.c4d"],
+    );
+    let owner = join_local_player(&mut engine, "Arriving skeleton");
+    let clonk = engine
+        .crew_cursor(owner)
+        .expect("the joined player has a crew member");
+    let arrival = engine.test_object_snapshot(clonk).action;
+    assert_eq!(arrival.name, "Build", "the scenario's arrival pose");
+    assert_eq!(arrival.target, None);
+    let accelerator = object_with_definition(&engine, "BACC").expect("the scenario places BACC");
+
+    call(&mut engine, accelerator, "Accelerating");
+}
+
+/// Asks the pack's own `IsGoldAge`, a global function, from script.
+const GOLDEN_AGE_PROBE: &str = r#"#strict
+public func InGoldenAge(int player)
+{
+    if (IsGoldAge(player)) return 1;
+    return -1;
+}
+"#;
+
+/// clonk-org/clonk-rs-content#89: `2Teudoburger.c4s` greeted each player with
+/// `Golden(iPlayer)`, a function that exists nowhere in the bundle, so every
+/// `InitializePlayer` ended in an unknown-function error. The pack's golden
+/// age is the `IntGoldAge` effect in `RufDerWipfe.c4d/System.c4g/Golden.c`,
+/// started by `StartGoldenAge(owner)`; `Golden` is what is left of the object
+/// based version the pack's music script still looks for (`_GLZ`, which no
+/// longer ships). The mission now calls the function the pack has.
+#[test]
+fn a_teudoburger_player_starts_in_a_golden_age() {
+    let mut engine = load_installed_scenario(
+        "Collection.c4f/Settling.c4f/RufDerWipfeRE.c4f/Kampagne.c4f/2Teudoburger.c4s",
+        0,
+    );
+    let owner = join_local_player(&mut engine, "Teudoburger settler");
+    engine
+        .register_script_definition("GAPR", "Golden age probe", GOLDEN_AGE_PROBE)
+        .expect("the golden age probe registers");
+    let probe = engine
+        .spawn_object(SpawnConfig::new("GAPR"))
+        .expect("the golden age probe spawns");
+
+    let index = engine.test_object_index(probe);
+    let answer = engine
+        .call_object_function(index, "InGoldenAge", vec![Value::Int(owner)])
+        .expect("the pack's IsGoldAge answers");
+    assert_eq!(answer.as_c4_int(), Some(1), "the player's golden age runs");
 }
 
 /// Kills `target` the way a fight does, so the shipped `Death` runs from script
