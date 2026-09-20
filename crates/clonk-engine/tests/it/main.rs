@@ -178,4 +178,5 @@ shard_modules!(
     virtual_player_harness,
     weather_audio,
     western_sack_pickup,
+    z4_landscape_helpers,
 );
