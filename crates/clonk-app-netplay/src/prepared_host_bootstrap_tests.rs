@@ -799,41 +799,106 @@ fn retained_lobby_replacement_accepts_a_resource_backed_runtime_host_player() {
     );
 }
 
+/// Runs `run` until one whole run fits inside a single second of `clock`, and
+/// returns that run's outcome.
+///
+/// `C4Group::Close` stamps `Head.Creation` with `time(nullptr)`
+/// (`src/C4Group.cpp:939`) and the group writer mirrors it in whole seconds, so
+/// two packs of one source are byte-equal only when every clock read in both
+/// saw the same second. A test comparing two packs asserts that equality on a
+/// run where the premise held, instead of pinning which second it ran in.
+///
+/// A run takes tens of milliseconds, so a second attempt is rare and a machine
+/// that cannot fit one run in eight tries is reported rather than waited on.
+fn within_one_clock_second<T>(clock: impl Fn() -> u64, mut run: impl FnMut() -> T) -> T {
+    const ATTEMPTS: usize = 8;
+    std::iter::repeat_with(|| {
+        let started = clock();
+        let outcome = run();
+        (clock() == started).then_some(outcome)
+    })
+    .take(ATTEMPTS)
+    .flatten()
+    .next()
+    .expect("no run fit inside one clock second")
+}
+
+/// The wall clock in the whole seconds the group writer stamps.
+fn wall_clock_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+#[test]
+fn a_run_that_straddles_a_clock_second_is_run_again() {
+    let ticks = std::cell::RefCell::new(vec![10_u64, 11, 11, 11].into_iter());
+    let mut runs = 0;
+    let outcome = within_one_clock_second(
+        || ticks.borrow_mut().next().expect("a clock reading"),
+        || {
+            runs += 1;
+            runs
+        },
+    );
+    assert_eq!(
+        outcome, 2,
+        "the run that saw one second is the one returned"
+    );
+}
+
+#[test]
+#[should_panic(expected = "no run fit inside one clock second")]
+fn a_clock_that_ticks_during_every_run_gives_up_instead_of_spinning() {
+    let ticks = std::cell::RefCell::new(0_u64..64);
+    within_one_clock_second(
+        || ticks.borrow_mut().next().expect("a clock reading"),
+        || (),
+    );
+}
+
 #[test]
 fn deferred_host_inputs_match_the_frozen_packed_publication_and_keep_one_launch() {
     // The host must open its published packed rows for InitDefs and materials
     // (src/C4Game.cpp:901-977); source directory rewrites cannot change them.
-    let mut fixture = minimal_install(None);
-    let packed = prepare(&fixture, &[]).unwrap();
-    let _packed_network = std::mem::replace(&mut fixture.network, tempfile::tempdir().unwrap());
-    let mut pending = prepare_typed_with_names_and_league_impl(
-        &fixture,
-        &[],
-        "Host Name",
-        "Host Nick",
-        "netpuncher.openclonk.org:11115",
-        None,
-        true,
-    )
-    .unwrap();
-    assert!(pending.resources_pending());
-    assert_eq!(
-        pending.claim_scenario().unwrap_err(),
-        PreparedHostUseError::ResourcesPending
-    );
-    let worker = pending.clone();
-    pending.set_runtime_join_allowed(true);
-    fs::write(
-        fixture.scenario_path.join("Scenario.txt"),
-        fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=7"),
-    )
-    .unwrap();
-    fs::write(
-        fixture.install_roots[0].join("Defs.c4d/Good.c4d/Script.c"),
-        b"invalid script after announcement",
-    )
-    .unwrap();
-    let completed = worker.complete_pending_resources().unwrap();
+    // The eager and the deferred publication are two packs of one source, so
+    // they are compared on a run in which both saw the same clock second.
+    let (_fixture, _packed_network, packed, mut pending, completed) =
+        within_one_clock_second(wall_clock_seconds, || {
+            let mut fixture = minimal_install(None);
+            let packed = prepare(&fixture, &[]).unwrap();
+            let packed_network =
+                std::mem::replace(&mut fixture.network, tempfile::tempdir().unwrap());
+            let mut pending = prepare_typed_with_names_and_league_impl(
+                &fixture,
+                &[],
+                "Host Name",
+                "Host Nick",
+                "netpuncher.openclonk.org:11115",
+                None,
+                true,
+            )
+            .unwrap();
+            assert!(pending.resources_pending());
+            assert_eq!(
+                pending.claim_scenario().unwrap_err(),
+                PreparedHostUseError::ResourcesPending
+            );
+            let worker = pending.clone();
+            pending.set_runtime_join_allowed(true);
+            fs::write(
+                fixture.scenario_path.join("Scenario.txt"),
+                fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=7"),
+            )
+            .unwrap();
+            fs::write(
+                fixture.install_roots[0].join("Defs.c4d/Good.c4d/Script.c"),
+                b"invalid script after announcement",
+            )
+            .unwrap();
+            let completed = worker.complete_pending_resources().unwrap();
+            (fixture, packed_network, packed, pending, completed)
+        });
     assert_eq!(
         completed.host_config().initial_join_snapshot,
         packed.host_config().initial_join_snapshot
