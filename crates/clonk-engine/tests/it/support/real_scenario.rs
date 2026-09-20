@@ -225,6 +225,16 @@ pub fn prepare_installed_scenario(
     relative_path: impl AsRef<Path>,
     seed: u64,
 ) -> PreparedInstalledScenario {
+    prepare_installed_scenario_loaded_by(relative_path, seed, |path, resolver| {
+        Scenario::load_from_path_with_seed(path, resolver, seed)
+    })
+}
+
+fn prepare_installed_scenario_loaded_by(
+    relative_path: impl AsRef<Path>,
+    seed: u64,
+    load: impl FnOnce(&Path, &ContentResolver) -> Result<Scenario, ScenarioError>,
+) -> PreparedInstalledScenario {
     let content = content_root();
     let content_install = content.parent().unwrap_or_else(|| {
         panic!(
@@ -239,12 +249,11 @@ pub fn prepare_installed_scenario(
         .find(|candidate| candidate.exists())
         .unwrap_or_else(|| bundled.join(relative_path));
     let scenario_started = std::time::Instant::now();
-    let scenario = Scenario::load_from_path_with_seed(
+    let scenario = load(
         &scenario_path,
         &ContentResolver {
             roots: vec![bundled, content.clone()],
         },
-        seed,
     )
     .unwrap_or_else(|error| panic!("scenario `{}` loads: {error}", scenario_path.display()));
     let scenario_elapsed = scenario_started.elapsed();
