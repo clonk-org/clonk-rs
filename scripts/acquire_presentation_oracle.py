@@ -384,6 +384,20 @@ def _require(condition: bool, message: str) -> None:
         raise AcquisitionFailure(message)
 
 
+def _require_repeatable(
+    engine: str, first: dict[str, str], second: dict[str, str]
+) -> None:
+    drift = sorted(
+        name
+        for name in first.keys() | second.keys()
+        if first.get(name) != second.get(name)
+    )
+    _require(
+        not drift,
+        f"{engine} repeat capture artifacts differ: {', '.join(drift)}",
+    )
+
+
 def _is_lower_hex(value: Any, length: int) -> bool:
     return (
         isinstance(value, str)
@@ -3219,10 +3233,10 @@ def _validate_v2_provenance_index(
             f"{run_id} launcher receipt does not bind exact launches",
         )
     for engine in ENGINE_IDS:
-        _require(
-            repeat_artifacts[engine][RUN_IDS[0]]
-            == repeat_artifacts[engine][RUN_IDS[1]],
-            f"{engine} repeat capture artifacts differ",
+        _require_repeatable(
+            engine,
+            repeat_artifacts[engine][RUN_IDS[0]],
+            repeat_artifacts[engine][RUN_IDS[1]],
         )
     comparisons = index["comparisons"]
     _require(isinstance(comparisons, list), "comparisons must be an array")
