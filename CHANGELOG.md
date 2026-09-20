@@ -4,6 +4,26 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-09-20
+
+### Bug fixes
+
+- Recover lost GPU devices across desktop backends (#1659)
+- Draw the capture oracle's presentation random from private generator state (#1658)
+- Route software window events and qualify Windows presentation (#1657)
+- Preserve group ABI order and verify linked artifacts (#1649)
+
+### Features
+
+- Advertise the port's engine name in the host game reference (#1655)
+- Restore the pinned GUI-validation bridge and drive it from a C++ harness (#1652)
+
+### Testing
+
+- Compare the eager and deferred host publications within one clock second (#1654)
+- Run the pinned oracle's platform-path bridge against this tree (#1650)
+- Run the pinned oracle's group-validation bridge against this tree (#1648)
+
 ## [0.27.5] - 2026-09-19
 
 ### Performance
