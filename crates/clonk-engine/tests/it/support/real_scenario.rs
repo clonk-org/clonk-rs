@@ -230,6 +230,30 @@ pub fn prepare_installed_scenario(
     })
 }
 
+/// A scenario whose `Scenario.txt` names no definitions runs on whatever the
+/// player selected at startup, which seeds `Objects.c4d` before
+/// `C4Game::OpenScenario`. `selected` is that seed; a scenario with its own
+/// non-local preset still replaces it.
+pub fn load_installed_scenario_with_selected_definitions(
+    relative_path: impl AsRef<Path>,
+    seed: u64,
+    selected: &[&str],
+) -> Engine {
+    prepare_installed_scenario_loaded_by(relative_path, seed, |path, resolver| {
+        Scenario::load_from_path_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+            path,
+            resolver,
+            &["US", "DE"],
+            seed,
+            selected,
+            None,
+            None,
+            1,
+        )
+    })
+    .instantiate()
+}
+
 fn prepare_installed_scenario_loaded_by(
     relative_path: impl AsRef<Path>,
     seed: u64,
