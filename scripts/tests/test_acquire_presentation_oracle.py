@@ -2307,6 +2307,25 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             "the drift message does not report the trace digest beside the counts",
         )
 
+    def test_repeat_drift_names_the_artifacts_that_differ(self):
+        # "cpp repeat capture artifacts differ" on its own sent the reader to
+        # decode PNG scanlines to learn that one startup capture had a cursor in
+        # it (clonk-org/clonk-rs#1666).
+        first = {"startup-main.png": "aa", "startup-about.png": "bb", "hud.png": "cc"}
+
+        MODULE._require_repeatable("cpp", first, dict(first))
+        with self.assertRaises(MODULE.AcquisitionFailure) as failure:
+            MODULE._require_repeatable(
+                "cpp",
+                first,
+                {"startup-main.png": "aa", "startup-about.png": "zz", "loader.png": "dd"},
+            )
+
+        self.assertEqual(
+            str(failure.exception),
+            "cpp repeat capture artifacts differ: hud.png, loader.png, startup-about.png",
+        )
+
     def test_launch_contract_uses_exact_inputs_and_refuses_unaudited_cpp_runtime(self):
         candidate = Path("/tmp/presentation-candidate")
         binaries = {
