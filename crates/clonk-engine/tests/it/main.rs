@@ -157,6 +157,7 @@ shard_modules!(
     flight_movement,
     harpoonrace_worldgen,
     hazard_crosshair,
+    inexantros_hero_locals,
     legacy_scenario_loading,
     mars_base_order_menu,
     mars_menu_override_drift,
