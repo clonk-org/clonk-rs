@@ -265,6 +265,18 @@ impl Group {
         }
     }
 
+    /// The pinned validation ABI exposes C4Group's native folder scan, while
+    /// engine resource listings use the canonical packed order.
+    #[cfg(feature = "ffi")]
+    pub(crate) fn validation_entries(&self) -> Result<Vec<GroupEntry>, GroupError> {
+        match &self.kind {
+            GroupKind::Directory(directory) => {
+                directory_entries(&directory.root, DirectoryEntryOrder::Native)
+            }
+            GroupKind::Packed(_) => self.entries(),
+        }
+    }
+
     pub fn read_file<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
         self.read_file_cow(relative).map(Cow::into_owned)
     }
@@ -1194,7 +1206,10 @@ impl DirectoryGroup {
         self.index
             .as_ref()
             .map(|index| index.entries.clone())
-            .map_or_else(|| directory_entries(&self.root), Ok)
+            .map_or_else(
+                || directory_entries(&self.root, DirectoryEntryOrder::Packed),
+                Ok,
+            )
     }
 
     fn resolve_entry(&self, relative: &Path) -> Result<PathBuf, GroupError> {
@@ -1247,7 +1262,7 @@ impl DirectoryGroup {
 
 impl DirectoryIndex {
     fn read(root: &Path) -> Result<Self, GroupError> {
-        let entries = directory_entries(root)?;
+        let entries = directory_entries(root, DirectoryEntryOrder::Packed)?;
         let mut first_by_name = HashMap::with_capacity(entries.len());
         for (index, entry) in entries.iter().enumerate() {
             first_by_name
@@ -1261,7 +1276,16 @@ impl DirectoryIndex {
     }
 }
 
-fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
+enum DirectoryEntryOrder {
+    Packed,
+    #[cfg(feature = "ffi")]
+    Native,
+}
+
+fn directory_entries(
+    root: &Path,
+    order: DirectoryEntryOrder,
+) -> Result<Vec<GroupEntry>, GroupError> {
     let mut entries = Vec::new();
     for entry in WalkDir::new(root).min_depth(1).max_depth(1) {
         let entry = entry.map_err(convert_walkdir_error)?;
@@ -1298,10 +1322,12 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
             stored_crc: 0,
         });
     }
-    let patterns = folder_sort_patterns(root);
-    entries.sort_unstable_by(|left, right| {
-        folder_name_order(&patterns, &left.name_bytes, &right.name_bytes)
-    });
+    if matches!(order, DirectoryEntryOrder::Packed) {
+        let patterns = folder_sort_patterns(root);
+        entries.sort_unstable_by(|left, right| {
+            folder_name_order(&patterns, &left.name_bytes, &right.name_bytes)
+        });
+    }
     Ok(entries)
 }
 
@@ -1442,7 +1468,7 @@ fn directory_entry_is_executable(_path: &Path) -> bool {
 }
 
 fn directory_contents_crc(root: &Path) -> Result<u32, GroupError> {
-    directory_entries(root)?
+    directory_entries(root, DirectoryEntryOrder::Packed)?
         .into_iter()
         .try_fold(0, |crc, entry| {
             let path = root.join(&entry.relative_path);
@@ -1460,7 +1486,7 @@ fn directory_contents_crc(root: &Path) -> Result<u32, GroupError> {
 }
 
 fn directory_contents_crc_or_zero(root: &Path) -> Result<u32, GroupError> {
-    directory_entries(root)?
+    directory_entries(root, DirectoryEntryOrder::Packed)?
         .into_iter()
         .try_fold(0, |crc, entry| {
             let path = root.join(&entry.relative_path);

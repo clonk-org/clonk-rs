@@ -60,6 +60,8 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 BUILD="$ORACLE_ROOT/$BUILD_DIR"
 CLONK="$BUILD/clonk"
 C4GROUP="$BUILD/c4group"
+python3 "$REPO_ROOT/parity/bridge/oracle_group_record.py" verify \
+	--oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
 [ -x "$CLONK" ] || { echo "error: no oracle binary at $CLONK; build it with --with-group-validation first" >&2; exit 1; }
 if [ -z "$OUT" ]; then
 	OUT=$(mktemp -d "${TMPDIR:-/tmp}/group-differential.XXXXXX")
@@ -96,7 +98,7 @@ done
 		echo "archive sha256:  $(shasum -a 256 "$resolved" | cut -d' ' -f1)"
 	fi
 	echo "port tree:       $REPO_ROOT"
-	echo "port revision:   $(git -C "$REPO_ROOT" rev-parse HEAD) $(git -C "$REPO_ROOT" diff --quiet -- crates xtask && echo clean || echo dirty)"
+	echo "port revision:   $(git -C "$REPO_ROOT" rev-parse HEAD) $(git -C "$REPO_ROOT" diff --quiet HEAD -- crates xtask && echo clean || echo dirty)"
 	echo "group symbols:   $(grep -c '^lc_group_' <<<"$exported") exported"
 } | tee "$OUT/link-record.txt"
 
@@ -250,6 +252,9 @@ if [ "$CHECK_LEAKS" = 1 ]; then
 		echo "leaks $name: ${summary#Process *: } (none through the bridge)"
 	done
 fi
+
+python3 "$REPO_ROOT/parity/bridge/oracle_group_record.py" verify \
+	--oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
 
 echo
 if [ "$failures" -eq 0 ]; then
