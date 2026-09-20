@@ -116,7 +116,12 @@ fn manifest() -> &'static Manifest {
 /// exist yet**: the behaviour may well be right, but nothing proves it, and an
 /// unproven promise is not one worth making to a lockstep peer.
 pub fn blockers() -> Vec<CompatBlocker> {
-    let manifest = manifest();
+    blockers_in(manifest())
+}
+
+/// [`blockers`] for any manifest, so the mapping is testable on a contract
+/// that records gaps whether or not the shipped one still does.
+fn blockers_in(manifest: &Manifest) -> Vec<CompatBlocker> {
     let mut blockers = manifest
         .divergences
         .iter()
@@ -196,7 +201,11 @@ const REPORTED_BLOCKERS: usize = 4;
 /// the first line says the profile was requested and is not being claimed, which
 /// is the thing a player has to know before anyone joins.
 pub fn blocked_profile_report(profile: &str) -> Vec<String> {
-    let blockers = blockers();
+    profile_report_for(profile, &blockers())
+}
+
+/// [`blocked_profile_report`] for any blocker list.
+fn profile_report_for(profile: &str, blockers: &[CompatBlocker]) -> Vec<String> {
     if blockers.is_empty() {
         return Vec::new();
     }
@@ -205,7 +214,7 @@ pub fn blocked_profile_report(profile: &str) -> Vec<String> {
          item(s). This session runs as an ordinary one.",
         blockers.len()
     )];
-    lines.extend(named_blockers(&blockers));
+    lines.extend(named_blockers(blockers));
     lines
 }
 
@@ -218,7 +227,11 @@ pub fn blocked_profile_report(profile: &str) -> Vec<String> {
 /// request and says only what the client can answer for. Empty when the profile
 /// is claimable, so a caller can use it as the whole decision.
 pub fn blocked_join_report(profile: &str) -> Vec<String> {
-    let blockers = blockers();
+    join_report_for(profile, &blockers())
+}
+
+/// [`blocked_join_report`] for any blocker list.
+fn join_report_for(profile: &str, blockers: &[CompatBlocker]) -> Vec<String> {
     if blockers.is_empty() {
         return Vec::new();
     }
@@ -227,7 +240,7 @@ pub fn blocked_join_report(profile: &str) -> Vec<String> {
          unresolved contract item(s). It joins as an ordinary client.",
         blockers.len()
     )];
-    lines.extend(named_blockers(&blockers));
+    lines.extend(named_blockers(blockers));
     lines
 }
 
