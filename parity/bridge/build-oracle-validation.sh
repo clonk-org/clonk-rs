@@ -19,6 +19,7 @@ ORACLE_ROOT=${LEGACYCLONK_ORACLE_ROOT:-}
 USE_RUST_CONFIG=OFF
 USE_RUST_GROUP_VALIDATION=OFF
 USE_RUST_PLATFORM_PATHS=OFF
+USE_RUST_GUI_VALIDATION=OFF
 
 usage() {
 	cat >&2 <<-USAGE
@@ -31,6 +32,7 @@ usage() {
 		  --with-config            also enable USE_RUST_CONFIG (clonk-org/clonk-rs#1264)
 		  --with-group-validation  also enable USE_RUST_GROUP_VALIDATION (clonk-org/clonk-rs#1265)
 		  --with-platform-paths    also enable USE_RUST_PLATFORM_PATHS (clonk-org/clonk-rs#1267)
+		  --with-gui-validation    also enable USE_RUST_GUI_VALIDATION (clonk-org/clonk-rs#1266)
 	USAGE
 	exit 2
 }
@@ -43,6 +45,7 @@ while [ $# -gt 0 ]; do
 		--with-config) USE_RUST_CONFIG=ON; shift ;;
 		--with-group-validation) USE_RUST_GROUP_VALIDATION=ON; shift ;;
 		--with-platform-paths) USE_RUST_PLATFORM_PATHS=ON; shift ;;
+		--with-gui-validation) USE_RUST_GUI_VALIDATION=ON; shift ;;
 		-h|--help) usage ;;
 		*) echo "unknown argument: $1" >&2; usage ;;
 	esac
@@ -127,21 +130,21 @@ fi
 
 # 3. RUST_INCLUDE_DIR is hardcoded to <oracle>/rust/include, and step 4 points
 #    <oracle>/rust at this tree -- so the header has to be reachable there.
-#    Untracked on purpose; .gitignore covers it. The config, group and
-#    platform headers are the contracts the pinned C++ compiles against
+#    Untracked on purpose; .gitignore covers it. The config, group, platform
+#    and GUI headers are the contracts the pinned C++ compiles against
 #    unchanged, so a copy that has drifted from the pin's own rust/include/ is
 #    a hard error: the bridge would then link a surface the oracle never
 #    called. The engine header is exempt because it deliberately extends the
 #    pin with the observation transports that the layered runtime patch consumes.
 mkdir -p "$REPO_ROOT/include"
-for header in lc_config_ffi.h lc_group_ffi.h lc_platform_ffi.h; do
+for header in lc_config_ffi.h lc_group_ffi.h lc_platform_ffi.h lc_gui_ffi.h; do
 	if ! git -C "$ORACLE_ROOT" show "${PIN}:rust/include/$header" | cmp -s - "$REPO_ROOT/parity/bridge/$header"; then
 		echo "error: parity/bridge/$header differs from rust/include/$header at the pin $PIN" >&2
 		exit 1
 	fi
 done
-echo "==> vendored config, group and platform headers match the pin"
-for header in lc_engine_ffi.h lc_config_ffi.h lc_group_ffi.h lc_platform_ffi.h; do
+echo "==> vendored config, group, platform and GUI headers match the pin"
+for header in lc_engine_ffi.h lc_config_ffi.h lc_group_ffi.h lc_platform_ffi.h lc_gui_ffi.h; do
 	ln -sfn "../parity/bridge/$header" "$REPO_ROOT/include/$header"
 done
 
@@ -165,6 +168,7 @@ cmake -S "$ORACLE_ROOT" -B "$ORACLE_ROOT/$BUILD_DIR" \
 	-DUSE_RUST_CONFIG="$USE_RUST_CONFIG" \
 	-DUSE_RUST_GROUP_VALIDATION="$USE_RUST_GROUP_VALIDATION" \
 	-DUSE_RUST_PLATFORM_PATHS="$USE_RUST_PLATFORM_PATHS" \
+	-DUSE_RUST_GUI_VALIDATION="$USE_RUST_GUI_VALIDATION" \
 	-DUSE_MINIUPNPC=OFF -DUSE_TESTS=OFF \
 	-DCMAKE_PREFIX_PATH=/opt/homebrew \
 	-DZLIB_INCLUDE_DIR="$ORACLE_ROOT/deps/include" \
@@ -216,4 +220,14 @@ if [ "$USE_RUST_PLATFORM_PATHS" = ON ]; then
 
 		    parity/bridge/run-platform-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
 	PLATFORM
+fi
+if [ "$USE_RUST_GUI_VALIDATION" = ON ]; then
+	cat <<-GUI
+
+		The GUI-validation bridge is linked, but nothing in the pinned
+		executable calls it. Its differential drives the wrapper from a
+		focused C++ harness against the same archive:
+
+		    parity/bridge/run-gui-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
+	GUI
 fi

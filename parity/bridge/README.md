@@ -276,7 +276,8 @@ each has to be built and run on its own:
 - `USE_RUST_CONFIG`: restored, see [The config bridge](#the-config-bridge).
 - `USE_RUST_GROUP_VALIDATION`: restored, see
   [The group-validation bridge](#the-group-validation-bridge).
-- `USE_RUST_GUI_VALIDATION`: clonk-org/clonk-rs#1266
+- `USE_RUST_GUI_VALIDATION`: restored as ABI evidence only, see
+  [The GUI-validation bridge](#the-gui-validation-bridge).
 - `USE_RUST_PLATFORM_PATHS`: restored, see
   [The platform-path bridge](#the-platform-path-bridge).
 
@@ -431,6 +432,48 @@ is not valid UTF-8 cannot be created on this filesystem; that boundary is the
 lossy conversion in the Rust getters and is documented rather than run.
 `--leaks` runs the override case; only AppKit's three Foundation objects
 remain.
+
+#### The GUI-validation bridge
+
+`build-oracle-validation.sh --with-gui-validation` builds the oracle with
+`USE_RUST_GUI_VALIDATION=ON`: the pinned `src/rust/RustGuiBridge.*` wrapper
+compiles and links `liblc_gui.a`, which is the engine archive carrying
+`clonk-gui`'s restored `ffi` module (`lc_gui_ffi.h` is the pin's bytes, and
+the crate's only drift since the pin was the widget id's constructor name).
+**That build is bridge and ABI evidence only.** Nothing in the pinned
+executable calls the wrapper: the unmodified C++ application routes none of
+its native menus through it, and an oracle built with the option behaves
+exactly like one without. Do not read a green build, or a green differential
+below, as evidence that C++ and Rust menus lay out alike.
+
+The behavioural half is a focused consumer. `gui-harness.cpp` drives the
+pinned wrapper over the C ABI through a scripted tree (a column holding a
+label, a button and a nested column with its own label), bounded layout,
+render export, a pointer move, press and release on the button's caption,
+a press and release outside, Tab, Enter and Escape, unbounded layout, reset,
+and prints one canonical dump; it also moves the tree from one wrapper into
+another before layout, so the moved-from wrapper must free nothing.
+`crates/clonk-gui/examples/bridge_scenario.rs` runs the same script through
+the safe API with the font the bridge measures with and prints the same
+lines. `run-gui-differential.sh` proves the archive the oracle linked and its
+sixteen exported symbols, builds the harness against that same archive and
+the pinned wrapper from the oracle worktree, and diffs the two dumps byte for
+byte: widget ids, every draw command's kind, rectangle, colour, text, font
+size and padding (or image size and byte count), the pointer target both
+sides derive from the caption's rectangle, and each event's capture flag and
+ordered actions. Both sides take `--perturb`, which changes one label; the
+script runs each perturbation and requires the dumps to differ, so the
+comparison is shown to be live in both directions. `--leaks` runs the harness
+under `leaks --atExit`; the wrapper frees every gui, render and event-result
+handle it takes.
+
+Two parts of the ABI are crossed without being exercised, and the dump shows
+it. The pinned header can build columns, labels and buttons only, so no tree
+made over it emits an image command: the image branch of the export is
+compared as code that both sides would print, never as bytes that crossed.
+And the script's Tab, Enter and Escape all come back `captured=false` with no
+action on both sides, because these widgets take no keyboard focus; the key
+entry points are shown to agree on that answer, not to drive a widget.
 
 No required gate runs the live bridge: it needs a separately built oracle
 checkout and is intentionally an opt-in investigation tool. `cargo xtask parity

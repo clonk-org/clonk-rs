@@ -19,6 +19,7 @@ HEADERS = (
     "lc_config_ffi.h",
     "lc_group_ffi.h",
     "lc_platform_ffi.h",
+    "lc_gui_ffi.h",
 )
 # The engine header extends the pin with the runtime observation transports the
 # layered engine patch consumes; the other three must be the pin's bytes.
@@ -157,7 +158,7 @@ class OracleConfigPatchTests(unittest.TestCase):
                 without = build()
                 self.assertEqual(without.returncode, 0, without.stdout + without.stderr)
                 self.assertNotIn("config-bridge", without.stdout)
-                self.assertIn("vendored config, group and platform headers match the pin", without.stdout)
+                self.assertIn("vendored config, group, platform and GUI headers match the pin", without.stdout)
                 run("git", "apply", "--check", str(bridge / PATCH.name), cwd=oracle)
 
                 first = build("--with-config")

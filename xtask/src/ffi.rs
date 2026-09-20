@@ -24,17 +24,17 @@ use anyhow::{bail, Context, Result};
 /// yet.
 const FFI_CRATES: &[FfiCrate] = &[
     // The engine archive carries every bridge surface (its `ffi` feature pulls
-    // the config, group and platform ones in), and is copied to the names the
-    // pinned CMake imports for `USE_RUST_CONFIG` (clonk-org/clonk-rs#1264),
-    // `USE_RUST_GROUP_VALIDATION` (#1265) and `USE_RUST_PLATFORM_PATHS`
-    // (#1267). The pin never carried a `cargo xtask ffi`, so those imports
-    // were never satisfiable there; and they cannot be separate archives,
-    // because two Rust static archives in one executable duplicate the
-    // standard library.
+    // the config, group, platform and GUI ones in), and is copied to the names
+    // the pinned CMake imports for `USE_RUST_CONFIG` (clonk-org/clonk-rs#1264),
+    // `USE_RUST_GROUP_VALIDATION` (#1265), `USE_RUST_PLATFORM_PATHS` (#1267)
+    // and `USE_RUST_GUI_VALIDATION` (#1266). The pin never carried a
+    // `cargo xtask ffi`, so those imports were never satisfiable there; and
+    // they cannot be separate archives, because two Rust static archives in
+    // one executable duplicate the standard library.
     FfiCrate {
         name: "clonk-engine",
         feature: Some("ffi"),
-        import_stems: &["lc_core", "lc_resources", "lc_platform"],
+        import_stems: &["lc_core", "lc_resources", "lc_platform", "lc_gui"],
     },
     FfiCrate {
         name: "clonk-core",
@@ -48,6 +48,11 @@ const FFI_CRATES: &[FfiCrate] = &[
     },
     FfiCrate {
         name: "clonk-platform",
+        feature: Some("ffi"),
+        import_stems: &[],
+    },
+    FfiCrate {
+        name: "clonk-gui",
         feature: Some("ffi"),
         import_stems: &[],
     },
@@ -266,7 +271,7 @@ mod tests {
             .expect("the engine is an FFI crate");
         assert_eq!(
             engine.import_stems,
-            &["lc_core", "lc_resources", "lc_platform"]
+            &["lc_core", "lc_resources", "lc_platform", "lc_gui"]
         );
         assert!(FFI_CRATES
             .iter()
@@ -351,6 +356,8 @@ mod tests {
             ("lc_group_ffi.h", "crates/clonk-resources/src/ffi.rs"),
             // `USE_RUST_PLATFORM_PATHS` (clonk-org/clonk-rs#1267).
             ("lc_platform_ffi.h", "crates/clonk-platform/src/ffi.rs"),
+            // `USE_RUST_GUI_VALIDATION` (clonk-org/clonk-rs#1266).
+            ("lc_gui_ffi.h", "crates/clonk-gui/src/ffi.rs"),
         ];
 
         let workspace = crate::parity::workspace_dir().expect("workspace root");

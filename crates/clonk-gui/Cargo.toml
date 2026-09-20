@@ -9,5 +9,17 @@ repository.workspace = true
 readme.workspace = true
 publish.workspace = true
 
+[features]
+# The C ABI the pinned oracle's USE_RUST_GUI_VALIDATION bridge links against
+# (clonk-org/clonk-rs#1266). Off by default: the crate types it needs are
+# emitted by `cargo xtask ffi`, and nothing in the shipped port calls it.
+ffi = []
+
 [dependencies]
 clonk-graphics = { path = "../clonk-graphics" }
+
+# The Rust side of the GUI bridge differential; it measures with the bridge's
+# font, so it needs the feature and must not be built by a default test run.
+[[example]]
+name = "bridge_scenario"
+required-features = ["ffi"]

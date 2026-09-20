@@ -97,6 +97,7 @@ class OracleWeatherPatchTests(unittest.TestCase):
                     "lc_config_ffi.h",
                     "lc_group_ffi.h",
                     "lc_platform_ffi.h",
+                    "lc_gui_ffi.h",
                 ):
                     shutil.copy2(
                         REPOSITORY / "parity" / "bridge" / header, bridge / header

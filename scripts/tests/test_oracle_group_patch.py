@@ -20,6 +20,7 @@ HEADERS = (
     "lc_config_ffi.h",
     "lc_group_ffi.h",
     "lc_platform_ffi.h",
+    "lc_gui_ffi.h",
 )
 EXPECTED_ORACLE_PATHS = {
     "src/C4Group.cpp",
