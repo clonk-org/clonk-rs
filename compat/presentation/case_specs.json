@@ -668,7 +668,7 @@
     },
     "scenario": {
       "path": null,
-      "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"
+      "content_tree": "fecec2213a6de006508c640b42d86281136a0faa"
     },
     "frame": {
       "checkpoint": "startup-options-reset-reference/render-ordinal-2",
@@ -730,7 +730,7 @@
     },
     "scenario": {
       "path": null,
-      "content_tree": "293efe72459eb5cb83b275213bcddc3d0b452f83"
+      "content_tree": "fecec2213a6de006508c640b42d86281136a0faa"
     },
     "frame": {
       "checkpoint": "startup-options-reset-minimum/render-ordinal-2",
