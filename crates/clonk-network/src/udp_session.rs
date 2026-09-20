@@ -1437,6 +1437,11 @@ impl AsyncWrite for ReliableUdpPeerStream {
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        // A peer can reply and close after the hub accepted the frame. With
+        // nothing left to flush, that close cannot invalidate the prior write.
+        if this.pending_send.is_none() && this.write_buffer.is_empty() {
+            return Poll::Ready(Ok(()));
+        }
         match this.poll_pending_send(context) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -3556,6 +3561,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_rejection_before_request_flush_preserves_the_sent_request_and_reply() {
+        // C4NetIOUDP::Peer::Send completes independently of a later peer Close
+        // (src/C4NetIO.cpp:2789-2810). Reproduce that ordering over real sockets.
+        let (outgoing_hub, incoming_hub, outgoing, incoming) = connected_pair().await;
+        let mut outgoing = ControlTransport::new(outgoing);
+        let mut incoming = ControlTransport::new(incoming);
+        let request = ControlMessage::ConnectionRequest(crate::ConnectionRequest {
+            core: clonk_protocol::ClientCoreControlData {
+                name: clonk_protocol::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                nick: clonk_protocol::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            build: crate::CURRENT_GAME_BUILD,
+            password: clonk_protocol::LegacyCString::default(),
+            connection_id: 52,
+            port_protocol: false,
+        });
+        let frame = outgoing.prepare_message_frame(request.clone()).unwrap();
+        let mut outgoing = outgoing.into_inner();
+
+        // Split ControlTransport's write_all/flush pair so the peer's reply
+        // and Close deterministically arrive between those two operations.
+        outgoing.write_all(&frame).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), incoming.read_message())
+                .await
+                .unwrap()
+                .unwrap(),
+            request
+        );
+        let rejection = ControlMessage::ConnectionReply(crate::ConnectionReply {
+            ok: false,
+            message: clonk_protocol::LegacyCString::from_bytes(
+                b"secondary connection came from a different peer host".to_vec(),
+            )
+            .unwrap(),
+            wrong_password: false,
+            port_protocol: false,
+        });
+        incoming.send_message(rejection.clone()).await.unwrap();
+        drop(incoming);
+        timeout(Duration::from_secs(2), async {
+            while !outgoing.terminal.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            outgoing.terminal.reason(),
+            Some(PeerTerminal::Disconnected(
+                ReliableUdpDisconnectReason::ClosedByPeer
+            ))
+        ));
+
+        outgoing.flush().await.unwrap();
+        let mut outgoing = ControlTransport::new(outgoing);
+        assert_eq!(outgoing.read_message().await.unwrap(), rejection);
+        drop(outgoing);
+        outgoing_hub.shutdown().await.unwrap();
+        incoming_hub.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn peer_stream_shutdown_sends_close_and_yields_remote_eof() {
         let (outgoing_hub, incoming_hub, mut outgoing, mut incoming) = connected_pair().await;
         outgoing.shutdown().await.unwrap();
@@ -4139,6 +4208,67 @@ mod tests {
         close_abandoned_peers(&mut driver, &mut peers).await;
         assert!(!peers.contains_key(&peer));
         assert!(driver.core().peer_status(peer).is_none());
+    }
+
+    #[tokio::test]
+    async fn flushing_a_sent_frame_after_peer_close_succeeds() {
+        // C4NetIOUDP::Peer::Send returns success after handing off the packet;
+        // a later Close does not undo that send (src/C4NetIO.cpp:2789-2810).
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (_inbound, inbound_rx) = mpsc::channel(1);
+        let terminal = Arc::new(PeerTerminalState::open());
+        let mut stream =
+            ReliableUdpPeerStream::new(loopback(), 9, commands, inbound_rx, terminal.clone());
+        let mut frame = vec![TCP_FRAME_PREFIX];
+        frame.extend_from_slice(&1_u32.to_ne_bytes());
+        frame.push(0);
+
+        stream.write_all(&frame).await.unwrap();
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(HubCommand::Send { payload, .. }) if payload == vec![0]
+        ));
+        // The remote can answer and close before ControlTransport performs its
+        // flush, even though the complete request has already left this stream.
+        terminal.close(PeerTerminal::Disconnected(
+            ReliableUdpDisconnectReason::ClosedByPeer,
+        ));
+
+        stream.flush().await.unwrap();
+        let error = stream.write_all(&frame).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn peer_close_rejects_flushes_with_unsent_data() {
+        let mut frame = vec![TCP_FRAME_PREFIX];
+        frame.extend_from_slice(&1_u32.to_ne_bytes());
+        frame.push(0);
+        for input in [&frame[..3], frame.as_slice()] {
+            let (commands, mut command_rx) = mpsc::channel(1);
+            // Prevent the complete frame from reaching the hub; the other
+            // case retains an incomplete frame in the stream instead.
+            assert!(commands
+                .try_send(HubCommand::Shutdown { completion: None })
+                .is_ok());
+            let (_inbound, inbound_rx) = mpsc::channel(1);
+            let terminal = Arc::new(PeerTerminalState::open());
+            let mut stream =
+                ReliableUdpPeerStream::new(loopback(), 9, commands, inbound_rx, terminal.clone());
+            stream.write_all(input).await.unwrap();
+            terminal.close(PeerTerminal::Disconnected(
+                ReliableUdpDisconnectReason::ClosedByPeer,
+            ));
+
+            let error = stream.flush().await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert!(error.to_string().contains("connection closed by peer"));
+            assert!(matches!(
+                command_rx.try_recv(),
+                Ok(HubCommand::Shutdown { .. })
+            ));
+            assert!(command_rx.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
