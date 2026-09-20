@@ -815,6 +815,16 @@ impl<'a> Parser<'a> {
         self.global_local_candidates.push((name.to_string(), line));
     }
 
+    /// Note a `var` the function declared. `AddVar` registers the name before
+    /// the initializer is parsed, so `var counter = counter;` resolves the
+    /// right-hand side to the new `var` rather than falling through to the
+    /// local check.
+    fn note_function_var(&mut self, name: &str) {
+        if self.parsing_global_function {
+            self.global_function_shadowing_names.insert(name.to_owned());
+        }
+    }
+
     fn parse_loop_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
         self.loop_depth += 1;
         let body = self.parse_stmt_or_block_vec();
@@ -1003,12 +1013,7 @@ impl<'a> Parser<'a> {
         loop {
             // Parse one variable
             let (name, _) = self.expect_identifier("expected variable name")?;
-            // `AddVar` registers the name before the initializer is parsed, so
-            // `var counter = counter;` resolves the right-hand side to the new
-            // `var` rather than falling through to the local check.
-            if self.parsing_global_function {
-                self.global_function_shadowing_names.insert(name.clone());
-            }
+            self.note_function_var(&name);
             let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                 // Commas in variable declarations separate declarators.
                 Some(self.parse_assignment()?)
