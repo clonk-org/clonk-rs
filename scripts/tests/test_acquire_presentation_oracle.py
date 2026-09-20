@@ -2235,6 +2235,53 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             patch,
         )
 
+    def test_cpp_capture_patch_draws_presentation_random_from_private_state(self):
+        # libc rand() is process-global. Two unaudited rand() calls on another
+        # thread moved the lobby's loader draws in about 6% of runs
+        # (clonk-org/clonk-rs#1656), so the capture build's SafeRandom keeps its
+        # own Park-Miller state. It has to be the recurrence the preflight
+        # already pins, or every trusted trace digest would change.
+        patch = (REPOSITORY / MODULE.CAPTURE_PATCH_SOURCE_PATH).read_text(
+            encoding="utf-8"
+        )
+        added = [
+            line[1:]
+            for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+
+        self.assertFalse(
+            any("rand() % range" in line for line in added),
+            "SafeRandom still draws from libc's shared state",
+        )
+        self.assertTrue(any("PresentationRandomState * 16807" in line for line in added))
+        self.assertTrue(any("% 2147483647" in line for line in added))
+        state, vector = 587, []
+        for _ in range(4):
+            state = state * 16807 % 2147483647
+            vector.append(state)
+        self.assertEqual(vector, [9865709, 456730344, 1160337230, 488826203])
+        self.assertTrue(
+            "constexpr std::array expected{9865709, 456730344, 1160337230, 488826203};"
+            in patch,
+            "the preflight no longer pins the vector this recurrence produces",
+        )
+
+    def test_cpp_capture_patch_names_the_trace_digest_that_drifted(self):
+        # The call counts can match the contract while the trace differs, which
+        # is what clonk-org/clonk-rs#1656 looked like: the old message printed
+        # two numbers that agreed with the contract and hid the one that did not.
+        patch = (REPOSITORY / MODULE.CAPTURE_PATCH_SOURCE_PATH).read_text(
+            encoding="utf-8"
+        )
+
+        self.assertTrue(
+            "RNG contract drift: simulation calls={} (expected {}), "
+            "presentation calls={} (expected {}), presentation trace {} (expected {})"
+            in patch,
+            "the drift message does not report the trace digest beside the counts",
+        )
+
     def test_launch_contract_uses_exact_inputs_and_refuses_unaudited_cpp_runtime(self):
         candidate = Path("/tmp/presentation-candidate")
         binaries = {
