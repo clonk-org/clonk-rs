@@ -287,15 +287,7 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
         self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
         let body_depth = self.brace_depth;
-        // Only a `global func` can name a declaring host's `local`
-        // (`C4AulParse.cpp:2000-2004`), so only its body collects candidates.
-        self.parsing_global_function = access == AccessLevel::Global;
-        self.global_local_candidates.clear();
-        self.global_function_shadowing_names.clear();
-        if self.parsing_global_function {
-            self.global_function_shadowing_names
-                .extend(params.iter().map(|param| param.name.clone()));
-        }
+        self.begin_global_local_tracking(access, &params);
 
         let mut description = None;
         let mut body = Vec::new();
@@ -349,6 +341,20 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    /// Start a function body's bookkeeping for the named-`local` check. Only a
+    /// `global func` can name a declaring host's `local`
+    /// (`C4AulParse.cpp:2000-2004`), so only its body collects candidates, and
+    /// its parameters are the first names that shadow one.
+    fn begin_global_local_tracking(&mut self, access: AccessLevel, params: &[Parameter]) {
+        self.parsing_global_function = access == AccessLevel::Global;
+        self.global_local_candidates.clear();
+        self.global_function_shadowing_names.clear();
+        if self.parsing_global_function {
+            self.global_function_shadowing_names
+                .extend(params.iter().map(|param| param.name.clone()));
+        }
+    }
+
     fn parse_old_style_function_recovering(
         &mut self,
         access: AccessLevel,
@@ -363,6 +369,9 @@ impl<'a> Parser<'a> {
         }
         self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
         let body_depth = self.brace_depth;
+        // An old-style function has no named parameters, and it is global only
+        // when it was itself written `global Name:`.
+        self.begin_global_local_tracking(access, &[]);
 
         let mut description = None;
         let mut body = Vec::new();
@@ -2975,6 +2984,56 @@ mod tests {
             );
             assert!(script.functions[0].global_local_reference.is_none());
         }
+    }
+
+    /// `Parse_FuncHead` starts every declaration at `AA_PUBLIC`, and its
+    /// old-style branch creates the function on the engine only when that same
+    /// declaration was written `global` (`C4AulParse.cpp:1563-1570,1737-1751`).
+    /// Nothing carries over from the declaration before it, so an old-style
+    /// function after a `global func` is an ordinary object function and reads
+    /// its script's locals. InExantros' hero is this shape: ten `global func`
+    /// one-liners, then old-style functions over forty locals.
+    #[test]
+    fn an_old_style_function_after_a_global_func_reads_its_hosts_locals() {
+        let source = "#strict\nlocal weapon;\n\
+            global func MaxType() { return(4); }\n\
+            OutItems:\n  if(weapon) RemoveObject(weapon);\n  return(1);\n";
+        let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|error| error.message() == "using local variable in global function!"),
+            "OutItems is an object function, got {diagnostics:?}"
+        );
+        assert!(script
+            .functions
+            .iter()
+            .all(|function| function.global_local_reference.is_none()));
+    }
+
+    /// The other side of the same rule: an old-style function that is itself
+    /// written `global` is created on the engine (`C4AulParse.cpp:1737-1745`),
+    /// so it is refused for naming a local even when the function before it
+    /// was an ordinary one.
+    #[test]
+    fn a_global_old_style_function_naming_a_local_is_refused_after_an_object_function() {
+        let source = "#strict\nlocal weapon;\n\
+            func Carried() { return(weapon); }\n\
+            global DropAll:\n  RemoveObject(weapon);\n  return(1);\n";
+        let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|error| error.message() == "using local variable in global function!"),
+            "DropAll is owned by the engine, got {diagnostics:?}"
+        );
+        let refused = script
+            .functions
+            .iter()
+            .filter(|function| function.global_local_reference.is_some())
+            .map(|function| function.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(refused, ["DropAll"]);
     }
 
     #[test]

@@ -9,6 +9,27 @@ struct ContentResolver {
     roots: Vec<PathBuf>,
 }
 
+/// `relative` below `root`, as it is spelled on disk. Each component matches
+/// ASCII case-insensitively, as C4Group entry lookup and the app's resolver
+/// do, with an exact spelling preferred where two entries differ only in case.
+pub fn existing_path_ignoring_ascii_case(root: &Path, relative: &str) -> Option<PathBuf> {
+    relative
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .try_fold(root.to_path_buf(), |directory, component| {
+            let names = std::fs::read_dir(&directory)
+                .ok()?
+                .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                .filter(|name| name.eq_ignore_ascii_case(component))
+                .collect::<Vec<_>>();
+            names
+                .iter()
+                .find(|name| name.as_str() == component)
+                .or_else(|| names.first())
+                .map(|name| directory.join(name))
+        })
+}
+
 struct RawContentResolver {
     root: PathBuf,
 }
@@ -35,8 +56,7 @@ impl LegacyDefinitionResolver for ContentResolver {
         if let Some(group) = self
             .roots
             .iter()
-            .map(|root| root.join(&relative))
-            .find(|candidate| candidate.exists())
+            .find_map(|root| existing_path_ignoring_ascii_case(root, &relative))
             .map(Group::open)
             .transpose()
             .map_err(ScenarioError::Resources)?
@@ -54,8 +74,7 @@ impl LegacyDefinitionResolver for ContentResolver {
                 break;
             }
             if self.roots.iter().any(|root| folder.starts_with(root)) {
-                let candidate = folder.join(&relative);
-                if candidate.exists() {
+                if let Some(candidate) = existing_path_ignoring_ascii_case(folder, &relative) {
                     return Group::open(candidate)
                         .map(|group| vec![group])
                         .map_err(ScenarioError::Resources);
