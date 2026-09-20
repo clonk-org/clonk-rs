@@ -61,7 +61,18 @@ class DeviceLossQualificationTests(unittest.TestCase):
                 runner.check_report(report, "vulkan")
             evidence["surface_counts_at_drop"] = [1, 0]
             report.write_text(json.dumps(evidence))
+            with self.assertRaisesRegex(SystemExit, "identit"):
+                runner.check_report(report, "vulkan")
+            evidence["resource_recovery"].update({
+                "texture_ids_before": [7], "texture_ids_after": [7],
+                "resident_textures_before": 2,
+            })
+            report.write_text(json.dumps(evidence))
             self.assertEqual(runner.check_report(report, "vulkan"), evidence)
+            evidence["resource_recovery"]["texture_ids_after"] = [8]
+            report.write_text(json.dumps(evidence))
+            with self.assertRaisesRegex(SystemExit, "identit"):
+                runner.check_report(report, "vulkan")
 
     def test_current_schema_still_requires_images_and_recreated_resources(self):
         import run_device_loss_probe as runner

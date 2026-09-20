@@ -30,8 +30,10 @@ Success requires all of the following:
   ordinary event loop successfully rebuilds it at a newer generation.
 - wgpu's live surface count falls by one after dropping the old configured
   surface and before constructing the replacement.
-- The first recovered frame recreates every resident source texture and
-  uploads their complete contents. No pre-loss GPU texture is reused.
+- The first recovered frame uses the same source texture identities as the
+  reference scene, recreates every one, and uploads their complete contents.
+  No pre-loss GPU texture is reused. Cached art from earlier screens is counted
+  separately; it is restored only when a later scene needs it.
 - Readback of that first actual presentation is byte-identical to the
   pre-loss reference, with nonuniform textured content in the captured image.
 - Three frames present on the replacement generation, without an unrequested

@@ -3361,6 +3361,18 @@ impl RetainedGpuRenderer {
         self.last_stats
     }
 
+    /// Source identities used by the last scene, excluding idle cached textures.
+    /// Only diagnostics request this allocated, ordered snapshot.
+    pub fn last_scene_texture_ids(&self) -> Vec<GpuTextureId> {
+        let mut ids = self
+            .texture_live_scratch
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
     pub fn timestamp_queries_enabled(&self) -> bool {
         self.timestamp_profiler.is_some()
     }
@@ -14743,6 +14755,30 @@ mod tests {
             }
         });
         assert_eq!(allocations, 0, "unchanged texture frames reuse bookkeeping");
+    }
+
+    #[test]
+    fn presented_texture_evidence_excludes_cached_art_from_an_earlier_screen() {
+        gpu_or_skip!(device, queue, "presented source texture evidence");
+        let mut renderer = test_renderer(&device, &queue);
+        let loading = reduction_source_scene(GpuTextureId::fresh(), [2, 2]);
+        render_extent_readback(&mut renderer, &device, &queue, &loading, [2, 2]);
+        let menu_id = GpuTextureId::fresh();
+        let menu = reduction_source_scene(menu_id, [2, 2]);
+        let before = render_extent_readback(&mut renderer, &device, &queue, &menu, [2, 2]);
+
+        assert_eq!(renderer.last_stats().resident_source_textures, 2);
+        assert_eq!(renderer.last_scene_texture_ids(), [menu_id]);
+
+        renderer.recreate(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let after = render_extent_readback(&mut renderer, &device, &queue, &menu, [2, 2]);
+        assert_eq!(after, before);
+        assert_eq!(renderer.last_scene_texture_ids(), [menu_id]);
+        let stats = renderer.last_stats();
+        assert_eq!(stats.resident_source_textures, 1);
+        assert_eq!(stats.created_source_textures, 1);
+        assert_eq!(stats.full_upload_calls, 1);
+        assert_eq!(stats.full_upload_bytes, 16);
     }
 
     #[test]

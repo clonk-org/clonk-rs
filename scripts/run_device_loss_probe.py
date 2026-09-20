@@ -69,6 +69,11 @@ def check_report(path: Path, backend: str) -> dict:
         failures.append("no device-destroyed callback followed by successful recreation")
     resources = report.get("resource_recovery") or {}
     textures = resources.get("textures_before") or 0
+    ids_before = resources.get("texture_ids_before") or []
+    ids_after = resources.get("texture_ids_after") or []
+    if (len(ids_before) != textures or len(set(ids_before)) != textures
+            or ids_before != ids_after):
+        failures.append("the recovered scene's source texture identities do not match")
     if (textures < 1 or resources.get("textures_after") != textures
             or resources.get("recreated_textures") != textures
             or (resources.get("full_upload_calls") or 0) < textures

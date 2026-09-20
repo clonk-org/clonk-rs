@@ -82,7 +82,8 @@ pub(crate) struct DeviceLossProbe {
     failure: Option<String>,
     reported: bool,
     reference_frame: Option<GpuReadbackFrame>,
-    reference_textures: usize,
+    reference_textures: Vec<clonk_graphics::GpuTextureId>,
+    reference_resident_textures: usize,
     resource_recovery: Option<ResourceRecoveryEvidence>,
     surface_counts_at_drop: Option<[usize; 2]>,
 }
@@ -90,6 +91,9 @@ pub(crate) struct DeviceLossProbe {
 #[derive(Clone, Debug, Serialize)]
 struct ResourceRecoveryEvidence {
     extent: [u32; 2],
+    texture_ids_before: Vec<u64>,
+    texture_ids_after: Vec<u64>,
+    resident_textures_before: usize,
     textures_before: usize,
     textures_after: usize,
     recreated_textures: usize,
@@ -111,7 +115,12 @@ fn validate_recovered_frame(
             && stats.created_source_textures == textures_before
             && stats.full_upload_calls >= textures_before
             && stats.full_upload_bytes > 0,
-        "the replacement device did not recreate and upload every retained source texture"
+        "the replacement device did not recreate and upload every presented source texture: \
+         expected {textures_before}, resident {}, created {}, full uploads {}, bytes {}",
+        stats.resident_source_textures,
+        stats.created_source_textures,
+        stats.full_upload_calls,
+        stats.full_upload_bytes,
     );
     Ok(())
 }
@@ -157,7 +166,8 @@ impl DeviceLossProbe {
             failure: None,
             reported: false,
             reference_frame: None,
-            reference_textures: 0,
+            reference_textures: Vec::new(),
+            reference_resident_textures: 0,
             resource_recovery: None,
             surface_counts_at_drop: None,
         }
@@ -205,6 +215,7 @@ impl DeviceLossProbe {
         surface.queue().submit([encoder.finish()]);
         let frame = ticket.read(surface.device())?;
         let stats = renderer.last_stats();
+        let texture_ids = renderer.last_scene_texture_ids();
         let suffix = if self.phase == Phase::Armed {
             "before.png"
         } else {
@@ -220,26 +231,35 @@ impl DeviceLossProbe {
             .write_all(&png)?;
         if self.phase == Phase::Armed {
             ensure!(
-                stats.resident_source_textures > 0,
+                !texture_ids.is_empty(),
                 "the pre-loss frame used no source textures"
             );
-            self.reference_textures = stats.resident_source_textures;
+            self.reference_textures = texture_ids;
+            self.reference_resident_textures = stats.resident_source_textures;
             self.reference_frame = Some(frame);
         } else {
             let reference = self
                 .reference_frame
                 .as_ref()
                 .context("no pre-loss frame was captured")?;
-            validate_recovered_frame(reference, &frame, self.reference_textures, &stats)?;
+            self.generation_after = Some(renderer.generation());
             self.resource_recovery = Some(ResourceRecoveryEvidence {
                 extent: frame.extent,
-                textures_before: self.reference_textures,
+                texture_ids_before: self.reference_textures.iter().map(|id| id.get()).collect(),
+                texture_ids_after: texture_ids.iter().map(|id| id.get()).collect(),
+                resident_textures_before: self.reference_resident_textures,
+                textures_before: self.reference_textures.len(),
                 textures_after: stats.resident_source_textures,
                 recreated_textures: stats.created_source_textures,
                 full_upload_calls: stats.full_upload_calls,
                 full_upload_bytes: stats.full_upload_bytes,
-                pixels_identical: true,
+                pixels_identical: reference == &frame,
             });
+            ensure!(
+                texture_ids == self.reference_textures,
+                "the first recovered scene uses different source texture identities"
+            );
+            validate_recovered_frame(reference, &frame, self.reference_textures.len(), &stats)?;
         }
         Ok(())
     }
