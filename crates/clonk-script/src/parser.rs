@@ -815,6 +815,16 @@ impl<'a> Parser<'a> {
         self.global_local_candidates.push((name.to_string(), line));
     }
 
+    /// Note a `var` the function declared. `AddVar` registers the name before
+    /// the initializer is parsed, so `var counter = counter;` resolves the
+    /// right-hand side to the new `var` rather than falling through to the
+    /// local check.
+    fn note_function_var(&mut self, name: &str) {
+        if self.parsing_global_function {
+            self.global_function_shadowing_names.insert(name.to_owned());
+        }
+    }
+
     fn parse_loop_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
         self.loop_depth += 1;
         let body = self.parse_stmt_or_block_vec();
@@ -1003,12 +1013,7 @@ impl<'a> Parser<'a> {
         loop {
             // Parse one variable
             let (name, _) = self.expect_identifier("expected variable name")?;
-            // `AddVar` registers the name before the initializer is parsed, so
-            // `var counter = counter;` resolves the right-hand side to the new
-            // `var` rather than falling through to the local check.
-            if self.parsing_global_function {
-                self.global_function_shadowing_names.insert(name.clone());
-            }
+            self.note_function_var(&name);
             let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                 // Commas in variable declarations separate declarators.
                 Some(self.parse_assignment()?)
@@ -1246,6 +1251,11 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            // Parse_ForEach adds both binders to the function's `var` table
+            // with or without the keyword (C4AulParse.cpp:2622-2663).
+            std::iter::once(&variable)
+                .chain(value_variable.as_ref())
+                .for_each(|binder| self.note_function_var(binder));
             self.expect_keyword(Keyword::In, "expected 'in' after foreach variables")?;
             let iterable = self.parse_expression()?;
             self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
@@ -1264,6 +1274,7 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Var)? {
             self.consume()?;
             let (variable, _) = self.expect_identifier("expected variable name")?;
+            self.note_function_var(&variable);
             let mut decls = Vec::new();
 
             // Commas in this clause separate declarations.
@@ -1276,6 +1287,7 @@ impl<'a> Parser<'a> {
 
             while self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 let (name, _) = self.expect_identifier("expected variable name")?;
+                self.note_function_var(&name);
                 let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                     Some(self.parse_assignment()?)
                 } else {
@@ -2920,6 +2932,51 @@ mod tests {
             );
         }
     }
+
+    /// C4Aul resolves an identifier against the function's parameters, then its
+    /// own `var`s, and only then the script's locals, where a `global func`
+    /// throws (`C4AulParse.cpp:1975-1996`). `Parse_For` hands a `var`
+    /// initialiser to `Parse_Var`, which registers the name (`:3252-3300`), so
+    /// a loop variable that shares a name with a local is the function's own.
+    /// Z4Keepers' `MaterialCircle` is this shape: `local x,y;` beside
+    /// `global func … { for(var x=…) for(var y=…) … }`.
+    #[test]
+    fn a_global_funcs_for_loop_var_shadows_a_declaring_hosts_local() {
+        let source = "local x, y;\n\
+            global func Circle(cx, cy, r) {\n\
+              for (var x = cx - r, y = cy - r; x < cx + r; x += 2) Plot(x, y);\n\
+            }";
+        let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|error| error.message() == "using local variable in global function!"),
+            "the loop variables are the function's own, got {diagnostics:?}"
+        );
+        assert!(script.functions[0].global_local_reference.is_none());
+    }
+
+    /// `Parse_ForEach` adds its binders to the function's `var` table whether
+    /// or not `var` is written, and adds the map form's value binder the same
+    /// way (`C4AulParse.cpp:2622-2663`). They shadow a local like any `var`.
+    #[test]
+    fn a_global_funcs_for_each_binders_shadow_a_declaring_hosts_locals() {
+        for source in [
+            "local item;\nglobal func Sum(list) { for (var item in list) Use(item); }",
+            "local item;\nglobal func Sum(list) { for (item in list) Use(item); }",
+            "local key, value;\nglobal func Walk(map) { for (var key, value in map) Use(key, value); }",
+        ] {
+            let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|error| error.message() == "using local variable in global function!"),
+                "the binders are the function's own in {source:?}, got {diagnostics:?}"
+            );
+            assert!(script.functions[0].global_local_reference.is_none());
+        }
+    }
+
     #[test]
     fn static_const_multi_declarators_parse() {
         // Talker.c4d:5-6: static const _TLK_ID = _TLK,\n _TLK_TimerInterval = 1;
