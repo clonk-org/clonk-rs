@@ -1,0 +1,208 @@
+diff --git a/src/C4Group.cpp b/src/C4Group.cpp
+index 3153df2b3..cd437a76c 100644
+--- a/src/C4Group.cpp
++++ b/src/C4Group.cpp
+@@ -24,6 +24,11 @@
+ #include <C4InputValidation.h>
+ #include "StdConfig.h"
+ 
++// Only the engine links RustGroupBridge.cpp and the Rust archive; the c4group
++// tool compiles this file with the same option and cannot link the hook.
++#if defined(USE_RUST_GROUP_VALIDATION) && !defined(C4ENGINE)
++#undef USE_RUST_GROUP_VALIDATION
++#endif
+ #if defined(USE_RUST_GROUP_VALIDATION)
+ #include "rust/RustGroupBridge.h"
+ #endif
+diff --git a/src/rust/RustGroupBridge.cpp b/src/rust/RustGroupBridge.cpp
+index abf88126c..8bf624b6a 100644
+--- a/src/rust/RustGroupBridge.cpp
++++ b/src/rust/RustGroupBridge.cpp
+@@ -12,6 +12,10 @@
+ #include <StdFile.h>
+ 
+ #include <algorithm>
++#include <cstdlib>
++#include <cstring>
++#include <optional>
++#include <string_view>
+ #include <array>
+ #include <string>
+ #include <unordered_map>
+@@ -139,6 +143,95 @@ std::string SummariseList(const std::vector<std::string> &items) {
+ 
+ } // namespace
+ 
++namespace {
++// LC_RUST_GROUP_DEEP: beyond the entry list, read every file through both
++// engines, ask Rust whether every entry exists, and compare maker and root;
++// every buffer and string Rust hands over is freed here. LC_RUST_GROUP_FAULT=read
++// flips the first file comparison to prove the read report fires.
++void DeepCheck(C4Group &group, GroupHandle *handle, const std::vector<LegacyEntry> &legacy_entries, const char *full_name) {
++    const char *deep = std::getenv("LC_RUST_GROUP_DEEP");
++    if (!deep || !*deep) {
++        return;
++    }
++    const char *fault = std::getenv("LC_RUST_GROUP_FAULT");
++    bool fault_read = fault && std::string_view{fault} == "read";
++    std::vector<std::string> read_mismatches;
++    std::vector<std::string> exists_mismatches;
++    std::size_t files_read = 0;
++    for (const auto &entry : legacy_entries) {
++        if (!lc_group_exists(handle, entry.original.c_str())) {
++            exists_mismatches.push_back(entry.original);
++        }
++        if (entry.is_directory) {
++            continue;
++        }
++        StdBuf legacy;
++        if (!group.LoadEntry(entry.original.c_str(), legacy)) {
++            read_mismatches.push_back(entry.original + " (legacy load failed)");
++            continue;
++        }
++        std::size_t rust_len = 0;
++        unsigned char *rust = lc_group_read_file(handle, entry.original.c_str(), &rust_len);
++        if (!rust) {
++            read_mismatches.push_back(entry.original + " (rust read failed)");
++            continue;
++        }
++        bool same = rust_len == legacy.getSize() && (rust_len == 0 || std::memcmp(rust, legacy.getData(), rust_len) == 0);
++        if (fault_read) {
++            same = false;
++            fault_read = false;
++        }
++        if (!same) {
++            read_mismatches.push_back(entry.original);
++        }
++        lc_group_buffer_free(rust, rust_len);
++        ++files_read;
++    }
++    std::optional<std::string> rust_maker;
++    if (char *maker = lc_group_maker(handle)) {
++        rust_maker = maker;
++        lc_group_string_free(maker);
++    }
++    const std::string legacy_maker = group.GetMaker() ? group.GetMaker() : "";
++    std::string maker_report;
++    if (group.GetStatus() == GRPF_File) {
++        if (!rust_maker || *rust_maker != legacy_maker) {
++            maker_report = "maker mismatch (legacy='" + legacy_maker + "', rust='" + rust_maker.value_or("<none>") + "')";
++        }
++    } else if (rust_maker) {
++        // C4Group names an opened folder "Open directory"; Rust has no maker for it.
++        maker_report = "maker reported for a folder (rust='" + *rust_maker + "')";
++    }
++    std::optional<std::string> rust_root;
++    if (char *root = lc_group_root(handle)) {
++        rust_root = root;
++        lc_group_string_free(root);
++    }
++    std::string root_report;
++    if (!rust_root || Canonicalise(*rust_root) != Canonicalise(full_name)) {
++        root_report = "root mismatch (legacy='" + std::string(full_name) + "', rust='" + rust_root.value_or("<none>") + "')";
++    }
++#ifdef C4ENGINE
++    if (read_mismatches.empty() && exists_mismatches.empty() && maker_report.empty() && root_report.empty()) {
++        LogNTr(spdlog::level::info, "Rust group validation {}: deep check agrees ({} files read)", full_name, files_read);
++        return;
++    }
++    if (!read_mismatches.empty()) {
++        LogNTr(spdlog::level::warn, "Rust group validation {}: read mismatch for entries: {}", full_name, SummariseList(read_mismatches));
++    }
++    if (!exists_mismatches.empty()) {
++        LogNTr(spdlog::level::warn, "Rust group validation {}: exists false for entries: {}", full_name, SummariseList(exists_mismatches));
++    }
++    if (!maker_report.empty()) {
++        LogNTr(spdlog::level::warn, "Rust group validation {}: {}", full_name, maker_report);
++    }
++    if (!root_report.empty()) {
++        LogNTr(spdlog::level::warn, "Rust group validation {}: {}", full_name, root_report);
++    }
++#endif
++}
++} // namespace
++
+ namespace RustGroupBridge {
+ 
+ void ValidateOnOpen(C4Group &group) {
+@@ -156,7 +249,12 @@ void ValidateOnOpen(C4Group &group) {
+         return;
+     }
+ 
+-    GroupHandlePtr handle(lc_group_open(full_name.getData()));
++    // LC_RUST_GROUP_FAULT=open hands Rust a path that is not there, which is
++    // the only way to reach the could-not-open report: C4Group must have opened
++    // the group for the bridge to run at all.
++    const char *open_fault = std::getenv("LC_RUST_GROUP_FAULT");
++    const bool fault_open = open_fault && std::string_view{open_fault} == "open";
++    GroupHandlePtr handle(lc_group_open(fault_open ? "<no such group>" : full_name.getData()));
+     if (!handle) {
+ #ifdef C4ENGINE
+         LogNTr(spdlog::level::warn, "Rust group validation failed: could not open {}", full_name.getData());
+@@ -165,7 +263,10 @@ void ValidateOnOpen(C4Group &group) {
+     }
+ 
+     std::size_t len = 0;
+-    EntryArrayPtr ffi_entries(lc_group_entries(handle.get(), &len), len);
++    // Two statements: as one constructor call the pinned code read `len` in an
++    // unspecified order against the call that fills it, and could free zero rows.
++    LcGroupEntry *raw_entries = lc_group_entries(handle.get(), &len);
++    EntryArrayPtr ffi_entries(raw_entries, len);
+ 
+     std::unordered_map<std::string, RustEntry> rust_entries;
+     if (auto raw = ffi_entries.get()) {
+@@ -177,11 +278,35 @@ void ValidateOnOpen(C4Group &group) {
+             }
+             std::string original(entry.path);
+             std::string canonical = Canonicalise(original);
+-            rust_entries.emplace(canonical, RustEntry{std::move(original), std::move(canonical), entry.size, entry.is_directory});
++            // The pinned line moved `canonical` into the value while naming it as
++            // the key; with the value built first every key was empty, so all but
++            // one entry vanished from the Rust view and the survivor was reported
++            // as additional.
++            std::string key = canonical;
++            rust_entries.emplace(std::move(key), RustEntry{std::move(original), std::move(canonical), entry.size, entry.is_directory});
+         }
+     }
+ 
+     auto legacy_entries = CollectLegacyEntries(group);
++    // Differential fault hook (clonk-org/clonk-rs#1265): perturb the C++ list so
++    // each report path below is shown to fire and to name its entry.
++    if (const char *fault = std::getenv("LC_RUST_GROUP_FAULT"); fault && *fault) {
++        const std::string_view which{fault};
++        if (which == "missing") {
++            legacy_entries.push_back({"PhantomEntry.txt", "PhantomEntry.txt", 0, false});
++        } else if (which == "additional" && !legacy_entries.empty()) {
++            legacy_entries.erase(legacy_entries.begin());
++        } else if (which == "size") {
++            for (auto &entry : legacy_entries) {
++                if (!entry.is_directory) {
++                    ++entry.size;
++                    break;
++                }
++            }
++        } else if (which == "type" && !legacy_entries.empty()) {
++            legacy_entries.front().is_directory = !legacy_entries.front().is_directory;
++        }
++    }
+ 
+     std::vector<std::string> missing_in_rust;
+     std::vector<std::string> missing_in_legacy;
+@@ -212,7 +337,16 @@ void ValidateOnOpen(C4Group &group) {
+         missing_in_legacy.push_back(entry.second.original);
+     }
+ 
+-    if (missing_in_rust.empty() && missing_in_legacy.empty() && size_mismatches.empty() && type_mismatches.empty()) {
++    const bool agrees = missing_in_rust.empty() && missing_in_legacy.empty() && size_mismatches.empty() && type_mismatches.empty();
++#ifdef C4ENGINE
++    if (agrees) {
++        // The pinned bridge is silent on agreement, which a differential cannot
++        // tell from a compare that never ran.
++        LogNTr(spdlog::level::info, "Rust group validation {}: {} entries agree", full_name.getData(), legacy_entries.size());
++    }
++#endif
++    DeepCheck(group, handle.get(), legacy_entries, full_name.getData());
++    if (agrees) {
+         return;
+     }
+ 

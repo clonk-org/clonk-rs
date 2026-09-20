@@ -274,7 +274,8 @@ does not exercise. An engine shadow-diff result is never evidence for them;
 each has to be built and run on its own:
 
 - `USE_RUST_CONFIG`: restored, see [The config bridge](#the-config-bridge).
-- `USE_RUST_GROUP_VALIDATION`: clonk-org/clonk-rs#1265
+- `USE_RUST_GROUP_VALIDATION`: restored, see
+  [The group-validation bridge](#the-group-validation-bridge).
 - `USE_RUST_GUI_VALIDATION`: clonk-org/clonk-rs#1266
 - `USE_RUST_PLATFORM_PATHS`: clonk-org/clonk-rs#1267
 
@@ -335,6 +336,59 @@ the first section of a repeated name (`StdCompiler.cpp`, the name tree and
 `Name()`). `clonk-core` has done the same since clonk-org/clonk-rs#1597, so the
 fixture rejects the report lines an empty key and a merged repeated section
 used to produce.
+
+#### The group-validation bridge
+
+`build-oracle-validation.sh --with-group-validation` builds the oracle with
+`USE_RUST_GROUP_VALIDATION=ON`. Every top-level packed file or folder
+`C4Group` opens is opened again through this tree's `clonk-resources`, and the
+two entry lists are compared by canonical name, size and type
+(`src/rust/RustGroupBridge.cpp` at the pin). That code compiled, but its first
+run against the real system folder reported nearly every entry missing from
+the Rust view and one file as additional. The pinned bridge moved each entry's
+canonical name into the map value while naming it as the key, so with the
+value built first every key was empty and the map held one entry. The port's
+listing was complete all along; a C harness against the same archive shows all
+seventeen rows. `oracle-group-bridge.patch` keys on a copy, splits a
+constructor call that read the entry count in unspecified order against the
+call filling it, says when the lists agree (the pinned bridge is silent on
+agreement, which a differential cannot tell from a compare that never ran),
+drops the option for the c4group tool that compiles `C4Group.cpp` without the
+bridge, and adds two environment hooks for the differential:
+`LC_RUST_GROUP_FAULT` perturbs the C++ list one way per run, and
+`LC_RUST_GROUP_DEEP` also reads every file through both engines, asks Rust
+whether every entry exists, and compares maker and root, freeing every buffer
+and string. `scripts/tests/test_oracle_group_patch.py` pins the patch.
+
+`run-group-differential.sh` proves the linked archive and the ten exported
+symbols the same way the config differential does, then builds a fixture
+folder (files of several sizes including an empty one, a nested directory, a
+child group folder, a name with a space, mixed case, and a dotfile and
+`Thumbs.db` that `C4Group_TestIgnore` drops) and packs it twice: with the
+oracle's own `c4group` and with this tree's `clonk-c4group`, so C4Group
+reading the port's pack is a differential of the writer too. Each form is
+installed as `System.c4g` in a private root with a symlink to the binary,
+which is how the oracle is made to open it; it then fails to find its scripts
+and exits non-zero, after validation. The cases:
+
+| case | bridge report |
+|---|---|
+| folder, both packed forms, the real system folder | `7 entries agree` (17 for the system folder) and `deep check agrees` |
+| `LC_RUST_GROUP_FAULT=missing` | `entries missing from Rust view: PhantomEntry.txt` |
+| `LC_RUST_GROUP_FAULT=additional` | `additional entries reported by Rust: Alpha.txt` |
+| `LC_RUST_GROUP_FAULT=size` | `size mismatch for entries: Alpha.txt` |
+| `LC_RUST_GROUP_FAULT=type` on a packed group | `entry type mismatch for: Alpha.txt` |
+| `LC_RUST_GROUP_FAULT=read` in deep mode | `read mismatch for entries: Alpha.txt` |
+| `LC_RUST_GROUP_FAULT=open` | `Rust group validation failed: could not open` |
+
+The open fault exists because `C4Group` must have opened the group for the
+bridge to run at all, so a group Rust cannot open is only reachable by handing
+Rust another path. `--leaks` runs the folder and a packed group in deep mode
+under `leaks --atExit`; only AppKit's three Foundation objects remain.
+
+Slash canonicalisation is exercised only as far as both readers report the
+same names: an entry name carrying a backslash needs a pack made on Windows,
+which neither packer here produces.
 
 No required gate runs the live bridge: it needs a separately built oracle
 checkout and is intentionally an opt-in investigation tool. `cargo xtask parity

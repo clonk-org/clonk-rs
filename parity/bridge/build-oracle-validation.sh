@@ -80,22 +80,28 @@ else
 	exit 1
 fi
 
-# The config bridge's C++ never compiled at the pin: two assigners in
-# src/C4Config.cpp take the wrong types (clonk-org/clonk-rs#1264). The fix is
-# layered the same way as the runtime instrumentation, and only when the
-# option that compiles that code is requested.
-CONFIG_PATCH="$REPO_ROOT/parity/bridge/oracle-config-bridge.patch"
-if [ "$USE_RUST_CONFIG" = ON ]; then
-	if git -C "$ORACLE_ROOT" apply --check "$CONFIG_PATCH" >/dev/null 2>&1; then
-		git -C "$ORACLE_ROOT" apply "$CONFIG_PATCH"
-		echo "==> applied the oracle config-bridge compile fix"
-	elif git -C "$ORACLE_ROOT" apply --reverse --check "$CONFIG_PATCH" >/dev/null 2>&1; then
-		echo "==> oracle config-bridge compile fix already applied"
+# The validation bridges' C++ never built at the pin: the config bridge's two
+# assigners in src/C4Config.cpp take the wrong types (clonk-org/clonk-rs#1264)
+# and the group bridge moves an entry name before keying on it
+# (clonk-org/clonk-rs#1265); both log where nothing listens, and both leave the
+# c4group tool unlinkable. Each fix is layered the same way as the runtime
+# instrumentation, and only when the option that compiles that code is
+# requested. $1 = patch path, $2 = label, $3 = ON to apply.
+layer_bridge_patch() {
+	local patch=$1 label=$2 enabled=$3
+	[ "$enabled" = ON ] || return 0
+	if git -C "$ORACLE_ROOT" apply --check "$patch" >/dev/null 2>&1; then
+		git -C "$ORACLE_ROOT" apply "$patch"
+		echo "==> applied the oracle $label compile fix"
+	elif git -C "$ORACLE_ROOT" apply --reverse --check "$patch" >/dev/null 2>&1; then
+		echo "==> oracle $label compile fix already applied"
 	else
-		echo "error: oracle config-bridge patch is partially applied or does not match $PIN" >&2
+		echo "error: oracle $label patch is partially applied or does not match $PIN" >&2
 		exit 1
 	fi
-fi
+}
+layer_bridge_patch "$REPO_ROOT/parity/bridge/oracle-config-bridge.patch" config-bridge "$USE_RUST_CONFIG"
+layer_bridge_patch "$REPO_ROOT/parity/bridge/oracle-group-bridge.patch" group-bridge "$USE_RUST_GROUP_VALIDATION"
 echo "==> oracle   $ORACLE_ROOT (at the pin)"
 echo "==> port     $REPO_ROOT"
 echo "==> profile  $PROFILE"
@@ -190,4 +196,13 @@ if [ "$USE_RUST_CONFIG" = ON ]; then
 
 		    parity/bridge/run-config-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
 	CONFIG
+fi
+if [ "$USE_RUST_GROUP_VALIDATION" = ON ]; then
+	cat <<-GROUP
+
+		The group-validation bridge is linked. Run its differential (folder and
+		packed fixtures, fault injection, reads, frees) with:
+
+		    parity/bridge/run-group-differential.sh --oracle-root "$ORACLE_ROOT" --build-dir "$BUILD_DIR"
+	GROUP
 fi
