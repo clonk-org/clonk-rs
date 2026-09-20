@@ -3747,6 +3747,31 @@ fn options_scale_confirmation_uses_the_oracle_icon_and_default_focus() {
 }
 
 #[test]
+fn options_scale_countdown_matches_native_timed_text_geometry() {
+    use clonk_graphics::clonk_font::TextAlign;
+
+    // C4StartupOptionsDlg.cpp:115-125 wraps the updated text without markup;
+    // C4GuiDialogs.cpp:1301-1342 preserves centered text and repositions buttons.
+    // These rectangles were read from the pinned live C++ dialog at 1280x720.
+    let mut app = new_real_classic_menu_app(1280, 720);
+    app.open_options_menu();
+    app.begin_options_scale_test(100, 150).test_value();
+    for remaining in [12, 11] {
+        let state = &app.dialogs.messages.last().test_value().state;
+        let font = &app.assets.clonk_fonts.as_ref().test_value().text;
+        let layout = state.layout(1280, 720, font);
+        main_assert_eq!(layout.message_alignment => TextAlign::Center);
+        main_assert_eq!(layout.message_text => format!(
+            "This is your new resolution. Do you like it?|Original resolution will be restored in\n{remaining} seconds..."
+        ));
+        main_assert_eq!(layout.bounds => clonk_frontend::classic_gui::IntRect::new(390, 282, 500, 156));
+        main_assert_eq!(layout.buttons[0].rect => clonk_frontend::classic_gui::IntRect::new(515, 396, 120, 32));
+        main_assert_eq!(layout.buttons[1].rect => clonk_frontend::classic_gui::IntRect::new(645, 396, 120, 32));
+        app.tick_options_scale_test_prompt();
+    }
+}
+
+#[test]
 fn options_scale_enter_submit_times_out_reverts_and_yes_commits() {
     use clonk_frontend::message_dialog::MessageDialogResult;
     use clonk_frontend::startup_options_dlg::OptionsDlgAction;

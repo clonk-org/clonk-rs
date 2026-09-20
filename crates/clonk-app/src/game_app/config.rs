@@ -1600,7 +1600,8 @@ impl GameApp {
             clonk_frontend::message_dialog::MessageDialogIcon::None,
             clonk_frontend::message_dialog::MessageDialogSize::Regular,
             false,
-        );
+        )
+        .with_timed_text_update();
         self.push_message_dialog(
             dialog,
             MessageDialogContinuation::OptionsScaleTest {
