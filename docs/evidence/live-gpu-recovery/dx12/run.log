@@ -1,0 +1,15 @@
+2026-09-20T10:11:15.950624Z  INFO clonk_app: engine session log initialized path=D:\a\clonk-rs\clonk-rs\target\device-loss\dx12\logs\Clonk.log
+2026-09-20T10:11:15.950787Z  INFO clonk_logging: starting clonk port_version="0.27.5" engine_version="4.9.11.0 [362]" os="windows" arch="x86_64" debug_assertions=false
+2026-09-20T10:11:15.950851Z  INFO clonk_app: no interrupted component update to recover
+2026-09-20T10:11:16.695700Z  WARN clonk_app::main_audio: no surface-compatible hardware adapter was offered; running on a software adapter backends=Backends(DX12) adapter=Microsoft Basic Render Driver
+2026-09-20T10:11:17.893828Z  INFO clonk_app::main_resources: loaded material definitions path=D:\a\clonk-rs\clonk-rs\content\Material.c4g count=21
+2026-09-20T10:11:19.884047Z ERROR clonk_audio::mixer: no audio output device available
+2026-09-20T10:11:25.842984Z  WARN clonk_app: device-loss probe: destroying the live GPU device generation=1
+2026-09-20T10:11:25.843933Z ERROR clonk_app_render::gpu_renderer: retained GPU device lost reason=Destroyed detail=Destroyed
+2026-09-20T10:11:25.843992Z  WARN clonk_app: retained GPU device requires recreation error=failed to submit retained GPU frame
+
+Caused by:
+    retained GPU device recreation required after DeviceLost: Destroyed
+2026-09-20T10:11:25.925888Z  WARN clonk_app::main_audio: no surface-compatible hardware adapter was offered; running on a software adapter backends=Backends(DX12) adapter=Microsoft Basic Render Driver
+LC_APP_DEVICE_LOSS_PROBE result=recovered backend=dx12 generation_before=1 generation_after=2 presented_after=3 recovery_ms=930 report=D:\a\clonk-rs\clonk-rs\target\device-loss\dx12\report.json
+2026-09-20T10:11:26.627434Z  INFO clonk_logging: stopping clonk reason="the event loop ended"

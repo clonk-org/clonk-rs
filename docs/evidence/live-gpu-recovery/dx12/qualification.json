@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "kind": "clonk_device_loss_qualification",
+  "recorded_at": "2026-09-20T10:11:27.887408+00:00",
+  "commit": "496ae5bd269dd3622d529f73f1266023e15d9eb9",
+  "content_commit": "9a01c8f55f0fbdccfa2dcf3a67e3cfcfcac7c009",
+  "sources_sha256": "f9b5d7cada4a243424ad72caef529e288c5a61fdf35b6c91be470e32776598bc",
+  "source_dirty": false,
+  "probe_inputs": {
+    "scripts/run_device_loss_probe.py": "61bdea3798e5a44ce3deac6ee40711abf46b9fe0984110ed1a07f17bdff1d7a9",
+    ".github/workflows/device-loss-qualification.yml": "a495379ac844fd3463383be4923be9350f7454e5ac9e18ef56cc067e67998200"
+  },
+  "os": "Windows-2025Server-10.0.26100-SP0",
+  "os_version": "10.0.26100",
+  "architecture": "AMD64",
+  "backend": "dx12",
+  "adapter": {
+    "name": "Microsoft Basic Render Driver",
+    "vendor_id": 5140,
+    "device_id": 140,
+    "device_type": "cpu",
+    "pci_bus_id": "",
+    "driver": "10.0.26100.33296",
+    "driver_info": "",
+    "backend": "dx12",
+    "subgroup_min_size": 4,
+    "subgroup_max_size": 4,
+    "transient_saves_memory": false
+  },
+  "build_profile": "release",
+  "build_target": "x86_64-pc-windows-msvc",
+  "rustflags": "-Ctarget-feature=+crt-static -Clinker-plugin-lto -Clinker-flavor=lld-link -Clink-arg=/lldltocache:D:/a/_temp/clonk-msvc-thinlto -Clink-arg=/lldltocachepolicy:cache_size=0%:cache_size_bytes=512m -Clink-arg=/DEBUG:NONE -Clink-arg=/OPT:REF,ICF -Clink-arg=/TIME -Clink-arg=/Brepro",
+  "encoded_rustflags": null,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "binary_sha256": "62049f7502b93da66cbede56e72999bacf978bd97cdd34918964db7b77d54d70",
+  "artifacts": {
+    "report.json": "8eaed844ab16f48192030e796c29149edf0b88ba2a351b8e39f1ed3e91f51191",
+    "report.before.png": "3c2dc3ed06aa713beb43770e19550297e84ad5a625afb021045b8ec2ebd45043",
+    "report.after.png": "3c2dc3ed06aa713beb43770e19550297e84ad5a625afb021045b8ec2ebd45043",
+    "run.log": "627aa490b7c4e8f9d53fcaf1dec27d864e7408fa2007da0a0156cf155b72b8bf",
+    "players/Probe.c4p": "0a87f43ae79e8365de7137912ffab1661b9f47a41cc307853540f0b52ac4c7c5"
+  }
+}

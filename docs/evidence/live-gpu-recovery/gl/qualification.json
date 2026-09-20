@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "kind": "clonk_device_loss_qualification",
+  "recorded_at": "2026-09-20T10:05:51.853743+00:00",
+  "commit": "496ae5bd269dd3622d529f73f1266023e15d9eb9",
+  "content_commit": "9a01c8f55f0fbdccfa2dcf3a67e3cfcfcac7c009",
+  "sources_sha256": "ed877fc31e40336b36922d8f4f15dd2c6aa3e338ab7ef7d63f0e46a78894800e",
+  "source_dirty": false,
+  "probe_inputs": {
+    "scripts/run_device_loss_probe.py": "8921c9b11b007156fa2d1648a750365dd7d0cd752cbf471c6982ebc8f22c6d66",
+    ".github/workflows/device-loss-qualification.yml": "74bb831c4364b77eeb95f113aa52ed11e49c9368fb2cba79cf0cb7820fec0028"
+  },
+  "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "os_version": "#22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026",
+  "architecture": "x86_64",
+  "backend": "gl",
+  "adapter": {
+    "name": "llvmpipe (LLVM 20.1.2, 256 bits)",
+    "vendor_id": 65541,
+    "device_id": 0,
+    "device_type": "cpu",
+    "pci_bus_id": "",
+    "driver": "",
+    "driver_info": "4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.2",
+    "backend": "gl",
+    "subgroup_min_size": 4,
+    "subgroup_max_size": 128,
+    "transient_saves_memory": null
+  },
+  "build_profile": "release",
+  "build_target": null,
+  "rustflags": null,
+  "encoded_rustflags": null,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "binary_sha256": "191ed5f22defb0af8417d6342529d359f1dc300fbf312817ae57ea3f6019d102",
+  "artifacts": {
+    "report.json": "0fbbfec246ddab3f03b01f96124864ad2e901b8b3958355d007438ef4a9899ed",
+    "report.before.png": "ec0c3b3cf24d6bdc3d2172e27c7a4f0a2853e21fd7b49d2e25e8af3c6c9e1940",
+    "report.after.png": "ec0c3b3cf24d6bdc3d2172e27c7a4f0a2853e21fd7b49d2e25e8af3c6c9e1940",
+    "run.log": "1f2fded8be18d1d67ae2ffdd1fe7d79321c52549a71c3e507aecd56cacce709a",
+    "players/Probe.c4p": "0a87f43ae79e8365de7137912ffab1661b9f47a41cc307853540f0b52ac4c7c5"
+  }
+}

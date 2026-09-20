@@ -64,5 +64,9 @@ qualification; developers can dispatch `rust.yml` with `device_loss=true` on
 their branch. Each platform retains failure diagnostics as well as successful
 evidence. These rows must pass before any platform is recorded as qualified.
 
-The currently accepted platform evidence remains pending under
-clonk-org/clonk-rs#1241 until the reports are retained and reviewed.
+The [accepted platform evidence](evidence/live-gpu-recovery/README.md) records
+successful Vulkan, GL, DX12, and Metal runs at source
+`496ae5bd269dd3622d529f73f1266023e15d9eb9` for clonk-org/clonk-rs#1241.
+It retains the source/binary identities, reports, matching image pairs, upload
+counts, and logs, with the software and paravirtual adapter scope stated for
+each platform.

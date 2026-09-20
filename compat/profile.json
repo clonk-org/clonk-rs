@@ -176,10 +176,10 @@
           "note": "The landing gate revalidates accepted C++/Rust evidence for all thirteen screens: six startup screens with port-authored branding or art and five runtime screens carrying the Clonk Rust logo use the layout term approved by clonk-org/clonk-rs#1298, while network-lobby and loader use the pixel term."
         },
         {
-          "kind": "issue",
-          "value": "clonk-org/clonk-rs#1241",
-          "status": "pending",
-          "note": "The shipped event loop lacks live platform evidence for complete retained-GPU device-loss recovery and the first correct post-rebuild presentation."
+          "kind": "document",
+          "value": "docs/DEVICE_LOSS_QUALIFICATION.md",
+          "status": "held",
+          "note": "Live release-build probes on Vulkan, GL, DX12, and Metal observe the destroyed-device callback, drop the old surface before replacement, recreate every source texture used by the presented scene, and present matching pixels on the replacement generation. Retained reports identify the software or paravirtual adapters; physical driver resets are outside this evidence."
         }
       ]
     },
