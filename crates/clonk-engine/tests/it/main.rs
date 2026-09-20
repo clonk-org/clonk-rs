@@ -145,6 +145,7 @@ shard_modules!(
 
 shard_modules!(
     "engine-it-shard-3",
+    collection_authored_script_fixes,
     dragon_rock_audio,
     dragon_rock_cage,
     effect_check_conversion,
