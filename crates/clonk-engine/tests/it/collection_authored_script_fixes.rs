@@ -62,3 +62,64 @@ fn a_cold_skies_clonk_departs_without_the_teamview_rule() {
 
     call(&mut engine, clonk, "Departure");
 }
+
+/// Kills `target` the way a fight does, so the shipped `Death` runs from script
+/// and makes its own typed `GameCallEx`.
+const KILL_PROBE: &str = r#"#strict
+public func Kill(object target, int killer)
+{
+    SetKiller(killer, target);
+    SetAlive(false, target);
+    return target->Death(killer);
+}
+"#;
+
+/// clonk-org/clonk-rs-content#84: every QuakeR scenario declared
+/// `RelaunchPlayer(int iPlr, object pCrew, object pKiller, int iTeam)`, while
+/// `QBot::Death` passes `GetKiller(this())`, a player number
+/// (`QuakeR.c4d/QBot.c4d/Script.c:390,399`). The typed call was refused, so a
+/// player whose last bot died was never relaunched. No scenario reads the
+/// argument, so the callbacks take it untyped, and `RelaunchClonk` runs: a
+/// replacement `QBOT` waits inside its `TIM2` holder.
+#[test]
+fn a_quaker_player_is_relaunched_after_their_last_bot_dies() {
+    let mut engine =
+        load_installed_scenario("Collection.c4f/Hazard.c4f/QuakeR.c4f/Q_DM-Medieval.c4s", 0);
+    let victim_owner = join_local_player_on_team(&mut engine, "Victim", 1);
+    let killer_owner = join_local_player_on_team(&mut engine, "Killer", 2);
+    let victim = engine
+        .crew_cursor(victim_owner)
+        .expect("the victim has a bot");
+    engine
+        .register_script_definition("KILP", "Kill probe", KILL_PROBE)
+        .expect("the kill probe registers");
+    let probe = engine
+        .spawn_object(SpawnConfig::new("KILP"))
+        .expect("the kill probe spawns");
+
+    let index = engine.test_object_index(probe);
+    engine
+        .call_object_function(
+            index,
+            "Kill",
+            vec![Value::Object(victim.as_u64()), Value::Int(killer_owner)],
+        )
+        .expect("the shipped QBot death chain completes");
+
+    let snapshot = engine.snapshot();
+    let relaunched = snapshot.objects.iter().any(|object| {
+        object.definition_id == "QBOT"
+            && object.id != victim
+            && object.owner == victim_owner
+            && object.container.is_some_and(|holder| {
+                snapshot
+                    .objects
+                    .iter()
+                    .any(|other| other.id == holder && other.definition_id == "TIM2")
+            })
+    });
+    assert!(
+        relaunched,
+        "the victim's replacement bot must wait inside its TIM2 holder"
+    );
+}
