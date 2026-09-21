@@ -6330,6 +6330,17 @@ fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
     main_assert_eq!(config.get_in(Some("General"), "VendorProgramKey") => Some("keep"));
 }
 
+/// Whether this build's wall-clock time says anything about the product. A
+/// budget is a claim about the shipped binary, and an llvm-cov-instrumented one
+/// is not it: the coverage row would be timing the instrumentation rather than
+/// the host. `cargo llvm-cov` names the profile file for every test process it
+/// runs, so its presence is the instrumented build. The uninstrumented
+/// `Linux / app` queue shards run the same tests and keep every budget a
+/// required gate.
+fn wall_clock_budgets_apply() -> bool {
+    std::env::var_os("LLVM_PROFILE_FILE").is_none()
+}
+
 #[test]
 fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
     // C++ enters DoLobby only after network initialization, initial PlayerInfo
@@ -6833,14 +6844,8 @@ fn selected_clonkmars_host_reference_is_queryable_within_one_second() {
     eprintln!(
         "selected ClonkMars host staged in {staging_elapsed:?} and exposed its reference in {elapsed:?} before the first lobby render"
     );
-    // The budget is a product claim about the shipped binary, and an
-    // llvm-cov-instrumented one is not it: the same selection measures 389ms
-    // here and 1.918s under `cargo llvm-cov`, so the coverage row would be
-    // timing the instrumentation rather than the host. `cargo llvm-cov` names
-    // the profile file for every test process it runs, so its presence is the
-    // instrumented build. The uninstrumented `Linux / app 5/12` queue shard
-    // runs this same test and keeps the budget a required gate.
-    if std::env::var_os("LLVM_PROFILE_FILE").is_none() {
+    // The same selection measures 389ms here and 1.918s under `cargo llvm-cov`.
+    if wall_clock_budgets_apply() {
         main_assert!(
             elapsed <= Duration::from_secs(1),
             "selected ClonkMars host took {elapsed:?}, exceeding the inclusive one-second reference-query budget"
