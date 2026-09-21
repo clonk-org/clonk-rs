@@ -5271,27 +5271,109 @@ mod tests {
         shutdown_test_session(client, host).await;
     }
 
+    /// A UDP port number nobody holds right now. It has to be a number and not
+    /// port 0, because the client is *configured* with it, so it is free only
+    /// until someone else asks the kernel for an ephemeral port.
+    fn unheld_udp_port() -> u16 {
+        std::net::UdpSocket::bind("[::]:0")
+            .test_value()
+            .local_addr()
+            .test_value()
+            .port()
+    }
+
+    /// Runs `connect` with a configured UDP port from `candidates`, and gives
+    /// back what it made together with the port it got. Between choosing a
+    /// port and binding it the port belongs to nobody, and with several
+    /// sessions running this suite on one machine another process does get it
+    /// (clonk-org/clonk-rs#1683). Losing that race says nothing about the code
+    /// under test, so the next candidate is tried; every other failure, and
+    /// running out of attempts, fails the test as before. The client binds its
+    /// mesh sockets before it contacts the host, so a lost attempt leaves
+    /// nothing behind there.
+    async fn connected_on_a_configured_udp_port<T, Connecting>(
+        mut candidates: impl FnMut() -> u16,
+        mut connect: impl FnMut(u16) -> Connecting,
+    ) -> (T, u16)
+    where
+        Connecting: Future<Output = Result<T, ClientError>>,
+    {
+        const ATTEMPTS: usize = 8;
+        for _ in 1..ATTEMPTS {
+            let port = candidates();
+            match connect(port).await {
+                Err(ClientError::Connect(error)) if error.kind() == io::ErrorKind::AddrInUse => {}
+                connected => return (connected.test_value(), port),
+            }
+        }
+        let port = candidates();
+        (connect(port).await.test_value(), port)
+    }
+
+    #[tokio::test]
+    async fn a_configured_udp_port_lost_to_someone_else_is_chosen_again() {
+        let taken = std::net::UdpSocket::bind("[::]:0").test_value();
+        let taken_port = taken.local_addr().test_value().port();
+        let free_port = unheld_udp_port();
+        let mut candidates = [taken_port, free_port].into_iter();
+
+        let (socket, port) = connected_on_a_configured_udp_port(
+            || candidates.next().expect("two candidates are enough"),
+            |port| async move {
+                tokio::net::UdpSocket::bind(SocketAddr::from(([0_u16; 8], port)))
+                    .await
+                    .map_err(ClientError::Connect)
+            },
+        )
+        .await;
+
+        assert_eq!(port, free_port);
+        assert_eq!(socket.local_addr().test_value().port(), free_port);
+    }
+
+    #[tokio::test]
+    async fn a_configured_udp_port_that_is_never_free_fails_after_eight_tries() {
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+
+        let outcome = tokio::spawn(async move {
+            connected_on_a_configured_udp_port(
+                || 1,
+                |_| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    async { Err::<(), _>(ClientError::Connect(io::ErrorKind::AddrInUse.into())) }
+                },
+            )
+            .await
+        })
+        .await;
+
+        assert!(outcome.is_err(), "the last refusal fails the test");
+        assert_eq!(tries.load(std::sync::atomic::Ordering::Relaxed), 8);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn client_shutdown_releases_the_configured_shared_udp_port() {
-        let reservation = tokio::net::UdpSocket::bind("[::]:0").await.test_value();
-        let configured_udp_port = reservation.local_addr().test_value().port();
-        drop(reservation);
         let mut puncher =
             crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).test_value();
         let puncher_address = puncher.local_addr();
         let (tcp_address, host) = start_test_host(HostConfig::default()).await;
 
-        let client = connect_client(
-            tcp_address,
-            ClientConfig::new("Alice", ParticipantKind::Player)
-                .with_mesh_udp_bind_address(SocketAddr::from(([0_u16; 8], configured_udp_port)))
-                .with_mesh_punchers([ClientMeshPuncherConfig {
-                    address: puncher_address,
-                    game_id: 0x1122_3344,
-                }]),
-        )
-        .await
-        .test_value();
+        // Chosen only now, and afresh for each attempt, so that this test's own
+        // sockets above cannot be the ones that take it.
+        let (client, configured_udp_port) =
+            connected_on_a_configured_udp_port(unheld_udp_port, |port| {
+                connect_client(
+                    tcp_address,
+                    ClientConfig::new("Alice", ParticipantKind::Player)
+                        .with_mesh_udp_bind_address(SocketAddr::from(([0_u16; 8], port)))
+                        .with_mesh_punchers([ClientMeshPuncherConfig {
+                            address: puncher_address,
+                            game_id: 0x1122_3344,
+                        }]),
+                )
+            })
+            .await;
         let _puncher_stream = await_test(puncher.accept()).await;
 
         client.shutdown().await.test_value();
