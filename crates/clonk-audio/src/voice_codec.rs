@@ -9,6 +9,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn malformed_voice_corpus_never_changes_the_bounded_decode_geometry() {
+        let mut decoder = VoiceDecoder::new().unwrap();
+        let mut seed = 0x12345678_u32;
+        for length in 0..=MAX_VOICE_ENCODED_BYTES + 1 {
+            for _ in 0..8 {
+                let packet: Vec<_> = (0..length)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        (seed >> 24) as u8
+                    })
+                    .collect();
+                if let Ok(decoded) = decoder.decode(&packet, false) {
+                    assert_eq!(decoded.len(), VOICE_FRAME_SAMPLES);
+                }
+            }
+        }
+        let mut encoder = VoiceEncoder::new().unwrap();
+        let packet = encoder.encode(&[1_000; VOICE_FRAME_SAMPLES]).unwrap();
+        assert!(decoder.decode(&packet, false).is_ok());
+    }
+
+    #[test]
     fn decoder_rejects_network_silence_and_stereo_before_changing_state() {
         let mut decoder = VoiceDecoder::new().unwrap();
         assert!(

@@ -1152,20 +1152,20 @@ impl CaptureFrameSink for ProcessedCaptureSink {
     }
 }
 
-#[cfg(feature = "cpal")]
+#[cfg(any(feature = "cpal", test))]
 struct RawCapturedFrame {
     samples: [f32; VOICE_FRAME_SAMPLES],
     timing: VoiceCaptureTiming,
 }
 
-#[cfg(feature = "cpal")]
+#[cfg(any(feature = "cpal", test))]
 struct RawCaptureSink {
     frames: Arc<crossbeam_queue::ArrayQueue<RawCapturedFrame>>,
     closed: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU64>,
 }
 
-#[cfg(feature = "cpal")]
+#[cfg(any(feature = "cpal", test))]
 impl CaptureFrameSink for RawCaptureSink {
     fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES], timing: VoiceCaptureTiming) {
         if self
@@ -1181,7 +1181,7 @@ impl CaptureFrameSink for RawCaptureSink {
     }
 }
 
-#[cfg(feature = "cpal")]
+#[cfg(any(feature = "cpal", test))]
 impl Drop for RawCaptureSink {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
@@ -1387,6 +1387,7 @@ pub(crate) struct StreamingVoiceResampler {
     started: bool,
 }
 
+#[cfg(any(feature = "cpal", test))]
 const VOICE_RESAMPLER_TAIL: usize = crate::voice_resampling::TAPS;
 
 impl StreamingVoiceResampler {
@@ -1711,9 +1712,12 @@ mod tests {
         }
         assert_eq!(
             std::iter::from_fn(|| receiver.pop())
-                .map(|frame| frame.samples[0])
+                .map(|frame| (frame.samples[0], frame.timing.sample_offset))
                 .collect::<Vec<_>>(),
-            vec![2.0, 3.0]
+            vec![
+                (2.0, VOICE_FRAME_SAMPLES as u64),
+                (3.0, 2 * VOICE_FRAME_SAMPLES as u64)
+            ]
         );
         assert_eq!(dropped_frames.load(Ordering::Relaxed), 1);
     }

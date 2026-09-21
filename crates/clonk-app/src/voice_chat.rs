@@ -77,7 +77,10 @@ const MAX_VOICE_JITTER_FRAMES: usize = 6;
 const MAX_PENDING_VOICE_FRAMES: usize = 8;
 const VOICE_SEQUENCE_WINDOW_FRAMES: usize = u64::BITS as usize;
 const MIN_VOICE_JITTER_OBSERVATIONS: usize = 3;
-const VOICE_PLAYOUT_GUARD_FRAMES: usize = 2;
+// The worker runs every 5 ms. One remaining (possibly partial) frame gives
+// it time to conceal before underrun; concealing with two frames still queued
+// needlessly replaces packets that can arrive in the next 20 ms.
+const VOICE_PLAYOUT_GUARD_FRAMES: usize = 1;
 const MAX_CONSECUTIVE_VOICE_PLC_FRAMES: u16 = 3;
 const VOICE_CAPTURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -377,8 +380,19 @@ impl RemoteVoiceJitterBuffer {
         farthest_offset.is_some_and(|farthest_offset| incoming_offset < farthest_offset)
     }
 
+    fn replaces_concealed_tail(&self, sequence: u16) -> bool {
+        self.started
+            && self.next_playout_sequence.is_some_and(|next| {
+                (1..=self
+                    .consecutive_concealed_frames
+                    .min(MAX_CONSECUTIVE_VOICE_PLC_FRAMES))
+                    .contains(&next.wrapping_sub(sequence))
+            })
+    }
+
     fn can_end(&self, sequence: u16) -> bool {
-        self.end_sequence.is_none() && self.insertion_anchor(sequence).is_some()
+        self.end_sequence.is_none()
+            && (self.insertion_anchor(sequence).is_some() || self.replaces_concealed_tail(sequence))
     }
 
     fn end(&mut self, sequence: u16, received_at: Instant) -> bool {
@@ -553,7 +567,10 @@ impl RemoteVoiceJitterBuffer {
             let expected = self
                 .next_playout_sequence
                 .expect("a started voice jitter buffer has a playout sequence");
-            if self.end_sequence == Some(expected) {
+            if self
+                .end_sequence
+                .is_some_and(|end| expected.wrapping_sub(end) <= u16::MAX / 2)
+            {
                 break;
             }
             let Some(position) = self
@@ -1316,6 +1333,24 @@ impl VoiceChatState {
         payload: Option<EncodedVoiceFrame>,
         disposition: VoiceFrameDisposition,
     ) -> Option<AcceptedRemoteVoicePacket> {
+        // Ownership was checked before producing this disposition. A late
+        // end marker can replace only an already-concealed tail in the same
+        // epoch; it must never bypass the floor for actual audio or revive an
+        // expired stream. The jitter buffer still rejects a repeated end.
+        let disposition = if disposition == VoiceFrameDisposition::DuplicateOrLate
+            && payload.is_none()
+            && self
+                .remote_streams
+                .get(&(client_id, frame.player_id))
+                .is_some_and(|stream| {
+                    stream.stream_epoch == frame.stream_epoch
+                        && stream.jitter.replaces_concealed_tail(frame.sequence)
+                        && stream.jitter.can_end(frame.sequence)
+                }) {
+            VoiceFrameDisposition::Accepted
+        } else {
+            disposition
+        };
         match disposition {
             VoiceFrameDisposition::Accepted | VoiceFrameDisposition::AcceptedNewEpoch => {
                 let inserted = self
@@ -2311,9 +2346,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3],
         );
-        assert_eq!(
+        assert!(
             jitter
                 .drain_ready_with_headroom(start + Duration::from_millis(100), usize::MAX, 2)
+                .is_empty(),
+            "two buffered frames leave time for a reordered packet"
+        );
+        assert_eq!(
+            jitter
+                .drain_ready_with_headroom(start + Duration::from_millis(120), usize::MAX, 1)
                 .into_iter()
                 .map(|frame| (frame.sequence, frame.concealed))
                 .collect::<Vec<_>>(),
@@ -3574,7 +3615,10 @@ mod tests {
             clonk_audio::DEFAULT_VOICE_BUFFERED_FRAMES,
             0,
         );
-        drained.extend(voice.drain_remote_playout(7, 17, start + Duration::from_millis(120), 2, 2));
+        assert!(voice
+            .drain_remote_playout(7, 17, start + Duration::from_millis(120), 2, 2)
+            .is_empty());
+        drained.extend(voice.drain_remote_playout(7, 17, start + Duration::from_millis(140), 2, 1));
         assert_eq!(
             drained
                 .into_iter()
@@ -3703,3 +3747,10 @@ mod tests {
         assert!(authenticated_selected_voice_crew(&snapshot, 7, 17).is_none());
     }
 }
+
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"),
+))]
+#[path = "voice_network_qualification.rs"]
+mod network_qualification;

@@ -899,7 +899,8 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     let sample_rate =
         usize::try_from(app.test_audio_ref().system.mixer().sample_rate()).unwrap_or(usize::MAX);
     let first_mix_frames = sample_rate.saturating_mul(35) / 1_000;
-    let second_mix_frames = sample_rate.saturating_mul(20) / 1_000;
+    // Let another frame play before declaring the reordered packet lost.
+    let second_mix_frames = sample_rate.saturating_mul(40) / 1_000;
     let total_mix_frames = sample_rate.saturating_mul(120) / 1_000;
     let final_mix_frames = total_mix_frames
         .saturating_sub(first_mix_frames)
@@ -934,18 +935,18 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     actual_output.extend(mix_frames(&app.test_audio_ref().system, second_mix_frames));
     expected_output.extend(mix_frames(&reference_audio, second_mix_frames));
 
-    app.update_voice_chat_at(admission_started_at + Duration::from_millis(120));
+    app.update_voice_chat_at(admission_started_at + Duration::from_millis(140));
     let rate = reference_voice.update_playout_clock(
-        remote_client, remote_player, admission_started_at + Duration::from_millis(120),
+        remote_client, remote_player, admission_started_at + Duration::from_millis(140),
         reference_audio.voice_stream_stats(stream_id).queued_duration,
     );
     reference_audio.worker_handle().set_voice_playout_rate(stream_id, rate);
     let final_reference_frames = reference_voice.drain_remote_playout(
         remote_client,
         remote_player,
-        admission_started_at + Duration::from_millis(120),
+        admission_started_at + Duration::from_millis(140),
         3,
-        2,
+        1,
     );
     main_assert_eq!(final_reference_frames.iter().map(|frame| (frame.sequence, frame.concealed)).collect::<Vec<_>>() => vec![(4, true), (5, false)],);
     for frame in final_reference_frames {

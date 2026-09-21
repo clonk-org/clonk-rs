@@ -1193,6 +1193,30 @@ mod tests {
     }
 
     #[test]
+    fn every_single_byte_media_corruption_is_rejected_without_consuming_the_nonce() {
+        let cipher = VoiceMediaCipher::from_parts(VoiceRouteCookie::from_bytes([3; 16]), [7; 32]);
+        let packet = VoicePacket::Direct(
+            VoiceFrame::outbound(17, 1, 0, vec![42; TEST_VOICE_PAYLOAD_BYTES]).unwrap(),
+        );
+        let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
+        for index in 0..wire.len() {
+            let mut damaged = wire.clone();
+            damaged[index] ^= 1;
+            assert!(
+                decode_authenticated_voice_packet(&damaged, &cipher).is_err(),
+                "accepted damaged byte {index}"
+            );
+        }
+        for length in 0..wire.len() {
+            assert!(decode_authenticated_voice_packet(&wire[..length], &cipher).is_err());
+        }
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire, &cipher),
+            Ok(packet)
+        );
+    }
+
+    #[test]
     fn oversized_sealed_media_is_rejected_before_authentication() {
         let cipher = VoiceMediaCipher::from_parts(
             VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
