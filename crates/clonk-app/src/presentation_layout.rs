@@ -36,7 +36,11 @@ pub(crate) fn expected_port_asset_exemptions(screen: &str) -> Option<BTreeMap<St
         | "startup-options-scale-initial-minimum"
         | "startup-options-scale-decremented-minimum"
         | "startup-options-reset-reference"
-        | "startup-options-reset-minimum" => &[],
+        | "startup-options-reset-minimum"
+        | "startup-options-key-keyboard-reference"
+        | "startup-options-key-keyboard-minimum"
+        | "startup-options-key-gamepad-reference"
+        | "startup-options-key-gamepad-minimum" => &[],
         "hud" | "ingame-menu" | "object-menu" | "gameplay" | "evaluation" => {
             &[("game/upper-board/branding/logo", "branding")]
         }

@@ -529,7 +529,7 @@ index b68423c74..5274a79a3 100644
  {
  	// draw background
 diff --git a/src/C4GuiDialogs.cpp b/src/C4GuiDialogs.cpp
-index 576cd1af3..db3363af1 100644
+index 576cd1af3..05ae877d8 100644
 --- a/src/C4GuiDialogs.cpp
 +++ b/src/C4GuiDialogs.cpp
 @@ -26,6 +26,7 @@
@@ -549,11 +549,12 @@ index 576cd1af3..db3363af1 100644
  	// draw window + contents (evaluates IsVisible)
  	Window::Draw(cgo);
  	// reset blit modulation
-@@ -1079,6 +1082,7 @@ bool Screen::ShowModalDlg(Dialog *pDlg, bool fDestruct)
+@@ -1079,6 +1082,8 @@ bool Screen::ShowModalDlg(Dialog *pDlg, bool fDestruct)
  	if (!pDlg) return false;
  	// show it
  	if (!pDlg->Show(this, true)) { delete pDlg; return false; }
 +	C4Startup::ResetCaptureModalShown(pDlg);
++	C4Startup::KeyCaptureModalShown(pDlg);
  	// wait until it is closed
  	bool fResult = pDlg->DoModal();
  	// free dlg if this class is still valid (may have been deleted in game clear)
@@ -1117,7 +1118,7 @@ index f6d50fece..c176860e9 100644
  
  void Randomize3();
 diff --git a/src/C4Startup.cpp b/src/C4Startup.cpp
-index 9542728ef..231d2efa6 100644
+index 9542728ef..d4ff55002 100644
 --- a/src/C4Startup.cpp
 +++ b/src/C4Startup.cpp
 @@ -26,9 +26,1343 @@
@@ -1179,14 +1180,14 @@ index 9542728ef..231d2efa6 100644
 +	constexpr std::string_view ObjectsManifestSha256 = "a0030a62c311e29d893dcd4ad178ee162ce8223d4686f6737b4c8f6ca8d23088";
 +	constexpr std::string_view MaterialManifestSha256 = "1fe714cea5c3f824633ba2b3cf98561866f76b1c577ac0ffe8dea741b35bdc90";
 +	constexpr std::string_view CaptureCapabilityMarker =
-+		"CLONK_PRESENTATION_CAPTURE_CAPABILITIES_V1=startup-main,startup-scenario-selection,startup-network-browser,startup-player-selection,startup-options,startup-about,network-lobby,loader,hud,ingame-menu,object-menu,gameplay,evaluation,startup-options-scale-initial-reference,startup-options-scale-decremented-reference,startup-options-scale-initial-minimum,startup-options-scale-decremented-minimum,startup-options-reset-reference,startup-options-reset-minimum;layout=hud,ingame-menu,object-menu,gameplay,evaluation";
-+	constexpr std::array<std::string_view, 12> StartupCaptureCapabilities{
++		"CLONK_PRESENTATION_CAPTURE_CAPABILITIES_V1=startup-main,startup-scenario-selection,startup-network-browser,startup-player-selection,startup-options,startup-about,network-lobby,loader,hud,ingame-menu,object-menu,gameplay,evaluation,startup-options-scale-initial-reference,startup-options-scale-decremented-reference,startup-options-scale-initial-minimum,startup-options-scale-decremented-minimum,startup-options-reset-reference,startup-options-reset-minimum,startup-options-key-keyboard-reference,startup-options-key-keyboard-minimum,startup-options-key-gamepad-reference,startup-options-key-gamepad-minimum;layout=hud,ingame-menu,object-menu,gameplay,evaluation";
++	constexpr std::array<std::string_view, 16> StartupCaptureCapabilities{
 +		"startup-main", "startup-scenario-selection", "startup-network-browser",
-+		"startup-player-selection", "startup-options", "startup-about", "startup-options-scale-initial-reference", "startup-options-scale-decremented-reference", "startup-options-scale-initial-minimum", "startup-options-scale-decremented-minimum", "startup-options-reset-reference", "startup-options-reset-minimum"};
++		"startup-player-selection", "startup-options", "startup-about", "startup-options-scale-initial-reference", "startup-options-scale-decremented-reference", "startup-options-scale-initial-minimum", "startup-options-scale-decremented-minimum", "startup-options-reset-reference", "startup-options-reset-minimum", "startup-options-key-keyboard-reference", "startup-options-key-keyboard-minimum", "startup-options-key-gamepad-reference", "startup-options-key-gamepad-minimum"};
 +
 +	bool IsOptionsModalCapture(const std::string_view id)
 +	{
-+		return id.starts_with("startup-options-scale-") || id.starts_with("startup-options-reset-");
++		return id.starts_with("startup-options-scale-") || id.starts_with("startup-options-reset-") || id.starts_with("startup-options-key-");
 +	}
 +	constexpr std::array<std::string_view, 5> RuntimeLayoutCapabilities{
 +		"hud", "ingame-menu", "object-menu", "gameplay", "evaluation"};
@@ -2464,7 +2465,7 @@ index 9542728ef..231d2efa6 100644
  
  bool C4StartupGraphics::LoadFile(C4FacetExID &rToFct, const char *szFilename)
  {
-@@ -149,6 +1483,286 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
+@@ -149,6 +1483,299 @@ C4Startup::C4Startup() : fInStartup(false), fAborted(false), pLastDlg(nullptr),
  	pInstance = this;
  }
  
@@ -2614,18 +2615,21 @@ index 9542728ef..231d2efa6 100644
 +	if (!pCurrDlg || !pCurrDlg->IsShown()) CaptureFailure("target startup dialog disappeared before capture");
 +	const bool scaleCapture = std::string_view{presentationCaptureCase}.starts_with("startup-options-scale-");
 +	const bool resetCapture = std::string_view{presentationCaptureCase}.starts_with("startup-options-reset-");
-+	const bool modalCapture = scaleCapture || resetCapture;
++	const bool keyCapture = std::string_view{presentationCaptureCase}.starts_with("startup-options-key-");
++	const bool modalCapture = scaleCapture || resetCapture || keyCapture;
 +	auto *options = modalCapture ? dynamic_cast<C4StartupOptionsDlg *>(pCurrDlg) : nullptr;
 +	if (modalCapture && !options) CaptureFailure("modal capture requires the real options dialog");
 +	if (modalCapture && !pCurrDlg->IsFading() && Game.pGUI->GetTopDialog() == pCurrDlg)
 +	{
 +		presentationCaptureStableRenderOrdinal = 0;
-+		if (resetCapture) options->StageResetConfirmationCapture();
++		if (keyCapture) options->StageKeyCapture(std::string_view{presentationCaptureCase}.starts_with("startup-options-key-gamepad-"));
++		else if (resetCapture) options->StageResetConfirmationCapture();
 +		else options->StageScaleConfirmationCapture();
 +		return;
 +	}
 +	if (Game.pGUI->GetTopDialog() != pCurrDlg && (!options ||
-+		!(scaleCapture ? options->IsScaleConfirmationCapture(Game.pGUI->GetTopDialog()) :
++		!(keyCapture ? options->IsKeyCapture(Game.pGUI->GetTopDialog()) :
++			scaleCapture ? options->IsScaleConfirmationCapture(Game.pGUI->GetTopDialog()) :
 +			options->IsResetConfirmationCapture(Game.pGUI->GetTopDialog()))))
 +		CaptureFailure("an unexpected modal obscured the target startup dialog");
 +	if (pCurrDlg->IsFading())
@@ -2704,7 +2708,8 @@ index 9542728ef..231d2efa6 100644
 +	const FileRecord png = ReadFileRecord(pngPath, artifactPrefix + pngPath.filename().string());
 +	const std::string artifacts = "\"png\":" + FileRecordJson(png) + (modalCapture ? "" :
 +		",\"layout\":" + FileRecordJson(ReadFileRecord(layoutPath, artifactPrefix + layoutPath.filename().string())));
-+	const std::string trigger = resetCapture ? "options-reset-confirmation-backdrop-v1" :
++	const std::string trigger = keyCapture ? "options-key-capture-backdrop-v1" :
++		resetCapture ? "options-reset-confirmation-backdrop-v1" :
 +		scaleCapture ? "options-scale-confirmation-backdrop-v1" : "direct-startup-dialog";
 +	const std::string checkpoint = presentationCaptureCase + (modalCapture ? "/render-ordinal-2" : "/fade-complete");
 +	const FileRecord binary = ReadFileRecord(presentationCaptureBinaryPath, "");
@@ -2728,7 +2733,7 @@ index 9542728ef..231d2efa6 100644
 +{
 +	if (!pInstance || !IsOptionsModalCapture(pInstance->presentationCaptureCase)) return;
 +	auto *options = dynamic_cast<C4StartupOptionsDlg *>(pInstance->pCurrDlg);
-+	if (!options || (!options->IsScaleConfirmationCapture(dialog) && !options->IsResetConfirmationCapture(dialog))) return;
++	if (!options || (!options->IsScaleConfirmationCapture(dialog) && !options->IsResetConfirmationCapture(dialog) && !options->IsKeyCapture(dialog))) return;
 +	constexpr std::array<uint32_t, 4> colors{0x00184878, 0x00305c28, 0x00903020, 0x00565676};
 +	for (int i = 0; i < 4; ++i)
 +		lpDDraw->DrawBoxDw(cgo.Surface, i * Config.Graphics.ResX / 4, 0, (i + 1) * Config.Graphics.ResX / 4 - 1, Config.Graphics.ResY - 1, colors[i]);
@@ -2743,6 +2748,15 @@ index 9542728ef..231d2efa6 100644
 +	options->TrackResetConfirmationCapture(dialog);
 +}
 +
++void C4Startup::KeyCaptureModalShown(C4GUI::Dialog *dialog)
++{
++	if (!pInstance || !pInstance->fPresentationCaptureEnabled ||
++		!std::string_view{pInstance->presentationCaptureCase}.starts_with("startup-options-key-")) return;
++	auto *options = dynamic_cast<C4StartupOptionsDlg *>(pInstance->pCurrDlg);
++	if (!options) CaptureFailure("key capture modal has no Options parent");
++	options->TrackKeyCapture(dialog);
++}
++
 +void C4Startup::PresentationCaptureAfterRender()
 +{
 +	if (pInstance) pInstance->CapturePresentationFrameAfterRender();
@@ -2751,7 +2765,7 @@ index 9542728ef..231d2efa6 100644
  C4Startup::~C4Startup()
  {
  	pInstance = nullptr;
-@@ -269,6 +1883,8 @@ bool C4Startup::DoStartup()
+@@ -269,6 +1896,8 @@ bool C4Startup::DoStartup()
  	delete pLastDlg; pLastDlg = nullptr;
  	delete pCurrDlg; pCurrDlg = nullptr;
  
@@ -2760,7 +2774,7 @@ index 9542728ef..231d2efa6 100644
  	// start with the last dlg that was shown - at first startup main dialog
  	if (!SwitchDialog(eLastDlgID)) return false;
  
-@@ -370,9 +1986,19 @@ void C4Startup::Unload()
+@@ -370,9 +1999,19 @@ void C4Startup::Unload()
  
  bool C4Startup::Execute()
  {
@@ -2781,7 +2795,7 @@ index 9542728ef..231d2efa6 100644
  	bool fResult = pStartup->DoStartup();
  	return fResult;
 diff --git a/src/C4Startup.h b/src/C4Startup.h
-index 65d33045c..0f77220c4 100644
+index 65d33045c..1a99e74a0 100644
 --- a/src/C4Startup.h
 +++ b/src/C4Startup.h
 @@ -22,6 +22,9 @@
@@ -2879,13 +2893,14 @@ index 65d33045c..0f77220c4 100644
  
  	friend class C4StartupMainDlg;
  	friend class C4StartupNetDlg;
-@@ -128,6 +193,9 @@ public:
+@@ -128,6 +193,10 @@ public:
  	static void Unload(); // make sure startup data is destroyed
  	static bool Execute(); // run startup - return false if game is to be closed
  	static bool SetStartScreen(const char *szScreen); // set screen that is shown first by case insensitive identifier
 +	static void PresentationCaptureAfterRender(); // called after composition and before PageFlip
 +	static void DrawScaleCaptureBackdrop(C4GUI::Dialog *dialog, C4FacetEx &cgo);
 +	static void ResetCaptureModalShown(C4GUI::Dialog *dialog);
++	static void KeyCaptureModalShown(C4GUI::Dialog *dialog);
  
  	static C4Startup *Get() { assert(pInstance); return pInstance; }
  };
@@ -3315,7 +3330,7 @@ index 62a7fa643..e492e8beb 100644
  	bool DoBack(); // abort dialog
  	void DoRefresh(); // restart network search
 diff --git a/src/C4StartupOptionsDlg.cpp b/src/C4StartupOptionsDlg.cpp
-index cebd24ff4..72186c065 100644
+index cebd24ff4..b5843626c 100644
 --- a/src/C4StartupOptionsDlg.cpp
 +++ b/src/C4StartupOptionsDlg.cpp
 @@ -35,6 +35,9 @@
@@ -3365,7 +3380,7 @@ index cebd24ff4..72186c065 100644
  	btn->SetToolTip(LoadResStr(C4ResStrTableKey::IDS_DLGTIP_BACKMAIN));
  
  	// main config area tabular
-@@ -1045,6 +1062,113 @@ C4StartupOptionsDlg::~C4StartupOptionsDlg()
+@@ -1045,6 +1062,139 @@ C4StartupOptionsDlg::~C4StartupOptionsDlg()
  	delete pKeyBack;
  }
  
@@ -3476,11 +3491,37 @@ index cebd24ff4..72186c065 100644
 +	return presentationResetConfirmation && dialog == presentationResetConfirmation;
 +}
 +
++void C4StartupOptionsDlg::StageKeyCapture(bool gamepad)
++{
++	if (presentationKeyRequested) throw std::runtime_error("key capture callback repeated");
++	presentationKeyRequested = true;
++	pOptionsTabular->SelectSheet(gamepad ? 4 : 3, false);
++	auto *sheet = pOptionsTabular->GetActiveSheet();
++	auto *controls = sheet ? dynamic_cast<ControlConfigArea *>(sheet->GetFirst()) : nullptr;
++	if (!controls || controls->GetNext()) throw std::runtime_error("unexpected control sheet topology");
++	// Invoke the unchanged key-button callback and its nested ShowModalDlg.
++	// Capture exits before any key is accepted or written to configuration.
++	controls->StageKeyCapture();
++	throw std::runtime_error("key capture dialog closed before capture");
++}
++
++void C4StartupOptionsDlg::TrackKeyCapture(C4GUI::Dialog *dialog)
++{
++	if (!presentationKeyRequested || presentationKeyCapture || !dynamic_cast<KeySelDialog *>(dialog))
++		throw std::runtime_error("unexpected modal during key capture");
++	presentationKeyCapture = dialog;
++}
++
++bool C4StartupOptionsDlg::IsKeyCapture(const C4GUI::Dialog *dialog) const
++{
++	return presentationKeyCapture && dialog == presentationKeyCapture;
++}
++
  void C4StartupOptionsDlg::OnClosed(bool fOK)
  {
  	// callback when dlg got closed - save config
 diff --git a/src/C4StartupOptionsDlg.h b/src/C4StartupOptionsDlg.h
-index d8dc7013a..2a6dcaf00 100644
+index d8dc7013a..fa5ec39ac 100644
 --- a/src/C4StartupOptionsDlg.h
 +++ b/src/C4StartupOptionsDlg.h
 @@ -35,6 +35,7 @@ private:
@@ -3491,7 +3532,7 @@ index d8dc7013a..2a6dcaf00 100644
  	C4GUI::Tabular *pOptionsTabular;
  
  protected:
-@@ -57,6 +58,12 @@ public:
+@@ -57,6 +58,15 @@ public:
  
  public:
  	void RecreateDialog(bool fFade);
@@ -3501,10 +3542,13 @@ index d8dc7013a..2a6dcaf00 100644
 +	void StageResetConfirmationCapture();
 +	void TrackResetConfirmationCapture(C4GUI::Dialog *dialog);
 +	bool IsResetConfirmationCapture(const C4GUI::Dialog *dialog) const;
++	void StageKeyCapture(bool gamepad);
++	void TrackKeyCapture(C4GUI::Dialog *dialog);
++	bool IsKeyCapture(const C4GUI::Dialog *dialog) const;
  
  	// program tab
  private:
-@@ -69,6 +76,7 @@ private:
+@@ -69,6 +79,7 @@ private:
  	public:
  		SmallButton(const char *szText, const C4Rect &rtBounds)
  			: C4GUI::Button(szText, rtBounds) {}
@@ -3512,17 +3556,27 @@ index d8dc7013a..2a6dcaf00 100644
  		static int32_t GetDefaultButtonHeight();
  	};
  
-@@ -123,6 +131,10 @@ private:
+@@ -123,6 +134,12 @@ private:
  		void UpdateText() override;
  	};
  
 +	ResChangeConfirmDlg *presentationScaleConfirmation = nullptr;
 +	C4GUI::Dialog *presentationResetConfirmation = nullptr;
 +	bool presentationResetRequested = false;
++	C4GUI::Dialog *presentationKeyCapture = nullptr;
++	bool presentationKeyRequested = false;
 +
  	void OnEffectsSliderChange(int32_t iNewVal);
  
  	C4GUI::ScrollBar *pEffectLevelSlider;
+@@ -203,6 +220,7 @@ private:
+ 	public:
+ 		ControlConfigArea(const C4Rect &rcArea, int32_t iHMargin, int32_t iVMargin, bool fGamepad, C4StartupOptionsDlg *pOptionsDlg);
+ 		virtual ~ControlConfigArea();
++		void StageKeyCapture() { OnCtrlKeyBtn(KeyControlBtns[4]); }
+ 
+ 	protected:
+ 		void UpdateCtrlSet();
 diff --git a/src/C4StartupPlrSelDlg.cpp b/src/C4StartupPlrSelDlg.cpp
 index f9b00f822..beac67d20 100644
 --- a/src/C4StartupPlrSelDlg.cpp

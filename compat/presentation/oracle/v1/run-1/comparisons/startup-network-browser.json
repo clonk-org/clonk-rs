@@ -5,7 +5,7 @@
   },
   "case_id": "startup-network-browser",
   "comparator": {
-    "binary_sha256": "e251dc714aa864f0d1777e78d72946092e8d64db836d73180532cc9fc1ba7579",
+    "binary_sha256": "c3ae060c41be6638f46ce710d96cfc80d19e9867e7c8c34e3151d459d9ac543f",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",

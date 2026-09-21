@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-2/rust/artifacts/startup-options-key-gamepad-minimum.png",
+    "sha256": "7648c8a5bd72b60b464abcb619a16fec79d752340d42e6ecb3acce0c2ad3fc2a"
+  },
+  "case_id": "startup-options-key-gamepad-minimum",
+  "comparator": {
+    "binary_sha256": "c3ae060c41be6638f46ce710d96cfc80d19e9867e7c8c34e3151d459d9ac543f",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "pixel",
+  "reference": {
+    "path": "run-2/cpp/artifacts/startup-options-key-gamepad-minimum.png",
+    "sha256": "7061f5b13321c38fe4af484a122f861bfa46f079b64fabc5f8fb235fc5503394"
+  },
+  "run_id": "run-2",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"startup-options-key-gamepad-minimum\",\"comparison\":\"pixel\",\"status\":\"match\"}\n"
+}

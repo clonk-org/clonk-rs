@@ -13,7 +13,7 @@
       "help": false,
       "note": "Route this no-button logical position through each engine's production input path immediately before every capture render. The inset keeps the native 50-pixel CursorLarge glyph fully visible and makes ambient host pointer position irrelevant without suppressing product output."
     },
-    "note": "Default geometry for existing screens. Timed scale confirmations additionally bind a 640x480 audit baseline through their per-screen resolution; it is not an enforced application minimum. All captures use scale 100 and the fixed pointer input."
+    "note": "Default geometry for existing screens. Options modal cases additionally bind a 640x480 audit baseline through their per-screen resolution; it is not an enforced application minimum. All captures use scale 100 and the fixed pointer input."
   },
   "tolerance": {
     "cpu_max_channel_delta": 0,
@@ -267,6 +267,54 @@
       "evidence": {
         "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-reset-minimum.png",
         "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-reset-minimum.png"
+      }
+    },
+    {
+      "id": "startup-options-key-keyboard-reference",
+      "area": "startup",
+      "description": "Real Options keyboard key capture for Up / Jump in control set 1, composited over the shared four-band backdrop fixture.",
+      "status": "captured",
+      "comparison": "pixel",
+      "resolution": "1280x720",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-key-keyboard-reference.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-key-keyboard-reference.png"
+      }
+    },
+    {
+      "id": "startup-options-key-keyboard-minimum",
+      "area": "startup",
+      "description": "Real Options keyboard key capture for Up / Jump in control set 1, composited over the shared four-band backdrop fixture.",
+      "status": "captured",
+      "comparison": "pixel",
+      "resolution": "640x480",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-key-keyboard-minimum.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-key-keyboard-minimum.png"
+      }
+    },
+    {
+      "id": "startup-options-key-gamepad-reference",
+      "area": "startup",
+      "description": "Real Options gamepad key capture for Up / Jump in control set 1, composited over the shared four-band backdrop fixture.",
+      "status": "captured",
+      "comparison": "pixel",
+      "resolution": "1280x720",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-key-gamepad-reference.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-key-gamepad-reference.png"
+      }
+    },
+    {
+      "id": "startup-options-key-gamepad-minimum",
+      "area": "startup",
+      "description": "Real Options gamepad key capture for Up / Jump in control set 1, composited over the shared four-band backdrop fixture.",
+      "status": "captured",
+      "comparison": "pixel",
+      "resolution": "640x480",
+      "evidence": {
+        "cpp": "compat/presentation/oracle/v1/run-1/cpp/artifacts/startup-options-key-gamepad-minimum.png",
+        "rust": "compat/presentation/oracle/v1/run-1/rust/artifacts/startup-options-key-gamepad-minimum.png"
       }
     }
   ],

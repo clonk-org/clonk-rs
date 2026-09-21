@@ -859,7 +859,7 @@ mod tests {
     fn every_presentation_capture_is_held_by_the_landing_gate() {
         assert_eq!(
             screens().len(),
-            19,
+            23,
             "the promised screen set must stay complete"
         );
         assert!(
