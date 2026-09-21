@@ -322,13 +322,18 @@ impl<'a> Parser<'a> {
                         // and goes on; the parser pass never runs that match
                         // (`C4AulParse.cpp:1706-1709,1400-1427`), so the
                         // function keeps every statement and no error chunk.
-                        let found = self
-                            .peek()
-                            .map_or((0, 0), |token| (token.line, token.column));
+                        let (found, line, column) =
+                            self.peek().map_or(("identifier", 0, 0), |token| {
+                                let found = match token.kind {
+                                    TokenKind::Symbol(Symbol::Colon) => "':'",
+                                    _ => "identifier",
+                                };
+                                (found, token.line, token.column)
+                            });
                         self.non_fatal_diagnostics.push(ParseError::new(
-                            "'}' expected, but found identifier",
-                            found.0,
-                            found.1,
+                            format!("'}}' expected, but found {found}"),
+                            line,
+                            column,
                         ));
                         None
                     }
@@ -903,12 +908,19 @@ impl<'a> Parser<'a> {
         let is_func =
             |kind: &TokenKind| matches!(kind, TokenKind::Identifier(name) if name == "func");
         if is_func(&self.peek()?.kind) {
-            let names_a_value = self.function_value_names.contains("func")
-                || self.script_var_decls.iter().any(|decl| {
-                    decl.name == "func"
-                        && matches!(decl.kind, VarDeclKind::Local | VarDeclKind::Static)
-                });
-            return Ok(!names_a_value);
+            return Ok(!self.names_a_value("func"));
+        }
+        // A bare old-style label. C4Aul reaches this only for an identifier
+        // that names no value, and its preparser has shifted past the name by
+        // the time it sees the colon (`C4AulParse.cpp:2231-2238`), so the name
+        // is consumed here and declaration parsing resumes at the colon: that
+        // labelled function is never declared.
+        if let TokenKind::Identifier(name) = &self.peek()?.kind {
+            let name = name.clone();
+            if !self.names_a_value(&name) && self.identifier_is_followed_by_colon()? {
+                self.consume()?;
+                return Ok(true);
+            }
         }
         if !matches!(
             self.peek()?.kind,
@@ -924,6 +936,26 @@ impl<'a> Parser<'a> {
             self.expect_symbol(Symbol::Colon, "':' expected")?;
         }
         Ok(true)
+    }
+
+    /// Whether C4Aul would match `name` as a parameter, a `var` of this
+    /// function, or a script local or static, all of which it tries before it
+    /// considers a declaration or a label (`C4AulParse.cpp:1975-2004`).
+    fn names_a_value(&self, name: &str) -> bool {
+        self.function_value_names.contains(name)
+            || self.script_var_decls.iter().any(|decl| {
+                decl.name == name && matches!(decl.kind, VarDeclKind::Local | VarDeclKind::Static)
+            })
+    }
+
+    fn identifier_is_followed_by_colon(&mut self) -> Result<bool, ParseError> {
+        self.begin_speculative();
+        let result = (|| {
+            self.consume()?;
+            self.check_symbol(Symbol::Colon)
+        })();
+        self.reset_speculative();
+        result
     }
 
     /// The empty statement `parse_statement` hands back where the next
@@ -3209,6 +3241,47 @@ mod tests {
         assert_eq!(
             diagnostics.first().map(|error| error.message().to_string()),
             Some("'}' expected, but found identifier".to_string())
+        );
+    }
+
+    /// A bare old-style label ends the body as well. The preparser has shifted
+    /// past the name before it sees the colon (`C4AulParse.cpp:2231-2238`), so
+    /// `Parse_Script` resumes at the colon and that labelled function is never
+    /// declared; its statements are refused token by token until the next
+    /// top-level `Name:`, which is declared as usual. The parser pass ends the
+    /// first function cleanly on the same label (`:2216-2229`). InExantros'
+    /// second act is this shape: `func Initialize() {` is never closed, and
+    /// `RelaunchPlayer:`, `InitializePlayer:` and a dozen more follow.
+    #[test]
+    fn a_bare_label_inside_a_body_ends_it_and_only_that_function_is_lost() {
+        let source = "#strict\nfunc Initialize() {\n  Setup();\n  return(1);\n\nRelaunchPlayer:\n  Relaunch();\n  return(1);\n\nInitializePlayer:\n  Place();\n  return(1);\n\nWin:\n  return(2);\n";
+        let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+
+        let names = script
+            .functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["Initialize", "InitializePlayer", "Win"],
+            "diagnostics: {diagnostics:?}"
+        );
+        let first = &script.functions[0].body;
+        assert_eq!(
+            first.len(),
+            2,
+            "Initialize keeps both statements: {first:?}"
+        );
+        assert!(
+            !first
+                .iter()
+                .any(|statement| matches!(statement, Stmt::ParseError { .. })),
+            "and carries no error: {first:?}"
+        );
+        assert_eq!(
+            diagnostics.first().map(|error| error.message().to_string()),
+            Some("'}' expected, but found ':'".to_string())
         );
     }
 
