@@ -6483,6 +6483,7 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
     let timeout = started + Duration::from_secs(10);
     let mut checkpoints = [None; 8];
     let mut lobby_rendered = false;
+    let mut render_duration = Duration::ZERO;
     loop {
         host.test_update();
         client.test_update();
@@ -6629,8 +6630,19 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
             status_acknowledged,
             startup_connection_finished,
         ];
+        let elapsed = started.elapsed();
+        for (checkpoint, ready) in checkpoints.iter_mut().zip(state_ready) {
+            if ready && checkpoint.is_none() {
+                *checkpoint = Some(elapsed);
+            }
+        }
         if state_ready.into_iter().all(|ready| ready) && !lobby_rendered {
+            let render_started = Instant::now();
             lobby_rendered = client.test_render(&mut client_frame);
+            render_duration += render_started.elapsed();
+            if lobby_rendered {
+                checkpoints[7] = Some(started.elapsed());
+            }
         }
         let ready = [
             lobby_visible,
@@ -6643,11 +6655,6 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
             lobby_rendered,
         ];
         let elapsed = started.elapsed();
-        for (checkpoint, ready) in checkpoints.iter_mut().zip(ready) {
-            if ready && checkpoint.is_none() {
-                *checkpoint = Some(elapsed);
-            }
-        }
         if ready.into_iter().all(|ready| ready) {
             break;
         }
@@ -6667,7 +6674,14 @@ fn initial_network_game_join_fully_loads_the_client_lobby_within_500ms() {
     }
 
     let elapsed = started.elapsed();
-    eprintln!("initial full-lobby network game join completed in {elapsed:?}");
+    eprintln!(
+        "initial full-lobby network game join completed in {elapsed:?}; render={render_duration:?}; coverage={}; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}",
+        cfg!(coverage)
+    );
+    // cargo-llvm-cov instruments both the join and software rendering. Keep
+    // all eight readiness checks and the progress deadline in those builds,
+    // but enforce the product's 500ms performance contract without coverage.
+    #[cfg(not(coverage))]
     main_assert!(
         elapsed <= Duration::from_millis(500),
         "initial network game join took {elapsed:?}, exceeding the inclusive 500ms lobby budget; checkpoints [lobby, scenario, roster, PlayerInfo, resources, status ack, startup connection, render] = {checkpoints:?}"

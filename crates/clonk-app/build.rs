@@ -14,6 +14,7 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rustc-check-cfg=cfg(coverage)");
     println!(
         "cargo:rustc-env=CLONK_TARGET_TRIPLE={}",
         std::env::var("TARGET").unwrap_or_default()
