@@ -43,6 +43,10 @@ EXPECTED_CASE_IDS = (
     "startup-options-scale-decremented-minimum",
     "startup-options-reset-reference",
     "startup-options-reset-minimum",
+    "startup-options-key-keyboard-reference",
+    "startup-options-key-keyboard-minimum",
+    "startup-options-key-gamepad-reference",
+    "startup-options-key-gamepad-minimum",
 )
 EXPECTED_LAYOUT_IDS = frozenset(
     (*EXPECTED_CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
@@ -1356,6 +1360,23 @@ class PinAndGitTests(unittest.TestCase):
 
 
 class InventoryAndPngTests(unittest.TestCase):
+    def test_key_capture_dimensions_bind_both_devices_to_each_audit_extent(self):
+        # C4StartupOptionsDlg.cpp:175-182: regular-sized keyboard/gamepad
+        # dialogs are compared at both extents without changing config bytes.
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "key.png"
+            for device in ("keyboard", "gamepad"):
+                image.write_bytes(png_bytes(width=640, height=480))
+                self.assertEqual(
+                    MODULE.validate_png(image, f"startup-options-key-{device}-minimum")["width"],
+                    640,
+                )
+                with self.assertRaisesRegex(MODULE.AcquisitionFailure, "PNG geometry"):
+                    MODULE.validate_png(image, f"startup-options-key-{device}-reference")
+                image.write_bytes(png_bytes())
+                with self.assertRaisesRegex(MODULE.AcquisitionFailure, "PNG geometry"):
+                    MODULE.validate_png(image, f"startup-options-key-{device}-minimum")
+
     def test_reset_modal_capture_dimensions_are_bound_to_the_case(self):
         # C4StartupOptionsDlg.cpp:1073-1091: the real reset dialog is captured
         # at both audit extents, without changing the canonical config bytes.
@@ -1480,7 +1501,7 @@ class InventoryAndPngTests(unittest.TestCase):
             write_capture_set(second)
 
             artifacts = MODULE.validate_duplicate_runs(first, second)
-            self.assertEqual(len(artifacts), 30)
+            self.assertEqual(len(artifacts), 34)
 
             (second / "gameplay.png").write_bytes(png_bytes(sample_byte=1))
             with self.assertRaisesRegex(MODULE.AcquisitionFailure, "gameplay.png"):
@@ -2395,6 +2416,10 @@ class AcquisitionOrchestrationTests(unittest.TestCase):
             "startup-options-scale-decremented-minimum": "/startup:options",
             "startup-options-reset-reference": "/startup:options",
             "startup-options-reset-minimum": "/startup:options",
+            "startup-options-key-keyboard-reference": "/startup:options",
+            "startup-options-key-keyboard-minimum": "/startup:options",
+            "startup-options-key-gamepad-reference": "/startup:options",
+            "startup-options-key-gamepad-minimum": "/startup:options",
         }
         self.assertEqual(MODULE.CPP_STARTUP_ARGUMENTS, expected_startup_arguments)
         self.assertEqual(tuple(MODULE.CPP_STARTUP_ARGUMENTS), (*EXPECTED_CASE_IDS[:6], *EXPECTED_CASE_IDS[13:]))

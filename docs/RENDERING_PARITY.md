@@ -261,6 +261,17 @@ producer answers the dialog: the evidence pins its notification icon, Yes/No
 order, default Yes focus, caption, body layout, and translucent composition
 while leaving reset and exit behavior to the existing interaction tests.
 
+Keyboard and gamepad key-capture modals use the same backdrop at both audit
+extents. The C++ producer selects the corresponding Options sheet and invokes
+the unchanged `ControlConfigArea::OnCtrlKeyBtn` for Up / Jump in control set 1
+(`C4StartupOptionsDlg.cpp:394-413`). The capture records the actual
+`KeySelDialog` inside `Screen::ShowModalDlg`; Rust dispatches the corresponding
+production `BeginControlCapture` action. Neither producer accepts a binding.
+Whole-frame comparison pins the caption, prompt layout, device icon, focused
+Cancel button, close glyph, cursor, translucent composition, and gamma. The
+constructor's device-specific text and icons are at
+`C4StartupOptionsDlg.cpp:175-182`.
+
 ### Audited capture workflow
 
 The evidence gate does not accept manual F9 screenshots. The launcher archives

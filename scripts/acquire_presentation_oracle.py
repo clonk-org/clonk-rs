@@ -161,6 +161,10 @@ CASE_IDS = (
     "startup-options-scale-decremented-minimum",
     "startup-options-reset-reference",
     "startup-options-reset-minimum",
+    "startup-options-key-keyboard-reference",
+    "startup-options-key-keyboard-minimum",
+    "startup-options-key-gamepad-reference",
+    "startup-options-key-gamepad-minimum",
 )
 LAYOUT_CASE_IDS = frozenset(
     (*CASE_IDS[:6], "hud", "ingame-menu", "object-menu", "gameplay", "evaluation")
@@ -225,6 +229,10 @@ EXPECTED_GEOMETRY = {
         "startup-options-scale-decremented-minimum": [640, 480],
         "startup-options-reset-reference": [1280, 720],
         "startup-options-reset-minimum": [640, 480],
+        "startup-options-key-keyboard-reference": [1280, 720],
+        "startup-options-key-keyboard-minimum": [640, 480],
+        "startup-options-key-gamepad-reference": [1280, 720],
+        "startup-options-key-gamepad-minimum": [640, 480],
     },
 }
 EXPECTED_POINTER_INPUT = {
@@ -267,6 +275,10 @@ CPP_STARTUP_ARGUMENTS = {
     "startup-options-scale-decremented-minimum": "/startup:options",
     "startup-options-reset-reference": "/startup:options",
     "startup-options-reset-minimum": "/startup:options",
+    "startup-options-key-keyboard-reference": "/startup:options",
+    "startup-options-key-keyboard-minimum": "/startup:options",
+    "startup-options-key-gamepad-reference": "/startup:options",
+    "startup-options-key-gamepad-minimum": "/startup:options",
 }
 CPP_RUNTIME_SCENARIOS = {
     "network-lobby": "Tutorial.c4f/Tutorial01.c4s",
@@ -1223,6 +1235,8 @@ def capture_dimensions(case_id: str | None) -> tuple[int, int]:
         "startup-options-scale-initial-minimum",
         "startup-options-scale-decremented-minimum",
         "startup-options-reset-minimum",
+        "startup-options-key-keyboard-minimum",
+        "startup-options-key-gamepad-minimum",
     }:
         return (640, 480)
     return (CAPTURE_WIDTH, CAPTURE_HEIGHT)
