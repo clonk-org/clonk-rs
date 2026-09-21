@@ -3689,13 +3689,24 @@ where
     if !report_progress(100) {
         return None;
     }
-    Some(merge_frontend_scenarios(
+    let mut entries = merge_frontend_scenarios(
         combined_entries
             .into_iter()
             .map(|(entry, label)| FrontendScenario::from_resource(entry, &label))
             .collect(),
         alphabetical_sorting,
-    ))
+    );
+    // Discovery already runs off the UI thread. Retain the scenario cores
+    // here so even the first search needs no scenario or archive reads.
+    let loader_languages =
+        classic_loader_language_sequence(paths).map_err(|error| error.to_string());
+    prepare_scenario_selector_metadata(
+        &mut entries,
+        &loader_languages,
+        &language_packs,
+        &mut || report_progress(100),
+    )
+    .then_some(entries)
 }
 
 /// Resolves the physical C4Group file and child path represented by a

@@ -3920,3 +3920,172 @@ fn scensel_enhanced_search_timing_report() {
         queries.len()
     );
 }
+
+// C4ScenarioListLoader::Entry::Load keeps the title facet empty when no
+// Title image exists (C4StartupScenSelDlg.cpp:532-534). The classic book
+// draws its own icons; constructing its rows needs no generated pixel art.
+#[test]
+fn scensel_rows_without_artwork_do_not_generate_preview_pixels() {
+    let mut entry = FrontendScenario::from_command_line(Path::new("Bare.c4s"));
+    entry.preview = None;
+    let rows = build_menu_entries(&[entry], false);
+    main_assert!(rows[0].preview.is_none());
+}
+
+#[test]
+#[ignore = "manual scenario-search timing probe over the installed catalog and complete submit path"]
+fn scensel_installed_catalog_search_timing_report() {
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    configure_test_startup_participant(&paths, user_data.path());
+    let started = Instant::now();
+    let scenarios = load_frontend_scenarios_from_paths(&paths);
+    println!("discovery: {:?}", started.elapsed());
+    let menu =
+        StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None).test_value();
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    app.menu_state = MenuState::new(menu, scenarios.clone());
+    app.scensel.catalog = build_scenario_catalog(&scenarios);
+    app.open_scenario_browser();
+    println!(
+        "catalog: {} entries, {} without previews",
+        app.scensel.catalog.len(),
+        app.scensel
+            .catalog
+            .values()
+            .filter(|entry| entry.preview.is_none())
+            .count()
+    );
+    install_classic_test_assets(&mut app);
+    let mut frame = vec![0_u8; 800 * 600 * 4];
+    app.render(&mut frame).test_value();
+    for query in [
+        "c", "cl", "clo", "clon", "clonk", "tower", "to", "t", "", "c",
+    ] {
+        app.menu_state.set_search_text(query);
+        let started = Instant::now();
+        app.submit_scenario_search().test_value();
+        let submit = started.elapsed();
+        let started = Instant::now();
+        app.render(&mut frame).test_value();
+        let render = started.elapsed();
+        println!(
+            "{query:?}: {} hits submit={submit:?} render={render:?} total={:?}",
+            app.menu_state.visible_entries().len(),
+            submit + render
+        );
+    }
+}
+
+// C4StartupScenSelDlg.cpp:689-719 retains C4S while loading each catalog
+// entry; CanOpen reads that stored core at 736-802 instead of reopening it.
+// The product search must keep those loaded rows usable without disk I/O,
+// while activation and F5 still inspect the current file.
+#[test]
+fn scensel_search_retains_loaded_metadata_until_rediscovery_but_start_rechecks() {
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    configure_test_startup_participant(&paths, user_data.path());
+    let path = paths.scenario_dir().join("SearchSnapshot.c4s");
+    fs::create_dir_all(&path).test_value();
+    let core = "[Head]\nTitle=Search Snapshot\nMinPlayer=1\nMaxPlayer=4\nForcedNoCrew=2\n";
+    fs::write(path.join("Scenario.txt"), core).test_value();
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    app.open_scenario_browser();
+    app.menu_state.set_search_text("Search Snapshot");
+    app.submit_scenario_search().test_value();
+    main_assert_eq!(app.scensel.entry_enabled.get("SearchSnapshot.c4s") => Some(&true));
+
+    let parked = user_data.path().join("Parked.c4s");
+    fs::rename(&path, &parked).test_value();
+    app.menu_state.set_search_text("Search Snap");
+    app.submit_scenario_search().test_value();
+    main_assert_eq!(app.scensel.entry_enabled.get("SearchSnapshot.c4s") => Some(&true),
+        "typing must use the catalog snapshot without reopening the scenario");
+    main_assert_eq!(app.scenario_game_options.values().selector_fair_crew_constraint => FairCrewConstraint::ForceNormal);
+    main_assert!(
+        app.scenario_selector_open_error(
+            app.menu_state.selected_scenario().test_value(),
+            ScenarioSelectorMode::Local
+        )
+        .is_err(),
+        "starting must still inspect the file even when its row was cached"
+    );
+
+    fs::rename(&parked, &path).test_value();
+    fs::write(
+        path.join("Scenario.txt"),
+        core.replace("MinPlayer=1", "MinPlayer=2"),
+    )
+    .test_value();
+    app.reload_scenario_selector(Some("SearchSnapshot.c4s"), true, true)
+        .test_value();
+    wait_for_scenario_selector_discovery(&mut app);
+    main_assert_eq!(app.scensel.entry_enabled.get("SearchSnapshot.c4s") => Some(&false),
+        "rediscovery replaces the cached player limit");
+    persist_config_value(&paths, "General", "Participants", "One.c4p;Two.c4p").test_value();
+    app.submit_scenario_search().test_value();
+    main_assert_eq!(app.scensel.entry_enabled.get("SearchSnapshot.c4s") => Some(&true),
+        "the participant count stays live even with a cached scenario core");
+}
+
+// C4StartupScenSelDlg.cpp:743-800 checks live mission access, rejects
+// network replays, allows too-few-player network starts, and lifts a saved
+// game's maximum to its minimum. Cached label decisions must match the
+// unchanged start-time inspection across those branches.
+#[test]
+fn scensel_cached_rows_match_live_start_rules_in_both_modes() {
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let cases = [
+        ("Normal", "MinPlayer=2\nMaxPlayer=4\n"),
+        ("Save", "MinPlayer=2\nMaxPlayer=0\nSaveGame=1\n"),
+        ("Replay", "MinPlayer=2\nMaxPlayer=4\nReplay=1\n"),
+        ("Locked", "MinPlayer=2\nMaxPlayer=4\nMissionAccess=Secret\n"),
+    ];
+    for (name, core) in cases {
+        let path = paths.scenario_dir().join(format!("CacheRules{name}.c4s"));
+        fs::create_dir_all(&path).test_value();
+        fs::write(
+            path.join("Scenario.txt"),
+            format!("[Head]\nTitle=CacheRules {name}\n{core}"),
+        )
+        .test_value();
+    }
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    app.open_scenario_browser();
+    app.menu_state.set_search_text("CacheRules");
+    for mode in [
+        ScenarioSelectorMode::Local,
+        ScenarioSelectorMode::NetworkHost,
+    ] {
+        app.scensel.mode = mode;
+        for granted in [false, true] {
+            app.config.mission_access.update_modules("Secret", !granted);
+            for count in [0, 1, 2, 5] {
+                let participants = (0..count)
+                    .map(|i| format!("Player{i}.c4p"))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                persist_config_value(&paths, "General", "Participants", participants).test_value();
+                app.submit_scenario_search().test_value();
+                main_assert_eq!(app.menu_state.visible_entries().len() => 4);
+                for entry in app.menu_state.visible_entries() {
+                    main_assert!(entry.selector_metadata.is_some());
+                    let live = app
+                        .scenario_selector_open_error(entry, mode)
+                        .test_value()
+                        .is_none();
+                    main_assert_eq!(app.scensel.entry_enabled.get(&entry.identifier).copied() => Some(live),
+                        "{}: mode={mode:?}, granted={granted}, participants={count}", entry.identifier);
+                }
+            }
+        }
+    }
+}

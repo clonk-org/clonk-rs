@@ -5,6 +5,88 @@
 
 use super::*;
 
+/// C4ScenarioListLoader retains C4S for CanOpen rather than reading it on
+/// every UpdateList (C4StartupScenSelDlg.cpp:689-719,736-802). Share the
+/// immutable snapshot across catalog/search-row clones; live config is not
+/// part of it, and the start-time validation does not consult it.
+#[derive(Debug)]
+pub(crate) struct ScenarioSelectorMetadata {
+    head: Result<ScenarioLoaderHead, String>,
+    fair_crew: FairCrewConstraint,
+}
+
+impl ScenarioSelectorMetadata {
+    pub(crate) fn can_open(
+        &self,
+        mode: ScenarioSelectorMode,
+        mission_access: &MissionAccessStore,
+        participant_count: &Result<i32, String>,
+    ) -> Result<bool, String> {
+        let head = self.head.as_ref().map_err(Clone::clone)?;
+        if !head.mission_access().is_empty() && !mission_access.contains(head.mission_access()) {
+            return Ok(false);
+        }
+        if head.is_replay() {
+            return Ok(mode == ScenarioSelectorMode::Local);
+        }
+        let count = *participant_count.as_ref().map_err(Clone::clone)?;
+        let maximum = if head.is_save_game() {
+            head.max_players().max(head.min_players())
+        } else {
+            head.max_players()
+        };
+        Ok(
+            (mode == ScenarioSelectorMode::NetworkHost || count >= head.min_players())
+                && count <= maximum,
+        )
+    }
+}
+
+pub(crate) fn prepare_scenario_selector_metadata(
+    entries: &mut [FrontendScenario],
+    languages: &Result<Vec<String>, String>,
+    language_packs: &LanguagePacks,
+    keep_loading: &mut impl FnMut() -> bool,
+) -> bool {
+    for entry in entries {
+        if !keep_loading() {
+            return false;
+        }
+        entry.selector_metadata = None;
+        if let Some(path) = entry
+            .path
+            .as_deref()
+            .filter(|_| entry.kind == ScenarioKind::Scenario)
+        {
+            let head = languages
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|languages| {
+                    let group = Group::open(path).map_err(|error| error.to_string())?;
+                    ScenarioLoaderHead::load_from_group_with_languages_and_packs(
+                        &group,
+                        languages,
+                        language_packs,
+                    )
+                    .map_err(|error| error.to_string())
+                });
+            entry.selector_metadata = Some(Arc::new(ScenarioSelectorMetadata {
+                head,
+                fair_crew: scenario_fair_crew_constraint(Some(entry)),
+            }));
+        }
+        if !prepare_scenario_selector_metadata(
+            &mut entry.children,
+            languages,
+            language_packs,
+            keep_loading,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
 impl FrontendScenario {
     pub(crate) fn from_command_line(path: &Path) -> Self {
         let title = path
@@ -21,6 +103,7 @@ impl FrontendScenario {
             is_editable: false,
             is_playable: true,
             mission_access: None,
+            selector_metadata: None,
             path: Some(path.to_path_buf()),
             source_paths: vec![path.to_path_buf()],
             root_label: None,
@@ -39,10 +122,6 @@ impl FrontendScenario {
     }
 
     pub(crate) fn to_ui_entry(&self) -> ScenarioEntry {
-        let preview = self
-            .preview
-            .clone()
-            .or_else(|| Some(generate_preview_placeholder(self.kind, &self.title)));
         ScenarioEntry {
             identifier: self.identifier.clone(),
             title: self.title.clone(),
@@ -51,7 +130,7 @@ impl FrontendScenario {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             location: self.location_label(),
-            preview,
+            preview: self.preview.clone(),
         }
     }
 
@@ -105,6 +184,7 @@ impl FrontendScenario {
             is_editable,
             is_playable,
             mission_access,
+            selector_metadata: None,
             path: Some(path),
             source_paths,
             root_label: Some(root_label.to_string()),
@@ -166,6 +246,7 @@ impl FrontendScenario {
             is_editable: true,
             is_playable: true,
             mission_access: None,
+            selector_metadata: None,
             path: None,
             source_paths: Vec::new(),
             root_label: None,
@@ -1053,6 +1134,7 @@ impl SavedScenarioInfo {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             mission_access: None,
+            selector_metadata: None,
             path: self.path.clone(),
             source_paths: Vec::new(),
             root_label: self.root_label.clone(),
@@ -4806,6 +4888,9 @@ pub(crate) fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> Game
 pub(crate) fn scenario_fair_crew_constraint(
     scenario: Option<&FrontendScenario>,
 ) -> FairCrewConstraint {
+    if let Some(metadata) = scenario.and_then(|scenario| scenario.selector_metadata.as_deref()) {
+        return metadata.fair_crew;
+    }
     let Some(path) = scenario.and_then(|scenario| scenario.path.as_deref()) else {
         return FairCrewConstraint::Free;
     };

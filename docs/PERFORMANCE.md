@@ -78,6 +78,33 @@ For runtime work, report phases independently:
 Use medians for compile/load and p50/p95/p99 for repeated simulation/render
 samples. Always retain sample counts and raw samples; a single mean hides stalls.
 
+## Scenario search latency
+
+Measure the full scenario-search submission and the following classic-book
+render with the installed catalog, including packed folders:
+
+```sh
+cargo nextest run -p clonk-app --run-ignored only \
+  -E 'test(scensel_installed_catalog_search_timing_report)' --nocapture
+```
+
+The probe reports discovery separately, then types, narrows, broadens, and
+clears queries at 800×600. The first query includes search-index construction.
+The older `scensel_enhanced_search_timing_report` uses synthetic entries with
+existing previews and measures the index/list alone; it cannot detect scenario
+file inspection on the application input path.
+
+Keep the initial query (including index construction), warm queries, and
+catalog discovery separate in reported results. Search submission includes
+ranking, row construction, availability labels, and the selected scenario's
+game-option constraint; render timing excludes window presentation/scanout.
+
+The selector retains immutable scenario metadata during background discovery.
+F5 replaces that catalog snapshot. Mission access and participant counts remain
+live, and starting a scenario performs the uncached file validation. This moves
+scenario/archive inspection out of typing; include the additional discovery
+work when measuring the cost of opening or refreshing the catalog.
+
 ## Baselines and regression gates
 
 There is no portable compile or runtime baseline. Timings from an arbitrary

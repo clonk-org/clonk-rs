@@ -1011,14 +1011,34 @@ impl GameApp {
             return;
         }
         let selector_mode = self.scensel.mode;
+        let participant_count = self
+            .app_paths
+            .as_ref()
+            .map(startup_participant_module_count)
+            .transpose()
+            .map(|count| count.unwrap_or_default())
+            .map_err(|error| error.to_string());
         self.scensel.entry_enabled = self
             .menu_state
             .visible_entries()
             .iter()
             .map(|scenario| {
                 let identifier = scenario.identifier.clone();
-                let enabled = match self.scenario_selector_open_error(scenario, selector_mode) {
-                    Ok(error) => error.is_none(),
+                let inspection = if !scenario.has_mission_access(&self.config.mission_access) {
+                    Ok(false)
+                } else if let Some(metadata) = scenario
+                    .selector_metadata
+                    .as_deref()
+                    .filter(|_| self.app_paths.is_some())
+                {
+                    metadata.can_open(selector_mode, &self.config.mission_access, &participant_count)
+                } else {
+                    self.scenario_selector_open_error(scenario, selector_mode)
+                        .map(|error| error.is_none())
+                        .map_err(|error| error.to_string())
+                };
+                let enabled = match inspection {
+                    Ok(enabled) => enabled,
                     Err(error) => {
                         tracing::error!(scenario = %identifier, %error, "failed to inspect scenario CanOpen state");
                         false
