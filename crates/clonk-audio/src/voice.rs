@@ -1110,7 +1110,7 @@ impl CaptureFrameSink for ProcessedCaptureSink {
             return;
         }
         self.last_timing = Some(timing);
-        let level = self.processing.process(frame);
+        let level = self.processing.process_at(frame, timing.captured_at);
         let samples = std::array::from_fn(|index| voice_f32_to_i16(frame[index]));
         match self.encoder.encode(&samples) {
             Ok(payload) => self.callbacks.send_frame(VoiceInputFrame {

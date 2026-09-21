@@ -125,10 +125,19 @@ impl VoiceProcessing {
     /// Measuring after it would hand the voice-activation gate a signal in
     /// which every frame is equally loud, and the gate would hold the
     /// microphone open on a hum.
+    #[cfg(test)]
     pub(crate) fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) -> f32 {
+        self.process_at(frame, std::time::Instant::now())
+    }
+
+    pub(crate) fn process_at(
+        &mut self,
+        frame: &mut [f32; VOICE_FRAME_SAMPLES],
+        captured_at: std::time::Instant,
+    ) -> f32 {
         let config = self.switches.get();
         if config.echo_cancellation {
-            self.echo.process(frame);
+            self.echo.process_at(frame, captured_at);
         }
         if config.noise_suppression {
             self.noise.process(frame);

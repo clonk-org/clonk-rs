@@ -12,6 +12,8 @@ mod voice_codec;
 #[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 mod voice_echo;
 #[cfg_attr(not(feature = "cpal"), allow(dead_code))]
+mod voice_output_reference;
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 mod voice_processing;
 mod wav;
 

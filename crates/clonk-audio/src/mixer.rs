@@ -880,6 +880,7 @@ pub struct AudioMixer {
     sample_rate: u32,
     resampling_mode: ResamplingMode,
     inert: bool,
+    output_reference: Option<VoiceEchoReference>,
 }
 
 #[derive(Debug)]
@@ -1125,6 +1126,7 @@ impl AudioMixer {
             sample_rate,
             resampling_mode,
             inert,
+            output_reference: None,
         }
     }
 
@@ -1505,6 +1507,9 @@ impl AudioMixer {
     /// thing that makes the mixer publish it; a session that never opens a
     /// capture never pays for it.
     pub fn voice_echo_reference(&self) -> VoiceEchoReference {
+        if let Some(reference) = &self.output_reference {
+            return reference.clone();
+        }
         let mut state = self.state.lock().unwrap();
         state
             .echo_tap

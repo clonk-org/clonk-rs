@@ -12,6 +12,7 @@ struct OutputBuffer {
     callback_frames: AtomicUsize,
     underruns: AtomicU64,
     errors: crossbeam_queue::ArrayQueue<cpal::Error>,
+    reference: Arc<crate::voice_output_reference::OutputReference>,
 }
 
 impl OutputBuffer {
@@ -23,6 +24,7 @@ impl OutputBuffer {
             callback_frames: AtomicUsize::new(CLASSIC_OUTPUT_BUFFER_FRAMES as usize),
             underruns: AtomicU64::new(0),
             errors: crossbeam_queue::ArrayQueue::new(16),
+            reference: crate::voice_output_reference::OutputReference::new(sample_rate),
         })
     }
 }
@@ -32,7 +34,12 @@ struct OutputCallback {
 }
 
 impl OutputCallback {
+    #[cfg(test)]
     fn render<T: SampleWrite>(&mut self, data: &mut [T], channels: usize) {
+        self.render_at(data, channels, Instant::now());
+    }
+
+    fn render_at<T: SampleWrite>(&mut self, data: &mut [T], channels: usize, playback_at: Instant) {
         if channels == 0 {
             data.iter_mut().for_each(SampleWrite::write_zero);
             return;
@@ -45,6 +52,7 @@ impl OutputCallback {
             data.iter_mut().for_each(SampleWrite::write_zero);
             return;
         }
+        let first_position = self.buffer.reference.written();
         let mut underrun = false;
         for output in data.chunks_mut(channels) {
             let pcm = if self.buffer.active.load(Ordering::Acquire) {
@@ -56,7 +64,11 @@ impl OutputCallback {
                 [0.0; 2]
             };
             write_stereo_frame(output, pcm[0], pcm[1]);
+            self.buffer.reference.push((pcm[0] + pcm[1]) * 0.5);
         }
+        self.buffer
+            .reference
+            .publish_timing(first_position, playback_at);
         if underrun {
             self.buffer.underruns.fetch_add(1, Ordering::Relaxed);
         }
@@ -86,8 +98,16 @@ where
     device
         .build_output_stream(
             config,
-            move |data: &mut [T], _| {
-                callback.render(data, output_channels);
+            move |data: &mut [T], info| {
+                let now = Instant::now();
+                let timestamp = info.timestamp();
+                let playback_at = if timestamp.playback >= timestamp.callback {
+                    now.checked_add(timestamp.playback.duration_since(timestamp.callback))
+                } else {
+                    now.checked_sub(timestamp.callback.duration_since(timestamp.playback))
+                }
+                .unwrap_or(now);
+                callback.render_at(data, output_channels, playback_at);
             },
             move |error| {
                 if !matches!(
@@ -118,12 +138,14 @@ impl CpalBackend {
         resampling_mode: ResamplingMode,
         make_driver: impl FnOnce() -> D + Send + 'static,
     ) -> Result<(Arc<AudioMixer>, Self), AudioError> {
-        let mixer = Arc::new(AudioMixer::new_with_resampling(
+        let control = OutputControl::new();
+        let mut mixer = AudioMixer::new_with_resampling(
             CLASSIC_OUTPUT_SAMPLE_RATE,
             max_channels,
             resampling_mode,
-        ));
-        let control = OutputControl::new();
+        );
+        mixer.output_reference = Some(control.state.lock().unwrap().reference.clone());
+        let mixer = Arc::new(mixer);
         let backend = Self {
             control: control.clone(),
         };
@@ -434,10 +456,12 @@ struct OutputState {
     buffer: Option<Arc<OutputBuffer>>,
     status: AudioOutputStatus,
     devices: Vec<AudioOutputDevice>,
+    reference: VoiceEchoReference,
 }
 
 impl OutputState {
     fn invalidate(&mut self) {
+        self.reference.set_output(None);
         if let Some(buffer) = self.buffer.take() {
             buffer.active.store(false, Ordering::Release);
         }
@@ -454,6 +478,7 @@ impl OutputControl {
                 buffer: None,
                 status: AudioOutputStatus::Opening,
                 devices: Vec::new(),
+                reference: VoiceEchoReference::for_output(),
             }),
         })
     }
@@ -578,9 +603,7 @@ impl<D: OutputDriver> OutputManager<D> {
         if self.stream.is_some() && self.device == target {
             return;
         }
-        if let Some(buffer) = state.buffer.take() {
-            buffer.active.store(false, Ordering::Release);
-        }
+        state.invalidate();
         self.device = None;
         state.status = if target.is_some() {
             AudioOutputStatus::Opening
@@ -609,6 +632,7 @@ impl<D: OutputDriver> OutputManager<D> {
                     device: id.clone(),
                     sample_rate: buffer.sample_rate,
                 };
+                state.reference.set_output(Some(buffer.reference.clone()));
                 state.buffer = Some(buffer);
                 self.device = Some(id);
                 self.stream = Some(stream);

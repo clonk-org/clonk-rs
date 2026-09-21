@@ -7,7 +7,10 @@
 //! audio callback may ever wait on the other.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use crate::voice_output_reference::OutputReference;
 
 use aec3::api::control::EchoControl;
 use aec3::audio_processing::aec3::echo_canceller3::EchoCanceller3;
@@ -47,6 +50,7 @@ struct EchoRing {
 #[derive(Clone, Debug)]
 pub struct VoiceEchoReference {
     ring: Arc<EchoRing>,
+    output: Option<Arc<Mutex<Option<Arc<OutputReference>>>>>,
 }
 
 /// The mixer's end of the reference: downmixes and resamples the output it is
@@ -62,6 +66,8 @@ pub(crate) struct VoiceEchoTap {
 pub(crate) struct EchoReferenceReader {
     reference: VoiceEchoReference,
     position: u64,
+    active_output: Option<Arc<OutputReference>>,
+    output_epoch: u64,
 }
 
 /// WebRTC AEC3 tracks render-to-capture delay instead of requiring the echo
@@ -91,6 +97,20 @@ impl VoiceEchoReference {
                     .collect(),
                 written: AtomicU64::new(0),
             }),
+            output: None,
+        }
+    }
+
+    pub(crate) fn for_output() -> Self {
+        Self {
+            output: Some(Arc::new(Mutex::new(None))),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn set_output(&self, reference: Option<Arc<OutputReference>>) {
+        if let Some(output) = &self.output {
+            *output.lock().unwrap() = reference;
         }
     }
 
@@ -152,7 +172,35 @@ impl EchoReferenceReader {
         Self {
             reference,
             position,
+            active_output: None,
+            output_epoch: 0,
         }
+    }
+
+    pub(crate) fn read_at(
+        &mut self,
+        far: &mut [f32; VOICE_FRAME_SAMPLES],
+        captured_at: Instant,
+    ) -> bool {
+        if let Some(output) = &self.reference.output {
+            let next = output.lock().unwrap().clone();
+            let epoch = next.as_ref().map_or(0, |output| output.epoch());
+            let changed = match (&self.active_output, &next) {
+                (Some(old), Some(new)) => !Arc::ptr_eq(old, new) || self.output_epoch != epoch,
+                (None, None) => false,
+                _ => true,
+            };
+            self.active_output = next;
+            self.output_epoch = epoch;
+            if let Some(output) = &self.active_output {
+                output.read_at(far, captured_at);
+            } else {
+                far.fill(0.0);
+            }
+            return changed;
+        }
+        self.read(far);
+        false
     }
 
     /// The far-end block that lines up with the microphone frame being
@@ -186,11 +234,25 @@ impl EchoCanceller {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) {
-        let (Some(reader), Some(processor)) = (&mut self.reader, &mut self.processor) else {
+        self.process_at(frame, Instant::now());
+    }
+
+    pub(crate) fn process_at(
+        &mut self,
+        frame: &mut [f32; VOICE_FRAME_SAMPLES],
+        captured_at: Instant,
+    ) {
+        let Some(reader) = &mut self.reader else {
             return;
         };
-        reader.read(&mut self.far);
+        if reader.read_at(&mut self.far, captured_at) {
+            self.processor = Some(Box::new(EchoProcessor::new()));
+        }
+        let Some(processor) = &mut self.processor else {
+            return;
+        };
         const BLOCK: usize = VOICE_FRAME_SAMPLES / 2;
         for (render, capture) in self
             .far
@@ -269,6 +331,105 @@ mod tests {
         0.5 * history[end - delay]
             + 0.25 * history[end - delay - 17]
             + 0.12 * history[end - delay - 53]
+    }
+
+    #[test]
+    fn timed_device_reference_cancels_a_three_hundred_millisecond_echo() {
+        let output = OutputReference::new(VOICE_SAMPLE_RATE);
+        let reference = VoiceEchoReference::for_output();
+        reference.set_output(Some(output.clone()));
+        let mut canceller = EchoCanceller::new(Some(reference));
+        let mut signal = TestSignal(11);
+        let delay = VOICE_SAMPLE_RATE as usize * 300 / 1_000;
+        let mut played = vec![0.0; delay + 64 + VOICE_FRAME_SAMPLES];
+        let mut heard = Vec::new();
+        let mut sent = Vec::new();
+        let start = Instant::now();
+        for index in 0..400 {
+            let first = output.written();
+            let capture_time = start + std::time::Duration::from_millis(index * 20);
+            let frame = std::array::from_fn::<_, VOICE_FRAME_SAMPLES, _>(|_| {
+                let sample = signal.next() * 0.3;
+                output.push(sample);
+                sample
+            });
+            output.publish_timing(first, capture_time);
+            played.extend_from_slice(&frame);
+            let mut microphone = std::array::from_fn(|offset| {
+                echo_of(&played, played.len() - VOICE_FRAME_SAMPLES + offset, delay)
+            });
+            let raw = microphone;
+            canceller.process_at(&mut microphone, capture_time);
+            if index >= 380 {
+                heard.extend_from_slice(&raw);
+                sent.extend_from_slice(&microphone);
+            }
+        }
+        let reduction = 20.0 * (rms(&heard) / rms(&sent).max(1e-9)).log10();
+        assert!(
+            reduction >= 20.0,
+            "timed output reference reduced echo by only {reduction:.2} dB"
+        );
+    }
+
+    #[test]
+    fn echo_reference_resets_on_output_replacement_removal_and_clock_discontinuity() {
+        let reference = VoiceEchoReference::for_output();
+        let mut reader = EchoReferenceReader::new(reference.clone());
+        let mut far = [0.0; VOICE_FRAME_SAMPLES];
+        let start = Instant::now();
+        let first = OutputReference::new(48_000);
+        reference.set_output(Some(first.clone()));
+        assert!(reader.read_at(&mut far, start));
+        assert!(!reader.read_at(&mut far, start));
+        let second = OutputReference::new(96_000);
+        reference.set_output(Some(second.clone()));
+        let time = Instant::now();
+        for _ in 0..1920 {
+            second.push(0.1);
+        }
+        second.publish_timing(0, time);
+        assert!(reader.read_at(&mut far, time));
+        // The former output can still finish its callback on another thread.
+        for _ in 0..960 {
+            first.push(0.8);
+        }
+        first.publish_timing(0, time);
+        assert!(!reader.read_at(&mut far, time));
+        assert!(far[128..832]
+            .iter()
+            .all(|sample| (*sample - 0.1).abs() < 0.0001));
+        second.publish_timing(1920, time + std::time::Duration::from_secs(1));
+        assert!(reader.read_at(&mut far, time));
+        assert!(!reader.read_at(&mut far, time));
+        reference.set_output(None);
+        assert!(reader.read_at(&mut far, time));
+        assert!(far.iter().all(|sample| *sample == 0.0));
+        assert!(!reader.read_at(&mut far, time));
+    }
+
+    #[test]
+    fn output_echo_reference_uses_capture_time_after_a_dsp_scheduling_delay() {
+        let output = OutputReference::new(VOICE_SAMPLE_RATE);
+        let start = Instant::now();
+        for frame in 0..10 {
+            let position = output.written();
+            for _ in 0..VOICE_FRAME_SAMPLES {
+                output.push(frame as f32 * 0.05);
+            }
+            output.publish_timing(
+                position,
+                start + std::time::Duration::from_millis(frame * 20),
+            );
+        }
+        let reference = VoiceEchoReference::for_output();
+        reference.set_output(Some(output));
+        let mut reader = EchoReferenceReader::new(reference);
+        let mut far = [0.0; VOICE_FRAME_SAMPLES];
+        reader.read_at(&mut far, start + std::time::Duration::from_millis(40));
+        assert!(far[128..832]
+            .iter()
+            .all(|sample| (*sample - 0.1).abs() < 0.0001));
     }
 
     #[test]
