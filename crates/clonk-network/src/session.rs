@@ -4896,6 +4896,133 @@ mod tests {
         .test_value();
     }
 
+    /// How long a voice fixture waits for one frame before it sends the next.
+    const VOICE_RESEND: Duration = Duration::from_millis(50);
+
+    /// What a voice fixture reads arrivals from: the session's voice inbox, or
+    /// a plain channel standing in for it.
+    trait TestInbox {
+        type Item;
+        fn next(&mut self) -> impl Future<Output = Option<Self::Item>>;
+    }
+
+    impl<T> TestInbox for mpsc::Receiver<T> {
+        type Item = T;
+        fn next(&mut self) -> impl Future<Output = Option<T>> {
+            self.recv()
+        }
+    }
+
+    impl TestInbox for crate::VoiceInboxReceiver {
+        type Item = crate::VoiceFrame;
+        fn next(&mut self) -> impl Future<Output = Option<crate::VoiceFrame>> {
+            self.recv()
+        }
+    }
+
+    /// Sends with `send(attempt)` until the inbox yields something, and gives
+    /// that back. Voice is droppable on purpose: every hop hands a frame on
+    /// with a `try_send`, and a frame carries its capture time so that one which
+    /// has aged past the freshness budget is discarded rather than played late.
+    /// On a loaded runner a lone frame can therefore simply never arrive, and
+    /// a test that waited for it could only time out, which evicted a merge
+    /// queue entry (clonk-org/clonk-rs#1694). A fixture that needs *a* frame to
+    /// get through says so by sending more.
+    ///
+    /// If it had to send again, an earlier frame may still be on its way, so it
+    /// waits for a quiet interval before it returns; the "nothing else may
+    /// arrive" checks that follow in these tests then still mean what they say.
+    async fn first_to_arrive<Inbox: TestInbox, Sending: Future<Output = ()>>(
+        mut send: impl FnMut(u16) -> Sending,
+        inbox: &mut Inbox,
+    ) -> Inbox::Item {
+        await_test(async {
+            let mut attempt = 0;
+            let arrived = loop {
+                send(attempt).await;
+                match timeout(VOICE_RESEND, inbox.next()).await {
+                    Ok(arrived) => break arrived,
+                    Err(_) => attempt += 1,
+                }
+            };
+            while attempt > 0 && timeout(VOICE_RESEND, inbox.next()).await.is_ok() {}
+            arrived
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_voice_fixture_sends_again_when_a_frame_is_dropped_on_the_way() {
+        let (tx, mut rx) = mpsc::channel::<u16>(8);
+        let arrived = first_to_arrive(
+            |attempt| {
+                let tx = tx.clone();
+                // The first three frames are lost, as a droppable hop loses them.
+                async move {
+                    if attempt >= 3 {
+                        tx.send(attempt).await.test_value();
+                    }
+                }
+            },
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(arrived, 3);
+    }
+
+    #[tokio::test]
+    async fn a_voice_fixture_that_sent_twice_leaves_no_straggler_behind() {
+        let (tx, mut rx) = mpsc::channel::<u16>(8);
+        let arrived = first_to_arrive(
+            |attempt| {
+                let tx = tx.clone();
+                async move {
+                    // The first frame is not lost, only late: it turns up after
+                    // the fixture has given up on it and sent the second.
+                    let lateness = if attempt == 0 {
+                        VOICE_RESEND + VOICE_RESEND / 2
+                    } else {
+                        Duration::ZERO
+                    };
+                    tokio::spawn(async move {
+                        tokio::time::sleep(lateness).await;
+                        tx.send(attempt).await.test_value();
+                    });
+                }
+            },
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(arrived, 1);
+        // By now the late frame has certainly been delivered somewhere: either
+        // the fixture waited it out, or it is sitting in the inbox.
+        tokio::time::sleep(VOICE_RESEND).await;
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "the late first frame was waited out"
+        );
+    }
+
+    /// Copies of `frame` sent from `sender` until one reaches `inbox`. Each copy
+    /// carries the next sequence number, as successive voice frames do.
+    async fn voice_frame_that_arrives<Inbox: TestInbox>(
+        sender: impl Fn() -> crate::VoiceSender,
+        frame: &crate::VoiceFrame,
+        inbox: &mut Inbox,
+    ) -> Inbox::Item {
+        first_to_arrive(
+            |attempt| {
+                let mut copy = frame.clone();
+                copy.sequence = frame.sequence.wrapping_add(attempt);
+                enqueue_test_voice(sender(), copy)
+            },
+            inbox,
+        )
+        .await
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn negotiated_udp_voice_round_trips_with_route_authenticated_sources() {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
@@ -4924,14 +5051,15 @@ mod tests {
 
         let mut client_frame = crate::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).test_value();
         client_frame.client_id = 99;
-        enqueue_test_voice(client.voice_sender(), client_frame).await;
-        let received = await_test(host_voice.recv()).await;
+        let received =
+            voice_frame_that_arrives(|| client.voice_sender(), &client_frame, &mut host_voice)
+                .await;
         assert_eq!(received.client_id, client_id);
 
         let mut host_frame = crate::VoiceFrame::outbound(8, 12, 30, vec![0xa5; 164]).test_value();
         host_frame.client_id = 99;
-        enqueue_test_voice(host.voice_sender(), host_frame).await;
-        let received = await_test(client_voice.recv()).await;
+        let received =
+            voice_frame_that_arrives(|| host.voice_sender(), &host_frame, &mut client_voice).await;
         assert_eq!(received.client_id, HOST_CLIENT_ID);
 
         shutdown_test_session(client, host).await;
@@ -4975,15 +5103,17 @@ mod tests {
         let mut beta_voice = beta.take_voice_receiver();
         let frame = crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; 164]).test_value();
 
-        enqueue_test_voice(alpha.voice_sender(), frame.clone()).await;
-
-        let received_by_host = await_test(host_voice.recv()).await;
-        let received_by_beta = await_test(beta_voice.recv()).await;
+        // The host hears the frame and relays it, and either hop may drop it, so
+        // each listener is waited on with its own run of copies.
+        let received_by_beta =
+            voice_frame_that_arrives(|| alpha.voice_sender(), &frame, &mut beta_voice).await;
+        let received_by_host =
+            voice_frame_that_arrives(|| alpha.voice_sender(), &frame, &mut host_voice).await;
         for received in [received_by_host, received_by_beta] {
             assert_eq!(received.client_id, alpha_id);
             assert_eq!(received.player_id, frame.player_id);
             assert_eq!(received.stream_epoch, frame.stream_epoch);
-            assert_eq!(received.sequence, frame.sequence);
+            assert!(received.sequence >= frame.sequence, "a copy of the frame");
             assert_eq!(received.payload, frame.payload);
         }
         assert!(
@@ -5037,9 +5167,11 @@ mod tests {
         assert!(!host.voice_sender().is_available());
         assert!(!alpha.mesh_peer_ids().await.contains(&beta.client_id()));
         let frame = crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; 120]).test_value();
-        enqueue_test_voice(alpha.voice_sender(), frame.clone()).await;
-        let received = await_test(beta_voice.recv()).await;
-        assert_eq!(received, frame.with_authenticated_source(alpha.client_id()));
+        let received =
+            voice_frame_that_arrives(|| alpha.voice_sender(), &frame, &mut beta_voice).await;
+        let mut sent = frame.clone();
+        sent.sequence = received.sequence;
+        assert_eq!(received, sent.with_authenticated_source(alpha.client_id()));
         // Even a caller bypassing the availability hint cannot transmit from
         // a locally disabled host. Relaying grants no local audio permission.
         enqueue_test_voice(
