@@ -1355,6 +1355,44 @@ pub(crate) fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
         .unwrap_or(Value::Nil))
 }
 
+/// `EffectVar(iVarIndex, pObj, iNumber)[index]`, served where the effect keeps
+/// the array. FnEffectVar hands back a reference to the C4Value the effect owns
+/// (C4Script.cpp:5576-5586) and AB_ARRAYA_R indexes the array behind it
+/// (C4AulExec.cpp:923-947), so C++ never copies that array for an element
+/// access. `Ok(None)` wherever [`effect_var`] would not find an array element
+/// to serve; the VM then uses [`effect_var`] itself, which keeps every other
+/// case (growth, other value types, snapshot proplists) exactly as it was.
+pub(crate) fn effect_var_element(
+    args: &[Value],
+    index: i32,
+    replacement: Option<&Value>,
+) -> Result<Option<Value>, RuntimeError> {
+    let address = |position: usize, what: &str| {
+        value_to_i32(args.get(position).unwrap_or(&Value::Nil), "EffectVar", what)
+            .map(|value| usize::try_from(value).ok())
+    };
+    let (Some(var_index), Some(effect_number), Ok(element_index)) = (
+        address(0, "index")?,
+        address(2, "number")?,
+        usize::try_from(index),
+    ) else {
+        return Ok(None);
+    };
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
+    let new_value = replacement.map(value_to_effect_var);
+    with_host_context_mut(Ok(None), |context| {
+        if let EffectScope::Object(Some(target)) = scope {
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+        }
+        Ok(context.scope_mut(scope).ok().and_then(|stack| {
+            stack.effect_var_element(effect_number, var_index, element_index, new_value)
+        }))
+    })
+    .map(|element| element.as_ref().map(effect_var_to_value))
+}
+
 /// FnEffectCall (C4Script.cpp:5589-5601): `EffectCall(pTarget, iNumber,
 /// szCallFn, vVal1..vVal7)` finds the effect BY NUMBER on the target (dead
 /// included, `C4Effect::Get(iNumber, true)`, C4Effect.cpp:240-256) and runs

@@ -8971,11 +8971,54 @@ impl EffectScopeContext {
             .position(|effect| effect.number == effect_number as i32)?;
         if let Some(value) = new_value {
             let effect = &mut self.effects[index];
-            effect.set_var(var_index, value);
-            let updated = effect.clone();
-            self.commands.push(EffectCommand::update(updated));
+            effect.set_var(var_index, value.clone());
+            // The variable alone: an `Update` would carry a copy of every
+            // variable the effect holds for each one that is set.
+            self.commands.push(EffectCommand::UpdateVar {
+                number: effect.number,
+                var: var_index,
+                value,
+            });
         }
         Some(self.effects[index].var(var_index))
+    }
+
+    /// One element of the array an effect variable holds: read, or written in
+    /// place when `new_value` is given. `None` when that effect, variable or
+    /// element is not there, which leaves the caller its whole-variable path.
+    pub(crate) fn effect_var_element(
+        &mut self,
+        effect_number: usize,
+        var_index: usize,
+        element_index: usize,
+        new_value: Option<EffectVarValue>,
+    ) -> Option<EffectVarValue> {
+        let number = i32::try_from(effect_number)
+            .ok()
+            .filter(|number| *number != 0)?;
+        // Looked up through a shared borrow first: a mutable one would copy a
+        // shared effect list even for a read or a miss.
+        let position = self.effects.iter().position(|effect| {
+            effect.number == number
+                && matches!(
+                    effect.vars.get(var_index),
+                    Some(EffectVarValue::Array(elements)) if element_index < elements.len()
+                )
+        })?;
+        let Some(value) = new_value else {
+            return match &self.effects[position].vars[var_index] {
+                EffectVarValue::Array(elements) => elements.get(element_index).cloned(),
+                _ => None,
+            };
+        };
+        *self.effects[position].var_element_mut(var_index, element_index)? = value.clone();
+        self.commands.push(EffectCommand::UpdateVarElement {
+            number,
+            var: var_index,
+            index: element_index,
+            value: value.clone(),
+        });
+        Some(value)
     }
 
     pub(crate) fn change_effect(

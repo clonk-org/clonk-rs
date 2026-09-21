@@ -3906,14 +3906,11 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         });
 
         assert!(matches!(result, Ok(Value::Int(number)) if number > 0));
-        let effect = outcome
-            .object
+        let mut folded = Vec::new();
+        crate::apply_effect_commands_to_stack(&mut folded, &outcome.object);
+        let effect = folded
             .iter()
-            .rev()
-            .find_map(|command| match command {
-                EffectCommand::Update(effect) if effect.name == crate::C4FX_FIRE => Some(effect),
-                _ => None,
-            })
+            .find(|effect| effect.name == crate::C4FX_FIRE)
             .test_value();
         assert_eq!(effect.var(1), EffectVarValue::Int(2));
         assert_eq!(

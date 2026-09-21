@@ -13,6 +13,13 @@ use crate::vm::{HostCallArg, ValueReference, Vm};
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
 
+/// Serves one element of an array a host function keeps behind its addressing
+/// arguments: a read when `replacement` is `None`, otherwise an in-place write.
+/// `Ok(None)` means the host does not hold an array there or the index is
+/// outside it, and the VM falls back to reading or replacing the whole value.
+pub type HostElementAccessor =
+    Arc<dyn Fn(&[Value], i32, Option<&Value>) -> Result<Option<Value>, RuntimeError> + Send + Sync>;
+
 /// A native callback together with the parameter count declared by its C++
 /// registration. Legacy embedding-only callbacks may remain variadic, but
 /// engine natives use an exact count so the VM can balance their call frame
@@ -21,6 +28,7 @@ pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Se
 pub(crate) struct RegisteredHostFunction {
     callback: HostFunction,
     parameter_count: Option<usize>,
+    element_accessor: Option<HostElementAccessor>,
 }
 
 impl RegisteredHostFunction {
@@ -28,6 +36,7 @@ impl RegisteredHostFunction {
         Self {
             callback,
             parameter_count: None,
+            element_accessor: None,
         }
     }
 
@@ -35,6 +44,7 @@ impl RegisteredHostFunction {
         Self {
             callback,
             parameter_count: Some(parameter_count),
+            element_accessor: None,
         }
     }
 
@@ -44,6 +54,10 @@ impl RegisteredHostFunction {
 
     pub(crate) fn parameter_count(&self) -> Option<usize> {
         self.parameter_count
+    }
+
+    pub(crate) fn element_accessor(&self) -> Option<&HostElementAccessor> {
+        self.element_accessor.as_ref()
     }
 }
 
@@ -1951,6 +1965,22 @@ impl Engine {
         F: Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
     {
         self.register_host_function_erased(name.into(), Arc::new(func), None);
+    }
+
+    /// Let an already registered host function serve single elements of an
+    /// array it keeps, so `Host(a, b, c)[index]` does not copy the array. Does
+    /// nothing when no function of that name is registered; registering the
+    /// function again drops the accessor.
+    pub fn register_host_element_accessor<F>(&mut self, name: &str, accessor: F)
+    where
+        F: Fn(&[Value], i32, Option<&Value>) -> Result<Option<Value>, RuntimeError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        if let Some(function) = Arc::make_mut(&mut self.host_functions).get_mut(name) {
+            function.element_accessor = Some(Arc::new(accessor));
+        }
     }
 
     /// Register a C++-style native host function with its exact declared

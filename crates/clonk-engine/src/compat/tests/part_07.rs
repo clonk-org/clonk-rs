@@ -484,6 +484,106 @@
         );
     }
 
+    /// An EffectVar write changes one variable, or one element of the array
+    /// it holds, and is queued as that. It used to queue an `Update` carrying
+    /// a copy of the whole effect, so the Temporary Tunnel spell, which keeps a
+    /// 7200 slot array beside the cursor it advances about 66 times a frame,
+    /// copied that array for every step of the cursor
+    /// (clonk-org/clonk-rs#1674).
+    #[test]
+    fn an_effect_var_write_queues_what_it_changed_and_not_the_whole_effect() {
+        let mut tunnel = EffectState::new("TunnelUSpell")
+            .with_priority(260)
+            .with_vars(vec![
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+                EffectVarValue::Array(vec![EffectVarValue::Nil; 4]),
+            ]);
+        tunnel.number = 1;
+        let mut other = EffectState::new("Other").with_priority(100);
+        other.number = 2;
+        let effects = [tunnel, other];
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"#strict 2
+        func Probe(state) {
+          EffectVar(0, this(), 1) = 5;
+          EffectVar(1, this(), 1) = 6;
+          EffectVar(0, this(), 1) = 7;
+          EffectVar(0, this(), 2) = 8;
+          EffectVar(3, this(), 1)[2] = "rock";
+          EffectVar(2, this(), 1) = 9;
+          return EffectVar(0, this(), 1) * 100 + EffectVar(1, this(), 1) * 10 + EffectVar(2, this(), 1);
+        }
+        "#,
+            )
+            .test_value();
+
+        let state = empty_state();
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext {
+                effects: &effects,
+                ..idle_object_context()
+            }),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || {
+                script
+                    .call_with_locals_and_this(
+                        "Probe",
+                        &[state],
+                        &HashMap::new(),
+                        object_reference_value(ObjectId::new(1)),
+                    )
+                    .map(|(value, _)| value)
+                    .map_err(|error| RuntimeError::new(error.to_string()))
+            },
+        );
+
+        assert_eq!(result.expect("EffectVar probe runs"), Value::Int(769));
+        let var = |number, var, value| EffectCommand::UpdateVar { number, var, value };
+        assert_eq!(
+            outcome.object,
+            vec![
+                var(1, 0, EffectVarValue::Int(5)),
+                var(1, 1, EffectVarValue::Int(6)),
+                var(1, 0, EffectVarValue::Int(7)),
+                var(2, 0, EffectVarValue::Int(8)),
+                EffectCommand::UpdateVarElement {
+                    number: 1,
+                    var: 3,
+                    index: 2,
+                    value: EffectVarValue::String("rock".into()),
+                },
+                var(1, 2, EffectVarValue::Int(9)),
+            ]
+        );
+
+        // Folded in order, the commands leave the effects as the script did.
+        let mut folded = effects.to_vec();
+        crate::apply_effect_commands_to_stack(&mut folded, &outcome.object);
+        assert_eq!(
+            folded[0].vars,
+            vec![
+                EffectVarValue::Int(7),
+                EffectVarValue::Int(6),
+                EffectVarValue::Int(9),
+                EffectVarValue::Array(vec![
+                    EffectVarValue::Nil,
+                    EffectVarValue::Nil,
+                    EffectVarValue::String("rock".into()),
+                    EffectVarValue::Nil,
+                ]),
+            ]
+        );
+        assert_eq!(folded[1].vars, vec![EffectVarValue::Int(8)]);
+    }
+
     #[test]
     fn set_action_respects_no_other_action() {
         let mut specs = HashMap::new();

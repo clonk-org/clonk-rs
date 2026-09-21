@@ -3011,6 +3011,32 @@ impl Object {
                         *existing = effect.clone();
                     }
                 }
+                EffectCommand::UpdateVar { number, var, value } => {
+                    if let Some(existing) = self
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|existing| existing.number == *number)
+                    {
+                        existing.set_var(*var, value.clone());
+                    }
+                }
+                EffectCommand::UpdateVarElement {
+                    number,
+                    var,
+                    index,
+                    value,
+                } => {
+                    if let Some(element) = self
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|existing| existing.number == *number)
+                        .and_then(|existing| existing.var_element_mut(*var, *index))
+                    {
+                        *element = value.clone();
+                    }
+                }
                 EffectCommand::Remove { name, no_callbacks } => {
                     if let Some(removed) = self.mark_effect_dead(name) {
                         if !no_callbacks {
