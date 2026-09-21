@@ -77,6 +77,7 @@ const MAX_PENDING_VOICE_FRAMES: usize = 8;
 const VOICE_SEQUENCE_WINDOW_FRAMES: usize = u64::BITS as usize;
 const MIN_VOICE_JITTER_OBSERVATIONS: usize = 3;
 const VOICE_PLAYOUT_GUARD_FRAMES: usize = 2;
+const MAX_CONSECUTIVE_VOICE_PLC_FRAMES: u16 = 3;
 const VOICE_CAPTURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +257,9 @@ struct RemoteVoiceJitterBuffer {
     arrival_observations: usize,
     target_frames: usize,
     started: bool,
+    next_playout_at: Option<Instant>,
+    end_sequence: Option<u16>,
+    consecutive_concealed_frames: u16,
     previous_output: Option<[i16; clonk_audio::VOICE_FRAME_SAMPLES]>,
     highest_arrival_sequence: Option<u16>,
     reordered_frames: u64,
@@ -274,6 +278,9 @@ impl Default for RemoteVoiceJitterBuffer {
             arrival_observations: 0,
             target_frames: INITIAL_VOICE_JITTER_FRAMES,
             started: false,
+            next_playout_at: None,
+            end_sequence: None,
+            consecutive_concealed_frames: 0,
             previous_output: None,
             highest_arrival_sequence: None,
             reordered_frames: 0,
@@ -285,6 +292,12 @@ impl Default for RemoteVoiceJitterBuffer {
 
 impl RemoteVoiceJitterBuffer {
     fn can_insert(&self, sequence: u16) -> bool {
+        if self
+            .end_sequence
+            .is_some_and(|end| sequence.wrapping_sub(end) <= u16::MAX / 2)
+        {
+            return false;
+        }
         if self
             .pending
             .iter()
@@ -311,6 +324,22 @@ impl RemoteVoiceJitterBuffer {
             return true;
         }
         farthest_offset.is_some_and(|farthest_offset| incoming_offset < farthest_offset)
+    }
+
+    fn can_end(&self, sequence: u16) -> bool {
+        self.end_sequence.is_none() && self.insertion_anchor(sequence).is_some()
+    }
+
+    fn end(&mut self, sequence: u16, received_at: Instant) -> bool {
+        if !self.can_end(sequence) {
+            return false;
+        }
+        self.end_sequence = Some(sequence);
+        self.next_playout_sequence.get_or_insert(sequence);
+        self.first_arrival_at.get_or_insert(received_at);
+        self.pending
+            .retain(|frame| frame.sequence.wrapping_sub(sequence) > u16::MAX / 2);
+        true
     }
 
     fn insertion_anchor(&self, sequence: u16) -> Option<u16> {
@@ -445,6 +474,7 @@ impl RemoteVoiceJitterBuffer {
                 return Vec::new();
             }
             self.started = true;
+            self.next_playout_at = Some(now);
         }
 
         let mut ready = Vec::with_capacity(max_frames.min(self.pending.len()));
@@ -452,6 +482,9 @@ impl RemoteVoiceJitterBuffer {
             let expected = self
                 .next_playout_sequence
                 .expect("a started voice jitter buffer has a playout sequence");
+            if self.end_sequence == Some(expected) {
+                break;
+            }
             let Some(position) = self
                 .pending
                 .iter()
@@ -463,7 +496,28 @@ impl RemoteVoiceJitterBuffer {
                     .min_by_key(|pending| pending.sequence.wrapping_sub(expected))
                     .map(|pending| (pending.sequence, pending.payload));
                 let Some((successor_sequence, successor_payload)) = successor else {
-                    break;
+                    if self.previous_output.is_none()
+                        || self.consecutive_concealed_frames >= MAX_CONSECUTIVE_VOICE_PLC_FRAMES
+                        || self.next_playout_at.is_none_or(|deadline| now < deadline)
+                        || buffered_playout_frames.saturating_add(ready.len())
+                            > VOICE_PLAYOUT_GUARD_FRAMES
+                    {
+                        break;
+                    }
+                    let samples = self.decode_for_playout(None, false);
+                    self.previous_output = Some(samples);
+                    ready.push(RemoteVoicePlayoutFrame {
+                        sequence: expected,
+                        samples,
+                        concealed: true,
+                    });
+                    self.concealed_frames = self.concealed_frames.saturating_add(1);
+                    self.consecutive_concealed_frames += 1;
+                    self.next_playout_sequence = Some(expected.wrapping_add(1));
+                    self.next_playout_at = self
+                        .next_playout_at
+                        .and_then(|at| at.checked_add(VOICE_FRAME_DURATION));
+                    continue;
                 };
                 let Some(_) = self.previous_output else {
                     break;
@@ -476,7 +530,13 @@ impl RemoteVoiceJitterBuffer {
                 if buffered_headroom > VOICE_PLAYOUT_GUARD_FRAMES {
                     break;
                 }
-                let samples = self.decode_for_playout(Some(successor_payload), true);
+                // Opus FEC describes only the immediately preceding interval.
+                // Earlier missing intervals need independent PLC calls so the
+                // decoder clock advances by exactly the missing duration.
+                let samples = self.decode_for_playout(
+                    (successor_distance == 1).then_some(successor_payload),
+                    successor_distance == 1,
+                );
                 self.previous_output = Some(samples);
                 ready.push(RemoteVoicePlayoutFrame {
                     sequence: expected,
@@ -484,14 +544,24 @@ impl RemoteVoiceJitterBuffer {
                     concealed: true,
                 });
                 self.concealed_frames = self.concealed_frames.saturating_add(1);
-                self.next_playout_sequence = Some(if successor_distance == 1 {
-                    expected.wrapping_add(1)
-                } else {
-                    successor_sequence
-                });
+                self.consecutive_concealed_frames =
+                    self.consecutive_concealed_frames.saturating_add(1);
+                self.next_playout_at = self
+                    .next_playout_at
+                    .and_then(|at| at.checked_add(VOICE_FRAME_DURATION));
+                self.next_playout_sequence =
+                    Some(if successor_distance <= MAX_CONSECUTIVE_VOICE_PLC_FRAMES {
+                        expected.wrapping_add(1)
+                    } else {
+                        successor_sequence
+                    });
                 continue;
             };
             let frame = self.pending.remove(position);
+            self.consecutive_concealed_frames = 0;
+            self.next_playout_at = self
+                .next_playout_at
+                .and_then(|at| at.checked_add(VOICE_FRAME_DURATION));
             let samples = self.decode_for_playout(Some(frame.payload), false);
             self.previous_output = Some(samples);
             ready.push(RemoteVoicePlayoutFrame {
@@ -991,20 +1061,28 @@ impl VoiceChatState {
     fn prepare_remote_frame(
         &self,
         frame: &clonk_network::VoiceFrame,
-    ) -> Option<(i32, EncodedVoiceFrame)> {
+    ) -> Option<(i32, Option<EncodedVoiceFrame>)> {
         let client_id = i32::try_from(frame.client_id).ok()?;
         // Before decoding: a muted peer costs nothing beyond the bytes the
         // transport already read.
         if self.is_client_muted(client_id) {
             return None;
         }
-        let payload = EncodedVoiceFrame::from_packet(&frame.payload).ok()?;
+        let payload = if frame.payload.is_empty() {
+            None // V3 reserves the empty authenticated payload for end-of-stream.
+        } else {
+            Some(EncodedVoiceFrame::from_packet(&frame.payload).ok()?)
+        };
         if self
             .remote_streams
             .get(&(client_id, frame.player_id))
             .is_some_and(|stream| {
                 stream.stream_epoch == frame.stream_epoch
-                    && !stream.jitter.can_insert(frame.sequence)
+                    && !if payload.is_some() {
+                        stream.jitter.can_insert(frame.sequence)
+                    } else {
+                        stream.jitter.can_end(frame.sequence)
+                    }
             })
         {
             return None;
@@ -1017,7 +1095,7 @@ impl VoiceChatState {
         frame: &clonk_network::VoiceFrame,
         received_at: Instant,
         client_id: i32,
-        payload: EncodedVoiceFrame,
+        payload: Option<EncodedVoiceFrame>,
         disposition: VoiceFrameDisposition,
     ) -> Option<AcceptedRemoteVoicePacket> {
         match disposition {
@@ -1025,8 +1103,9 @@ impl VoiceChatState {
                 let inserted = self
                     .remote_streams
                     .get_mut(&(client_id, frame.player_id))
-                    .is_some_and(|stream| {
-                        stream.jitter.insert(frame.sequence, received_at, payload)
+                    .is_some_and(|stream| match payload {
+                        Some(payload) => stream.jitter.insert(frame.sequence, received_at, payload),
+                        None => stream.jitter.end(frame.sequence, received_at),
                     });
                 if !inserted {
                     return None;
@@ -1871,7 +1950,99 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_voice_loss_reanchors_after_one_concealed_frame() {
+    fn authenticated_voice_end_stops_concealment_and_rejects_audio_past_the_end() {
+        let start = Instant::now();
+        let mut state = VoiceChatState::default();
+        for sequence in 0..3 {
+            let mut frame = clonk_network::VoiceFrame::outbound(
+                17,
+                1,
+                sequence,
+                clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence))
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            frame.client_id = 0;
+            assert!(state
+                .accept_authorized_remote_frame(
+                    &frame,
+                    start + VOICE_FRAME_DURATION * u32::from(sequence)
+                )
+                .is_some());
+        }
+        let mut end = clonk_network::VoiceFrame::outbound(17, 1, 3, Vec::new()).unwrap();
+        end.client_id = 0;
+        assert!(state
+            .accept_authorized_remote_frame(&end, start + Duration::from_millis(60))
+            .is_some());
+        assert_eq!(
+            state
+                .drain_remote_playout(0, 17, start + Duration::from_millis(60), 8, 0)
+                .len(),
+            3
+        );
+        assert!(state
+            .drain_remote_playout(0, 17, start + Duration::from_millis(200), 8, 0)
+            .is_empty());
+        let mut late = clonk_network::VoiceFrame::outbound(
+            17,
+            1,
+            4,
+            clonk_audio::test_encode_voice_frame(&speech_voice_frame(4))
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        late.client_id = 0;
+        assert!(state
+            .accept_authorized_remote_frame(&late, start + Duration::from_millis(200))
+            .is_none());
+    }
+
+    #[test]
+    fn missing_voice_tail_uses_a_bounded_playout_clock_without_a_successor() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for sequence in 0..3 {
+            assert!(jitter.insert(
+                sequence,
+                start + VOICE_FRAME_DURATION * u32::from(sequence),
+                clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
+            ));
+        }
+        assert_eq!(
+            jitter
+                .drain_ready(start + Duration::from_millis(40), 8)
+                .len(),
+            3
+        );
+        assert!(jitter
+            .drain_ready(start + Duration::from_millis(99), 8)
+            .is_empty());
+        for (sequence, millis) in [(3, 100), (4, 120), (5, 140)] {
+            let ready = jitter.drain_ready(start + Duration::from_millis(millis), 8);
+            assert_eq!(
+                ready
+                    .iter()
+                    .map(|f| (f.sequence, f.concealed))
+                    .collect::<Vec<_>>(),
+                vec![(sequence, true)]
+            );
+            assert!(jitter
+                .drain_ready(start + Duration::from_millis(millis), 8)
+                .is_empty());
+        }
+        assert!(
+            jitter
+                .drain_ready(start + Duration::from_secs(1), 8)
+                .is_empty(),
+            "an ended or disconnected speaker cannot generate unbounded artificial audio"
+        );
+    }
+
+    #[test]
+    fn consecutive_voice_loss_preserves_each_missing_interval() {
         let start = Instant::now();
         let mut jitter = RemoteVoiceJitterBuffer::default();
         for sequence in [0, 1, 2, 3, 6] {
@@ -1895,12 +2066,12 @@ mod tests {
                 .drain_ready_with_headroom(
                     start + Duration::from_millis(120),
                     usize::MAX,
-                    VOICE_PLAYOUT_GUARD_FRAMES,
+                    VOICE_PLAYOUT_GUARD_FRAMES - 1,
                 )
                 .into_iter()
                 .map(|frame| (frame.sequence, frame.concealed))
                 .collect::<Vec<_>>(),
-            vec![(4, true), (6, false)],
+            vec![(4, true), (5, true), (6, false)],
         );
         assert!(jitter.insert(
             7,
