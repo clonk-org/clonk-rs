@@ -101,6 +101,7 @@ pub enum VoiceFrameQueueOutcome {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct VoiceStreamStats {
     pub queued_frames: usize,
+    pub queued_duration: Duration,
     pub dropped_stale_frames: u64,
 }
 
@@ -812,6 +813,20 @@ pub struct AudioWorkerHandle {
 }
 
 impl AudioWorkerHandle {
+    /// Smooth corrections are bounded to one percent inside the resampler.
+    pub fn set_voice_playout_rate(&self, stream_id: u64, parts_per_million: i32) {
+        if let Some(stream) = self
+            .mixer
+            .state
+            .lock()
+            .unwrap()
+            .voice_streams
+            .get_mut(&stream_id)
+        {
+            stream.resampler.set_rate_adjustment(parts_per_million);
+        }
+    }
+
     pub fn shares_mixer(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.mixer, &other.mixer)
     }
@@ -1097,7 +1112,8 @@ struct VoicePlaybackResampler {
     output_sample_rate: u32,
     previous: Option<[f32; 2]>,
     current_source_index: u128,
-    next_output_index: u128,
+    next_output_position: u128,
+    rate_adjustment: i32,
 }
 
 #[derive(Debug)]
@@ -1942,6 +1958,13 @@ impl VoiceStreamPlayback {
     fn stats(&self) -> VoiceStreamStats {
         VoiceStreamStats {
             queued_frames: self.frames.len(),
+            queued_duration: Duration::from_secs_f64(
+                self.frames
+                    .iter()
+                    .map(|frame| frame.samples.len() - frame.position)
+                    .sum::<usize>() as f64
+                    / f64::from(self.resampler.output_sample_rate),
+            ),
             dropped_stale_frames: self.dropped_stale_frames,
         }
     }
@@ -2003,6 +2026,10 @@ impl VoiceLimiter {
 }
 
 impl VoicePlaybackResampler {
+    fn set_rate_adjustment(&mut self, parts_per_million: i32) {
+        self.rate_adjustment = parts_per_million.clamp(-10_000, 10_000);
+    }
+
     fn new(output_sample_rate: u32) -> Self {
         Self {
             output_sample_rate: if output_sample_rate == 0 {
@@ -2012,7 +2039,8 @@ impl VoicePlaybackResampler {
             },
             previous: None,
             current_source_index: 0,
-            next_output_index: 0,
+            next_output_position: 0,
+            rate_adjustment: 0,
         }
     }
 
@@ -2027,41 +2055,67 @@ impl VoicePlaybackResampler {
     }
 
     fn push_frame_linear(&mut self, samples: [i16; VOICE_FRAME_SAMPLES]) -> Box<[[f32; 2]]> {
-        let mut output = Vec::with_capacity(
-            (VOICE_FRAME_SAMPLES as u128 * u128::from(self.output_sample_rate)
-                / u128::from(VOICE_SAMPLE_RATE)) as usize
-                + 1,
-        );
+        // Integer phase keeps long calls exact at unity while allowing small
+        // continuous clock corrections without inserting or dropping frames.
+        const CLOCK_SCALE: u128 = 1_000_000;
+        let output_rate = u128::from(self.output_sample_rate) * CLOCK_SCALE;
+        let step = u128::from(VOICE_SAMPLE_RATE) * (1_000_000 + self.rate_adjustment) as u128;
+        let mut output =
+            Vec::with_capacity((VOICE_FRAME_SAMPLES as u128 * output_rate / step) as usize + 2);
         for sample in samples {
             let sample = f32::from(sample) / 32_768.0;
             let current = [sample, sample];
             let Some(previous) = self.previous else {
                 output.push(current);
                 self.previous = Some(current);
-                self.next_output_index = 1;
+                self.next_output_position = step;
                 continue;
             };
 
             self.current_source_index += 1;
-            let interval_start =
-                (self.current_source_index - 1) * u128::from(self.output_sample_rate);
-            let interval_end = self.current_source_index * u128::from(self.output_sample_rate);
+            let interval_start = (self.current_source_index - 1) * output_rate;
+            let interval_end = self.current_source_index * output_rate;
             loop {
-                let output_position = self.next_output_index * u128::from(VOICE_SAMPLE_RATE);
+                let output_position = self.next_output_position;
                 if output_position > interval_end {
                     break;
                 }
-                let fraction =
-                    (output_position - interval_start) as f64 / f64::from(self.output_sample_rate);
+                let fraction = (output_position - interval_start) as f64 / output_rate as f64;
                 output.push([
                     previous[0] + (current[0] - previous[0]) * fraction as f32,
                     previous[1] + (current[1] - previous[1]) * fraction as f32,
                 ]);
-                self.next_output_index += 1;
+                self.next_output_position += step;
             }
             self.previous = Some(current);
         }
         output.into_boxed_slice()
+    }
+}
+
+#[cfg(test)]
+mod voice_clock_tests {
+    use super::*;
+
+    #[test]
+    fn playback_resampling_tracks_device_clock_skew_without_dropping_frames() {
+        for parts_per_million in [-1_000, 1_000] {
+            let mut resampler = VoicePlaybackResampler::new(VOICE_SAMPLE_RATE);
+            resampler.set_rate_adjustment(parts_per_million);
+            let mut output_samples = 0;
+            for _ in 0..100 {
+                let samples =
+                    resampler.push_frame([8_192; VOICE_FRAME_SAMPLES], ResamplingMode::Linear);
+                assert!(samples
+                    .iter()
+                    .all(|frame| (frame[0] - 0.25).abs() < 0.000_001));
+                output_samples += samples.len();
+            }
+            let expected = (100 * VOICE_FRAME_SAMPLES) as f64
+                / (1.0 + f64::from(parts_per_million) / 1_000_000.0);
+            assert!((output_samples as f64 - expected).abs() <= 2.0,
+                "device clock correction must change duration continuously: {output_samples}, expected {expected}");
+        }
     }
 }
 

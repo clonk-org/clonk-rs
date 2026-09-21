@@ -1760,8 +1760,16 @@ impl TestVoiceChannels {
         &self,
         frame: clonk_network::VoiceFrame,
     ) -> std::result::Result<(), clonk_network::VoiceFrame> {
+        self.send_inbound_at(frame, Instant::now())
+    }
+
+    pub fn send_inbound_at(
+        &self,
+        frame: clonk_network::VoiceFrame,
+        received_at: Instant,
+    ) -> std::result::Result<(), clonk_network::VoiceFrame> {
         self.inbound
-            .try_send(frame)
+            .try_send_at(frame, received_at)
             .map_err(|error| error.into_inner())
     }
 

@@ -16,10 +16,16 @@ media never enters simulation, lockstep controls or recordings.
 - [x] Preserve utterance endings on push-to-talk release and beginnings in voice
   activation, while privacy cancellation immediately discards pending capture.
 - [ ] Recover output devices and keep expensive work out of output callbacks.
-- [ ] Continuously adapt playout to jitter and device clock drift.
+- [x] Continuously adapt playout to jitter and device clock drift.
 - [ ] Expose device/route status, input and output selection, a level meter and
   an explicitly requested local microphone test.
 - [ ] Complete automated qualification, required repository gates and landing.
+
+The jitter target tracks recent arrivals between 40 and 120 ms, including
+authenticated packets that arrive after their playout deadline. Gradual
+playback-rate corrections are limited to one percent. Deterministic tests cover
+eight simulated hours of clock drift and sequence wrapping; they are not an
+eight-hour live-call or hardware soak test.
 
 Hardware qualification must distinguish synthetic signal tests from real calls.
 The Raspberry Pi 4 synthetic AEC, noise suppression, gain control and Opus probe

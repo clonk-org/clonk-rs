@@ -109,11 +109,8 @@ impl<T: InboxFrame> MediaInboxSender<T> {
         self.try_send_at(frame, Instant::now())
     }
 
-    pub(crate) fn try_send_at(
-        &self,
-        frame: T,
-        received_at: Instant,
-    ) -> Result<(), TrySendError<T>> {
+    /// Preserve the original local capture/receive time across queue handoffs.
+    pub fn try_send_at(&self, frame: T, received_at: Instant) -> Result<(), TrySendError<T>> {
         if self.is_closed() {
             return Err(TrySendError::Closed(frame));
         }

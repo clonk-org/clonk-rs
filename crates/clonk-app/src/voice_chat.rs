@@ -261,6 +261,35 @@ pub(crate) struct RemoteVoicePlayoutStats {
     pub(crate) target_frames: usize,
     pub(crate) reordered_frames: u64,
     pub(crate) concealed_frames: u64,
+    pub(crate) rate_adjustment_ppm: i32,
+    pub(crate) late_frames: u64,
+}
+
+#[derive(Debug, Default)]
+struct VoicePlayoutClock {
+    last_update: Option<Instant>,
+    smoothed_error_frames: f64,
+    rate_adjustment: f64,
+}
+
+impl VoicePlayoutClock {
+    fn update(&mut self, now: Instant, buffered: Duration, target: Duration) -> i32 {
+        let previous = self.last_update.replace(now).unwrap_or(now);
+        let elapsed = now
+            .saturating_duration_since(previous)
+            .as_secs_f64()
+            .min(0.1);
+        let error_frames =
+            (buffered.as_secs_f64() - target.as_secs_f64()) / VOICE_FRAME_DURATION.as_secs_f64();
+        let smoothing = 1.0 - (-elapsed / 0.5).exp();
+        self.smoothed_error_frames += (error_frames - self.smoothed_error_frames) * smoothing;
+        // Small rate changes correct both persistent device skew and the
+        // desired jitter delay. Limit their size and slew to avoid jumps.
+        let desired = (self.smoothed_error_frames * 5_000.0).clamp(-10_000.0, 10_000.0);
+        let step = 40_000.0 * elapsed;
+        self.rate_adjustment += (desired - self.rate_adjustment).clamp(-step, step);
+        self.rate_adjustment.round() as i32
+    }
 }
 
 #[derive(Debug)]
@@ -268,8 +297,9 @@ struct RemoteVoiceJitterBuffer {
     pending: Vec<BufferedRemoteVoiceFrame>,
     next_playout_sequence: Option<u16>,
     first_arrival_at: Option<Instant>,
-    arrival_origin: Option<(u16, Instant)>,
-    transit_bounds_ns: Option<(i128, i128)>,
+    arrival_origin: Option<Instant>,
+    arrival_sequence: Option<(u16, i64)>,
+    recent_transits: VecDeque<(u16, Instant, i128)>,
     arrival_observations: usize,
     target_frames: usize,
     started: bool,
@@ -280,6 +310,8 @@ struct RemoteVoiceJitterBuffer {
     highest_arrival_sequence: Option<u16>,
     reordered_frames: u64,
     concealed_frames: u64,
+    clock: VoicePlayoutClock,
+    late_frames: u64,
     decoder: Result<clonk_audio::VoiceDecoder, clonk_audio::VoiceCodecError>,
 }
 
@@ -290,7 +322,8 @@ impl Default for RemoteVoiceJitterBuffer {
             next_playout_sequence: None,
             first_arrival_at: None,
             arrival_origin: None,
-            transit_bounds_ns: None,
+            arrival_sequence: None,
+            recent_transits: VecDeque::with_capacity(128),
             arrival_observations: 0,
             target_frames: INITIAL_VOICE_JITTER_FRAMES,
             started: false,
@@ -301,6 +334,8 @@ impl Default for RemoteVoiceJitterBuffer {
             highest_arrival_sequence: None,
             reordered_frames: 0,
             concealed_frames: 0,
+            clock: VoicePlayoutClock::default(),
+            late_frames: 0,
             decoder: clonk_audio::VoiceDecoder::new(),
         }
     }
@@ -420,38 +455,55 @@ impl RemoteVoiceJitterBuffer {
         true
     }
 
-    fn observe_arrival(&mut self, sequence: u16, received_at: Instant) {
-        let (origin_sequence, origin_at) =
-            *self.arrival_origin.get_or_insert((sequence, received_at));
+    fn observe_arrival(&mut self, sequence: u16, received_at: Instant) -> bool {
+        if self
+            .recent_transits
+            .iter()
+            .any(|(seen, _, _)| *seen == sequence)
+        {
+            return false;
+        }
+        let origin_at = *self.arrival_origin.get_or_insert(received_at);
+        let (previous, position) = *self.arrival_sequence.get_or_insert((sequence, 0));
+        let advance = i64::from(sequence.wrapping_sub(previous) as i16);
+        let position = position.saturating_add(advance);
+        if advance > 0 {
+            self.arrival_sequence = Some((sequence, position));
+        }
         let arrival_offset_ns = received_at
             .checked_duration_since(origin_at)
             .map(duration_nanos)
             .unwrap_or_else(|| -duration_nanos(origin_at.duration_since(received_at)));
-        let sequence_offset = i128::from(sequence.wrapping_sub(origin_sequence) as i16);
-        let residual_ns = arrival_offset_ns
-            .saturating_sub(sequence_offset.saturating_mul(duration_nanos(VOICE_FRAME_DURATION)));
-        match self.transit_bounds_ns.as_mut() {
-            Some((minimum, maximum)) => {
-                *minimum = (*minimum).min(residual_ns);
-                *maximum = (*maximum).max(residual_ns);
-            }
-            None => self.transit_bounds_ns = Some((residual_ns, residual_ns)),
+        let residual_ns = arrival_offset_ns.saturating_sub(
+            i128::from(position).saturating_mul(duration_nanos(VOICE_FRAME_DURATION)),
+        );
+        while self.recent_transits.len() >= 128
+            || self.recent_transits.front().is_some_and(|(_, at, _)| {
+                received_at.saturating_duration_since(*at) > Duration::from_secs(3)
+            })
+        {
+            self.recent_transits.pop_front();
         }
+        self.recent_transits
+            .push_back((sequence, received_at, residual_ns));
         self.arrival_observations = self.arrival_observations.saturating_add(1);
-        // Resize only the startup prebuffer. Growing a live delay without
-        // time-stretching would create the very gap this buffer prevents.
-        if self.started || self.arrival_observations < MIN_VOICE_JITTER_OBSERVATIONS {
-            return;
+        if self.arrival_observations < MIN_VOICE_JITTER_OBSERVATIONS {
+            return true;
         }
-        let (minimum, maximum) = self
-            .transit_bounds_ns
-            .expect("an observed voice arrival has transit bounds");
+        // A bounded recent window forgets route changes and temporary bursts.
+        // Unwrapped positions prevent a long call from looking like a huge
+        // delay jump each time the wire sequence counter wraps.
+        let (minimum, maximum) = self.recent_transits.iter().fold(
+            (residual_ns, residual_ns),
+            |(minimum, maximum), &(_, _, transit)| (minimum.min(transit), maximum.max(transit)),
+        );
         let frame_ns = duration_nanos(VOICE_FRAME_DURATION);
         let spread_ns = maximum.saturating_sub(minimum);
         let spread_frames = spread_ns.saturating_add(frame_ns - 1) / frame_ns;
         self.target_frames = usize::try_from(spread_frames.saturating_add(1))
             .unwrap_or(MAX_VOICE_JITTER_FRAMES)
             .clamp(MIN_VOICE_JITTER_FRAMES, MAX_VOICE_JITTER_FRAMES);
+        true
     }
 
     #[cfg(test)]
@@ -469,6 +521,9 @@ impl RemoteVoiceJitterBuffer {
         max_frames: usize,
         buffered_playout_frames: usize,
     ) -> Vec<RemoteVoicePlayoutFrame> {
+        let frame_duration = Duration::from_secs_f64(
+            VOICE_FRAME_DURATION.as_secs_f64() / (1.0 + self.clock.rate_adjustment / 1_000_000.0),
+        );
         let Some(mut next_sequence) = self.next_playout_sequence else {
             return Vec::new();
         };
@@ -532,7 +587,7 @@ impl RemoteVoiceJitterBuffer {
                     self.next_playout_sequence = Some(expected.wrapping_add(1));
                     self.next_playout_at = self
                         .next_playout_at
-                        .and_then(|at| at.checked_add(VOICE_FRAME_DURATION));
+                        .and_then(|at| at.checked_add(frame_duration));
                     continue;
                 };
                 let Some(_) = self.previous_output else {
@@ -564,7 +619,7 @@ impl RemoteVoiceJitterBuffer {
                     self.consecutive_concealed_frames.saturating_add(1);
                 self.next_playout_at = self
                     .next_playout_at
-                    .and_then(|at| at.checked_add(VOICE_FRAME_DURATION));
+                    .and_then(|at| at.checked_add(frame_duration));
                 self.next_playout_sequence =
                     Some(if successor_distance <= MAX_CONSECUTIVE_VOICE_PLC_FRAMES {
                         expected.wrapping_add(1)
@@ -577,7 +632,7 @@ impl RemoteVoiceJitterBuffer {
             self.consecutive_concealed_frames = 0;
             self.next_playout_at = self
                 .next_playout_at
-                .and_then(|at| at.checked_add(VOICE_FRAME_DURATION));
+                .and_then(|at| at.checked_add(frame_duration));
             let samples = self.decode_for_playout(Some(frame.payload), false);
             self.previous_output = Some(samples);
             ready.push(RemoteVoicePlayoutFrame {
@@ -613,6 +668,8 @@ impl RemoteVoiceJitterBuffer {
             target_frames: self.target_frames,
             reordered_frames: self.reordered_frames,
             concealed_frames: self.concealed_frames,
+            rate_adjustment_ppm: self.clock.rate_adjustment.round() as i32,
+            late_frames: self.late_frames,
         }
     }
 }
@@ -1175,7 +1232,7 @@ impl VoiceChatState {
         frame: &clonk_network::VoiceFrame,
         received_at: Instant,
     ) -> Option<AcceptedRemoteVoicePacket> {
-        let (client_id, payload) = self.prepare_remote_frame(frame)?;
+        let (client_id, payload) = self.prepare_remote_frame(frame, received_at)?;
         let disposition = self.note_remote_frame(
             snapshot,
             client_id,
@@ -1196,7 +1253,7 @@ impl VoiceChatState {
         frame: &clonk_network::VoiceFrame,
         received_at: Instant,
     ) -> Option<AcceptedRemoteVoicePacket> {
-        let (client_id, payload) = self.prepare_remote_frame(frame)?;
+        let (client_id, payload) = self.prepare_remote_frame(frame, received_at)?;
         let disposition = self.note_authenticated_remote_frame(
             client_id,
             frame.player_id,
@@ -1208,8 +1265,9 @@ impl VoiceChatState {
     }
 
     fn prepare_remote_frame(
-        &self,
+        &mut self,
         frame: &clonk_network::VoiceFrame,
+        received_at: Instant,
     ) -> Option<(i32, Option<EncodedVoiceFrame>)> {
         let client_id = i32::try_from(frame.client_id).ok()?;
         // Before decoding: a muted peer costs nothing beyond the bytes the
@@ -1222,19 +1280,30 @@ impl VoiceChatState {
         } else {
             Some(EncodedVoiceFrame::from_packet(&frame.payload).ok()?)
         };
-        if self
+        if let Some(stream) = self
             .remote_streams
-            .get(&(client_id, frame.player_id))
-            .is_some_and(|stream| {
-                stream.stream_epoch == frame.stream_epoch
-                    && !if payload.is_some() {
-                        stream.jitter.can_insert(frame.sequence)
-                    } else {
-                        stream.jitter.can_end(frame.sequence)
-                    }
-            })
+            .get_mut(&(client_id, frame.player_id))
+            .filter(|stream| stream.stream_epoch == frame.stream_epoch)
         {
-            return None;
+            let admitted = if payload.is_some() {
+                stream.jitter.can_insert(frame.sequence)
+            } else {
+                stream.jitter.can_end(frame.sequence)
+            };
+            if !admitted {
+                let late = stream.jitter.next_playout_sequence.is_some_and(|next| {
+                    (1..=VOICE_SEQUENCE_WINDOW_FRAMES as u16)
+                        .contains(&next.wrapping_sub(frame.sequence))
+                });
+                if payload.is_some()
+                    && stream.jitter.started
+                    && late
+                    && stream.jitter.observe_arrival(frame.sequence, received_at)
+                {
+                    stream.jitter.late_frames = stream.jitter.late_frames.saturating_add(1);
+                }
+                return None;
+            }
         }
         Some((client_id, payload))
     }
@@ -1268,6 +1337,27 @@ impl VoiceChatState {
             | VoiceFrameDisposition::OwnershipMismatch
             | VoiceFrameDisposition::DuplicateOrLate => None,
         }
+    }
+
+    pub(crate) fn update_playout_clock(
+        &mut self,
+        client: i32,
+        player: i32,
+        now: Instant,
+        queued: Duration,
+    ) -> i32 {
+        let Some(stream) = self.remote_streams.get_mut(&(client, player)) else {
+            return 0;
+        };
+        if !stream.jitter.started {
+            return 0;
+        }
+        let pending = VOICE_FRAME_DURATION.saturating_mul(stream.jitter.pending.len() as u32);
+        let target = VOICE_FRAME_DURATION.saturating_mul(stream.jitter.target_frames as u32);
+        stream
+            .jitter
+            .clock
+            .update(now, queued.saturating_add(pending), target)
     }
 
     pub(crate) fn drain_remote_playout(
@@ -1948,7 +2038,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_voice_jitter_buffer_freezes_delay_after_playout_starts() {
+    fn remote_voice_jitter_buffer_adapts_live_delay_within_the_latency_budget() {
         let start = Instant::now();
         let mut jitter = RemoteVoiceJitterBuffer::default();
         for sequence in 0..3 {
@@ -1973,8 +2063,142 @@ mod tests {
         ));
         assert_eq!(
             jitter.target_frames(),
+            4,
+            "changing network delay must update the live playout target",
+        );
+        for sequence in 4..200 {
+            jitter.observe_arrival(
+                sequence,
+                start + Duration::from_millis(u64::from(sequence) * 20 + 60),
+            );
+        }
+        assert_eq!(
+            jitter.target_frames(),
             2,
-            "growing live playout delay would itself introduce an audio gap",
+            "a stable route must recover its low latency target"
+        );
+    }
+
+    #[test]
+    fn voice_playout_clock_keeps_latency_bounded_over_eight_hours_of_device_drift() {
+        let start = Instant::now();
+        for drift in [-0.0003, 0.0003] {
+            let mut clock = VoicePlayoutClock::default();
+            let interval = 0.02 * (1.0 + drift);
+            let mut queued = 0.08_f64;
+            let mut rate = 0;
+            for frame in 0..1_440_000 {
+                queued += 0.02 - interval * (1.0 + f64::from(rate) / 1_000_000.0);
+                assert!(
+                    queued > 0.0 && queued < 0.16,
+                    "clock drift exhausted the latency budget: {queued}"
+                );
+                rate = clock.update(
+                    start + Duration::from_secs_f64(f64::from(frame) * interval),
+                    Duration::from_secs_f64(queued),
+                    Duration::from_millis(80),
+                );
+            }
+            assert!((queued - 0.08).abs() < 0.005, "latency drifted to {queued}");
+            assert!((f64::from(rate) + drift * 1_000_000.0).abs() < 10.0);
+        }
+    }
+
+    #[test]
+    fn voice_delay_changes_use_bounded_gradual_clock_corrections() {
+        let start = Instant::now();
+        let mut clock = VoicePlayoutClock::default();
+        let mut queued = 0.04_f64;
+        let mut rate = 0;
+        for frame in 0..1_000 {
+            let target = if frame < 500 { 120 } else { 40 };
+            queued += 0.02 - 0.02 * (1.0 + f64::from(rate) / 1_000_000.0);
+            let next = clock.update(
+                start + Duration::from_millis(frame * 20),
+                Duration::from_secs_f64(queued),
+                Duration::from_millis(target),
+            );
+            assert!(next.abs() <= 10_000);
+            assert!((next - rate).abs() <= 800, "playout rate changed abruptly");
+            assert!(
+                (0.03..0.14).contains(&queued),
+                "delay adjustment created a gap or excessive backlog"
+            );
+            rate = next;
+            if frame == 499 {
+                assert!(queued > 0.105, "delay did not grow smoothly: {queued}");
+            }
+        }
+        assert!(
+            queued < 0.055,
+            "delay did not return toward its low latency target: {queued}"
+        );
+    }
+
+    #[test]
+    fn jitter_estimates_survive_eight_hours_of_wire_sequence_wrap() {
+        let start = Instant::now();
+        let mut jitter = RemoteVoiceJitterBuffer::default();
+        for frame in 0..1_440_000_u64 {
+            jitter.observe_arrival(frame as u16, start + Duration::from_micros(frame * 20_004));
+            if frame > 2 {
+                assert_eq!(
+                    jitter.target_frames(),
+                    2,
+                    "a wrapped sequence looked like a network delay spike at {frame}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn late_authenticated_voice_adapts_delay_without_replaying_concealed_audio() {
+        let start = Instant::now();
+        let payload =
+            clonk_audio::test_encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap();
+        let mut voice = VoiceChatState::default();
+        let packet = |sequence| clonk_network::VoiceFrame {
+            client_id: 7,
+            player_id: 17,
+            stream_epoch: 1,
+            sequence,
+            payload: payload.to_vec(),
+        };
+        for sequence in 0..3 {
+            assert!(voice
+                .accept_authorized_remote_frame(
+                    &packet(sequence),
+                    start + Duration::from_millis(u64::from(sequence) * 20)
+                )
+                .is_some());
+        }
+        assert_eq!(
+            voice
+                .drain_remote_playout(7, 17, start + Duration::from_millis(40), 8, 0)
+                .len(),
+            3
+        );
+        assert_eq!(
+            voice.drain_remote_playout(7, 17, start + Duration::from_millis(100), 8, 0)[0].sequence,
+            3
+        );
+        assert!(voice
+            .accept_authorized_remote_frame(&packet(3), start + Duration::from_millis(120))
+            .is_none());
+        let stats = voice.remote_playout_stats(7, 17);
+        assert_eq!(
+            stats.target_frames, 4,
+            "late packets must still inform the delay estimator"
+        );
+        assert_eq!(stats.late_frames, 1);
+        assert!(voice
+            .accept_authorized_remote_frame(&packet(3), start + Duration::from_millis(140))
+            .is_none());
+        assert_eq!(
+            voice.remote_playout_stats(7, 17).late_frames,
+            1,
+            "a repeated late packet is not another loss"
         );
     }
 

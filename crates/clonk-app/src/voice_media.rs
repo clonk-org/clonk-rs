@@ -83,7 +83,10 @@ pub(crate) fn service_voice_media(
             audio.remove_voice_stream(stream_id);
             continue;
         };
-        let queued = audio.voice_stream_stats(stream_id).queued_frames;
+        let playback = audio.voice_stream_stats(stream_id);
+        let rate = state.update_playout_clock(client_id, player_id, now, playback.queued_duration);
+        audio.set_voice_playout_rate(stream_id, rate);
+        let queued = playback.queued_frames;
         let available = clonk_audio::DEFAULT_VOICE_BUFFERED_FRAMES
             .saturating_sub(1)
             .saturating_sub(queued);

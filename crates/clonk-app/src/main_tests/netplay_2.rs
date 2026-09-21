@@ -867,7 +867,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         main_assert!(reference_voice
             .accept_remote_frame(&app.snapshot, &inbound, batched_admission_at)
             .is_some());
-        voice.send_inbound(inbound).test_value();
+        voice.send_inbound_at(inbound, batched_admission_at).test_value();
     }
     app.update_voice_chat_at(batched_admission_at);
 
@@ -915,8 +915,13 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
             admission_started_at + Duration::from_millis(100),
         )
         .is_some());
-    voice.send_inbound(missing_successor).test_value();
+    voice.send_inbound_at(missing_successor, admission_started_at + Duration::from_millis(100)).test_value();
     app.update_voice_chat_at(admission_started_at + Duration::from_millis(100));
+    let rate = reference_voice.update_playout_clock(
+        remote_client, remote_player, admission_started_at + Duration::from_millis(100),
+        reference_audio.voice_stream_stats(stream_id).queued_duration,
+    );
+    reference_audio.worker_handle().set_voice_playout_rate(stream_id, rate);
     main_assert!(reference_voice
         .drain_remote_playout(
             remote_client,
@@ -930,6 +935,11 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     expected_output.extend(mix_frames(&reference_audio, second_mix_frames));
 
     app.update_voice_chat_at(admission_started_at + Duration::from_millis(120));
+    let rate = reference_voice.update_playout_clock(
+        remote_client, remote_player, admission_started_at + Duration::from_millis(120),
+        reference_audio.voice_stream_stats(stream_id).queued_duration,
+    );
+    reference_audio.worker_handle().set_voice_playout_rate(stream_id, rate);
     let final_reference_frames = reference_voice.drain_remote_playout(
         remote_client,
         remote_player,
