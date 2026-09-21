@@ -409,13 +409,13 @@ mod tests {
                     release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
                     Ok(TimedSource {
                         next: Cell::new(Instant::now()),
-                        frame: VoiceInputFrame {
-                            payload: clonk_audio::test_encode_voice_frame(
+                        frame: VoiceInputFrame::test_frame(
+                            clonk_audio::test_encode_voice_frame(
                                 &[12_000; clonk_audio::VOICE_FRAME_SAMPLES],
                             )
                             .unwrap(),
-                            level: 0.5,
-                        },
+                            0.5,
+                        ),
                     })
                 })
             },
@@ -457,13 +457,13 @@ mod tests {
                     release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
                     Ok(TimedSource {
                         next: Cell::new(Instant::now()),
-                        frame: VoiceInputFrame {
-                            payload: clonk_audio::test_encode_voice_frame(
+                        frame: VoiceInputFrame::test_frame(
+                            clonk_audio::test_encode_voice_frame(
                                 &[12_000; clonk_audio::VOICE_FRAME_SAMPLES],
                             )
                             .unwrap(),
-                            level: 0.5,
-                        },
+                            0.5,
+                        ),
                     })
                 })
             },
@@ -495,13 +495,13 @@ mod tests {
                 VoiceChatState::with_source_opener(|_| {
                     Ok(TimedSource {
                         next: Cell::new(Instant::now()),
-                        frame: VoiceInputFrame {
-                            payload: clonk_audio::test_encode_voice_frame(
+                        frame: VoiceInputFrame::test_frame(
+                            clonk_audio::test_encode_voice_frame(
                                 &[12_000; clonk_audio::VOICE_FRAME_SAMPLES],
                             )
                             .unwrap(),
-                            level: 0.5,
-                        },
+                            0.5,
+                        ),
                     })
                 })
             },
@@ -536,13 +536,13 @@ mod tests {
                 VoiceChatState::with_source_opener(|_| {
                     Ok(TimedSource {
                         next: Cell::new(Instant::now()),
-                        frame: VoiceInputFrame {
-                            payload: clonk_audio::test_encode_voice_frame(
+                        frame: VoiceInputFrame::test_frame(
+                            clonk_audio::test_encode_voice_frame(
                                 &[12_000; clonk_audio::VOICE_FRAME_SAMPLES],
                             )
                             .unwrap(),
-                            level: 0.5,
-                        },
+                            0.5,
+                        ),
                     })
                 })
             },
@@ -582,13 +582,13 @@ mod tests {
                 VoiceChatState::with_source_opener(|_| {
                     Ok(TimedSource {
                         next: Cell::new(Instant::now()),
-                        frame: VoiceInputFrame {
-                            payload: clonk_audio::test_encode_voice_frame(
+                        frame: VoiceInputFrame::test_frame(
+                            clonk_audio::test_encode_voice_frame(
                                 &[12_000; clonk_audio::VOICE_FRAME_SAMPLES],
                             )
                             .unwrap(),
-                            level: 0.5,
-                        },
+                            0.5,
+                        ),
                     })
                 })
             },

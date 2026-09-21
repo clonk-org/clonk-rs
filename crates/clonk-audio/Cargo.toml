@@ -24,6 +24,7 @@ cpal = { version = "0.18.1", optional = true }
 tracing = "0.1"
 aec3 = "=0.4.0"
 opus = "=0.4.0"
+crossbeam-queue = "=0.3.14"
 
 [dev-dependencies]
 hound = "3"

@@ -22,8 +22,8 @@ pub use mixer::{
 };
 pub use voice::{
     voice_activation_level, voice_input_devices, VoiceCapture, VoiceCaptureError,
-    VoiceCaptureOptions, VoiceInputDevice, VoiceInputDeviceId, VoiceInputDeviceIdParseError,
-    VoiceInputFrame, VOICE_CAPTURE_QUEUE_FRAMES,
+    VoiceCaptureOptions, VoiceCaptureTiming, VoiceInputDevice, VoiceInputDeviceId,
+    VoiceInputDeviceIdParseError, VoiceInputFrame, VOICE_CAPTURE_QUEUE_FRAMES,
 };
 #[cfg(any(test, feature = "test-hooks"))]
 pub use voice_codec::test_encode_voice_frame;

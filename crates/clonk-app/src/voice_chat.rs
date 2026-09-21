@@ -622,6 +622,8 @@ pub(crate) struct VoiceChatState {
     activation_open_failed: bool,
     stream_epoch: u32,
     next_sequence: u16,
+    capture_sample_origin: Option<u64>,
+    transmitted_in_epoch: bool,
     pub(crate) remote_streams: BTreeMap<(i32, i32), RemoteVoiceStream>,
     /// Clients this player has silenced, mirroring the runtime client list's
     /// existing per-client mute so one control silences a participant rather
@@ -675,6 +677,8 @@ impl VoiceChatState {
             activation_open_failed: false,
             stream_epoch: 0,
             next_sequence: 0,
+            capture_sample_origin: None,
+            transmitted_in_epoch: false,
             remote_streams: BTreeMap::new(),
             muted_clients: BTreeSet::new(),
         }
@@ -777,6 +781,8 @@ impl VoiceChatState {
         self.activation_gate.close();
         self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
         self.next_sequence = 0;
+        self.capture_sample_origin = None;
+        self.transmitted_in_epoch = false;
         Ok(())
     }
 
@@ -887,43 +893,54 @@ impl VoiceChatState {
             self.capture_stream_generation = generation;
             self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
             self.next_sequence = 0;
+            self.capture_sample_origin = None;
+            self.transmitted_in_epoch = false;
             self.activation_gate.close();
         }
+        let now = Instant::now();
         frames
             .into_iter()
+            .filter(|frame| frame.is_fresh_at(now))
             .filter_map(|frame| match activation {
-                None => Some((frame.payload, false)),
+                None => Some((frame, false)),
                 Some(activation) => self
                     .activation_gate
                     .admit(frame.level, activation)
-                    .map(|reopened| (frame.payload, reopened)),
+                    .map(|reopened| (frame, reopened)),
             })
             // The gate borrows `self` mutably, so the stamping pass cannot be
             // fused into it.
             .collect::<Vec<_>>()
             .into_iter()
-            .map(|(payload, reopened)| self.stamp_captured_frame(payload, reopened))
+            .map(|(frame, reopened)| self.stamp_captured_frame(frame, reopened))
             .collect()
     }
 
     fn stamp_captured_frame(
         &mut self,
-        payload: EncodedVoiceFrame,
+        frame: VoiceInputFrame,
         starts_new_stream: bool,
     ) -> CapturedVoiceFrame {
-        // Nothing has gone out on this epoch yet when the sequence is still 0,
-        // so the first frame after a capture opens keeps the epoch
-        // `start_capture` already allocated.
-        if starts_new_stream && self.next_sequence != 0 {
+        // An explicit flag survives sequence wrap during long utterances.
+        if starts_new_stream && self.transmitted_in_epoch {
             self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
             self.next_sequence = 0;
+            self.capture_sample_origin = None;
+            self.transmitted_in_epoch = false;
         }
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let sequence = frame.capture_timing().map_or(self.next_sequence, |timing| {
+            let origin = *self
+                .capture_sample_origin
+                .get_or_insert(timing.sample_offset);
+            (timing.sample_offset.saturating_sub(origin) / clonk_audio::VOICE_FRAME_SAMPLES as u64)
+                as u16
+        });
+        self.next_sequence = sequence.wrapping_add(1);
+        self.transmitted_in_epoch = true;
         CapturedVoiceFrame {
             stream_epoch: self.stream_epoch,
             sequence,
-            payload,
+            payload: frame.payload,
         }
     }
 
@@ -1493,10 +1510,7 @@ mod tests {
     impl TestVoiceSource {
         fn with_frame(payload: EncodedVoiceFrame) -> Self {
             Self {
-                frames: RefCell::new(vec![VoiceInputFrame {
-                    payload,
-                    level: 1.0,
-                }]),
+                frames: RefCell::new(vec![VoiceInputFrame::test_frame(payload, 1.0)]),
             }
         }
 
@@ -1505,12 +1519,14 @@ mod tests {
                 frames: RefCell::new(
                     levels
                         .iter()
-                        .map(|&level| VoiceInputFrame {
-                            payload: clonk_audio::test_encode_voice_frame(
-                                &[0; clonk_audio::VOICE_FRAME_SAMPLES],
+                        .map(|&level| {
+                            VoiceInputFrame::test_frame(
+                                clonk_audio::test_encode_voice_frame(
+                                    &[0; clonk_audio::VOICE_FRAME_SAMPLES],
+                                )
+                                .unwrap(),
+                                level,
                             )
-                            .unwrap(),
-                            level,
                         })
                         .collect(),
                 ),
@@ -2503,6 +2519,41 @@ mod tests {
     }
 
     #[test]
+    fn capture_overflow_preserves_missing_sample_intervals_on_the_wire() {
+        let now = Instant::now();
+        let mut voice = VoiceChatState::with_capture_opener(move |_| {
+            let payload =
+                clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                    .unwrap();
+            Ok(TestVoiceSource {
+                frames: RefCell::new(
+                    [0, 3]
+                        .map(|index| {
+                            VoiceInputFrame::test_frame(payload, 1.0).with_test_timing(
+                                clonk_audio::VoiceCaptureTiming {
+                                    captured_at: now,
+                                    sample_offset: index * clonk_audio::VOICE_FRAME_SAMPLES as u64,
+                                },
+                            )
+                        })
+                        .to_vec(),
+                ),
+            })
+        });
+        voice
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
+            .unwrap();
+        assert_eq!(
+            voice
+                .drain_captured_frames(None)
+                .into_iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 3]
+        );
+    }
+
+    #[test]
     fn microphone_opens_only_for_an_explicit_capture_start() {
         let opens = Rc::new(Cell::new(0));
         let observed_opens = opens.clone();
@@ -2628,13 +2679,11 @@ mod tests {
         let mut voice = VoiceChatState::with_capture_opener(move |options| {
             observed_opens.borrow_mut().push(options.input_device);
             Ok(DroppingVoiceSource {
-                frame: RefCell::new(Some(VoiceInputFrame {
-                    payload: clonk_audio::test_encode_voice_frame(
-                        &[0; clonk_audio::VOICE_FRAME_SAMPLES],
-                    )
-                    .unwrap(),
-                    level: 1.0,
-                })),
+                frame: RefCell::new(Some(VoiceInputFrame::test_frame(
+                    clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                        .unwrap(),
+                    1.0,
+                ))),
                 drops: observed_drops.clone(),
             })
         });
@@ -2759,13 +2808,11 @@ mod tests {
             .expect("initial input opens");
 
         let mut capture_one = || {
-            frames.borrow_mut().push(VoiceInputFrame {
-                payload: clonk_audio::test_encode_voice_frame(
-                    &[0; clonk_audio::VOICE_FRAME_SAMPLES],
-                )
-                .unwrap(),
-                level: 1.0,
-            });
+            frames.borrow_mut().push(VoiceInputFrame::test_frame(
+                clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                    .unwrap(),
+                1.0,
+            ));
             voice
                 .drain_captured_frames(None)
                 .into_iter()

@@ -95,6 +95,7 @@ crc32fast	1.5.2	MIT OR Apache-2.0
 crossbeam-channel	0.5.17	MIT OR Apache-2.0
 crossbeam-deque	0.8.8	MIT OR Apache-2.0
 crossbeam-epoch	0.9.21	MIT OR Apache-2.0
+crossbeam-queue	0.3.14	MIT OR Apache-2.0
 crossbeam-utils	0.8.23	MIT OR Apache-2.0
 crunchy	0.2.4	MIT
 crypto-common	0.2.2	MIT OR Apache-2.0
