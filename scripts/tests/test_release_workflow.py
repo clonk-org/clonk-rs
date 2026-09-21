@@ -218,8 +218,8 @@ class ReleaseWorkflowTopologyTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn(
-            'group: "release-${{ startsWith(github.event.head_commit.message, '
-            "'chore: release ') && github.sha || 'rolling' }}\"",
+            'group: "release-${{ inputs.release-sha || (startsWith(github.event.head_commit.message, '
+            "'chore: release ') && github.sha || 'rolling') }}\"",
             workflow,
         )
         self.assertIn("cancel-in-progress: false", workflow)
@@ -317,7 +317,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         return completed, output.read_text(encoding="utf-8") if output.exists() else ""
 
-    def run_publication_slo(self, elapsed_seconds):
+    def run_publication_slo(self, elapsed_seconds, event_name="push"):
         self._stub(
             'if [[ "$*" == "api repos/${REPOSITORY}/commits/${SHA}/pulls" ]]; then\n'
             '  printf \'[{"merge_commit_sha":"%s","merged_at":"%s"}]\\n\' "$SHA" "$LANDED_AT"\n'
@@ -340,6 +340,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "ELAPSED_SECONDS": str(elapsed_seconds),
+            "EVENT_NAME": event_name,
             "GH_TOKEN": "stub",
             "LANDED_AT": "2026-08-09T10:30:55Z",
             "PUBLISHED_AT": "2026-08-09T10:32:55Z",
@@ -362,6 +363,105 @@ class ReleaseWorkflowTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def run_release_resolver(self, **extra):
+        (self.root / "Cargo.toml").write_text(
+            '[workspace.package]\nversion = "0.28.0"\n', encoding="utf-8"
+        )
+        git = self.bin / "git"
+        git.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  "show -s --format=%s HEAD") echo "$CHECKOUT_SUBJECT" ;;\n'
+            '  "rev-parse HEAD") echo "$CHECKOUT_SHA" ;;\n'
+            "  *) exit 1 ;;\nesac\n",
+            encoding="utf-8",
+        )
+        git.chmod(0o755)
+        self._stub(
+            'case "$*" in\n'
+            '  "api repos/${REPOSITORY}/compare/${RESOLVED_SHA}...main --jq .status")\n'
+            '    echo "$COMPARISON" ;;\n'
+            '  "api repos/${REPOSITORY}/git/ref/tags/v0.28.0 "*)\n'
+            '    echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
+            "  *) exit 1 ;;\nesac\n"
+        )
+        output = self.root / "github-output"
+        output.unlink(missing_ok=True)
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        environment = {
+            **os.environ,
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "HEAD_SUBJECT": "",
+            "EVENT_NAME": "workflow_dispatch",
+            "RESOLVED_SHA": sha,
+            "CHECKOUT_SHA": sha,
+            "CHECKOUT_SUBJECT": "chore: release 0.28.0 (#1661)",
+            "COMPARISON": "ahead",
+            "REPOSITORY": "clonk-org/clonk-rs",
+            "RUNNER_TEMP": str(self.root),
+            "GITHUB_OUTPUT": str(output),
+            **extra,
+        }
+        completed = subprocess.run(
+            [
+                "bash", "--noprofile", "--norc", "-eo", "pipefail", "-c",
+                step_script("Decide whether this commit releases"),
+            ],
+            cwd=self.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        return completed, output.read_text(encoding="utf-8") if output.exists() else ""
+
+    def test_recovery_rejects_an_ordinary_commit(self):
+        completed, output = self.run_release_resolver(
+            CHECKOUT_SUBJECT="fix: ordinary change"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("release=true", output)
+        self.assertIn("not a release commit", completed.stderr)
+
+    def test_recovery_requires_the_exact_commit_to_have_landed_on_main(self):
+        for comparison in ("behind", "diverged", "", "unknown"):
+            with self.subTest(comparison=comparison):
+                completed, output = self.run_release_resolver(COMPARISON=comparison)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertNotIn("release=true", output)
+                self.assertIn("not on main", completed.stderr)
+
+    def test_recovery_rejects_mutable_refs_and_a_different_checkout(self):
+        cases = [
+            {"RESOLVED_SHA": "main"},
+            {"RESOLVED_SHA": "01234567"},
+            {"CHECKOUT_SHA": "f" * 40},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                completed, output = self.run_release_resolver(**case)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertNotIn("release=true", output)
+                self.assertIn("exact commit SHA", completed.stderr)
+
+    def test_recovery_resolves_the_original_release_version_and_sha(self):
+        for comparison in ("ahead", "identical"):
+            with self.subTest(comparison=comparison):
+                completed, output = self.run_release_resolver(COMPARISON=comparison)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    output,
+                    "version=0.28.0\n"
+                    "sha=0123456789abcdef0123456789abcdef01234567\n"
+                    "release=true\n",
+                )
+
+    def test_ordinary_main_push_does_not_release(self):
+        completed, output = self.run_release_resolver(
+            EVENT_NAME="push", HEAD_SUBJECT="fix: ordinary change"
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(output, "release=false\n")
 
     def run_release_build_latency(self, elapsed_seconds, *, omit=None):
         started = datetime(2026, 8, 10, tzinfo=timezone.utc)
@@ -496,6 +596,24 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(output, "run-id=91\n")
 
+    def test_resolver_accepts_device_loss_diagnostics_for_the_release_commit(self):
+        self._stub(
+            'if [[ "$1 $2" == "run list" ]]; then\n'
+            '  printf "91\\t%s\\tcompleted\\tsuccess\\n" "$CI_SHA"\n'
+            'elif [[ "$1" == "api" ]]; then printf "%s\\n" "$ARTIFACTS";\n'
+            "else exit 1; fi\n"
+        )
+        inventory = json.loads(self.artifact_inventory())
+        inventory["artifacts"].extend(
+            {"name": f"device-loss-{platform}-0123456789abcdef", "expired": False}
+            for platform in ("Linux", "Windows", "macOS")
+        )
+        completed, output = self.run_artifact_resolver(
+            ARTIFACTS=json.dumps(inventory), CI_POLL_ATTEMPTS="1"
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(output, "run-id=91\n")
+
     def test_resolver_fails_closed_on_missing_or_expired_coverage_artifacts(self):
         self._stub(
             'if [[ "$1 $2" == "run list" ]]; then\n'
@@ -538,6 +656,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "unknown coverage": self.artifact_inventory(
                 extra="rust-coverage-fragment-91-unreviewed"
             ),
+            "stale device loss": self.artifact_inventory(
+                extra="device-loss-Linux-different-commit"
+            ),
+            "unknown device loss": self.artifact_inventory(
+                extra="device-loss-unreviewed-0123456789abcdef"
+            ),
         }
         for name, inventory in cases.items():
             with self.subTest(name=name):
@@ -576,6 +700,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("release publication exceeded its 120s SLO", completed.stderr)
+
+    def test_recovery_reports_the_original_missed_publication_slo(self):
+        completed = self.run_publication_slo(86400, event_name="workflow_dispatch")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("::warning::", completed.stdout)
+        self.assertIn("original publication missed its 120s SLO", completed.stdout)
+        self.assertIn("86400s", completed.stdout)
 
     def test_release_build_latency_accepts_exactly_half_the_baseline(self):
         completed = self.run_release_build_latency(898)

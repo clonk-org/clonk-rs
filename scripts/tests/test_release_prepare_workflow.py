@@ -169,13 +169,15 @@ class ReleasePrepareWorkflowTests(unittest.TestCase):
         )
         self.assertIn("-F force=true", workflow)
 
-    def test_schedule_prepares_a_pr_and_release_only_reacts_to_main(self):
+    def test_schedule_prepares_a_pr_and_publication_can_recover_a_landed_sha(self):
         prepare = PREPARE.read_text(encoding="utf-8")
         publish = PUBLISH.read_text(encoding="utf-8")
 
         self.assertIn("schedule:", prepare)
         self.assertNotIn("schedule:", publish)
-        self.assertNotIn("workflow_dispatch:", publish)
+        self.assertIn("workflow_dispatch:", publish)
+        self.assertIn("release-sha:", publish)
+        self.assertIn("required: true", publish)
 
     def test_publish_resolver_has_no_legacy_preparation_ancestor(self):
         workflow = PUBLISH.read_text(encoding="utf-8")
@@ -184,8 +186,8 @@ class ReleasePrepareWorkflowTests(unittest.TestCase):
         self.assertNotIn("\n  prepare:\n", workflow)
         self.assertNotIn("needs: [prepare]", publish)
         self.assertNotIn("needs.prepare", publish)
-        self.assertIn("ref: ${{ github.sha }}", publish)
-        self.assertIn("RESOLVED_SHA: ${{ github.sha }}", publish)
+        self.assertIn("ref: ${{ inputs.release-sha || github.sha }}", publish)
+        self.assertIn("RESOLVED_SHA: ${{ inputs.release-sha || github.sha }}", publish)
 
     def test_app_created_pr_runs_the_repository_checks(self):
         workflow = PREPARE.read_text(encoding="utf-8")
