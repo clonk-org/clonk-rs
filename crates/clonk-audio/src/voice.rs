@@ -742,8 +742,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
         validate_capture_config(supported.sample_rate(), supported.channels())?;
 
         let stream_config = supported.config();
-        let processing =
-            VoiceProcessing::new(options.processing.clone(), options.echo_reference.clone());
+        let processing = options.clone();
         macro_rules! input_stream {
             ($sample:ty) => {
                 build_voice_input_stream::<$sample>(&device, stream_config, callbacks, processing)?
@@ -802,7 +801,7 @@ fn build_voice_input_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     callbacks: CaptureStreamCallbacks,
-    processing: VoiceProcessing,
+    options: VoiceCaptureOptions,
 ) -> Result<cpal::Stream, VoiceCaptureError>
 where
     T: cpal::SizedSample + VoiceInputSample + Send + 'static,
@@ -810,11 +809,32 @@ where
     use cpal::traits::DeviceTrait;
 
     let error_callbacks = callbacks.clone();
-    let mut processor = VoiceCaptureProcessor::new_managed(
+    let (raw_tx, raw_rx) =
+        mpsc::sync_channel::<[f32; VOICE_FRAME_SAMPLES]>(VOICE_CAPTURE_QUEUE_FRAMES);
+    let dropped_frames = callbacks.dropped_frames.clone();
+    // Device callbacks only gather PCM. Codec and echo processing belong to a
+    // worker, so neither expensive processing nor its allocations can miss a
+    // hardware callback deadline. Dropping the stream closes this worker's
+    // only raw producer; it then drains its bounded tail and exits.
+    std::thread::Builder::new()
+        .name("voice-capture".to_owned())
+        .spawn(move || {
+            let mut sink = ProcessedCaptureSink {
+                processing: VoiceProcessing::new(options.processing, options.echo_reference),
+                callbacks,
+            };
+            while let Ok(mut frame) = raw_rx.recv() {
+                sink.process(&mut frame);
+            }
+        })
+        .map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
+    let mut processor = VoiceCaptureProcessor::new_with_sink(
         config.sample_rate,
         config.channels,
-        callbacks,
-        processing,
+        RawCaptureSink {
+            frames: raw_tx,
+            dropped_frames,
+        },
     )?;
     device
         .build_input_stream(
@@ -870,20 +890,54 @@ impl_voice_input_sample!(
 );
 
 #[cfg(any(feature = "cpal", test))]
-struct VoiceCaptureProcessor {
-    channels: usize,
-    resampler: StreamingVoiceResampler,
-    /// The frame is gathered as floats because the processing chain works in
-    /// them; quantizing to the encoder's integers is the last step.
-    frame: [f32; VOICE_FRAME_SAMPLES],
-    sample_count: usize,
+trait CaptureFrameSink {
+    fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]);
+}
+
+#[cfg(any(feature = "cpal", test))]
+struct ProcessedCaptureSink {
     processing: VoiceProcessing,
     callbacks: CaptureStreamCallbacks,
 }
 
 #[cfg(any(feature = "cpal", test))]
-impl VoiceCaptureProcessor {
-    #[cfg(test)]
+impl CaptureFrameSink for ProcessedCaptureSink {
+    fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) {
+        let level = self.processing.process(frame);
+        let samples = std::array::from_fn(|index| voice_f32_to_i16(frame[index]));
+        self.callbacks.send_frame(VoiceInputFrame {
+            payload: encode_voice_frame(&samples),
+            level,
+        });
+    }
+}
+
+#[cfg(feature = "cpal")]
+struct RawCaptureSink {
+    frames: SyncSender<[f32; VOICE_FRAME_SAMPLES]>,
+    dropped_frames: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "cpal")]
+impl CaptureFrameSink for RawCaptureSink {
+    fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) {
+        if self.frames.try_send(*frame).is_err() {
+            self.dropped_frames.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(any(feature = "cpal", test))]
+struct VoiceCaptureProcessor<S> {
+    channels: usize,
+    resampler: StreamingVoiceResampler,
+    frame: [f32; VOICE_FRAME_SAMPLES],
+    sample_count: usize,
+    sink: S,
+}
+
+#[cfg(test)]
+impl VoiceCaptureProcessor<ProcessedCaptureSink> {
     fn new(
         sample_rate: u32,
         channels: u16,
@@ -892,46 +946,35 @@ impl VoiceCaptureProcessor {
         processing: VoiceProcessing,
     ) -> Result<Self, VoiceCaptureError> {
         let (events, _) = std::sync::mpsc::sync_channel(1);
-        Self::new_with_callbacks(
+        Self::new_with_sink(
             sample_rate,
             channels,
-            CaptureStreamCallbacks {
-                generation: 1,
-                frames: sender,
-                dropped_frames,
-                active_generation: Arc::new(AtomicU64::new(1)),
-                invalidated_generation: Arc::new(AtomicU64::new(0)),
-                route_changed_generation: Arc::new(AtomicU64::new(0)),
-                events,
+            ProcessedCaptureSink {
+                processing,
+                callbacks: CaptureStreamCallbacks {
+                    generation: 1,
+                    frames: sender,
+                    dropped_frames,
+                    active_generation: Arc::new(AtomicU64::new(1)),
+                    invalidated_generation: Arc::new(AtomicU64::new(0)),
+                    route_changed_generation: Arc::new(AtomicU64::new(0)),
+                    events,
+                },
             },
-            processing,
         )
     }
+}
 
-    #[cfg(feature = "cpal")]
-    fn new_managed(
-        sample_rate: u32,
-        channels: u16,
-        callbacks: CaptureStreamCallbacks,
-        processing: VoiceProcessing,
-    ) -> Result<Self, VoiceCaptureError> {
-        Self::new_with_callbacks(sample_rate, channels, callbacks, processing)
-    }
-
-    fn new_with_callbacks(
-        sample_rate: u32,
-        channels: u16,
-        callbacks: CaptureStreamCallbacks,
-        processing: VoiceProcessing,
-    ) -> Result<Self, VoiceCaptureError> {
+#[cfg(any(feature = "cpal", test))]
+impl<S: CaptureFrameSink> VoiceCaptureProcessor<S> {
+    fn new_with_sink(sample_rate: u32, channels: u16, sink: S) -> Result<Self, VoiceCaptureError> {
         validate_capture_config(sample_rate, channels)?;
         Ok(Self {
             channels: usize::from(channels),
             resampler: StreamingVoiceResampler::new(sample_rate),
             frame: [0.0; VOICE_FRAME_SAMPLES],
             sample_count: 0,
-            processing,
-            callbacks,
+            sink,
         })
     }
 
@@ -946,24 +989,14 @@ impl VoiceCaptureProcessor {
                 resampler,
                 frame,
                 sample_count,
-                processing,
-                callbacks,
+                sink,
                 ..
             } = self;
             resampler.push_sample(mono, |sample| {
                 frame[*sample_count] = sample;
                 *sample_count += 1;
                 if *sample_count == VOICE_FRAME_SAMPLES {
-                    let level = processing.process(frame);
-                    let mut samples = [0_i16; VOICE_FRAME_SAMPLES];
-                    for (quantized, processed) in samples.iter_mut().zip(frame.iter()) {
-                        *quantized = voice_f32_to_i16(*processed);
-                    }
-                    let captured = VoiceInputFrame {
-                        payload: encode_voice_frame(&samples),
-                        level,
-                    };
-                    callbacks.send_frame(captured);
+                    sink.process(frame);
                     *sample_count = 0;
                 }
             });

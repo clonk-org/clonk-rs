@@ -1705,11 +1705,6 @@ impl AudioMixer {
                         voice_right += frame[1] * stream.right_gain;
                     }
                 }
-                let voice_gain =
-                    voice_limiter.gain_for_peak(voice_left.abs().max(voice_right.abs()));
-                left += voice_left * voice_gain;
-                right += voice_right * voice_gain;
-
                 if !finished_music {
                     if let Some(music) = active_music.as_mut() {
                         if let Some(frame) = music.next_frame() {
@@ -1734,6 +1729,13 @@ impl AudioMixer {
                         }
                     }
                 }
+
+                // Only voice may yield: keep the established sound/music
+                // arithmetic, while reserving actual headroom in both ears.
+                let voice_gain =
+                    voice_limiter.gain_for_mix([voice_left, voice_right], [left, right]);
+                left += voice_left * voice_gain;
+                right += voice_right * voice_gain;
 
                 if let Some(tap) = echo_tap.as_mut() {
                     tap.push_output_frame(left.clamp(-1.0, 1.0), right.clamp(-1.0, 1.0));
@@ -1928,12 +1930,27 @@ impl VoiceLimiter {
     /// instantaneous, so `gain <= VOICE_BUS_CEILING / peak` holds on the very
     /// first sample of a burst instead of one release later; only handing the
     /// gain back is smoothed, which is what keeps the limiter inaudible.
+    #[cfg(test)]
     fn gain_for_peak(&mut self, peak: f32) -> f32 {
-        let target = if peak > VOICE_BUS_CEILING {
+        self.gain_for_mix([peak, 0.0], [0.0, 0.0])
+    }
+
+    fn gain_for_mix(&mut self, voice: [f32; 2], background: [f32; 2]) -> f32 {
+        let peak = voice[0].abs().max(voice[1].abs());
+        let mut target = if peak > VOICE_BUS_CEILING {
             VOICE_BUS_CEILING / peak
         } else {
             1.0
         };
+        // One signed gain for both ears preserves stereo placement. The
+        // one-PCM-step margin also avoids rounding onto the output clamp.
+        const OUTPUT_CEILING: f32 = 1.0 - 1.0 / 32_768.0;
+        for (sample, background) in voice.into_iter().zip(background) {
+            if sample != 0.0 {
+                let headroom = OUTPUT_CEILING - background * sample.signum();
+                target = target.min((headroom / sample.abs()).clamp(0.0, 1.0));
+            }
+        }
         self.gain = if target < self.gain {
             target
         } else {
@@ -2661,6 +2678,27 @@ mod tests {
         mixer.mix_f32(&mut output);
         assert!((output[0] - 0.125).abs() < 0.000_1);
         assert_eq!(output[1], 0.0);
+    }
+
+    #[test]
+    fn voice_respects_loud_game_audio_headroom() {
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 1);
+        let data = float_stereo_wave(VOICE_SAMPLE_RATE, &[[0.9, 0.9]; VOICE_FRAME_SAMPLES]);
+        let sound = mixer.load_sound(&data).unwrap();
+        mixer.play_sound(sound, false).unwrap();
+        mixer.queue_voice_stream_with_mix(1, [20_000; VOICE_FRAME_SAMPLES], 1.0, 0.0);
+
+        let mut output = [0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        mixer.mix_f32(&mut output);
+
+        assert!(
+            output.iter().all(|sample| *sample < 1.0),
+            "speech must not drive loud game audio into the output clamp"
+        );
+        assert!(
+            output.iter().all(|sample| *sample > 0.9 * 100.0 / 128.0),
+            "speech must remain audible above the unchanged game mix"
+        );
     }
 
     #[test]
