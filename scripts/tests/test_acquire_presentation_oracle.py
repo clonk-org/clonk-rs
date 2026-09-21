@@ -1088,7 +1088,7 @@ class PinAndGitTests(unittest.TestCase):
         )
         self.assertEqual(
             MODULE.FIXTURE_CONTENT_COMMIT,
-            "71607fc81f4024a12081da27a29639fbc85f41b2",
+            "f692a2fd619fb4c4df1ea1aa720409f13472365f",
         )
         self.assertEqual(MODULE.CASE_IDS, EXPECTED_CASE_IDS)
         self.assertEqual(MODULE.LAYOUT_CASE_IDS, EXPECTED_LAYOUT_IDS)
@@ -1339,7 +1339,7 @@ class PinAndGitTests(unittest.TestCase):
         self.assertTrue(oracle["entries"])
         self.assertEqual(
             MODULE.tree_oid(REPOSITORY / "content", MODULE.FIXTURE_CONTENT_COMMIT),
-            "fecec2213a6de006508c640b42d86281136a0faa",
+            "d3f96af28468851e5de4798a4a83c4a1b569c508",
         )
 
     def test_provenance_can_validate_the_squash_stable_current_source(self):
