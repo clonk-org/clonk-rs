@@ -9,6 +9,14 @@ on:
   # after its App-owned pull request has passed the merge queue and landed.
   push:
     branches: [main]
+  # Recover with the fixed workflow on main, keeping the original release SHA:
+  # gh workflow run release.yml --ref main -f release-sha=<full-sha>
+  workflow_dispatch:
+    inputs:
+      release-sha:
+        description: Full SHA of a landed release commit to recover
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -17,7 +25,7 @@ concurrency:
   # GitHub retains only one pending run per group even when cancellation is
   # disabled. Keep each real release in its own lane so an ordinary later push
   # cannot replace it before the resolver starts; no-op pushes may coalesce.
-  group: "release-${{ startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling' }}"
+  group: "release-${{ inputs.release-sha || (startsWith(github.event.head_commit.message, 'chore: release ') && github.sha || 'rolling') }}"
   cancel-in-progress: false
 
 env:
@@ -39,9 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The triggering commit, never `main`, whose tip moves while a build
-          # is running.
-          ref: ${{ github.sha }}
+          # Recovery runs the current workflow over the original release
+          # commit's metadata. Re-running its old workflow would repeat a bug.
+          ref: ${{ inputs.release-sha || github.sha }}
           # Release metadata lives in this tree. Tag idempotency is checked
           # through the API below, so downloading the repository's complete
           # history and tag set would spend most of the publication budget for
@@ -55,19 +63,37 @@ jobs:
           # Via env, never interpolated into the script: a commit subject is
           # attacker-influencable text.
           HEAD_SUBJECT: ${{ github.event.head_commit.message }}
-          # Only the push path infers intent from the commit subject. On the
-          # schedule and dispatch paths `head_commit` is absent entirely, and
-          # testing the subject there would reject every scheduled release.
+          # A dispatch has no head_commit; recovery reads the checked-out
+          # subject and verifies that the requested SHA has landed on main.
           EVENT_NAME: ${{ github.event_name }}
-          RESOLVED_SHA: ${{ github.sha }}
+          RESOLVED_SHA: ${{ inputs.release-sha || github.sha }}
           REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
           subject=${HEAD_SUBJECT%%$'\n'*}
-          if [[ "$EVENT_NAME" == "push" && "$subject" != "chore: release "* ]]; then
-            echo "not a release commit: $subject"
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            subject=$(git show -s --format=%s HEAD)
+          fi
+          if [[ "$subject" != "chore: release "* ]]; then
+            if [[ "$EVENT_NAME" == "push" ]]; then
+              echo "not a release commit: $subject"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "not a release commit: $subject" >&2
+            exit 1
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$RESOLVED_SHA" =~ ^[0-9a-f]{40}$ || "$(git rev-parse HEAD)" != "$RESOLVED_SHA" ]]; then
+              echo "recovery requires the exact commit SHA checked out" >&2
+              exit 1
+            fi
+            comparison=$(gh api "repos/${REPOSITORY}/compare/${RESOLVED_SHA}...main" --jq '.status')
+            if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
+              echo "release commit ${RESOLVED_SHA} is not on main" >&2
+              exit 1
+            fi
           fi
 
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
@@ -214,11 +240,16 @@ jobs:
               # Failed-shard diagnostics use the same Landing run so they can
               # be downloaded with the release qualification logs. They are
               # deliberately outside the immutable release payload contract;
-              # filter only this run's diagnostic prefix before the exact
-              # payload/coverage comparison.
+              # Filter this run's shard diagnostics and the three known
+              # device-loss reports for this SHA before comparing payloads.
               diagnostic_prefix="rust-test-diagnostics-${run_id}-"
-              actual_inventory=$(jq -r --arg diagnostic_prefix "$diagnostic_prefix" \
-                '.artifacts[] | select((.name | startswith($diagnostic_prefix)) == false) | [.name, (.expired | tostring)] | @tsv' \
+              actual_inventory=$(jq -r --arg diagnostic_prefix "$diagnostic_prefix" --arg sha "$CI_SHA" \
+                '.artifacts[]
+                 | select((.name | startswith($diagnostic_prefix)) == false)
+                 | select(.name != ("device-loss-Linux-" + $sha)
+                      and .name != ("device-loss-Windows-" + $sha)
+                      and .name != ("device-loss-macOS-" + $sha))
+                 | [.name, (.expired | tostring)] | @tsv' \
                 <<<"$artifacts" | LC_ALL=C sort)
               if [[ "$actual_inventory" == "$expected_inventory" ]]; then
                 echo "resolved exact-SHA artifacts from Landing run $run_id"
@@ -520,12 +551,15 @@ jobs:
       - name: Enforce release publication SLO
         # Also runs on an idempotent rerun after publication, so a slow first
         # run cannot be turned green merely by observing its existing release.
+        # Explicit recovery reports the historical miss without failing the
+        # repair; the original push run and its reruns still fail the SLO.
         if: steps.resolve.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           SHA: ${{ steps.resolve.outputs.sha }}
           VERSION: ${{ steps.resolve.outputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           pulls=$(gh api "repos/${REPOSITORY}/commits/${SHA}/pulls")
           landed_at=$(jq -r --arg sha "$SHA" \
@@ -547,6 +581,10 @@ jobs:
             exit 1
           fi
           if [[ "$elapsed" -gt 120 ]]; then
+            if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "::warning::Recovered release ${VERSION}; original publication missed its 120s SLO (${elapsed}s)"
+              exit 0
+            fi
             echo "release publication exceeded its 120s SLO" >&2
             exit 1
           fi
