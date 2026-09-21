@@ -4,3 +4,5 @@ parity/oracle/presentation_capture.patch -whitespace
 # Retain captured artifact bytes, including the Windows qualification JSON's CRLF.
 docs/evidence/windows-software-presentation/** -text -whitespace
 docs/evidence/live-gpu-recovery/** -text -whitespace
+# Preserve verbatim third-party license text, including upstream whitespace.
+crates/clonk-frontend/src/dependency_licenses.txt -whitespace
