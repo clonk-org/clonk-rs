@@ -812,6 +812,39 @@ pub struct AudioWorkerHandle {
 }
 
 impl AudioWorkerHandle {
+    pub fn queue_voice_stream_with_mix(
+        &self,
+        stream_id: u64,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+        volume: f32,
+        pan: f32,
+    ) -> VoiceFrameQueueOutcome {
+        if let Some(backend) = &self.deferred_null_backend {
+            backend.ensure_running();
+        }
+        self.mixer
+            .queue_voice_stream_with_mix(stream_id, samples, volume, pan)
+    }
+
+    /// Updates an existing voice source. Returns false when no frame has been
+    /// queued for this key yet.
+    pub fn update_voice_stream(&self, stream_id: u64, volume: f32, pan: f32) -> bool {
+        self.mixer.update_voice_stream(stream_id, volume, pan)
+    }
+
+    /// Removes a keyed live voice source and all of its buffered audio.
+    pub fn remove_voice_stream(&self, stream_id: u64) -> bool {
+        self.mixer.remove_voice_stream(stream_id)
+    }
+
+    pub fn voice_stream_stats(&self, stream_id: u64) -> VoiceStreamStats {
+        self.mixer.voice_stream_stats(stream_id)
+    }
+
+    pub fn voice_echo_reference(&self) -> VoiceEchoReference {
+        self.mixer.voice_echo_reference()
+    }
+
     pub fn load_music(&self, data: &[u8]) -> Result<MusicHandle, AudioError> {
         let id = self.mixer.load_music(data)?;
         Ok(MusicHandle::new(self.mixer.clone(), id))

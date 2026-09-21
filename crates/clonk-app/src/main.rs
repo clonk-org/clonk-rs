@@ -191,6 +191,7 @@ mod update_check;
 mod update_download;
 mod viewport_window_host;
 mod voice_chat;
+mod voice_media;
 mod window_icon;
 
 // `GameApp` methods are partitioned into per-area extension modules. They stay
