@@ -175,6 +175,7 @@ shard_modules!(
     sky_lighting_is_static,
     snapshot_section_profile,
     spawn_container_order,
+    temporary_tunnel_profile,
     virtual_player_harness,
     weather_audio,
     western_sack_pickup,
