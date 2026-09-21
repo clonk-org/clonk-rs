@@ -273,6 +273,21 @@ pub fn load_installed_scenario_with_selected_definitions(
     .instantiate()
 }
 
+/// The scenario as a player with this `LanguageEx` sequence gets it. The other
+/// loaders here pass `US,DE`, which also picks up a component that ships in
+/// German only; a US player's sequence is `US` alone, since neither shipped
+/// language file names a fallback (`IDS_LANG_FALLBACK=`).
+pub fn load_installed_scenario_in_languages(
+    relative_path: impl AsRef<Path>,
+    seed: u64,
+    languages: &[&str],
+) -> Engine {
+    prepare_installed_scenario_loaded_by(relative_path, seed, |path, resolver| {
+        Scenario::load_from_path_with_languages_and_seed(path, resolver, languages, seed)
+    })
+    .instantiate()
+}
+
 fn prepare_installed_scenario_loaded_by(
     relative_path: impl AsRef<Path>,
     seed: u64,
