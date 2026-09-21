@@ -155,6 +155,7 @@ shard_modules!(
     far_worlds_deep_lorry_acquire,
     wagon_grab_put_get,
     flight_movement,
+    goldwipf_activity,
     harpoonrace_worldgen,
     hazard_crosshair,
     inexantros_hero_locals,
