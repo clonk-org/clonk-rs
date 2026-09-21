@@ -1,0 +1,19 @@
+{
+  "actual": {
+    "path": "run-2/rust/artifacts/startup-options-key-keyboard-minimum.png",
+    "sha256": "8a6f75102de34fc614afbc6141cda9575f937ab81e82b947c6342bc9f394e7eb"
+  },
+  "case_id": "startup-options-key-keyboard-minimum",
+  "comparator": {
+    "binary_sha256": "c3ae060c41be6638f46ce710d96cfc80d19e9867e7c8c34e3151d459d9ac543f",
+    "schema": "clonk-rs/presentation-comparison/v1"
+  },
+  "comparison": "pixel",
+  "reference": {
+    "path": "run-2/cpp/artifacts/startup-options-key-keyboard-minimum.png",
+    "sha256": "e2f40d607c18f95e0f82ed0ea50d4bbbc64052b09f962e2f1d39213e8e001e07"
+  },
+  "run_id": "run-2",
+  "schema": "clonk-rs/presentation-comparison-attestation/v1",
+  "stdout": "{\"schema\":\"clonk-rs/presentation-comparison/v1\",\"case_id\":\"startup-options-key-keyboard-minimum\",\"comparison\":\"pixel\",\"status\":\"match\"}\n"
+}
