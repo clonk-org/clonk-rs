@@ -21,14 +21,15 @@ pub use mixer::{
     MAX_VOICE_BUFFERED_FRAMES,
 };
 pub use voice::{
-    decode_voice_frame, encode_voice_frame, voice_activation_level, voice_input_devices,
-    EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceCaptureOptions, VoiceCodecError,
-    VoiceInputDevice, VoiceInputDeviceId, VoiceInputDeviceIdParseError, VoiceInputFrame,
-    VOICE_CAPTURE_QUEUE_FRAMES, VOICE_ENCODED_FRAME_BYTES, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
+    voice_activation_level, voice_input_devices, VoiceCapture, VoiceCaptureError,
+    VoiceCaptureOptions, VoiceInputDevice, VoiceInputDeviceId, VoiceInputDeviceIdParseError,
+    VoiceInputFrame, VOICE_CAPTURE_QUEUE_FRAMES,
 };
+#[cfg(any(test, feature = "test-hooks"))]
+pub use voice_codec::test_encode_voice_frame;
 pub use voice_codec::{
-    EncodedOpusFrame, OpusCodecError, VoiceDecoder, VoiceEncoder, OPUS_FRAME_SAMPLES,
-    OPUS_MAX_PACKET_BYTES, OPUS_SAMPLE_RATE,
+    EncodedVoiceFrame, VoiceCodecError, VoiceDecoder, VoiceEncoder, MAX_VOICE_ENCODED_BYTES,
+    VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
 };
 pub use voice_echo::VoiceEchoReference;
 pub use voice_processing::{VoiceProcessingConfig, VoiceProcessingSwitches};

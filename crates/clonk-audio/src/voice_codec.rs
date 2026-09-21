@@ -1,8 +1,8 @@
 //! Bounded, stateful Opus for the versioned voice media lane.
 
-pub const OPUS_SAMPLE_RATE: u32 = 48_000;
-pub const OPUS_FRAME_SAMPLES: usize = 960;
-pub const OPUS_MAX_PACKET_BYTES: usize = 512;
+pub const VOICE_SAMPLE_RATE: u32 = 48_000;
+pub const VOICE_FRAME_SAMPLES: usize = 960;
+pub const MAX_VOICE_ENCODED_BYTES: usize = 512;
 
 #[cfg(test)]
 mod tests {
@@ -16,13 +16,13 @@ mod tests {
             "loss concealment is explicit"
         );
         let mut stereo = opus::Encoder::new(
-            OPUS_SAMPLE_RATE,
+            VOICE_SAMPLE_RATE,
             opus::Channels::Stereo,
             opus::Application::Audio,
         )
         .unwrap();
         let packet = stereo
-            .encode_vec(&[1_000; OPUS_FRAME_SAMPLES * 2], OPUS_MAX_PACKET_BYTES)
+            .encode_vec(&[1_000; VOICE_FRAME_SAMPLES * 2], MAX_VOICE_ENCODED_BYTES)
             .unwrap();
         assert!(
             decoder.decode(&packet, false).is_err(),
@@ -37,24 +37,24 @@ mod tests {
         let mut output = Vec::new();
         for frame in 0..50 {
             let samples = std::array::from_fn(|sample| {
-                let t = (frame * OPUS_FRAME_SAMPLES + sample) as f32 / OPUS_SAMPLE_RATE as f32;
+                let t = (frame * VOICE_FRAME_SAMPLES + sample) as f32 / VOICE_SAMPLE_RATE as f32;
                 ((std::f32::consts::TAU * 12_000.0 * t).sin() * 12_000.0
                     + (std::f32::consts::TAU * 200.0 * t).sin() * 8_000.0) as i16
             });
             let packet = encoder.encode(&samples).unwrap();
             assert!(!packet.is_empty());
-            assert!(packet.len() <= OPUS_MAX_PACKET_BYTES);
+            assert!(packet.len() <= MAX_VOICE_ENCODED_BYTES);
             output.extend(decoder.decode(&packet, false).unwrap());
         }
         // A component above the old codec's 8 kHz Nyquist must survive.
-        let settled = &output[OPUS_FRAME_SAMPLES * 10..];
+        let settled = &output[VOICE_FRAME_SAMPLES * 10..];
         let (sin, cos) =
             settled
                 .iter()
                 .enumerate()
                 .fold((0.0, 0.0), |(sin, cos), (index, &sample)| {
                     let phase = std::f64::consts::TAU * 12_000.0 * index as f64
-                        / f64::from(OPUS_SAMPLE_RATE);
+                        / f64::from(VOICE_SAMPLE_RATE);
                     (
                         sin + f64::from(sample) * phase.sin(),
                         cos + f64::from(sample) * phase.cos(),
@@ -71,23 +71,23 @@ mod tests {
 /// A complete encoded frame. The fixed storage bounds allocation and wire size;
 /// only the initialized prefix is transmitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncodedOpusFrame {
-    bytes: [u8; OPUS_MAX_PACKET_BYTES],
+pub struct EncodedVoiceFrame {
+    bytes: [u8; MAX_VOICE_ENCODED_BYTES],
     length: usize,
 }
 
-impl std::ops::Deref for EncodedOpusFrame {
+impl std::ops::Deref for EncodedVoiceFrame {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.bytes[..self.length]
     }
 }
 
-impl EncodedOpusFrame {
-    pub fn from_packet(packet: &[u8]) -> Result<Self, OpusCodecError> {
+impl EncodedVoiceFrame {
+    pub fn from_packet(packet: &[u8]) -> Result<Self, VoiceCodecError> {
         validate_voice_packet(packet)?;
         let mut frame = Self {
-            bytes: [0; OPUS_MAX_PACKET_BYTES],
+            bytes: [0; MAX_VOICE_ENCODED_BYTES],
             length: packet.len(),
         };
         frame.bytes[..packet.len()].copy_from_slice(packet);
@@ -96,20 +96,20 @@ impl EncodedOpusFrame {
 }
 
 /// Validate geometry before a network packet reaches a stateful decoder.
-pub fn validate_voice_packet(packet: &[u8]) -> Result<(), OpusCodecError> {
+pub fn validate_voice_packet(packet: &[u8]) -> Result<(), VoiceCodecError> {
     if packet.is_empty()
-        || packet.len() > OPUS_MAX_PACKET_BYTES
+        || packet.len() > MAX_VOICE_ENCODED_BYTES
         || opus::packet::get_nb_channels(packet)? != opus::Channels::Mono
-        || opus::packet::get_nb_samples(packet, OPUS_SAMPLE_RATE)? != OPUS_FRAME_SAMPLES
+        || opus::packet::get_nb_samples(packet, VOICE_SAMPLE_RATE)? != VOICE_FRAME_SAMPLES
     {
-        return Err(OpusCodecError::InvalidPacket);
+        return Err(VoiceCodecError::InvalidPacket);
     }
     opus::packet::parse(packet)?;
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum OpusCodecError {
+pub enum VoiceCodecError {
     #[error("voice packet is not a bounded 20 ms mono Opus frame")]
     InvalidPacket,
     #[error("Opus voice processing failed: {0}")]
@@ -121,13 +121,13 @@ pub struct VoiceEncoder(opus::Encoder);
 
 impl VoiceEncoder {
     /// Codec lookahead, used when flushing an utterance and measuring fidelity.
-    pub fn lookahead_samples(&mut self) -> Result<usize, OpusCodecError> {
+    pub fn lookahead_samples(&mut self) -> Result<usize, VoiceCodecError> {
         Ok(self.0.get_lookahead()? as usize)
     }
 
-    pub fn new() -> Result<Self, OpusCodecError> {
+    pub fn new() -> Result<Self, VoiceCodecError> {
         let mut encoder = opus::Encoder::new(
-            OPUS_SAMPLE_RATE,
+            VOICE_SAMPLE_RATE,
             opus::Channels::Mono,
             opus::Application::Voip,
         )?;
@@ -142,10 +142,10 @@ impl VoiceEncoder {
 
     pub fn encode(
         &mut self,
-        samples: &[i16; OPUS_FRAME_SAMPLES],
-    ) -> Result<EncodedOpusFrame, OpusCodecError> {
-        let mut packet = EncodedOpusFrame {
-            bytes: [0; OPUS_MAX_PACKET_BYTES],
+        samples: &[i16; VOICE_FRAME_SAMPLES],
+    ) -> Result<EncodedVoiceFrame, VoiceCodecError> {
+        let mut packet = EncodedVoiceFrame {
+            bytes: [0; MAX_VOICE_ENCODED_BYTES],
             length: 0,
         };
         packet.length = self.0.encode(samples, &mut packet.bytes)?;
@@ -157,9 +157,9 @@ impl VoiceEncoder {
 pub struct VoiceDecoder(opus::Decoder);
 
 impl VoiceDecoder {
-    pub fn new() -> Result<Self, OpusCodecError> {
+    pub fn new() -> Result<Self, VoiceCodecError> {
         Ok(Self(opus::Decoder::new(
-            OPUS_SAMPLE_RATE,
+            VOICE_SAMPLE_RATE,
             opus::Channels::Mono,
         )?))
     }
@@ -170,7 +170,7 @@ impl VoiceDecoder {
         &mut self,
         packet: &[u8],
         fec: bool,
-    ) -> Result<[i16; OPUS_FRAME_SAMPLES], OpusCodecError> {
+    ) -> Result<[i16; VOICE_FRAME_SAMPLES], VoiceCodecError> {
         validate_voice_packet(packet)?;
         self.decode_inner(packet, fec)
     }
@@ -179,17 +179,25 @@ impl VoiceDecoder {
         &mut self,
         packet: &[u8],
         fec: bool,
-    ) -> Result<[i16; OPUS_FRAME_SAMPLES], OpusCodecError> {
-        let mut samples = [0; OPUS_FRAME_SAMPLES];
+    ) -> Result<[i16; VOICE_FRAME_SAMPLES], VoiceCodecError> {
+        let mut samples = [0; VOICE_FRAME_SAMPLES];
         let count = self.0.decode(packet, &mut samples, fec)?;
-        if count != OPUS_FRAME_SAMPLES {
-            return Err(OpusCodecError::InvalidPacket);
+        if count != VOICE_FRAME_SAMPLES {
+            return Err(VoiceCodecError::InvalidPacket);
         }
         Ok(samples)
     }
 
     /// Codec-native loss concealment, always exactly one media interval.
-    pub fn conceal(&mut self) -> Result<[i16; OPUS_FRAME_SAMPLES], OpusCodecError> {
+    pub fn conceal(&mut self) -> Result<[i16; VOICE_FRAME_SAMPLES], VoiceCodecError> {
         self.decode_inner(&[], false)
     }
+}
+
+/// Convenience for synthetic test fixtures. Live capture retains its encoder.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_encode_voice_frame(
+    samples: &[i16; VOICE_FRAME_SAMPLES],
+) -> Result<EncodedVoiceFrame, VoiceCodecError> {
+    VoiceEncoder::new()?.encode(samples)
 }

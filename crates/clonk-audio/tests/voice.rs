@@ -2,7 +2,7 @@
 use clonk_audio::{voice_input_devices, VoiceCapture, VoiceCaptureError};
 use clonk_audio::{
     VoiceCaptureOptions, VoiceInputDevice, VoiceInputDeviceId, VoiceProcessingConfig,
-    VoiceProcessingSwitches, VOICE_ENCODED_FRAME_BYTES, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
+    VoiceProcessingSwitches, MAX_VOICE_ENCODED_BYTES, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
 };
 
 #[test]
@@ -75,7 +75,7 @@ fn voice_codec_preserves_speech_spectrum_with_low_distortion() {
                 + (std::f64::consts::TAU * 1_320.0 * time).sin() * 4_000.0) as i16
         });
         let packet = encoder.encode(&samples).unwrap();
-        assert!(packet.len() <= VOICE_ENCODED_FRAME_BYTES);
+        assert!(packet.len() <= MAX_VOICE_ENCODED_BYTES);
         output.extend(decoder.decode(&packet, false).unwrap());
     }
     // VoIP filtering and prediction alter phase. Pin spectral gain and added
@@ -153,7 +153,7 @@ fn voice_codec_preserves_a_short_utterance_when_its_lookahead_is_flushed() {
 fn voice_codec_rejects_oversized_packets_and_unnegotiated_frame_durations() {
     let mut decoder = clonk_audio::VoiceDecoder::new().unwrap();
     assert!(decoder
-        .decode(&vec![0; VOICE_ENCODED_FRAME_BYTES + 1], false)
+        .decode(&vec![0; MAX_VOICE_ENCODED_BYTES + 1], false)
         .is_err());
     let mut encoder = opus::Encoder::new(
         VOICE_SAMPLE_RATE,
@@ -167,7 +167,7 @@ fn voice_codec_rejects_oversized_packets_and_unnegotiated_frame_durations() {
         VOICE_FRAME_SAMPLES * 3,
     ] {
         let packet = encoder
-            .encode_vec(&vec![1_000; sample_count], VOICE_ENCODED_FRAME_BYTES)
+            .encode_vec(&vec![1_000; sample_count], MAX_VOICE_ENCODED_BYTES)
             .unwrap();
         assert!(decoder.decode(&packet, false).is_err());
     }

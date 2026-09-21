@@ -260,7 +260,7 @@ struct RemoteVoiceJitterBuffer {
     highest_arrival_sequence: Option<u16>,
     reordered_frames: u64,
     concealed_frames: u64,
-    decoder: Result<clonk_audio::VoiceDecoder, clonk_audio::OpusCodecError>,
+    decoder: Result<clonk_audio::VoiceDecoder, clonk_audio::VoiceCodecError>,
 }
 
 impl Default for RemoteVoiceJitterBuffer {
@@ -1423,7 +1423,7 @@ mod tests {
                     levels
                         .iter()
                         .map(|&level| VoiceInputFrame {
-                            payload: clonk_audio::encode_voice_frame(
+                            payload: clonk_audio::test_encode_voice_frame(
                                 &[0; clonk_audio::VOICE_FRAME_SAMPLES],
                             )
                             .unwrap(),
@@ -1572,22 +1572,22 @@ mod tests {
         assert!(jitter.insert(
             40,
             start,
-            clonk_audio::encode_voice_frame(&[40; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap()
+            clonk_audio::test_encode_voice_frame(&[40; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap()
         ));
         assert!(jitter.insert(
             42,
             start + Duration::from_millis(20),
-            clonk_audio::encode_voice_frame(&[42; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            clonk_audio::test_encode_voice_frame(&[42; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert!(jitter.insert(
             41,
             start + Duration::from_millis(35),
-            clonk_audio::encode_voice_frame(&[41; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            clonk_audio::test_encode_voice_frame(&[41; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert!(jitter.insert(
             43,
             start + Duration::from_millis(60),
-            clonk_audio::encode_voice_frame(&[43; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            clonk_audio::test_encode_voice_frame(&[43; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
 
         let ready = jitter.drain_ready(start + Duration::from_millis(60), usize::MAX);
@@ -1607,7 +1607,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + Duration::from_millis(arrival_ms),
-                clonk_audio::encode_voice_frame(
+                clonk_audio::test_encode_voice_frame(
                     &[sequence as i16; clonk_audio::VOICE_FRAME_SAMPLES]
                 )
                 .unwrap(),
@@ -1632,12 +1632,12 @@ mod tests {
         assert!(jitter.insert(
             13,
             start,
-            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap()
+            clonk_audio::test_encode_voice_frame(&bipolar_voice_frame()).unwrap()
         ));
         assert!(jitter.insert(
             0,
             start + Duration::from_millis(10),
-            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
+            clonk_audio::test_encode_voice_frame(&bipolar_voice_frame()).unwrap(),
         ));
     }
 
@@ -1649,7 +1649,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + Duration::from_millis(arrival_ms),
-                clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
+                clonk_audio::test_encode_voice_frame(&bipolar_voice_frame()).unwrap(),
             ));
         }
 
@@ -1671,14 +1671,14 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
+                clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
         assert!(jitter.insert(
             1,
             start + Duration::from_millis(170),
-            clonk_audio::encode_voice_frame(&speech_voice_frame(1)).unwrap(),
+            clonk_audio::test_encode_voice_frame(&speech_voice_frame(1)).unwrap(),
         ));
         assert_eq!(
             jitter
@@ -1698,24 +1698,24 @@ mod tests {
         assert!(jitter.insert(
             0,
             start,
-            clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap()
+            clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap()
         ));
         assert!(jitter.insert(
             1,
             start + VOICE_FRAME_DURATION,
-            clonk_audio::encode_voice_frame(&[1; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            clonk_audio::test_encode_voice_frame(&[1; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert!(jitter.insert(
             2,
             start + VOICE_FRAME_DURATION.saturating_mul(2),
-            clonk_audio::encode_voice_frame(&[2; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            clonk_audio::test_encode_voice_frame(&[2; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert_eq!(jitter.target_frames(), 2);
 
         assert!(jitter.insert(
             3,
             start + VOICE_FRAME_DURATION.saturating_mul(6),
-            clonk_audio::encode_voice_frame(&[3; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            clonk_audio::test_encode_voice_frame(&[3; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert_eq!(jitter.target_frames(), 4);
     }
@@ -1728,7 +1728,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
+                clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
         assert_eq!(jitter.target_frames(), 2);
@@ -1742,7 +1742,7 @@ mod tests {
         assert!(jitter.insert(
             3,
             start + Duration::from_millis(120),
-            clonk_audio::encode_voice_frame(&speech_voice_frame(3)).unwrap(),
+            clonk_audio::test_encode_voice_frame(&speech_voice_frame(3)).unwrap(),
         ));
         assert_eq!(
             jitter.target_frames(),
@@ -1848,7 +1848,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + Duration::from_millis(arrival_ms),
-                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
+                clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
@@ -1878,7 +1878,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
+                clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
@@ -1905,7 +1905,7 @@ mod tests {
         assert!(jitter.insert(
             7,
             start + Duration::from_millis(140),
-            clonk_audio::encode_voice_frame(&speech_voice_frame(7)).unwrap(),
+            clonk_audio::test_encode_voice_frame(&speech_voice_frame(7)).unwrap(),
         ));
         assert_eq!(
             jitter
@@ -1925,7 +1925,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
+                clonk_audio::test_encode_voice_frame(&bipolar_voice_frame()).unwrap(),
             ));
         }
 
@@ -1952,12 +1952,12 @@ mod tests {
         assert!(jitter.insert(
             14,
             start + Duration::from_millis(280),
-            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
+            clonk_audio::test_encode_voice_frame(&bipolar_voice_frame()).unwrap(),
         ));
         assert!(!jitter.insert(
             5,
             start + Duration::from_millis(280),
-            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
+            clonk_audio::test_encode_voice_frame(&bipolar_voice_frame()).unwrap(),
         ));
         assert_eq!(
             jitter
@@ -1977,7 +1977,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
+                clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
@@ -2056,9 +2056,11 @@ mod tests {
             player_id: LOBBY_VOICE_PLAYER_ID,
             stream_epoch,
             sequence,
-            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
-                .unwrap()
-                .to_vec(),
+            payload: clonk_audio::test_encode_voice_frame(
+                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .unwrap()
+            .to_vec(),
         };
 
         assert!(voice
@@ -2095,9 +2097,11 @@ mod tests {
             player_id: LOBBY_VOICE_PLAYER_ID,
             stream_epoch,
             sequence,
-            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
-                .unwrap()
-                .to_vec(),
+            payload: clonk_audio::test_encode_voice_frame(
+                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .unwrap()
+            .to_vec(),
         };
 
         assert!(voice
@@ -2134,9 +2138,11 @@ mod tests {
             player_id: 17,
             stream_epoch: 5,
             sequence,
-            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
-                .unwrap()
-                .to_vec(),
+            payload: clonk_audio::test_encode_voice_frame(
+                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .unwrap()
+            .to_vec(),
         };
 
         assert!(voice
@@ -2173,9 +2179,11 @@ mod tests {
             player_id: 17,
             stream_epoch: 5,
             sequence,
-            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
-                .unwrap()
-                .to_vec(),
+            payload: clonk_audio::test_encode_voice_frame(
+                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .unwrap()
+            .to_vec(),
         };
 
         assert!(voice
@@ -2203,9 +2211,11 @@ mod tests {
             player_id: 17,
             stream_epoch: 5,
             sequence,
-            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
-                .unwrap()
-                .to_vec(),
+            payload: clonk_audio::test_encode_voice_frame(
+                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .unwrap()
+            .to_vec(),
         };
 
         for sequence in 0..5 {
@@ -2324,7 +2334,8 @@ mod tests {
         let mut voice = VoiceChatState::with_capture_opener(move |_| {
             observed_opens.set(observed_opens.get() + 1);
             Ok(TestVoiceSource::with_frame(
-                clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+                clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                    .unwrap(),
             ))
         });
 
@@ -2391,7 +2402,8 @@ mod tests {
         let mut voice = VoiceChatState::with_capture_opener(move |options| {
             *observed_options.borrow_mut() = options.input_device;
             Ok(TestVoiceSource::with_frame(
-                clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+                clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                    .unwrap(),
             ))
         });
         let selected = r#"coreaudio:USB #1 — \"room\""#
@@ -2442,7 +2454,7 @@ mod tests {
             observed_opens.borrow_mut().push(options.input_device);
             Ok(DroppingVoiceSource {
                 frame: RefCell::new(Some(VoiceInputFrame {
-                    payload: clonk_audio::encode_voice_frame(
+                    payload: clonk_audio::test_encode_voice_frame(
                         &[0; clonk_audio::VOICE_FRAME_SAMPLES],
                     )
                     .unwrap(),
@@ -2502,7 +2514,7 @@ mod tests {
                 Err(VoiceCaptureError::NoInputDevice)
             } else {
                 Ok(TestVoiceSource::with_frame(
-                    clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                    clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
                         .unwrap(),
                 ))
             }
@@ -2573,8 +2585,10 @@ mod tests {
 
         let mut capture_one = || {
             frames.borrow_mut().push(VoiceInputFrame {
-                payload: clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
-                    .unwrap(),
+                payload: clonk_audio::test_encode_voice_frame(
+                    &[0; clonk_audio::VOICE_FRAME_SAMPLES],
+                )
+                .unwrap(),
                 level: 1.0,
             });
             voice
@@ -2597,7 +2611,8 @@ mod tests {
         let mut voice = VoiceChatState::with_capture_opener(move |options| {
             *observed.borrow_mut() = Some(options.processing.clone());
             Ok(TestVoiceSource::with_frame(
-                clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+                clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                    .unwrap(),
             ))
         });
         let quiet_room = VoiceProcessingConfig {
@@ -2726,9 +2741,11 @@ mod tests {
         assert!(voice.active_speakers(now).is_empty());
 
         let valid = clonk_network::VoiceFrame {
-            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
-                .unwrap()
-                .to_vec(),
+            payload: clonk_audio::test_encode_voice_frame(
+                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .unwrap()
+            .to_vec(),
             ..malformed
         };
         let accepted = voice
@@ -2755,9 +2772,11 @@ mod tests {
             player_id: 17,
             stream_epoch: 5,
             sequence,
-            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
-                .unwrap()
-                .to_vec(),
+            payload: clonk_audio::test_encode_voice_frame(
+                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+            )
+            .unwrap()
+            .to_vec(),
         };
 
         assert!(voice
@@ -2788,7 +2807,7 @@ mod tests {
                 player_id: 17,
                 stream_epoch: 5,
                 sequence,
-                payload: clonk_audio::encode_voice_frame(
+                payload: clonk_audio::test_encode_voice_frame(
                     &[sequence as i16; clonk_audio::VOICE_FRAME_SAMPLES],
                 )
                 .unwrap()
@@ -2819,7 +2838,7 @@ mod tests {
                 player_id: 17,
                 stream_epoch: 5,
                 sequence,
-                payload: clonk_audio::encode_voice_frame(&speech_voice_frame(sequence))
+                payload: clonk_audio::test_encode_voice_frame(&speech_voice_frame(sequence))
                     .unwrap()
                     .to_vec(),
             };
@@ -2848,7 +2867,7 @@ mod tests {
             player_id: 17,
             stream_epoch: 5,
             sequence: 4,
-            payload: clonk_audio::encode_voice_frame(&speech_voice_frame(4))
+            payload: clonk_audio::test_encode_voice_frame(&speech_voice_frame(4))
                 .unwrap()
                 .to_vec(),
         };

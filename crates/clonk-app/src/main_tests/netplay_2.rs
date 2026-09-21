@@ -229,7 +229,7 @@ impl crate::voice_chat::VoiceFrameSource for N2VoiceFrames {
 
 fn n2_voice_input_frame(sample: i16, level: f32) -> clonk_audio::VoiceInputFrame {
     clonk_audio::VoiceInputFrame {
-        payload: clonk_audio::encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES])
+        payload: clonk_audio::test_encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES])
             .unwrap(),
         level,
     }
@@ -247,7 +247,7 @@ fn n2_voice_frame(
         player_id,
         stream_epoch,
         sequence,
-        payload: clonk_audio::encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES])
+        payload: clonk_audio::test_encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES])
             .unwrap()
             .to_vec(),
     }
@@ -1116,7 +1116,7 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
     }
 
     let payload =
-        clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap();
+        clonk_audio::test_encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap();
     app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
         Ok(N2VoiceFrames::new(vec![
             clonk_audio::VoiceInputFrame {

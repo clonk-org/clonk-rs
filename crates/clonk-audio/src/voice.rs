@@ -19,12 +19,7 @@ use crate::voice_echo::VoiceEchoReference;
 use crate::voice_processing::VoiceProcessing;
 use crate::voice_processing::VoiceProcessingSwitches;
 
-/// Fixed 20 ms mono capture and playout geometry, including codec concealment.
-pub const VOICE_SAMPLE_RATE: u32 = crate::voice_codec::OPUS_SAMPLE_RATE;
-pub const VOICE_FRAME_SAMPLES: usize = crate::voice_codec::OPUS_FRAME_SAMPLES;
-pub const VOICE_ENCODED_FRAME_BYTES: usize = crate::voice_codec::OPUS_MAX_PACKET_BYTES;
-pub type EncodedVoiceFrame = crate::voice_codec::EncodedOpusFrame;
-pub use crate::voice_codec::OpusCodecError as VoiceCodecError;
+use crate::voice_codec::{EncodedVoiceFrame, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
 
 /// Opaque CPAL input-endpoint identity suitable for persistence.
 ///
@@ -1135,19 +1130,6 @@ pub(crate) fn voice_level_from_rms(rms: f64) -> f32 {
     (1.0 - dbfs / VOICE_ACTIVATION_FLOOR_DBFS).clamp(0.0, 1.0) as f32
 }
 
-/// Encodes an isolated frame. Continuous capture keeps a [`crate::VoiceEncoder`]
-/// alive for the entire stream so prediction, FEC and DTX retain their history.
-pub fn encode_voice_frame(
-    samples: &[i16; VOICE_FRAME_SAMPLES],
-) -> Result<EncodedVoiceFrame, VoiceCodecError> {
-    crate::VoiceEncoder::new()?.encode(samples)
-}
-
-/// Decodes an isolated frame. Playout must retain a decoder per ordered stream.
-pub fn decode_voice_frame(encoded: &[u8]) -> Result<[i16; VOICE_FRAME_SAMPLES], VoiceCodecError> {
-    crate::VoiceDecoder::new()?.decode(encoded, false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1324,7 +1306,8 @@ mod tests {
 
     fn input_frame(marker: u8) -> VoiceInputFrame {
         VoiceInputFrame {
-            payload: encode_voice_frame(&[i16::from(marker); VOICE_FRAME_SAMPLES]).unwrap(),
+            payload: crate::test_encode_voice_frame(&[i16::from(marker); VOICE_FRAME_SAMPLES])
+                .unwrap(),
             level: f32::from(marker) / 255.0,
         }
     }
@@ -2043,7 +2026,10 @@ mod tests {
             "a quarter of full scale is -12 dBFS, got {}",
             loud.level,
         );
-        assert!(decode_voice_frame(&loud.payload).is_ok());
+        assert!(crate::VoiceDecoder::new()
+            .unwrap()
+            .decode(&loud.payload, false)
+            .is_ok());
     }
 
     #[test]

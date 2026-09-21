@@ -11,8 +11,8 @@ use thiserror::Error;
 use crate::decoder::{
     decode_audio_bounded_for_output, AudioDecodeError, MusicStream, SharedAudioData,
 };
-use crate::voice::{VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
 use crate::voice_echo::{VoiceEchoReference, VoiceEchoTap};
+use crate::{VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
 
 const SDL_MIXER_MAX_VOLUME: f32 = 128.0;
 const SDL_MIXER_MAX_PANNING: f32 = 255.0;
