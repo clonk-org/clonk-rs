@@ -312,14 +312,18 @@ impl VoiceMediaTransport for PrivacyGuardedTransport<'_> {
     fn receive(&mut self) -> Vec<clonk_network::ReceivedVoiceFrame> {
         self.inner.receive()
     }
-    fn send(&self, frame: clonk_network::VoiceFrame) -> Result<(), clonk_network::VoiceSendError> {
+    fn send(
+        &self,
+        frame: clonk_network::VoiceFrame,
+        captured_at: Instant,
+    ) -> Result<(), clonk_network::VoiceSendError> {
         let control = self.control.lock();
         if control.privacy_revision != self.privacy_revision {
             return Err(clonk_network::VoiceSendError::Closed);
         }
         // The nonblocking enqueue and permission check share a boundary with
         // revocation, including when opening a device took several seconds.
-        self.inner.send(frame)
+        self.inner.send(frame, captured_at)
     }
 }
 
@@ -375,7 +379,7 @@ mod tests {
         fn receive(&mut self) -> Vec<ReceivedVoiceFrame> {
             Vec::new()
         }
-        fn send(&self, frame: VoiceFrame) -> Result<(), VoiceSendError> {
+        fn send(&self, frame: VoiceFrame, _captured_at: Instant) -> Result<(), VoiceSendError> {
             self.0.try_send(frame).map_err(|_| VoiceSendError::Full)
         }
     }

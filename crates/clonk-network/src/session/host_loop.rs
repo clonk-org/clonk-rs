@@ -132,6 +132,7 @@ fn send_host_voice_frame(
     frame: crate::VoiceFrame,
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
     state: &HostState,
+    captured_at: Instant,
 ) {
     if !state.config.voice_enabled {
         return;
@@ -145,7 +146,7 @@ fn send_host_voice_frame(
             &cipher,
             &crate::voice::VoicePacket::Relayed(frame.clone()),
         ) {
-            let _ = udp_handle.try_send_voice_frame_at(peer, HOST_CLIENT_ID, wire, Instant::now());
+            let _ = udp_handle.try_send_voice_frame_at(peer, HOST_CLIENT_ID, wire, captured_at);
         }
     }
 }
@@ -326,7 +327,7 @@ pub(crate) async fn run_host(
     mut commands: mpsc::Receiver<HostCommand>,
     control_send_time: ControlSendTimeSnapshot,
     event_tx: mpsc::Sender<HostEvent>,
-    mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
+    mut voice_commands: crate::VoiceInboxReceiver,
     voice_events: crate::VoiceInboxSender,
     voice_available: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -1147,8 +1148,8 @@ pub(crate) async fn run_host(
                     &mut voice_route_health,
                 );
             }
-            Some(frame) = voice_commands.recv(), if voice_media_ready => {
-                send_host_voice_frame(frame, udp_handle.as_ref(), &state);
+            Some(captured) = voice_commands.recv_timed(), if voice_media_ready => {
+                send_host_voice_frame(captured.frame, udp_handle.as_ref(), &state, captured.received_at);
             }
             _ = voice_probe_timer.tick(), if voice_media_ready => {
                 voice_route_health.poll(&host_voice_routes(&state), udp_handle.as_ref(), Instant::now());

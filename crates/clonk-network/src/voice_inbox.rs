@@ -195,12 +195,16 @@ impl<T: InboxFrame> MediaInboxReceiver<T> {
     }
 
     pub async fn recv(&mut self) -> Option<T> {
+        self.recv_timed().await.map(|received| received.frame)
+    }
+
+    pub async fn recv_timed(&mut self) -> Option<ReceivedMedia<T>> {
         loop {
             let shared = self.0.clone();
             let ready = shared.ready.notified();
             tokio::pin!(ready);
             ready.as_mut().enable();
-            match self.try_recv() {
+            match self.try_recv_timed() {
                 Ok(frame) => return Some(frame),
                 Err(TryRecvError::Disconnected) => return None,
                 Err(TryRecvError::Empty) => ready.await,

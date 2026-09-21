@@ -390,7 +390,7 @@ impl VoiceRouteAuthentication {
 /// network-manager worker.
 #[derive(Clone, Debug)]
 pub struct VoiceSender {
-    pub(crate) tx: mpsc::Sender<VoiceFrame>,
+    pub(crate) tx: crate::VoiceInboxSender,
     available: Arc<AtomicBool>,
 }
 
@@ -444,23 +444,35 @@ pub(crate) const fn voice_media_may_run(
 }
 
 impl VoiceSender {
-    pub(crate) fn new(tx: mpsc::Sender<VoiceFrame>) -> Self {
+    pub(crate) fn new(tx: crate::VoiceInboxSender) -> Self {
         Self {
             tx,
             available: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub fn try_send(&self, frame: VoiceFrame) -> Result<(), VoiceSendError> {
+    /// Retains the original local capture time across the session and socket
+    /// queues, so another handoff never renews the speech freshness budget.
+    pub fn try_send_at(
+        &self,
+        frame: VoiceFrame,
+        captured_at: Instant,
+    ) -> Result<(), VoiceSendError> {
         validate_voice_payload(&frame.payload).map_err(VoiceSendError::Invalid)?;
-        self.tx.try_send(frame).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => VoiceSendError::Full,
-            mpsc::error::TrySendError::Closed(_) => VoiceSendError::Closed,
-        })
+        self.tx
+            .try_send_at(frame, captured_at)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => VoiceSendError::Full,
+                mpsc::error::TrySendError::Closed(_) => VoiceSendError::Closed,
+            })
     }
 
-    /// Whether at least one established UDP link has positively negotiated
-    /// voice support. This remains false for an all-C++ session.
+    pub fn try_send(&self, frame: VoiceFrame) -> Result<(), VoiceSendError> {
+        self.try_send_at(frame, Instant::now())
+    }
+
+    /// Whether an authenticated UDP media route has a current round-trip
+    /// confirmation. This remains false for an all-C++ session.
     pub fn is_available(&self) -> bool {
         self.available.load(Ordering::Acquire)
     }
@@ -1367,19 +1379,41 @@ mod tests {
     }
 
     #[test]
-    fn application_sender_is_nonblocking_and_drops_at_its_bound() {
-        let (tx, mut rx) = mpsc::channel(1);
+    fn the_send_queue_preserves_the_original_capture_deadline() {
+        let (tx, mut rx) = crate::voice_inbox();
         let sender = VoiceSender::new(tx);
-        let first = VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap();
-        let second = VoiceFrame::outbound(7, 11, 30, vec![0x5a; 164]).unwrap();
+        let frame = VoiceFrame::outbound(7, 11, 29, vec![0; 120]).unwrap();
+        sender
+            .try_send_at(frame, Instant::now() - Duration::from_millis(180))
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "entering another queue must not make expired capture fresh again"
+        );
+    }
 
+    #[test]
+    fn application_sender_is_nonblocking_and_drops_at_its_bound() {
+        let (tx, mut rx) = crate::voice_inbox();
+        let sender = VoiceSender::new(tx);
         assert!(!sender.is_available());
-        assert_eq!(sender.try_send(first.clone()), Ok(()));
-        assert_eq!(sender.try_send(second), Err(VoiceSendError::Full));
-        assert_eq!(rx.try_recv(), Ok(first));
+        for sequence in 0..10 {
+            sender
+                .try_send(VoiceFrame::outbound(7, 11, sequence, vec![0x5a; 120]).unwrap())
+                .unwrap();
+        }
+        let mut received = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            received.push(frame.sequence);
+        }
+        assert_eq!(
+            received,
+            (2..10).collect::<Vec<_>>(),
+            "overload must retain current speech"
+        );
         drop(rx);
         assert_eq!(
-            sender.try_send(VoiceFrame::outbound(7, 11, 31, vec![0x5a; 164]).unwrap()),
+            sender.try_send(VoiceFrame::outbound(7, 11, 31, vec![0x5a; 120]).unwrap()),
             Err(VoiceSendError::Closed)
         );
     }

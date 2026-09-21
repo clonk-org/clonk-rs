@@ -11,9 +11,6 @@ pub(crate) const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5)
 pub(crate) const CONTROL_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const CLIENT_BACKLOG_LIMIT: usize = 256;
 pub(crate) const CLIENT_MESH_PENDING_LIMIT: usize = 64;
-/// At 50 frames/s, no application-facing media stage can queue more than
-/// 160 ms of encoded speech while control traffic preempts it.
-pub(crate) const VOICE_APP_CHANNEL_CAPACITY: usize = 8;
 #[cfg(test)]
 pub(crate) const DEFAULT_CONTROL_TARGET_FPS: i32 = 38;
 pub(crate) const HOST_CLIENT_ID: ClientId = 0;

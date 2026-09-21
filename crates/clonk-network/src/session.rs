@@ -383,7 +383,7 @@ mod tests {
                 command_tx,
                 control_send_time: test_control_send_time_snapshot(),
                 event_rx: Some(event_rx),
-                voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+                voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
                 voice_event_rx: Some(crate::voice_inbox().1),
                 shutdown_tx: Some(shutdown_tx),
                 join_handle: tokio::spawn(async {}),
@@ -4337,7 +4337,7 @@ mod tests {
             command_tx: host_command_tx,
             control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(host_event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
             voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(host_shutdown_tx),
             join_handle: tokio::spawn(async {}),
@@ -4368,7 +4368,7 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(client_event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
             voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(client_shutdown_tx),
             join_handle: tokio::spawn(async {}),
@@ -5045,8 +5045,11 @@ mod tests {
 
     #[test]
     fn application_voice_queue_holds_at_most_160_milliseconds() {
+        let frame = crate::VoiceFrame::outbound(1, 1, 0, Vec::new()).unwrap();
         assert!(
-            VOICE_APP_CHANNEL_CAPACITY * usize::from(crate::VOICE_FRAME_DURATION_MS) <= 160,
+            crate::voice_inbox::InboxFrame::max_queued_frames(&frame)
+                * usize::from(crate::VOICE_FRAME_DURATION_MS)
+                <= 160,
             "each bounded application stage must hold little encoded speech"
         );
     }
@@ -6399,7 +6402,7 @@ mod tests {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
             voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
@@ -6430,7 +6433,7 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
             voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
@@ -8593,7 +8596,7 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
             voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: None,
             join_handle: tokio::spawn(async {}),
@@ -9160,7 +9163,7 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
             voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
@@ -18287,7 +18290,7 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
             voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,

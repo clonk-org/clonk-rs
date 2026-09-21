@@ -1684,12 +1684,13 @@ impl NetworkVoiceEndpoint {
         }
     }
 
-    pub fn try_send(
+    pub fn try_send_at(
         &self,
         frame: clonk_network::VoiceFrame,
+        captured_at: Instant,
     ) -> std::result::Result<(), clonk_network::VoiceSendError> {
         match &self.sender {
-            NetworkVoiceSender::Session(sender) => sender.try_send(frame),
+            NetworkVoiceSender::Session(sender) => sender.try_send_at(frame, captured_at),
             #[cfg(any(test, feature = "test-hooks"))]
             NetworkVoiceSender::Test(sender) => {
                 sender.try_send(frame).map_err(|error| match error {

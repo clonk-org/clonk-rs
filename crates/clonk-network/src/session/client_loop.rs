@@ -626,6 +626,7 @@ fn send_client_voice_frame(
     transport: &ClientRouteManager,
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
     health: &crate::voice_route_health::VoiceRouteHealth,
+    captured_at: Instant,
 ) {
     let Some(udp_handle) = udp_handle else {
         return;
@@ -636,6 +637,7 @@ fn send_client_voice_frame(
         transport.authenticated_voice_send_routes(),
         udp_handle,
         health,
+        captured_at,
     );
 }
 
@@ -644,6 +646,7 @@ fn send_client_voice_frame_to_routes(
     routes: Vec<(ClientId, SocketAddr, crate::voice::VoiceMediaCipher)>,
     udp_handle: &crate::ReliableUdpSessionHandle,
     health: &crate::voice_route_health::VoiceRouteHealth,
+    captured_at: Instant,
 ) {
     let host_route = routes
         .iter()
@@ -651,7 +654,6 @@ fn send_client_voice_frame_to_routes(
     // Per-recipient budgets keep a direct fanout from consuming the relay's
     // space. A route still needs confirmed delivery before bypassing relay.
     let source = frame.client_id;
-    let queued_at = Instant::now();
     let mut direct_recipients = Vec::new();
     for (peer_id, peer, cipher) in routes.iter().filter(|(peer_id, peer, cipher)| {
         *peer_id != HOST_CLIENT_ID && health.confirmed(*peer, cipher.cookie(), Instant::now())
@@ -665,7 +667,7 @@ fn send_client_voice_frame_to_routes(
         ) else {
             continue;
         };
-        if udp_handle.try_send_voice_frame_at(*peer, source, wire, queued_at) {
+        if udp_handle.try_send_voice_frame_at(*peer, source, wire, captured_at) {
             direct_recipients.push(*peer_id);
         }
     }
@@ -677,7 +679,7 @@ fn send_client_voice_frame_to_routes(
         direct_recipients,
     };
     if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(host_cipher, &relay) {
-        let _ = udp_handle.try_send_voice_frame_at(*host_peer, source, wire, queued_at);
+        let _ = udp_handle.try_send_voice_frame_at(*host_peer, source, wire, captured_at);
     }
 }
 
@@ -764,8 +766,7 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
         .get_mut(&0)
         .expect("test host route exists")
         .peer_is_port = true;
-    let (_voice_command_tx, voice_commands) =
-        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let (_voice_command_tx, voice_commands) = crate::voice_inbox();
     let (voice_events, _voice_event_rx) = crate::voice_inbox();
     let voice_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
     run_client_loop_with_routes(
@@ -815,7 +816,7 @@ pub(crate) async fn run_client_loop_with_routes(
     control_send_time: ControlSendTimeSnapshot,
     control_wait_attribution: crate::ControlWaitAttributionSnapshot,
     event_tx: mpsc::Sender<ClientEvent>,
-    mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
+    mut voice_commands: crate::VoiceInboxReceiver,
     voice_events: crate::VoiceInboxSender,
     voice_available: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -2759,14 +2760,15 @@ pub(crate) async fn run_client_loop_with_routes(
                     mesh_udp_handle.as_ref(),
                 );
             }
-            Some(frame) = voice_commands.recv(), if voice_media_ready => {
+            Some(captured) = voice_commands.recv_timed(), if voice_media_ready => {
                 if let Ok(local_client_id) = ClientId::try_from(local_core.client_id) {
                     send_client_voice_frame(
-                        frame,
+                        captured.frame,
                         local_client_id,
                         &transport,
                         mesh_udp_handle.as_ref(),
                         &voice_route_health,
+                        captured.received_at,
                     );
                 }
             }
@@ -3125,7 +3127,7 @@ mod tests {
             ];
             let (udp, mut queued) = crate::ReliableUdpSessionHandle::test_voice_queue();
             let frame = crate::VoiceFrame::outbound(17, 3, 9, vec![0; 120]).unwrap();
-            send_client_voice_frame_to_routes(frame, routes, &udp, &health);
+            send_client_voice_frame_to_routes(frame, routes, &udp, &health, Instant::now());
             let mut relayed = false;
             while let Ok(datagram) = queued.try_recv() {
                 if let crate::voice::VoicePacket::RelayRequest {
@@ -3181,7 +3183,7 @@ mod tests {
         for (_, peer, cipher) in &routes {
             health.confirm_for_test(*peer, cipher.cookie(), Instant::now());
         }
-        send_client_voice_frame_to_routes(frame, routes, &udp_handle, &health);
+        send_client_voice_frame_to_routes(frame, routes, &udp_handle, &health, Instant::now());
 
         let mut direct_recipients = Vec::new();
         let mut relayed_recipients = None;

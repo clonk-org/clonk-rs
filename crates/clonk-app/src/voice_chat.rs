@@ -145,6 +145,7 @@ pub(crate) struct VoiceActivityTracker {
 pub(crate) struct CapturedVoiceFrame {
     pub(crate) stream_epoch: u32,
     pub(crate) sequence: u16,
+    pub(crate) captured_at: Instant,
     pub(crate) payload: EncodedVoiceFrame,
 }
 
@@ -940,6 +941,9 @@ impl VoiceChatState {
         CapturedVoiceFrame {
             stream_epoch: self.stream_epoch,
             sequence,
+            captured_at: frame
+                .capture_timing()
+                .map_or_else(Instant::now, |timing| timing.captured_at),
             payload: frame.payload,
         }
     }
@@ -2547,9 +2551,9 @@ mod tests {
             voice
                 .drain_captured_frames(None)
                 .into_iter()
-                .map(|frame| frame.sequence)
+                .map(|frame| (frame.sequence, frame.captured_at))
                 .collect::<Vec<_>>(),
-            vec![0, 3]
+            vec![(0, now), (3, now)]
         );
     }
 

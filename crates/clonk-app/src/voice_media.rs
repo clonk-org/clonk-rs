@@ -23,7 +23,7 @@ pub(crate) struct VoiceMediaPolicy {
 pub(crate) trait VoiceMediaTransport {
     fn available(&self) -> bool;
     fn receive(&mut self) -> Vec<ReceivedVoiceFrame>;
-    fn send(&self, frame: VoiceFrame) -> Result<(), VoiceSendError>;
+    fn send(&self, frame: VoiceFrame, captured_at: Instant) -> Result<(), VoiceSendError>;
 }
 
 impl VoiceMediaTransport for crate::network::NetworkVoiceEndpoint {
@@ -33,8 +33,8 @@ impl VoiceMediaTransport for crate::network::NetworkVoiceEndpoint {
     fn receive(&mut self) -> Vec<ReceivedVoiceFrame> {
         self.receive()
     }
-    fn send(&self, frame: VoiceFrame) -> Result<(), VoiceSendError> {
-        self.try_send(frame)
+    fn send(&self, frame: VoiceFrame, captured_at: Instant) -> Result<(), VoiceSendError> {
+        self.try_send_at(frame, captured_at)
     }
 }
 
@@ -129,7 +129,7 @@ pub(crate) fn service_voice_media(
                 continue;
             }
         };
-        if transport.send(frame).is_ok() {
+        if transport.send(frame, captured.captured_at).is_ok() {
             state.note_local_frame(client_id, player_id, now);
         }
     }
