@@ -5,7 +5,8 @@
 
 use crate::support::real_scenario::{
     join_local_player, join_local_player_on_team, load_installed_scenario,
-    load_installed_scenario_with_selected_definitions, object_with_definition,
+    load_installed_scenario_in_languages, load_installed_scenario_with_selected_definitions,
+    object_with_definition,
 };
 use crate::support::EngineTestExt;
 use clonk_engine::{Engine, ObjectId, SpawnConfig};
@@ -127,6 +128,44 @@ fn a_teudoburger_player_starts_in_a_golden_age() {
         .call_object_function(index, "InGoldenAge", vec![Value::Int(owner)])
         .expect("the pack's IsGoldAge answers");
     assert_eq!(answer.as_c4_int(), Some(1), "the player's golden age runs");
+}
+
+/// clonk-org/clonk-rs-content#85: the Quiz overloads the castle tower `CPT2`
+/// with a definition whose only script was `ScriptDE.c`. A definition's script
+/// is `Script.c|Script{}.c|C4Script{}.c` tried for each language of the
+/// player's `LanguageEx` (C4Components.h:55; C4ComponentHost.cpp:155-186), and
+/// neither shipped language file names a fallback, so a US player got a tower
+/// with no script at all, and the tower parts that include it then failed on
+/// its helpers. The script holds no player-visible text, so it is now the
+/// language-neutral `Script.c`.
+#[test]
+fn the_quiz_tower_has_its_script_in_every_language() {
+    // The German player had it all along and must keep it.
+    for languages in [["US"], ["DE"]] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Puzzles.c4f/Das_Clonk_Quiz_3_Meister_des_Quiz.c4s",
+            0,
+            &languages,
+        );
+        let tower = engine.spawn_test_object(SpawnConfig::new("CPT2"));
+        // Asked from script, as the tower parts ask: a function the tower does
+        // not have is an error there, where a call from the host is fail-safe.
+        engine
+            .register_script_definition(
+                "QZPR",
+                "Quiz probe",
+                "#strict\npublic func Ask(object tower) { return tower->FindDrawbridgeUp(); }\n",
+            )
+            .expect("the probe registers");
+        let probe = engine.spawn_test_object(SpawnConfig::new("QZPR"));
+
+        // No drawbridge is attached, so the helper looks for one and answers 0.
+        let index = engine.test_object_index(probe);
+        let up = engine
+            .call_object_function(index, "Ask", vec![Value::Object(tower.as_u64())])
+            .unwrap_or_else(|error| panic!("the {languages:?} tower has its helpers: {error}"));
+        assert_eq!(up.as_c4_int().unwrap_or(0), 0);
+    }
 }
 
 /// Kills `target` the way a fight does, so the shipped `Death` runs from script
