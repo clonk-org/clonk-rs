@@ -1,6 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
-#[cfg(feature = "cpal")]
+#[cfg(any(feature = "cpal", test))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(feature = "cpal", test))]
@@ -8,7 +8,6 @@ use std::sync::mpsc::Receiver;
 #[cfg(any(feature = "cpal", test))]
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
-#[cfg(feature = "cpal")]
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -75,9 +74,7 @@ pub fn voice_input_devices() -> Result<Vec<VoiceInputDevice>, VoiceCaptureError>
         use cpal::traits::{DeviceTrait, HostTrait};
 
         let host = cpal::default_host();
-        let devices = host
-            .input_devices()
-            .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))?;
+        let devices = host.input_devices().map_err(cpal_capture_error)?;
         Ok(devices
             .filter_map(|device| {
                 let id = device.id().map_err(|error| {
@@ -172,6 +169,12 @@ const MAX_VOICE_CAPTURE_CHANNELS: u16 = 32;
 
 #[derive(Debug, Error)]
 pub enum VoiceCaptureError {
+    #[error("microphone permission was denied: {0}")]
+    PermissionDenied(String),
+    #[error("microphone device is busy: {0}")]
+    DeviceBusy(String),
+    #[error("microphone capture was cancelled")]
+    Cancelled,
     #[error("microphone capture support was disabled at compile time")]
     Unavailable,
     #[error("no microphone input device is available")]
@@ -227,6 +230,7 @@ struct CaptureStreamEvent {
 #[derive(Clone)]
 struct CaptureStreamCallbacks {
     generation: u64,
+    stopped: Arc<AtomicBool>,
     frames: CaptureFrameQueue,
     dropped_frames: Arc<AtomicU64>,
     active_generation: Arc<AtomicU64>,
@@ -238,7 +242,9 @@ struct CaptureStreamCallbacks {
 #[cfg(any(feature = "cpal", test))]
 impl CaptureStreamCallbacks {
     fn send_frame(&self, frame: VoiceInputFrame) {
-        if self.active_generation.load(Ordering::Acquire) != self.generation {
+        if self.stopped.load(Ordering::Acquire)
+            || self.active_generation.load(Ordering::Acquire) != self.generation
+        {
             return;
         }
         self.enqueue_frame(self.generation, frame);
@@ -323,6 +329,7 @@ struct ActiveCaptureStream<S> {
 #[cfg(any(feature = "cpal", test))]
 struct VoiceCaptureManager<B: VoiceCaptureBackend> {
     backend: B,
+    stopped: Arc<AtomicBool>,
     options: VoiceCaptureOptions,
     active: Option<ActiveCaptureStream<B::Stream>>,
     active_generation: Arc<AtomicU64>,
@@ -346,6 +353,7 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
         let (event_sender, events) = std::sync::mpsc::sync_channel(VOICE_CAPTURE_EVENT_QUEUE);
         Self {
             backend,
+            stopped: Arc::new(AtomicBool::new(false)),
             options,
             active: None,
             active_generation: Arc::new(AtomicU64::new(0)),
@@ -359,7 +367,16 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
         }
     }
 
+    fn ensure_requested(&self) -> Result<(), VoiceCaptureError> {
+        if self.stopped.load(Ordering::Acquire) {
+            Err(VoiceCaptureError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     fn open_initial(&mut self) -> Result<(), VoiceCaptureError> {
+        self.ensure_requested()?;
         let inventory = self.backend.inventory(self.options.input_device.as_ref())?;
         let target = match self.options.input_device.as_ref() {
             Some(selected) if inventory.inputs.contains(selected) => {
@@ -377,12 +394,14 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
     }
 
     fn replace_stream(&mut self, target: CaptureDeviceTarget) -> Result<(), VoiceCaptureError> {
+        self.ensure_requested()?;
         let callback_generation = self.next_callback_generation;
         self.next_callback_generation = callback_generation.wrapping_add(1).max(1);
         let invalidated_generation = Arc::new(AtomicU64::new(0));
         let route_changed_generation = Arc::new(AtomicU64::new(0));
         let callbacks = CaptureStreamCallbacks {
             generation: callback_generation,
+            stopped: self.stopped.clone(),
             frames: self.frames.clone(),
             dropped_frames: self.dropped_frames.clone(),
             active_generation: self.active_generation.clone(),
@@ -393,6 +412,7 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
         let stream = self
             .backend
             .open_stream(&target, callbacks, &self.options)?;
+        self.ensure_requested()?;
         let previous = self.active.replace(ActiveCaptureStream {
             target,
             callback_generation,
@@ -513,6 +533,7 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
         self.refresh()
     }
 
+    #[cfg(test)]
     fn drain_frames(&mut self, receiver: &CaptureFrameQueue) -> Vec<VoiceInputFrame> {
         match self.service(Instant::now()) {
             Ok(true) => {
@@ -528,6 +549,7 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
         self.collect_active_frames(receiver, || {})
     }
 
+    #[cfg(test)]
     fn collect_active_frames(
         &self,
         receiver: &CaptureFrameQueue,
@@ -556,6 +578,7 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
         }
     }
 
+    #[cfg(test)]
     fn stream_generation(&self) -> u64 {
         self.stream_generation.load(Ordering::Acquire)
     }
@@ -593,22 +616,65 @@ impl VoiceCaptureOptions {
     }
 }
 
-/// Explicitly opened microphone capture. Merely constructing [`AudioSystem`](crate::AudioSystem)
-/// never opens an input device or requests microphone permission.
+/// The current input-device state. Capture is requested explicitly; failures
+/// are retried on the device worker without delaying incoming voice or gameplay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VoiceCaptureStatus {
+    PermissionDenied,
+    DeviceBusy,
+    Opening,
+    Active,
+    Unavailable,
+    Retrying(String),
+}
+
+impl VoiceCaptureStatus {
+    #[cfg(any(feature = "cpal", test))]
+    fn from_error(error: &VoiceCaptureError) -> Self {
+        match error {
+            VoiceCaptureError::PermissionDenied(_) => Self::PermissionDenied,
+            VoiceCaptureError::DeviceBusy(_) => Self::DeviceBusy,
+            VoiceCaptureError::Unavailable
+            | VoiceCaptureError::NoInputDevice
+            | VoiceCaptureError::InputDeviceUnavailable(_)
+            | VoiceCaptureError::Cancelled => Self::Unavailable,
+            _ => Self::Retrying(error.to_string()),
+        }
+    }
+}
+
+#[cfg(feature = "cpal")]
+fn cpal_capture_error(error: cpal::Error) -> VoiceCaptureError {
+    match error.kind() {
+        cpal::ErrorKind::PermissionDenied => VoiceCaptureError::PermissionDenied(error.to_string()),
+        cpal::ErrorKind::DeviceBusy => VoiceCaptureError::DeviceBusy(error.to_string()),
+        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::HostUnavailable => {
+            VoiceCaptureError::NoInputDevice
+        }
+        _ => VoiceCaptureError::Stream(error.to_string()),
+    }
+}
+
+/// Explicitly requested microphone capture. Device enumeration, opening,
+/// recovery and closing run on a dedicated worker, including initial failures.
+/// Merely constructing an audio system never requests microphone permission.
 pub struct VoiceCapture {
-    #[cfg(feature = "cpal")]
-    manager: Mutex<VoiceCaptureManager<CpalVoiceCaptureBackend>>,
     frames: CaptureFrameQueue,
     dropped_frames: Arc<AtomicU64>,
+    active_generation: Arc<AtomicU64>,
+    last_drained_generation: AtomicU64,
+    status: Arc<Mutex<VoiceCaptureStatus>>,
+    #[cfg(any(feature = "cpal", test))]
+    stopped: Arc<AtomicBool>,
 }
 
 impl VoiceCapture {
-    /// Opens and starts the configured microphone input endpoint. This is the
-    /// only production entry point that touches a capture device.
+    /// Starts device management without waiting for a native driver or a
+    /// permission prompt. Observe [`Self::status`] for asynchronous failures.
     pub fn open(options: VoiceCaptureOptions) -> Result<Self, VoiceCaptureError> {
         #[cfg(feature = "cpal")]
         {
-            Self::open_cpal(options)
+            Self::open_with_backend(options, || CpalVoiceCaptureBackend)
         }
         #[cfg(not(feature = "cpal"))]
         {
@@ -617,67 +683,113 @@ impl VoiceCapture {
         }
     }
 
-    /// Drains every complete frame currently available without waiting.
-    ///
-    /// This also performs the throttled hotplug check. Call
-    /// [`Self::stream_generation`] after draining when the frames need to be
-    /// associated with a physical-stream generation.
+    /// Drains fresh audio without performing device IO. A batch belongs to
+    /// exactly one capture generation, even if a device changes concurrently.
     pub fn drain_frames(&self) -> Vec<VoiceInputFrame> {
-        #[cfg(feature = "cpal")]
-        {
-            self.manager
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .drain_frames(&self.frames)
-        }
-        #[cfg(not(feature = "cpal"))]
-        {
-            std::iter::from_fn(|| self.frames.pop())
-                .map(|queued| queued.frame)
-                .collect()
+        let generation = self.active_generation.load(Ordering::Acquire);
+        let now = Instant::now();
+        let frames = std::iter::from_fn(|| self.frames.pop())
+            .filter(|queued| queued.callback_generation == generation)
+            .map(|queued| queued.frame)
+            .filter(|frame| {
+                let fresh = frame.is_fresh_at(now);
+                if !fresh {
+                    self.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                }
+                fresh
+            })
+            .collect();
+        if generation != 0 && self.active_generation.load(Ordering::Acquire) == generation {
+            self.last_drained_generation
+                .store(generation, Ordering::Release);
+            frames
+        } else {
+            Vec::new()
         }
     }
 
-    /// Generation of the most recently opened physical capture stream.
-    ///
-    /// The initial stream is generation 1. A successful hotplug replacement
-    /// advances it exactly once; scans, failures and idle time leave it alone.
+    /// Generation associated with the last successful drain. Changes are
+    /// published with the batch, never halfway through its consumption.
     pub fn stream_generation(&self) -> u64 {
-        #[cfg(feature = "cpal")]
-        {
-            self.manager
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .stream_generation()
-        }
-        #[cfg(not(feature = "cpal"))]
-        {
-            0
-        }
+        self.last_drained_generation.load(Ordering::Acquire)
     }
 
-    /// Frames discarded because the bounded app queue was full.
+    pub fn status(&self) -> VoiceCaptureStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     pub fn dropped_frames(&self) -> u64 {
         self.dropped_frames.load(Ordering::Relaxed)
     }
 
-    #[cfg(feature = "cpal")]
-    fn open_cpal(options: VoiceCaptureOptions) -> Result<Self, VoiceCaptureError> {
+    #[cfg(any(feature = "cpal", test))]
+    fn open_with_backend<B, F>(
+        options: VoiceCaptureOptions,
+        backend: F,
+    ) -> Result<Self, VoiceCaptureError>
+    where
+        B: VoiceCaptureBackend + 'static,
+        F: FnOnce() -> B + Send + 'static,
+    {
         let frames = Arc::new(crossbeam_queue::ArrayQueue::new(VOICE_CAPTURE_QUEUE_FRAMES));
-        let sender = frames.clone();
         let dropped_frames = Arc::new(AtomicU64::new(0));
-        let mut manager = VoiceCaptureManager::new(
-            CpalVoiceCaptureBackend,
-            options,
-            sender,
-            dropped_frames.clone(),
-        );
-        manager.open_initial()?;
-        Ok(Self {
-            manager: Mutex::new(manager),
-            frames,
-            dropped_frames,
-        })
+        let active_generation = Arc::new(AtomicU64::new(0));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(Mutex::new(VoiceCaptureStatus::Opening));
+        let capture = Self {
+            frames: frames.clone(),
+            dropped_frames: dropped_frames.clone(),
+            active_generation: active_generation.clone(),
+            last_drained_generation: AtomicU64::new(0),
+            status: status.clone(),
+            stopped: stopped.clone(),
+        };
+        std::thread::Builder::new()
+            .name("voice-device".to_owned())
+            .spawn(move || {
+                let mut manager =
+                    VoiceCaptureManager::new(backend(), options, frames, dropped_frames);
+                manager.active_generation = active_generation;
+                manager.stopped = stopped.clone();
+                let set_status =
+                    |result: Result<(), VoiceCaptureError>, manager: &VoiceCaptureManager<B>| {
+                        let next = match result {
+                            Err(error) => VoiceCaptureStatus::from_error(&error),
+                            Ok(()) if manager.active_generation.load(Ordering::Acquire) != 0 => {
+                                VoiceCaptureStatus::Active
+                            }
+                            Ok(()) => VoiceCaptureStatus::Unavailable,
+                        };
+                        *status
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+                    };
+                set_status(manager.open_initial(), &manager);
+                while !stopped.load(Ordering::Acquire) {
+                    let now = Instant::now();
+                    let poll_due = now >= manager.next_poll;
+                    let had_stream = manager.active.is_some();
+                    let result = manager.service(now).map(|_| ());
+                    if result.is_err() || poll_due || had_stream != manager.active.is_some() {
+                        set_status(result, &manager);
+                    }
+                    std::thread::park_timeout(Duration::from_millis(5));
+                }
+                manager.deactivate();
+            })
+            .map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
+        Ok(capture)
+    }
+}
+
+impl Drop for VoiceCapture {
+    fn drop(&mut self) {
+        #[cfg(any(feature = "cpal", test))]
+        self.stopped.store(true, Ordering::Release);
+        self.active_generation.store(0, Ordering::Release);
     }
 }
 
@@ -701,7 +813,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
                     device
                         .id()
                         .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
-                        .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))
+                        .map_err(cpal_capture_error)
                 })
                 .transpose()?
         } else {
@@ -709,12 +821,12 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
         };
         let inputs = if selected.is_some() {
             host.input_devices()
-                .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))?
+                .map_err(cpal_capture_error)?
                 .map(|device| {
                     device
                         .id()
                         .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
-                        .map_err(|error| VoiceCaptureError::InputDevices(error.to_string()))
+                        .map_err(cpal_capture_error)
                 })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
@@ -740,7 +852,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
                 let actual = device
                     .id()
                     .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
-                    .map_err(|error| VoiceCaptureError::InputConfig(error.to_string()))?;
+                    .map_err(cpal_capture_error)?;
                 if &actual != expected {
                     return Err(VoiceCaptureError::Stream(
                         "system default microphone changed while opening".to_string(),
@@ -755,9 +867,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
                 .and_then(|id| host.device_by_id(&id))
                 .ok_or_else(|| VoiceCaptureError::InputDeviceUnavailable(selected.clone()))?,
         };
-        let supported = device
-            .default_input_config()
-            .map_err(|error| VoiceCaptureError::InputConfig(error.to_string()))?;
+        let supported = device.default_input_config().map_err(cpal_capture_error)?;
         validate_capture_config(supported.sample_rate(), supported.channels())?;
 
         let stream_config = supported.config();
@@ -786,9 +896,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
                 ));
             }
         };
-        stream
-            .play()
-            .map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
+        stream.play().map_err(cpal_capture_error)?;
         Ok(stream)
     }
 }
@@ -827,6 +935,7 @@ where
 {
     use cpal::traits::DeviceTrait;
 
+    let stopped = callbacks.stopped.clone();
     let error_callbacks = callbacks.clone();
     let raw_frames = Arc::new(crossbeam_queue::ArrayQueue::<RawCapturedFrame>::new(
         VOICE_CAPTURE_QUEUE_FRAMES,
@@ -876,6 +985,9 @@ where
         .build_input_stream(
             config,
             move |data: &[T], info| {
+                if stopped.load(Ordering::Acquire) {
+                    return;
+                }
                 let now = Instant::now();
                 let timestamp = info.timestamp();
                 let delay = timestamp.callback.duration_since(timestamp.capture);
@@ -888,7 +1000,7 @@ where
             },
             None,
         )
-        .map_err(|error| VoiceCaptureError::Stream(error.to_string()))
+        .map_err(cpal_capture_error)
 }
 
 #[cfg(any(feature = "cpal", test))]
@@ -1035,6 +1147,7 @@ impl VoiceCaptureProcessor<ProcessedCaptureSink> {
                 processing,
                 callbacks: CaptureStreamCallbacks {
                     generation: 1,
+                    stopped: Arc::new(AtomicBool::new(false)),
                     frames: sender,
                     dropped_frames,
                     active_generation: Arc::new(AtomicU64::new(1)),
@@ -1122,7 +1235,7 @@ pub(crate) struct StreamingVoiceResampler {
 
 /// A causal low-pass ahead of downsampling. Linear interpolation alone is not
 /// a sample-rate converter when the source is faster: it aliases everything
-/// above 8 kHz back into the speech band, where it sounds like noise and no
+/// above the destination Nyquist back into the speech band, where it sounds like noise and no
 /// longer matches the echo reference produced by another device rate.
 #[derive(Debug)]
 struct VoiceAntiAliasFilter {
@@ -1529,6 +1642,110 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(capture.dropped_frames.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(feature = "cpal")]
+    #[test]
+    fn capture_status_preserves_actionable_native_device_failures() {
+        for (kind, expected) in [
+            (
+                cpal::ErrorKind::PermissionDenied,
+                VoiceCaptureStatus::PermissionDenied,
+            ),
+            (cpal::ErrorKind::DeviceBusy, VoiceCaptureStatus::DeviceBusy),
+            (
+                cpal::ErrorKind::DeviceNotAvailable,
+                VoiceCaptureStatus::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                VoiceCaptureStatus::from_error(&cpal_capture_error(cpal::Error::new(kind))),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn capture_failure_remains_visible_between_bounded_retries() {
+        let default = input_device_id("test:default");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(default.clone()),
+            inputs: vec![default],
+        });
+        backend.fail_next_open();
+        let observed = backend.clone();
+        let options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        let capture = VoiceCapture::open_with_backend(options, move || backend).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while observed.opens().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(
+            matches!(capture.status(), VoiceCaptureStatus::Retrying(_)),
+            "failure disappeared before retry: {:?}",
+            capture.status()
+        );
+        assert_eq!(
+            observed.opens().len(),
+            1,
+            "device failures must not cause a busy retry loop"
+        );
+        drop(capture);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    #[test]
+    fn cancelling_capture_during_initialization_never_opens_a_microphone_later() {
+        let default = input_device_id("test:default");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(default.clone()),
+            inputs: vec![default],
+        });
+        let observed = backend.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        let capture = VoiceCapture::open_with_backend(options, move || {
+            wait.recv().unwrap();
+            backend
+        })
+        .unwrap();
+        drop(capture);
+        release.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            observed.opens().is_empty(),
+            "cancelled capture opened a microphone after permission was revoked"
+        );
+    }
+
+    #[test]
+    fn microphone_device_initialization_never_blocks_the_media_caller() {
+        let default = input_device_id("test:default");
+        let options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        let started = Instant::now();
+        let capture = VoiceCapture::open_with_backend(options, move || {
+            std::thread::sleep(Duration::from_millis(250));
+            FakeCaptureBackend::new(CaptureDeviceInventory {
+                default: Some(default.clone()),
+                inputs: vec![default],
+            })
+        })
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "device initialization blocked the media caller"
+        );
+        assert!(capture.drain_frames().is_empty());
+        drop(capture);
+        // Let the intentionally slow fake driver finish; no detached test leak.
+        std::thread::sleep(Duration::from_millis(300));
     }
 
     #[test]
