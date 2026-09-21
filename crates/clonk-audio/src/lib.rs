@@ -19,9 +19,9 @@ mod wav;
 
 pub use decoder::{decode_audio, AudioDecodeError, AudioFormat};
 pub use mixer::{
-    AudioError, AudioOutputDevice, AudioOutputStatus, AudioSystem, AudioWorkerHandle, ChannelId,
-    MusicHandle, ResamplingMode, SoundHandle, VoiceFrameQueueOutcome, VoiceStreamStats,
-    DEFAULT_VOICE_BUFFERED_FRAMES, MAX_VOICE_BUFFERED_FRAMES,
+    AudioError, AudioOutputDevice, AudioOutputStats, AudioOutputStatus, AudioSystem,
+    AudioWorkerHandle, ChannelId, MusicHandle, ResamplingMode, SoundHandle, VoiceFrameQueueOutcome,
+    VoiceStreamStats, DEFAULT_VOICE_BUFFERED_FRAMES, MAX_VOICE_BUFFERED_FRAMES,
 };
 pub use voice::{
     voice_activation_level, voice_input_devices, VoiceCapture, VoiceCaptureError,

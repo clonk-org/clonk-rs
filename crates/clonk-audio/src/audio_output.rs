@@ -5,12 +5,19 @@ use std::sync::atomic::AtomicU64;
 
 const OUTPUT_QUEUE_FRAMES: usize = 16_384;
 
+#[derive(Debug)]
+struct OutputPcm {
+    pcm: [f32; 2],
+    rendered_at: Instant,
+}
+
 struct OutputBuffer {
-    samples: crossbeam_queue::ArrayQueue<[f32; 2]>,
+    samples: crossbeam_queue::ArrayQueue<OutputPcm>,
     active: AtomicBool,
     sample_rate: u32,
     callback_frames: AtomicUsize,
     underruns: AtomicU64,
+    stale_frames: AtomicU64,
     errors: crossbeam_queue::ArrayQueue<cpal::Error>,
     reference: Arc<crate::voice_output_reference::OutputReference>,
 }
@@ -23,6 +30,7 @@ impl OutputBuffer {
             sample_rate,
             callback_frames: AtomicUsize::new(CLASSIC_OUTPUT_BUFFER_FRAMES as usize),
             underruns: AtomicU64::new(0),
+            stale_frames: AtomicU64::new(0),
             errors: crossbeam_queue::ArrayQueue::new(16),
             reference: crate::voice_output_reference::OutputReference::new(sample_rate),
         })
@@ -52,14 +60,30 @@ impl OutputCallback {
             data.iter_mut().for_each(SampleWrite::write_zero);
             return;
         }
+        let now = Instant::now();
         let first_position = self.buffer.reference.written();
+        let mut stale_frames = 0;
         let mut underrun = false;
         for output in data.chunks_mut(channels) {
             let pcm = if self.buffer.active.load(Ordering::Acquire) {
-                self.buffer.samples.pop().unwrap_or_else(|| {
-                    underrun = true;
-                    [0.0; 2]
-                })
+                self.buffer
+                    .samples
+                    .pop()
+                    .filter(|frame| {
+                        if now.saturating_duration_since(frame.rendered_at)
+                            <= Duration::from_millis(160)
+                        {
+                            true
+                        } else {
+                            stale_frames += 1;
+                            false
+                        }
+                    })
+                    .map(|frame| frame.pcm)
+                    .unwrap_or_else(|| {
+                        underrun = true;
+                        [0.0; 2]
+                    })
             } else {
                 [0.0; 2]
             };
@@ -69,6 +93,9 @@ impl OutputCallback {
         self.buffer
             .reference
             .publish_timing(first_position, playback_at);
+        self.buffer
+            .stale_frames
+            .fetch_add(stale_frames, Ordering::Relaxed);
         if underrun {
             self.buffer.underruns.fetch_add(1, Ordering::Relaxed);
         }
@@ -172,6 +199,28 @@ impl CpalBackend {
 
     pub(super) fn status(&self) -> AudioOutputStatus {
         self.control.state.lock().unwrap().status.clone()
+    }
+
+    pub(super) fn stats(&self) -> AudioOutputStats {
+        let state = self.control.state.lock().unwrap();
+        let mut stats = AudioOutputStats {
+            underrun_callbacks: state.underrun_callbacks,
+            stale_frames: state.stale_frames,
+            ..AudioOutputStats::default()
+        };
+        if let Some(buffer) = &state.buffer {
+            stats.queued_duration = Duration::from_secs_f64(
+                buffer.samples.len() as f64 / f64::from(buffer.sample_rate),
+            );
+            stats.callback_frames = buffer.callback_frames.load(Ordering::Relaxed);
+            stats.underrun_callbacks = stats
+                .underrun_callbacks
+                .saturating_add(buffer.underruns.load(Ordering::Relaxed));
+            stats.stale_frames = stats
+                .stale_frames
+                .saturating_add(buffer.stale_frames.load(Ordering::Relaxed));
+        }
+        stats
     }
 
     pub(super) fn devices(&self) -> Vec<AudioOutputDevice> {
@@ -375,10 +424,14 @@ fn render_output(mixer: Arc<AudioMixer>, control: Arc<OutputControl>) {
                 let needed = target - buffer.samples.len();
                 let frames = (needed * mixer.sample_rate() as usize / buffer.sample_rate as usize)
                     .clamp(1, pcm.len() / 2);
+                let rendered_at = Instant::now();
                 mixer.mix_f32(&mut pcm[..frames * 2]);
                 for pair in pcm[..frames * 2].chunks_exact(2) {
                     converter.push([pair[0], pair[1]], |frame| {
-                        let _ = buffer.samples.push(frame);
+                        let _ = buffer.samples.push(OutputPcm {
+                            pcm: frame,
+                            rendered_at,
+                        });
                     });
                 }
             }
@@ -457,6 +510,8 @@ struct OutputState {
     status: AudioOutputStatus,
     devices: Vec<AudioOutputDevice>,
     reference: VoiceEchoReference,
+    underrun_callbacks: u64,
+    stale_frames: u64,
 }
 
 impl OutputState {
@@ -464,6 +519,12 @@ impl OutputState {
         self.reference.set_output(None);
         if let Some(buffer) = self.buffer.take() {
             buffer.active.store(false, Ordering::Release);
+            self.underrun_callbacks = self
+                .underrun_callbacks
+                .saturating_add(buffer.underruns.load(Ordering::Relaxed));
+            self.stale_frames = self
+                .stale_frames
+                .saturating_add(buffer.stale_frames.load(Ordering::Relaxed));
         }
     }
 }
@@ -479,6 +540,8 @@ impl OutputControl {
                 status: AudioOutputStatus::Opening,
                 devices: Vec::new(),
                 reference: VoiceEchoReference::for_output(),
+                underrun_callbacks: 0,
+                stale_frames: 0,
             }),
         })
     }
@@ -682,6 +745,61 @@ mod tests {
     }
 
     #[test]
+    fn output_diagnostics_count_stale_audio_and_keep_failure_counts_across_retries() {
+        let backend = CpalBackend {
+            control: OutputControl::new(),
+        };
+        let buffer = OutputBuffer::new(48_000);
+        backend.control.state.lock().unwrap().buffer = Some(buffer.clone());
+        let old = Instant::now() - Duration::from_secs(1);
+        for _ in 0..960 {
+            buffer
+                .samples
+                .push(OutputPcm {
+                    pcm: [0.3; 2],
+                    rendered_at: old,
+                })
+                .unwrap();
+        }
+        assert_eq!(backend.stats().queued_duration, Duration::from_millis(20));
+        let mut callback = OutputCallback { buffer };
+        callback.render(&mut [0.0_f32; 1920], 2);
+        assert_eq!(backend.stats().stale_frames, 960);
+        assert_eq!(backend.stats().underrun_callbacks, 1);
+        backend.retry();
+        assert_eq!(backend.stats().stale_frames, 960);
+        assert_eq!(backend.stats().underrun_callbacks, 1);
+        assert_eq!(backend.stats().queued_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn resumed_output_discards_stale_pcm_but_keeps_fresh_audio_with_hardware_latency() {
+        let buffer = OutputBuffer::new(48_000);
+        let now = Instant::now();
+        for rendered_at in [now - Duration::from_secs(1), now] {
+            for _ in 0..960 {
+                buffer
+                    .samples
+                    .push(OutputPcm {
+                        pcm: [0.25, -0.25],
+                        rendered_at,
+                    })
+                    .unwrap();
+            }
+        }
+        let mut callback = OutputCallback {
+            buffer: buffer.clone(),
+        };
+        let mut pcm = [1.0_f32; 1920];
+        callback.render_at(&mut pcm, 2, now + Duration::from_millis(200));
+        assert!(pcm.iter().all(|sample| *sample == 0.0));
+        assert_eq!(buffer.stale_frames.load(Ordering::Relaxed), 960);
+        assert_eq!(buffer.underruns.load(Ordering::Relaxed), 1);
+        callback.render_at(&mut pcm, 2, now + Duration::from_millis(220));
+        assert!(pcm.chunks_exact(2).all(|pair| pair == [0.25, -0.25]));
+    }
+
+    #[test]
     fn missing_output_recovers_when_a_device_appears() {
         let control = OutputControl::new();
         let mut manager = OutputManager::new(
@@ -874,7 +992,12 @@ mod tests {
         manager.service(now + Duration::from_millis(20));
         assert_eq!(manager.driver.opened, 2);
         let next = control.state.lock().unwrap().buffer.clone().unwrap();
-        next.samples.push([0.25, -0.25]).unwrap();
+        next.samples
+            .push(OutputPcm {
+                pcm: [0.25, -0.25],
+                rendered_at: Instant::now(),
+            })
+            .unwrap();
         let mut obsolete = OutputCallback { buffer: previous };
         let mut pcm = [1.0_f32; 2];
         obsolete.render(&mut pcm, 2);
@@ -925,7 +1048,13 @@ mod tests {
         ));
         let buffer = OutputBuffer::new(CLASSIC_OUTPUT_SAMPLE_RATE);
         for _ in 0..2 {
-            assert!(buffer.samples.push([0.25, -0.25]).is_ok());
+            assert!(buffer
+                .samples
+                .push(OutputPcm {
+                    pcm: [0.25, -0.25],
+                    rendered_at: Instant::now()
+                })
+                .is_ok());
         }
         let mut callback = OutputCallback { buffer };
         let held = mixer.state.lock().unwrap();

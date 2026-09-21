@@ -229,6 +229,14 @@ pub enum AudioOutputStatus {
     Retrying(String),
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AudioOutputStats {
+    pub queued_duration: Duration,
+    pub callback_frames: usize,
+    pub underrun_callbacks: u64,
+    pub stale_frames: u64,
+}
+
 pub struct AudioSystem {
     mixer: Arc<AudioMixer>,
     _backend: Backend,
@@ -522,6 +530,14 @@ impl AudioSystem {
             return backend.status();
         }
         AudioOutputStatus::Headless
+    }
+
+    pub fn output_stats(&self) -> AudioOutputStats {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.stats();
+        }
+        AudioOutputStats::default()
     }
 
     pub fn output_devices(&self) -> Vec<AudioOutputDevice> {
