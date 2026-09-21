@@ -9,6 +9,7 @@ mod voice_codec;
 #[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 mod voice_devices;
 mod voice_microphone_test;
+mod voice_resampling;
 // Without the `cpal` feature nothing can open a microphone, so the capture-side
 // halves of these two have no caller in that build. They still compile, and
 // their tests still run.
