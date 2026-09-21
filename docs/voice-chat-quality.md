@@ -15,11 +15,20 @@ media never enters simulation, lockstep controls or recordings.
   require a recent authenticated round trip before bypassing the host relay.
 - [x] Preserve utterance endings on push-to-talk release and beginnings in voice
   activation, while privacy cancellation immediately discards pending capture.
-- [ ] Recover output devices and keep expensive work out of output callbacks.
+- [x] Recover output devices and keep expensive work out of output callbacks.
 - [x] Continuously adapt playout to jitter and device clock drift.
 - [ ] Expose device/route status, input and output selection, a level meter and
   an explicitly requested local microphone test.
 - [ ] Complete automated qualification, required repository gates and landing.
+
+Output recovers on a device worker while a separate render worker advances the
+mixer. Hardware callbacks consume bounded, timestamped PCM; they discard stale
+samples after a playback stall. Voice requests a 256-frame device buffer once
+per audio session, with a supported-size clamp and device-default fallback.
+Echo cancellation uses actual output PCM and playback timestamps, aligned to
+the original microphone capture time, and resets when the output clock or
+device changes. Queue depth, underrun callbacks and stale-frame counts are
+available for diagnostics.
 
 The jitter target tracks recent arrivals between 40 and 120 ms, including
 authenticated packets that arrive after their playout deadline. Gradual

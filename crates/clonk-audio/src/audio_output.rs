@@ -172,6 +172,7 @@ impl CpalBackend {
             resampling_mode,
         );
         mixer.output_reference = Some(control.state.lock().unwrap().reference.clone());
+        mixer.voice_output_mode = control.voice_mode.clone();
         let mixer = Arc::new(mixer);
         let backend = Self {
             control: control.clone(),
@@ -245,6 +246,22 @@ impl CpalBackend {
     }
 }
 
+fn output_stream_configs(
+    config: cpal::SupportedStreamConfig,
+    voice: bool,
+) -> [cpal::StreamConfig; 2] {
+    if !voice {
+        return cpal_output_stream_config_candidates(config);
+    }
+    let frames = match *config.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } if min <= max => 256_u32.clamp(min, max),
+        _ => 256,
+    };
+    let mut requested = config.config();
+    requested.buffer_size = cpal::BufferSize::Fixed(frames);
+    [requested, config.config()]
+}
+
 struct NativeOutputDriver {
     host: cpal::Host,
 }
@@ -259,12 +276,13 @@ impl NativeOutputDriver {
     fn try_config(
         device: &cpal::Device,
         config: cpal::SupportedStreamConfig,
+        voice_mode: bool,
     ) -> Result<(cpal::Stream, Arc<OutputBuffer>), AudioError> {
         use cpal::traits::StreamTrait;
 
         let sample_rate = config.sample_rate();
         let sample_format = config.sample_format();
-        let stream_configs = cpal_output_stream_config_candidates(config);
+        let stream_configs = output_stream_configs(config, voice_mode);
 
         try_cpal_stream_configs(stream_configs, |stream_config| {
             let buffer = OutputBuffer::new(sample_rate);
@@ -347,7 +365,11 @@ impl OutputDriver for NativeOutputDriver {
         Ok(OutputInventory { default, devices })
     }
 
-    fn open(&mut self, id: &str) -> Result<(Self::Stream, Arc<OutputBuffer>), AudioError> {
+    fn open(
+        &mut self,
+        id: &str,
+        voice_mode: bool,
+    ) -> Result<(Self::Stream, Arc<OutputBuffer>), AudioError> {
         use cpal::traits::{DeviceTrait, HostTrait};
         let id = id.parse().map_err(|_| AudioError::NoAudioDevice)?;
         let device = self
@@ -366,7 +388,9 @@ impl OutputDriver for NativeOutputDriver {
                 "no convertible output format between 8 and 192 kHz with 1 to 8 channels".into(),
             ));
         }
-        try_cpal_output_candidates(configs, |config| Self::try_config(&device, config))
+        try_cpal_output_candidates(configs, |config| {
+            Self::try_config(&device, config, voice_mode)
+        })
     }
 
     fn play(&mut self, _stream: &Self::Stream) -> Result<(), AudioError> {
@@ -500,6 +524,7 @@ struct OutputInventory {
 
 struct OutputControl {
     running: AtomicBool,
+    voice_mode: Arc<AtomicBool>,
     state: Mutex<OutputState>,
 }
 
@@ -533,6 +558,7 @@ impl OutputControl {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             running: AtomicBool::new(true),
+            voice_mode: Arc::new(AtomicBool::new(false)),
             state: Mutex::new(OutputState {
                 selected: None,
                 revision: 0,
@@ -550,7 +576,11 @@ impl OutputControl {
 trait OutputDriver {
     type Stream;
     fn inventory(&mut self) -> Result<OutputInventory, AudioError>;
-    fn open(&mut self, id: &str) -> Result<(Self::Stream, Arc<OutputBuffer>), AudioError>;
+    fn open(
+        &mut self,
+        id: &str,
+        voice_mode: bool,
+    ) -> Result<(Self::Stream, Arc<OutputBuffer>), AudioError>;
     fn play(&mut self, stream: &Self::Stream) -> Result<(), AudioError>;
 }
 
@@ -560,6 +590,7 @@ struct OutputManager<D: OutputDriver> {
     stream: Option<D::Stream>,
     device: Option<String>,
     revision: u64,
+    voice_mode: bool,
     next_poll: Option<Instant>,
     error_reporter: CpalStreamErrorReporter,
     started: Instant,
@@ -573,6 +604,7 @@ impl<D: OutputDriver> OutputManager<D> {
             stream: None,
             device: None,
             revision: 0,
+            voice_mode: false,
             next_poll: None,
             error_reporter: CpalStreamErrorReporter::default(),
             started: Instant::now(),
@@ -587,7 +619,8 @@ impl<D: OutputDriver> OutputManager<D> {
             let state = self.control.state.lock().unwrap();
             (state.revision, state.buffer.clone())
         };
-        let revision_changed = self.revision != requested_revision;
+        let voice_mode = self.control.voice_mode.load(Ordering::Acquire);
+        let revision_changed = self.revision != requested_revision || self.voice_mode != voice_mode;
         let mut failed = false;
         let mut failure = None;
         if let Some(buffer) = buffer {
@@ -621,12 +654,14 @@ impl<D: OutputDriver> OutputManager<D> {
             state.invalidate();
             self.device = None;
             self.revision = requested_revision;
+            self.voice_mode = voice_mode;
             if failed {
                 state.status = AudioOutputStatus::Retrying(
                     failure.unwrap_or_else(|| "output stream stopped; reconnecting".into()),
                 );
                 self.next_poll = Some(now + OUTPUT_DEVICE_POLL);
             } else {
+                state.status = AudioOutputStatus::Opening;
                 self.next_poll = None;
             }
             drop(state);
@@ -678,7 +713,7 @@ impl<D: OutputDriver> OutputManager<D> {
         let Some(id) = target else {
             return;
         };
-        match self.driver.open(&id) {
+        match self.driver.open(&id, voice_mode) {
             Ok((stream, buffer)) => {
                 if let Err(error) = self.driver.play(&stream) {
                     self.failed(requested_revision, now, error);
@@ -687,6 +722,7 @@ impl<D: OutputDriver> OutputManager<D> {
                 let mut state = self.control.state.lock().unwrap();
                 if !self.control.running.load(Ordering::Acquire)
                     || state.revision != requested_revision
+                    || self.control.voice_mode.load(Ordering::Acquire) != voice_mode
                 {
                     buffer.active.store(false, Ordering::Release);
                     return;
@@ -735,12 +771,87 @@ mod tests {
                 OutputInventory::default()
             })
         }
-        fn open(&mut self, _: &str) -> Result<((), Arc<OutputBuffer>), AudioError> {
+        fn open(
+            &mut self,
+            _: &str,
+            voice_mode: bool,
+        ) -> Result<((), Arc<OutputBuffer>), AudioError> {
             self.opened += 1;
-            Ok(((), OutputBuffer::new(48_000)))
+            let buffer = OutputBuffer::new(48_000);
+            let configs = output_stream_configs(
+                cpal::SupportedStreamConfig::new(
+                    2,
+                    48_000,
+                    cpal::SupportedBufferSize::Unknown,
+                    cpal::SampleFormat::I16,
+                ),
+                voice_mode,
+            );
+            if let cpal::BufferSize::Fixed(frames) = configs[0].buffer_size {
+                buffer
+                    .callback_frames
+                    .store(frames as usize, Ordering::Relaxed);
+            }
+            Ok(((), buffer))
         }
         fn play(&mut self, _: &()) -> Result<(), AudioError> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn voice_latches_low_latency_once_without_reopening_for_each_utterance() {
+        let control = OutputControl::new();
+        let mut mixer = AudioMixer::new(44_100, 8);
+        mixer.voice_output_mode = control.voice_mode.clone();
+        let mut manager = OutputManager::new(
+            TestOutputDriver {
+                available: true,
+                opened: 0,
+            },
+            control.clone(),
+        );
+        let backend = CpalBackend { control };
+        let now = Instant::now();
+        manager.service(now);
+        assert_eq!(backend.stats().callback_frames, 1024);
+        let system = AudioSystem {
+            mixer: Arc::new(mixer),
+            _backend: Backend::Cpal(backend),
+        };
+        system.prepare_voice_output();
+        manager.service(now + Duration::from_millis(10));
+        assert_eq!(manager.driver.opened, 2);
+        assert_eq!(system.output_stats().callback_frames, 256);
+        for utterance in 1..=4 {
+            system.voice_echo_reference();
+            system.queue_voice_stream(1, [0; VOICE_FRAME_SAMPLES]);
+            system.remove_voice_stream(1);
+            manager.service(now + Duration::from_secs(utterance));
+        }
+        assert_eq!(manager.driver.opened, 2);
+    }
+
+    #[test]
+    fn voice_requests_a_short_output_buffer_with_a_supported_default_fallback() {
+        for (support, expected) in [
+            (cpal::SupportedBufferSize::Unknown, 256),
+            (cpal::SupportedBufferSize::Range { min: 64, max: 2048 }, 256),
+            (
+                cpal::SupportedBufferSize::Range {
+                    min: 512,
+                    max: 2048,
+                },
+                512,
+            ),
+        ] {
+            let config =
+                cpal::SupportedStreamConfig::new(2, 44_100, support, cpal::SampleFormat::I16);
+            let voice = output_stream_configs(config, true);
+            assert_eq!(voice[0].buffer_size, cpal::BufferSize::Fixed(expected));
+            assert_eq!(voice[1].buffer_size, cpal::BufferSize::Default);
+            let classic = output_stream_configs(config, false);
+            assert_eq!(classic[0].buffer_size, cpal::BufferSize::Fixed(1024));
         }
     }
 
@@ -911,8 +1022,12 @@ mod tests {
         fn inventory(&mut self) -> Result<OutputInventory, AudioError> {
             self.inner.inventory()
         }
-        fn open(&mut self, id: &str) -> Result<((), Arc<OutputBuffer>), AudioError> {
-            let result = self.inner.open(id)?;
+        fn open(
+            &mut self,
+            id: &str,
+            voice_mode: bool,
+        ) -> Result<((), Arc<OutputBuffer>), AudioError> {
+            let result = self.inner.open(id, voice_mode)?;
             self.entered.send(result.1.clone()).unwrap();
             self.resume.recv().unwrap();
             Ok(result)
@@ -1021,7 +1136,12 @@ mod tests {
                 }
                 .inventory()
             }
-            fn open(&mut self, _: &str) -> Result<((), Arc<OutputBuffer>), AudioError> {
+            fn open(
+                &mut self,
+                _: &str,
+                voice_mode: bool,
+            ) -> Result<((), Arc<OutputBuffer>), AudioError> {
+                let _ = voice_mode;
                 self.0.running.store(false, Ordering::Release);
                 self.0.state.lock().unwrap().status = AudioOutputStatus::Headless;
                 Err(AudioError::NoAudioDevice)

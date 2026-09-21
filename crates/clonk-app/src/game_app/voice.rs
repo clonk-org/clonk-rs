@@ -193,6 +193,9 @@ impl GameApp {
         .then(|| self.local_voice_identity())
         .flatten();
         let audio = audio.borrow();
+        if audio.options.voice_enabled {
+            audio.system.prepare_voice_output();
+        }
         let policy = crate::voice_media::VoiceMediaPolicy {
             enabled: audio.options.voice_enabled,
             context,

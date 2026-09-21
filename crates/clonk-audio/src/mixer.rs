@@ -524,6 +524,13 @@ impl AudioSystem {
         self.mixer.voice_echo_reference()
     }
 
+    /// Prepare the shorter voice buffer before the first utterance. The
+    /// preference stays latched to avoid reopening output between key presses.
+    /// This does not open a microphone or start voice transmission.
+    pub fn prepare_voice_output(&self) {
+        self.mixer.voice_output_mode.store(true, Ordering::Release);
+    }
+
     pub fn output_status(&self) -> AudioOutputStatus {
         #[cfg(feature = "cpal")]
         if let Backend::Cpal(backend) = &self._backend {
@@ -897,6 +904,7 @@ pub struct AudioMixer {
     resampling_mode: ResamplingMode,
     inert: bool,
     output_reference: Option<VoiceEchoReference>,
+    voice_output_mode: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -1143,6 +1151,7 @@ impl AudioMixer {
             resampling_mode,
             inert,
             output_reference: None,
+            voice_output_mode: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1323,6 +1332,7 @@ impl AudioMixer {
         if self.inert {
             return VoiceFrameQueueOutcome::Queued;
         }
+        self.voice_output_mode.store(true, Ordering::Release);
         let mut state = self.state.lock().unwrap();
         state
             .voice_streams
@@ -1343,6 +1353,7 @@ impl AudioMixer {
         if self.inert {
             return VoiceFrameQueueOutcome::Queued;
         }
+        self.voice_output_mode.store(true, Ordering::Release);
         let mut state = self.state.lock().unwrap();
         let stream = state.voice_streams.entry(id).or_insert_with(|| {
             VoiceStreamPlayback::new(DEFAULT_VOICE_BUFFERED_FRAMES, self.sample_rate)
@@ -1523,6 +1534,7 @@ impl AudioMixer {
     /// thing that makes the mixer publish it; a session that never opens a
     /// capture never pays for it.
     pub fn voice_echo_reference(&self) -> VoiceEchoReference {
+        self.voice_output_mode.store(true, Ordering::Release);
         if let Some(reference) = &self.output_reference {
             return reference.clone();
         }
