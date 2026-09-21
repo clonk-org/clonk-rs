@@ -213,6 +213,22 @@ impl MusicHandle {
     }
 }
 
+/// Metadata cached by the output worker; reading it never opens a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioOutputDevice {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioOutputStatus {
+    Headless,
+    Opening,
+    Active { device: String, sample_rate: u32 },
+    Unavailable,
+    Retrying(String),
+}
+
 pub struct AudioSystem {
     mixer: Arc<AudioMixer>,
     _backend: Backend,
@@ -498,6 +514,38 @@ impl AudioSystem {
     /// could come to cancel an echo should.
     pub fn voice_echo_reference(&self) -> VoiceEchoReference {
         self.mixer.voice_echo_reference()
+    }
+
+    pub fn output_status(&self) -> AudioOutputStatus {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.status();
+        }
+        AudioOutputStatus::Headless
+    }
+
+    pub fn output_devices(&self) -> Vec<AudioOutputDevice> {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.devices();
+        }
+        Vec::new()
+    }
+
+    pub fn select_output_device(&self, selected: Option<String>) {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            backend.select(selected);
+        }
+        #[cfg(not(feature = "cpal"))]
+        let _ = selected;
+    }
+
+    pub fn retry_output(&self) {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            backend.retry();
+        }
     }
 
     pub fn resampling_mode(&self) -> ResamplingMode {

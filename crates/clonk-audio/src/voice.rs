@@ -1404,9 +1404,13 @@ const VOICE_ANTI_ALIAS_TAPS: usize = 127;
 
 impl StreamingVoiceResampler {
     pub(crate) fn new(source_rate: u32) -> Self {
+        Self::with_output_rate(source_rate, VOICE_SAMPLE_RATE)
+    }
+
+    pub(crate) fn with_output_rate(source_rate: u32, output_rate: u32) -> Self {
         Self {
-            source_per_output: f64::from(source_rate) / f64::from(VOICE_SAMPLE_RATE),
-            anti_alias: VoiceAntiAliasFilter::new(source_rate),
+            source_per_output: f64::from(source_rate) / f64::from(output_rate),
+            anti_alias: VoiceAntiAliasFilter::new(source_rate, output_rate),
             previous: None,
             current_source_index: 0,
             next_output_position: 0.0,
@@ -1437,11 +1441,11 @@ impl StreamingVoiceResampler {
 }
 
 impl VoiceAntiAliasFilter {
-    fn new(source_rate: u32) -> Option<Self> {
-        if source_rate <= VOICE_SAMPLE_RATE {
+    fn new(source_rate: u32, output_rate: u32) -> Option<Self> {
+        if source_rate <= output_rate {
             return None;
         }
-        let cutoff = 0.45 * VOICE_SAMPLE_RATE as f64 / f64::from(source_rate);
+        let cutoff = 0.45 * f64::from(output_rate) / f64::from(source_rate);
         let center = (VOICE_ANTI_ALIAS_TAPS - 1) as f64 * 0.5;
         let mut coefficients = (0..VOICE_ANTI_ALIAS_TAPS)
             .map(|index| {
@@ -1729,6 +1733,24 @@ mod tests {
     }
 
     #[cfg(feature = "cpal")]
+    #[test]
+    fn streaming_resampling_tracks_a_new_device_clock_without_changing_the_mixer_rate() {
+        for output_rate in [8_000, 44_100, 48_000, 96_000, 192_000] {
+            let mut converter = StreamingVoiceResampler::with_output_rate(44_100, output_rate);
+            let mut count = 0_u32;
+            for _ in 0..44_101 {
+                converter.push_sample(0.25, |sample| {
+                    assert!((sample - 0.25).abs() < 1e-5);
+                    count += 1;
+                });
+            }
+            assert!(
+                count.abs_diff(output_rate + 1) <= 1,
+                "{output_rate} Hz: {count} samples"
+            );
+        }
+    }
+
     #[test]
     fn saturated_raw_capture_discards_old_audio_before_processing() {
         let receiver = Arc::new(crossbeam_queue::ArrayQueue::new(2));
