@@ -642,6 +642,7 @@ pub(crate) struct VoiceChatState {
     stream_epoch: u32,
     next_sequence: u16,
     capture_sample_origin: Option<u64>,
+    last_capture_sample_offset: Option<u64>,
     transmitted_in_epoch: bool,
     pub(crate) remote_streams: BTreeMap<(i32, i32), RemoteVoiceStream>,
     /// Clients this player has silenced, mirroring the runtime client list's
@@ -700,6 +701,7 @@ impl VoiceChatState {
             stream_epoch: 0,
             next_sequence: 0,
             capture_sample_origin: None,
+            last_capture_sample_offset: None,
             transmitted_in_epoch: false,
             remote_streams: BTreeMap::new(),
             muted_clients: BTreeSet::new(),
@@ -822,6 +824,7 @@ impl VoiceChatState {
         self.activation_preroll.clear();
         self.next_sequence = 0;
         self.capture_sample_origin = None;
+        self.last_capture_sample_offset = None;
         self.transmitted_in_epoch = false;
         Ok(())
     }
@@ -965,6 +968,7 @@ impl VoiceChatState {
             self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
             self.next_sequence = 0;
             self.capture_sample_origin = None;
+            self.last_capture_sample_offset = None;
             self.transmitted_in_epoch = false;
             self.activation_gate.close();
             self.activation_preroll.clear();
@@ -1034,8 +1038,15 @@ impl VoiceChatState {
         frame: VoiceInputFrame,
         starts_new_stream: bool,
     ) -> CapturedVoiceFrame {
+        let capture_gap = frame
+            .capture_timing()
+            .zip(self.last_capture_sample_offset)
+            .is_some_and(|(timing, previous)| {
+                timing.sample_offset.saturating_sub(previous)
+                    > VOICE_SEQUENCE_WINDOW_FRAMES as u64 * clonk_audio::VOICE_FRAME_SAMPLES as u64
+            });
         // An explicit flag survives sequence wrap during long utterances.
-        if starts_new_stream && self.transmitted_in_epoch {
+        if (starts_new_stream || capture_gap) && self.transmitted_in_epoch {
             self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
             self.next_sequence = 0;
             self.capture_sample_origin = None;
@@ -1049,6 +1060,7 @@ impl VoiceChatState {
                 as u16
         });
         self.next_sequence = sequence.wrapping_add(1);
+        self.last_capture_sample_offset = frame.capture_timing().map(|timing| timing.sample_offset);
         self.transmitted_in_epoch = true;
         CapturedVoiceFrame {
             stream_epoch: self.stream_epoch,
@@ -2666,6 +2678,34 @@ mod tests {
                 .map(|frame| (frame.sequence, frame.captured_at))
                 .collect::<Vec<_>>(),
             vec![(0, now), (3, now)]
+        );
+    }
+
+    #[test]
+    fn capture_recovers_with_a_new_epoch_after_a_gap_beyond_the_receive_window() {
+        let payload =
+            clonk_audio::test_encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap();
+        let mut voice =
+            VoiceChatState::with_capture_opener(|_| Ok(TestVoiceSource::with_levels(&[])));
+        voice
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
+            .unwrap();
+        let stamps = [0, 100, 101, 65_637].map(|index| {
+            let frame = voice.stamp_captured_frame(
+                VoiceInputFrame::test_frame(payload, 1.0).with_test_timing(
+                    clonk_audio::VoiceCaptureTiming {
+                        captured_at: Instant::now(),
+                        sample_offset: index * clonk_audio::VOICE_FRAME_SAMPLES as u64,
+                    },
+                ),
+                false,
+            );
+            (frame.stream_epoch, frame.sequence)
+        });
+        assert_eq!(
+            stamps,
+            [(1, 0), (2, 0), (2, 1), (3, 0)],
+            "a local capture stall must not leave the receiver rejecting the rest of the utterance"
         );
     }
 
