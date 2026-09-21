@@ -233,6 +233,8 @@ mod game_app_tick;
 mod game_app_update;
 #[path = "game_app/voice.rs"]
 mod game_app_voice;
+#[path = "game_app/voice_setup.rs"]
+mod game_app_voice_setup;
 
 #[path = "main_parts/app_state.rs"]
 mod main_app_state;
@@ -3151,6 +3153,7 @@ impl GameApp {
                 ..SoundState::default()
             },
             voice_chat: crate::voice_service::VoiceChatService::new(),
+            voice_setup: None,
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,
@@ -3862,6 +3865,9 @@ impl GameApp {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        if let Some(setup) = self.voice_setup.as_mut() {
+            setup.controller.cancel_interaction();
+        }
         self.reject_classic_global_gui_bootstrap()?;
         let restart_same_dialog_fade = self
             .startup
@@ -4821,6 +4827,7 @@ impl GameApp {
     }
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
+        self.cancel_voice_setup_test();
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
         self.input_routing.live.primary_left_down = false;

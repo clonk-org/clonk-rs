@@ -18,7 +18,7 @@
 //!
 //! Where the slack is smaller than one titled group box -- 640x480 leaves 50px
 //! -- the group is omitted entirely rather than drawn over C++'s controls, and
-//! the Advanced Settings editor remains the way to reach the `Voice` keys. That
+//! the dedicated Voice setup panel remains reachable from Options. That
 //! is also why `ActivationThreshold` and `ActivationHangover` are not here:
 //! they are set-once tuning, and a third row costs ~41px, which 800x600's 91px
 //! of slack cannot pay.

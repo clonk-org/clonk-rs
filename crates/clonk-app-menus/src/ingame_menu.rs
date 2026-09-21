@@ -189,6 +189,8 @@ pub enum MenuAction {
     ToggleSound,
     /// "Options:Music" (C4MainMenu.cpp:837-840).
     ToggleMusic,
+    /// Port-only local device setup.
+    VoiceSetup,
     /// "Options:Mouse" (C4MainMenu.cpp:847-849).
     ToggleMouseControl,
     /// "Display:*" (C4MainMenu.cpp:855-884).
@@ -1254,6 +1256,17 @@ impl IngameMenuState {
         );
         menu.set_selection(selection);
         menu
+    }
+
+    /// Adds the port-only setup entry without changing the classic factory.
+    pub fn with_voice_setup(mut self, label: String) -> Self {
+        self.items.push(MenuItem::new(
+            label,
+            MenuSymbol::Options(0),
+            MenuAction::VoiceSetup,
+            None,
+        ));
+        self
     }
 
     /// `C4MainMenu::ActivateDisplay` (C4MainMenu.cpp:582-641).
@@ -3781,6 +3794,22 @@ mod tests {
         assert!(matches!(menu.items()[1].symbol, MenuSymbol::Options(1)));
         assert!(matches!(menu.items()[2].symbol, MenuSymbol::Options(12)));
         assert!(matches!(menu.items()[3].symbol, MenuSymbol::Menu(8)));
+    }
+
+    #[test]
+    fn voice_setup_entry_is_added_after_the_classic_options() {
+        let flags = OptionFlags {
+            sound: true,
+            music: false,
+            mouse_shown: false,
+            mouse: false,
+        };
+        let classic = IngameMenuState::options_menu(&flags, 0, &labels());
+        let voice = IngameMenuState::options_menu(&flags, 0, &labels())
+            .with_voice_setup("Voice setup".into());
+        assert_eq!(voice.items().len(), classic.items().len() + 1);
+        assert_eq!(voice.items().last().unwrap().caption, "Voice setup");
+        assert_eq!(captions(&classic), vec!["Sound", "Music", "Display"]);
     }
 
     // Enter on a permanent menu keeps it open (C4Menu.cpp:512-513).

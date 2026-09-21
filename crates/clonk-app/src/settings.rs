@@ -381,6 +381,19 @@ impl AudioOptions {
         );
     }
 
+    /// The dedicated setup panel also owns the capture-processing switches.
+    pub(crate) fn write_voice_setup_config(&self, config: &mut Config) {
+        self.write_startup_voice_config(config);
+        let section = Some("Voice");
+        for (key, enabled) in [
+            ("EchoCancellation", self.voice_echo_cancellation),
+            ("NoiseSuppression", self.voice_noise_suppression),
+            ("AutomaticGainControl", self.voice_automatic_gain_control),
+        ] {
+            config.set_in(section, key, bool_config_value(enabled));
+        }
+    }
+
     /// The port-only `[Voice]` keys the Audio sheet edits
     /// (clonk-org/clonk-rs#452). They live in their own section rather than
     /// `[Sound]` because `[Sound]` is C4Config's on-disk layout and every key
@@ -388,6 +401,7 @@ impl AudioOptions {
     pub(crate) fn write_startup_voice_config(&self, config: &mut Config) {
         let section = Some("Voice");
         config.set_in(section, "Enabled", bool_config_value(self.voice_enabled));
+
         config.set_in(section, "Volume", self.voice_volume_percent().to_string());
         config.set_in(
             section,
@@ -683,6 +697,21 @@ mod tests {
             reloaded.voice_activation_mode,
             VoiceActivationMode::VoiceActivated
         );
+    }
+
+    #[test]
+    fn voice_setup_processing_choices_survive_reload() {
+        let options = AudioOptions {
+            voice_echo_cancellation: false,
+            voice_noise_suppression: false,
+            voice_automatic_gain_control: false,
+            ..AudioOptions::default()
+        };
+        let mut config = Config::new();
+        options.write_voice_setup_config(&mut config);
+        let mut loaded = AudioOptions::default();
+        loaded.apply_config(&config);
+        assert_eq!(loaded.voice_processing(), options.voice_processing());
     }
 
     #[test]

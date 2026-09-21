@@ -153,6 +153,7 @@ impl GameApp {
     }
 
     pub(crate) fn update_voice_chat_at(&mut self, now: Instant) {
+        self.update_voice_setup();
         let Some(audio) = self.sound.context.as_ref() else {
             self.voice_chat.clear();
             return;

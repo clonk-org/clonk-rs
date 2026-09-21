@@ -2912,6 +2912,7 @@ pub(crate) struct GameApp {
     /// Presentation-only proximity voice state; never serialized or passed to
     /// the deterministic engine.
     pub(crate) voice_chat: crate::voice_service::VoiceChatService,
+    pub(crate) voice_setup: Option<crate::game_app_voice_setup::VoiceSetup>,
     pub(crate) assets: Arc<FrontendAssets>,
     /// Per-resource failures from resolving the active scenario's C4GUI
     /// sheet/font set. Empty means the active (or startup) bundle resolved
