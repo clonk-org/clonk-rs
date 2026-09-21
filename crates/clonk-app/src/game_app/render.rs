@@ -6080,6 +6080,9 @@ impl GameApp {
             message_board,
             crew_name_labels,
             speaking: SpeakingOverlay {
+                icon: (!speaking_object_ids.is_empty())
+                    .then(|| self.assets.dialog_image("Speaking.png"))
+                    .flatten(),
                 gui_icons: (!speaking_object_ids.is_empty())
                     .then(|| self.assets.dialog_image("GUIIcons.png"))
                     .flatten(),

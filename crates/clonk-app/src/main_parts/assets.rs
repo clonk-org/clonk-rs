@@ -954,6 +954,8 @@ const SUPPLEMENTAL_STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUICheckbox.png",
     "GUIIcons.png",
     "GUIIcons2.png",
+    // Process-local voice activity uses a standalone high-resolution sprite.
+    "Speaking.png",
     "GUIContext.png",
     "GUISubmenu.png",
     "GUIScroll.png",
