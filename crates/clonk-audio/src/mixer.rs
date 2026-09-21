@@ -247,7 +247,7 @@ enum Backend {
     #[cfg(feature = "cpal")]
     Cpal(CpalBackend),
     Inert,
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     Manual,
     Null(NullBackend),
     DeferredNull(Arc<DeferredNullBackend>),
@@ -330,7 +330,7 @@ impl AudioSystem {
 
     /// Construct a live mixer without a worker thread so tests can advance it
     /// by calling [`AudioMixer::mix_i16`] themselves.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn new_manual_with_resampling(
         max_channels: usize,
         resampling_mode: ResamplingMode,

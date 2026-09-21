@@ -7,8 +7,9 @@
 //!
 //! It runs on the capture worker, on the fixed 20 ms, 48 kHz mono
 //! frame the encoder is about to consume, and never changes that geometry.
-//! Every buffer it needs is allocated when the capture opens, so a frame costs
-//! no allocation and takes no lock.
+//! Steady processing reuses its buffers. Output-reference changes rebuild the
+//! echo processor on this worker; device metadata is shared through a brief
+//! snapshot lock, never a hardware-callback lock.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

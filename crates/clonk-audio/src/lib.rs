@@ -8,6 +8,7 @@ mod voice_capture_control;
 mod voice_codec;
 #[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 mod voice_devices;
+mod voice_microphone_test;
 // Without the `cpal` feature nothing can open a microphone, so the capture-side
 // halves of these two have no caller in that build. They still compile, and
 // their tests still run.
@@ -41,3 +42,7 @@ pub use voice_echo::VoiceEchoReference;
 pub use voice_processing::{VoiceProcessingConfig, VoiceProcessingSwitches};
 
 pub use voice_devices::VoiceInputDeviceInventory;
+
+pub use voice_microphone_test::{
+    VoiceMicrophoneTest, VoiceMicrophoneTestState, VoiceMicrophoneTestStatus,
+};
