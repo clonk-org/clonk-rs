@@ -40,7 +40,7 @@ const TCP_FRAME_HEADER_SIZE: usize = 5;
 const HUB_COMMAND_CAPACITY: usize = 64;
 const INCOMING_PEER_CAPACITY: usize = 32;
 const PUNCHER_EVENT_CAPACITY: usize = 16;
-/// At 50 frames/s, each hub direction queues at most 160 ms of encoded speech.
+/// Per speaker and recipient, at most 160 ms of encoded speech.
 const VOICE_MEDIA_CAPACITY: usize = 8;
 const PEER_INBOUND_PACKET_CAPACITY: usize = 64;
 const ABANDONED_PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
@@ -101,18 +101,58 @@ enum HubCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VoiceReceiveCapacity {
+    Direct,
+    HostRelay,
+}
+
+#[derive(Clone, Copy)]
+struct VoiceReceiveAdmission {
+    cookie: crate::voice::VoiceRouteCookie,
+    capacity: VoiceReceiveCapacity,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReliableUdpVoiceDatagram {
     pub peer: SocketAddr,
     pub payload: Vec<u8>,
     /// Local enqueue time, retained when receive media crosses the session task.
     pub queued_at: Instant,
+    capacity: VoiceReceiveCapacity,
 }
 
 impl crate::voice_inbox::InboxFrame for ReliableUdpVoiceDatagram {
     type Source = SocketAddr;
+    fn max_queued_frames(&self) -> usize {
+        match self.capacity {
+            VoiceReceiveCapacity::Direct => VOICE_MEDIA_CAPACITY,
+            VoiceReceiveCapacity::HostRelay => 64 * VOICE_MEDIA_CAPACITY,
+        }
+    }
     fn source(&self) -> SocketAddr {
         self.peer
+    }
+}
+
+/// Local-only metadata distinguishes speakers sharing a relay destination.
+/// It is never parsed from an unauthenticated media header.
+#[derive(Debug)]
+pub(crate) struct OutgoingVoiceDatagram {
+    pub peer: SocketAddr,
+    pub payload: Vec<u8>,
+    speaker: Option<crate::ClientId>,
+}
+
+impl crate::voice_inbox::InboxFrame for OutgoingVoiceDatagram {
+    type Source = (SocketAddr, Option<crate::ClientId>);
+    // Each admitted destination has 64 speaker slots plus health-control traffic.
+    const MAX_SOURCES: usize = 64 * 65;
+    fn max_queued_frames(&self) -> usize {
+        VOICE_MEDIA_CAPACITY
+    }
+    fn source(&self) -> Self::Source {
+        (self.peer, self.speaker)
     }
 }
 
@@ -120,7 +160,7 @@ pub(crate) type UdpVoiceInboxReceiver =
     crate::voice_inbox::MediaInboxReceiver<ReliableUdpVoiceDatagram>;
 
 struct HubVoiceMedia {
-    outgoing: mpsc::Receiver<ReliableUdpVoiceDatagram>,
+    outgoing: crate::voice_inbox::MediaInboxReceiver<OutgoingVoiceDatagram>,
     incoming: crate::voice_inbox::MediaInboxSender<ReliableUdpVoiceDatagram>,
 }
 
@@ -134,7 +174,7 @@ struct UdpOutboxRouteState {
     generation: u64,
     packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
     drained: Arc<UdpRouteDrain>,
-    voice_receive_cookie: Option<crate::voice::VoiceRouteCookie>,
+    voice_receive_admission: Option<VoiceReceiveAdmission>,
 }
 
 #[derive(Clone)]
@@ -259,7 +299,7 @@ impl UdpLogicalOutbox {
                 generation,
                 packet_log,
                 drained,
-                voice_receive_cookie: None,
+                voice_receive_admission: None,
             },
         );
         debug_assert!(replaced.is_none());
@@ -633,6 +673,7 @@ impl UdpSharedOutbox {
         &self,
         route: UdpOutboxRouteId,
         cookie: crate::voice::VoiceRouteCookie,
+        capacity: VoiceReceiveCapacity,
     ) {
         if let Some(state) = self
             .state
@@ -642,22 +683,22 @@ impl UdpSharedOutbox {
             .get_mut(&route)
             .filter(|state| state.accepting)
         {
-            state.voice_receive_cookie = Some(cookie);
+            state.voice_receive_admission = Some(VoiceReceiveAdmission { cookie, capacity });
         }
     }
 
-    fn voice_receive_cookie(
+    fn voice_receive_admission(
         &self,
         peer: SocketAddr,
         generation: u64,
-    ) -> Option<crate::voice::VoiceRouteCookie> {
+    ) -> Option<VoiceReceiveAdmission> {
         self.state
             .lock()
             .expect("UDP outbox poisoned")
             .routes
             .values()
             .find(|route| route.accepting && route.peer == peer && route.generation == generation)
-            .and_then(|route| route.voice_receive_cookie)
+            .and_then(|route| route.voice_receive_admission)
     }
 
     fn enqueue_many(
@@ -837,10 +878,14 @@ impl ReliableUdpRouteSender {
         completed.await.map_err(|_| ())
     }
 
-    pub(crate) fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
+    pub(crate) fn set_voice_receive_cookie(
+        &self,
+        cookie: crate::voice::VoiceRouteCookie,
+        capacity: VoiceReceiveCapacity,
+    ) {
         self.lease
             .outbox
-            .set_voice_receive_cookie(self.lease.route, cookie);
+            .set_voice_receive_cookie(self.lease.route, cookie, capacity);
     }
 
     pub(crate) fn try_send_raw(&self, packet: Vec<u8>) -> Result<(), Vec<u8>> {
@@ -1563,28 +1608,17 @@ impl AsyncWrite for ReliableUdpOwnedPeerStream {
 #[derive(Clone, Debug)]
 pub struct ReliableUdpSessionHandle {
     commands: mpsc::Sender<HubCommand>,
-    voice_media: mpsc::Sender<ReliableUdpVoiceDatagram>,
-}
-
-pub(crate) struct ReliableUdpVoiceMediaPermit<'a> {
-    permit: mpsc::Permit<'a, ReliableUdpVoiceDatagram>,
-}
-
-impl ReliableUdpVoiceMediaPermit<'_> {
-    pub(crate) fn send(self, peer: SocketAddr, payload: Vec<u8>) {
-        self.permit.send(ReliableUdpVoiceDatagram {
-            peer: canonical_reliable_udp_peer_address(peer),
-            payload,
-            queued_at: Instant::now(),
-        });
-    }
+    voice_media: crate::voice_inbox::MediaInboxSender<OutgoingVoiceDatagram>,
 }
 
 impl ReliableUdpSessionHandle {
     #[cfg(test)]
-    pub(crate) fn test_voice_queue() -> (Self, mpsc::Receiver<ReliableUdpVoiceDatagram>) {
+    pub(crate) fn test_voice_queue() -> (
+        Self,
+        crate::voice_inbox::MediaInboxReceiver<OutgoingVoiceDatagram>,
+    ) {
         let (commands, _command_rx) = mpsc::channel(1);
-        let (voice_media, voice_media_rx) = mpsc::channel(VOICE_MEDIA_CAPACITY);
+        let (voice_media, voice_media_rx) = crate::voice_inbox::media_inbox();
         (
             Self {
                 commands,
@@ -1594,21 +1628,38 @@ impl ReliableUdpSessionHandle {
         )
     }
 
+    /// Health-control traffic has its own budget beside each speaker.
     pub(crate) fn try_send_voice_media(&self, peer: SocketAddr, payload: Vec<u8>) -> bool {
-        self.voice_media
-            .try_send(ReliableUdpVoiceDatagram {
-                peer: canonical_reliable_udp_peer_address(peer),
-                payload,
-                queued_at: Instant::now(),
-            })
-            .is_ok()
+        self.queue_voice_media(peer, None, payload, Instant::now())
     }
 
-    pub(crate) fn try_reserve_voice_media(&self) -> Option<ReliableUdpVoiceMediaPermit<'_>> {
+    pub(crate) fn try_send_voice_frame_at(
+        &self,
+        peer: SocketAddr,
+        speaker: crate::ClientId,
+        payload: Vec<u8>,
+        queued_at: Instant,
+    ) -> bool {
+        self.queue_voice_media(peer, Some(speaker), payload, queued_at)
+    }
+
+    fn queue_voice_media(
+        &self,
+        peer: SocketAddr,
+        speaker: Option<crate::ClientId>,
+        payload: Vec<u8>,
+        queued_at: Instant,
+    ) -> bool {
         self.voice_media
-            .try_reserve()
-            .ok()
-            .map(|permit| ReliableUdpVoiceMediaPermit { permit })
+            .try_send_at(
+                OutgoingVoiceDatagram {
+                    peer: canonical_reliable_udp_peer_address(peer),
+                    payload,
+                    speaker,
+                },
+                queued_at,
+            )
+            .is_ok()
     }
 
     pub async fn init_puncher(&self, address: SocketAddr, role: NetpuncherRole) -> io::Result<()> {
@@ -1707,7 +1758,7 @@ impl ReliableUdpSessionHandle {
 pub struct ReliableUdpSessionHub {
     local_addr: SocketAddr,
     commands: mpsc::Sender<HubCommand>,
-    voice_media: mpsc::Sender<ReliableUdpVoiceDatagram>,
+    voice_media: crate::voice_inbox::MediaInboxSender<OutgoingVoiceDatagram>,
     incoming: mpsc::Receiver<io::Result<ReliableUdpPeerStream>>,
     puncher_events: Option<mpsc::Receiver<NetpuncherIoEvent>>,
     voice_media_events: Option<UdpVoiceInboxReceiver>,
@@ -1738,7 +1789,7 @@ impl ReliableUdpSessionHub {
         let (commands, command_rx) = mpsc::channel(HUB_COMMAND_CAPACITY);
         let (incoming_tx, incoming) = mpsc::channel(INCOMING_PEER_CAPACITY);
         let (puncher_event_tx, puncher_events) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
-        let (voice_media, voice_media_rx) = mpsc::channel(VOICE_MEDIA_CAPACITY);
+        let (voice_media, voice_media_rx) = crate::voice_inbox::media_inbox();
         let (voice_media_event_tx, voice_media_events) = crate::voice_inbox::media_inbox();
         let outbox = Arc::new(UdpSharedOutbox::default());
         let task_commands = commands.clone();
@@ -2273,18 +2324,18 @@ async fn run_hub(
                     Ok(events) => {
                         if let Some((peer, payload)) = driver.take_voice_media() {
                             let peer = canonical_reliable_udp_peer_address(peer);
-                            let authenticated = peers
+                            let admission = peers
                                 .get(&peer)
                                 .and_then(|connected| {
-                                    outbox.voice_receive_cookie(peer, connected.generation)
+                                    outbox.voice_receive_admission(peer, connected.generation)
                                 })
-                                .is_some_and(|cookie| {
-                                    crate::voice::voice_datagram_has_cookie(&payload, cookie)
+                                .filter(|admission| {
+                                    crate::voice::voice_datagram_has_cookie(&payload, admission.cookie)
                                 });
-                            if authenticated {
+                            if let Some(admission) = admission {
                                 let _ = voice_media
                                     .incoming
-                                    .try_send(ReliableUdpVoiceDatagram { peer, payload, queued_at: Instant::now() });
+                                    .try_send(ReliableUdpVoiceDatagram { peer, payload, queued_at: Instant::now(), capacity: admission.capacity });
                             }
                         }
                         dispatch_events(
@@ -3316,7 +3367,7 @@ mod tests {
             ),
             [0x44; crate::voice::VOICE_MEDIA_KEY_BYTES],
         );
-        incoming_route.set_voice_receive_cookie(expected.cookie());
+        incoming_route.set_voice_receive_cookie(expected.cookie(), VoiceReceiveCapacity::Direct);
         let frame = crate::voice::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).unwrap();
         let forged_packet = crate::voice::encode_authenticated_voice_packet(
             &forged,
@@ -3346,6 +3397,81 @@ mod tests {
         assert_eq!(received.peer, outgoing_hub.local_addr());
         assert_eq!(received.payload, packet);
         assert!(received.queued_at.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_authenticated_host_route_retains_simultaneous_speaker_bursts() {
+        let (sender, mut receiver) = crate::voice_inbox::media_inbox();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
+        for marker in 0..16 {
+            sender
+                .try_send(ReliableUdpVoiceDatagram {
+                    peer,
+                    payload: vec![marker],
+                    queued_at: Instant::now(),
+                    capacity: VoiceReceiveCapacity::HostRelay,
+                })
+                .unwrap();
+        }
+        let mut received = Vec::new();
+        while let Ok(datagram) = receiver.try_recv() {
+            received.push(datagram.payload[0]);
+        }
+        assert_eq!(
+            received,
+            (0..16).collect::<Vec<_>>(),
+            "two frames from eight speakers must not compete for one speaker's queue"
+        );
+    }
+
+    #[test]
+    fn relayed_speakers_keep_separate_fresh_budgets_and_expired_speech_is_not_sent() {
+        let (handle, mut queued) = ReliableUdpSessionHandle::test_voice_queue();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
+        let now = Instant::now();
+        for marker in 0..10 {
+            assert!(handle.try_send_voice_frame_at(peer, 1, vec![marker], now));
+        }
+        assert!(handle.try_send_voice_frame_at(peer, 2, vec![99], now));
+        assert!(handle.try_send_voice_frame_at(
+            peer,
+            3,
+            vec![88],
+            now - Duration::from_millis(180)
+        ));
+        let mut received = BTreeMap::<_, Vec<_>>::new();
+        while let Ok(datagram) = queued.try_recv() {
+            received
+                .entry(datagram.speaker)
+                .or_default()
+                .push(datagram.payload[0]);
+        }
+        assert_eq!(received.get(&Some(1)), Some(&(2..10).collect::<Vec<_>>()));
+        assert_eq!(received.get(&Some(2)), Some(&vec![99]));
+        assert!(
+            !received.contains_key(&Some(3)),
+            "the sender must enforce the original queue deadline"
+        );
+    }
+
+    #[test]
+    fn voice_fanout_has_an_independent_queue_budget_for_each_recipient() {
+        let (handle, mut queued) = ReliableUdpSessionHandle::test_voice_queue();
+        for recipient in 1..=12 {
+            let peer = SocketAddr::from(([127, 0, 0, 1], 40_000 + recipient));
+            for marker in 0..2 {
+                assert!(
+                    handle.try_send_voice_media(peer, vec![marker]),
+                    "recipient {recipient} lost its budget to another route"
+                );
+            }
+        }
+        let mut received = BTreeMap::new();
+        while let Ok(datagram) = queued.try_recv() {
+            *received.entry(datagram.peer).or_insert(0) += 1;
+        }
+        assert_eq!(received.len(), 12);
+        assert!(received.values().all(|count| *count == 2));
     }
 
     #[test]

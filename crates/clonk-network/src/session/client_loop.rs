@@ -648,18 +648,10 @@ fn send_client_voice_frame_to_routes(
     let host_route = routes
         .iter()
         .find(|(peer_id, _, _)| *peer_id == HOST_CLIENT_ID);
-    // Direct fanout and the host relay share one bounded hub queue. Hold the
-    // relay's slot before filling the rest: without it, a burst of direct
-    // routes can silence the host and every peer that needs its fallback.
-    let relay_permit = match host_route {
-        Some(_) => {
-            let Some(permit) = udp_handle.try_reserve_voice_media() else {
-                return;
-            };
-            Some(permit)
-        }
-        None => None,
-    };
+    // Per-recipient budgets keep a direct fanout from consuming the relay's
+    // space. A route still needs confirmed delivery before bypassing relay.
+    let source = frame.client_id;
+    let queued_at = Instant::now();
     let mut direct_recipients = Vec::new();
     for (peer_id, peer, cipher) in routes.iter().filter(|(peer_id, peer, cipher)| {
         *peer_id != HOST_CLIENT_ID && health.confirmed(*peer, cipher.cookie(), Instant::now())
@@ -673,11 +665,11 @@ fn send_client_voice_frame_to_routes(
         ) else {
             continue;
         };
-        if udp_handle.try_send_voice_media(*peer, wire) {
+        if udp_handle.try_send_voice_frame_at(*peer, source, wire, queued_at) {
             direct_recipients.push(*peer_id);
         }
     }
-    let Some(((_, host_peer, host_cipher), relay_permit)) = host_route.zip(relay_permit) else {
+    let Some((_, host_peer, host_cipher)) = host_route else {
         return;
     };
     let relay = crate::voice::VoicePacket::RelayRequest {
@@ -685,7 +677,7 @@ fn send_client_voice_frame_to_routes(
         direct_recipients,
     };
     if let Ok(wire) = crate::voice::encode_authenticated_voice_packet(host_cipher, &relay) {
-        relay_permit.send(*host_peer, wire);
+        let _ = udp_handle.try_send_voice_frame_at(*host_peer, source, wire, queued_at);
     }
 }
 
@@ -3153,7 +3145,7 @@ mod tests {
     }
 
     #[test]
-    fn client_voice_reserves_host_relay_when_direct_fanout_saturates_media_queue() {
+    fn client_voice_fanout_keeps_the_host_relay_available_for_every_recipient() {
         let cipher = crate::voice::VoiceMediaCipher::from_parts(
             crate::voice::VoiceRouteCookie::from_bytes(
                 [0x11; crate::voice::VOICE_ROUTE_COOKIE_BYTES],
@@ -3209,10 +3201,10 @@ mod tests {
             }
         }
 
-        assert!(!direct_recipients.is_empty());
-        assert!(
-            direct_recipients.len() < 10,
-            "the direct fanout must actually saturate the bounded queue",
+        assert_eq!(
+            direct_recipients.len(),
+            10,
+            "every confirmed recipient has an independent budget"
         );
         assert_eq!(relayed_recipients, Some(direct_recipients));
     }

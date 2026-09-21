@@ -145,7 +145,7 @@ fn send_host_voice_frame(
             &cipher,
             &crate::voice::VoicePacket::Relayed(frame.clone()),
         ) {
-            let _ = udp_handle.try_send_voice_media(peer, wire);
+            let _ = udp_handle.try_send_voice_frame_at(peer, HOST_CLIENT_ID, wire, Instant::now());
         }
     }
 }
@@ -199,7 +199,12 @@ fn handle_host_voice_media(
                 &cipher,
                 &crate::voice::VoicePacket::Relayed(frame.clone()),
             ) {
-                let _ = udp_handle.try_send_voice_media(peer, wire);
+                let _ = udp_handle.try_send_voice_frame_at(
+                    peer,
+                    source_client_id,
+                    wire,
+                    media.queued_at,
+                );
             }
         }
     }

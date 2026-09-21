@@ -25,6 +25,10 @@ pub struct ReceivedMedia<T> {
 
 pub trait InboxFrame {
     type Source: Copy + Ord + std::fmt::Debug;
+    const MAX_SOURCES: usize = MAX_SPEAKERS;
+    fn max_queued_frames(&self) -> usize {
+        FRAMES_PER_SPEAKER
+    }
     fn source(&self) -> Self::Source;
 }
 
@@ -113,21 +117,24 @@ impl<T: InboxFrame> MediaInboxSender<T> {
         if self.is_closed() {
             return Err(TrySendError::Closed(frame));
         }
+        let capacity = frame
+            .max_queued_frames()
+            .clamp(1, FRAMES_PER_SPEAKER * MAX_SPEAKERS);
         // Media cannot block the session task or its lockstep commands.
         let Ok(mut state) = self.0.state.try_lock() else {
             return Err(TrySendError::Full(frame));
         };
         if !state.queues.contains_key(&frame.source()) {
             state.queues.retain(|_, frames| !frames.is_empty());
-            if state.queues.len() >= MAX_SPEAKERS {
+            if state.queues.len() >= T::MAX_SOURCES {
                 return Err(TrySendError::Full(frame));
             }
         }
         let queue = state
             .queues
             .entry(frame.source())
-            .or_insert_with(|| VecDeque::with_capacity(FRAMES_PER_SPEAKER));
-        if queue.len() == FRAMES_PER_SPEAKER {
+            .or_insert_with(|| VecDeque::with_capacity(capacity));
+        while queue.len() >= capacity {
             queue.pop_front();
         }
         queue.push_back(ReceivedMedia { frame, received_at });

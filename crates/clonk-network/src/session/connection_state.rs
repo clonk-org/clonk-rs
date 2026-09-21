@@ -242,7 +242,7 @@ impl HostOutboundSender {
 
     pub(crate) fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
         if let Some(udp) = &self.udp {
-            udp.set_voice_receive_cookie(cookie);
+            udp.set_voice_receive_cookie(cookie, crate::udp_session::VoiceReceiveCapacity::Direct);
         }
     }
 

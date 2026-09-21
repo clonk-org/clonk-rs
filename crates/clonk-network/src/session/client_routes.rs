@@ -681,9 +681,14 @@ impl ClientRouteSender {
         }
     }
 
-    fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie) {
+    fn set_voice_receive_cookie(&self, cookie: crate::voice::VoiceRouteCookie, peer_id: ClientId) {
         if let Some(udp) = &self.udp {
-            udp.set_voice_receive_cookie(cookie);
+            let capacity = if peer_id == HOST_CLIENT_ID {
+                crate::udp_session::VoiceReceiveCapacity::HostRelay
+            } else {
+                crate::udp_session::VoiceReceiveCapacity::Direct
+            };
+            udp.set_voice_receive_cookie(cookie, capacity);
         }
     }
 
@@ -1176,7 +1181,7 @@ impl ClientRouteManager {
                 .get(&local_connection_id)
                 .expect("new client route exists");
             if let Some(cookie) = route.voice_auth.receive_cookie() {
-                route.outbound.set_voice_receive_cookie(cookie);
+                route.outbound.set_voice_receive_cookie(cookie, peer_id);
             }
             let announced = route
                 .outbound
