@@ -159,6 +159,7 @@ shard_modules!(
     harpoonrace_worldgen,
     hazard_crosshair,
     inexantros_hero_locals,
+    inexantros_second_act_callbacks,
     legacy_scenario_loading,
     mars_base_order_menu,
     mars_menu_override_drift,
