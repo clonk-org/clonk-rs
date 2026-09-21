@@ -177,6 +177,15 @@ impl EffectState {
         self.vars[index] = value;
     }
 
+    /// The element `element` of the array variable `index` holds, if it holds
+    /// one that long.
+    pub fn var_element_mut(&mut self, index: usize, element: usize) -> Option<&mut EffectVarValue> {
+        match self.vars.get_mut(index)? {
+            EffectVarValue::Array(elements) => elements.get_mut(element),
+            _ => None,
+        }
+    }
+
     pub fn var(&self, index: usize) -> EffectVarValue {
         self.vars
             .get(index)
@@ -369,6 +378,25 @@ pub enum EffectCommand {
     /// must never resurrect an effect the timer killed in the same
     /// frame (C4Effect vars live inside the effect; death is final).
     Update(EffectState),
+    /// One effect variable, as `EffectVar(v, t, n) = x` sets it. Folds like
+    /// `Update`: a no-op once the number is gone.
+    UpdateVar {
+        number: i32,
+        var: usize,
+        value: EffectVarValue,
+    },
+    /// One element of an array an effect variable holds. `EffectVar(v, t,
+    /// n)[i] = x` changes that element in the array the effect owns
+    /// (C4Script.cpp:5576-5586; C4AulExec.cpp:923-947), so it is recorded as
+    /// that, and an `Update` carrying a copy of every variable is not queued
+    /// for it. Folds like `Update`: a no-op once the number is gone, and also
+    /// when the variable no longer holds an array with that element.
+    UpdateVarElement {
+        number: i32,
+        var: usize,
+        index: usize,
+        value: EffectVarValue,
+    },
     /// Marks the selected live effect dead. C4Effect::Kill/SetDead leaves
     /// the node linked at priority zero until the next Execute walk.
     Remove {

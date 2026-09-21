@@ -17,7 +17,8 @@ use crate::ast::{
 use crate::debugger::DebuggerHooks;
 use crate::engine::{
     EvalDirectExecContinuationHook, EvalDirectExecHook, GlobalCallContextHook, GlobalSlots,
-    GlobalVariables, HostFunction, HostReferenceFunction, RegisteredHostFunction,
+    GlobalVariables, HostElementAccessor, HostFunction, HostReferenceFunction,
+    RegisteredHostFunction,
 };
 use crate::error::{RuntimeCallFrame, RuntimeControl, RuntimeError};
 use crate::lookup_profile;
@@ -2621,6 +2622,9 @@ pub(crate) enum LValueRef {
     /// `AB_ARRAYA_R` without flattening it to a copied array.
     HostPath {
         function: HostFunction,
+        /// Serves `Host(args)[index]` without copying the host's array; see
+        /// [`HostElementAccessor`].
+        element: Option<HostElementAccessor>,
         args: Vec<Value>,
         caller: ScriptCallerContext,
         global_call_context_hook: Option<GlobalCallContextHook>,
@@ -2690,7 +2694,9 @@ impl LValueRef {
                 }
                 if let Some(legacy_pin) = legacy_pin {
                     let mut legacy_pin = legacy_pin.borrow_mut();
-                    legacy_pin.root.clear_object_reference(object_id);
+                    if let LegacyHostPathRoot::Snapshot(root) = &mut legacy_pin.root {
+                        root.clear_object_reference(object_id);
+                    }
                     for arg in &mut legacy_pin.args {
                         arg.clear_object_reference(object_id);
                     }
@@ -2794,6 +2800,29 @@ impl LValueRef {
         Ok(())
     }
 
+    /// The element `index` of the array a host keeps behind this reference,
+    /// when the reference is the host value itself and the host serves it.
+    fn host_element(&self, index: &Value) -> Result<Option<Value>, RuntimeError> {
+        let Self::HostPath {
+            element,
+            args,
+            caller,
+            global_call_context_hook,
+            segments,
+            legacy_pin: None,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        if !segments.is_empty() {
+            return Ok(None);
+        }
+        let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
+        let _guard = CallerContextGuard::enter(Some(caller.clone()));
+        read_host_element(element, args, &[PathSegment::Index(index.clone())])
+    }
+
     fn prepare_legacy_host_path_step(&self) -> Result<(), RuntimeError> {
         let Self::HostPath {
             segments,
@@ -2812,7 +2841,10 @@ impl LValueRef {
 
         let parent = {
             let legacy_pin = legacy_pin.borrow();
-            read_path(&legacy_pin.root.value, parent_segments)?
+            match &legacy_pin.root {
+                LegacyHostPathRoot::Snapshot(root) => read_path(&root.value, parent_segments)?,
+                LegacyHostPathRoot::LiveElement { .. } => return Ok(()),
+            }
         };
         let needs_slot = match (&parent, last) {
             (Value::Array(elements), PathSegment::Index(index)) => {
@@ -2893,6 +2925,7 @@ impl LValueRef {
             }
             LValueRef::HostPath {
                 function,
+                element,
                 args,
                 caller,
                 global_call_context_hook,
@@ -2904,10 +2937,15 @@ impl LValueRef {
                 }
                 if let Some(legacy_pin) = legacy_pin {
                     let legacy_pin = legacy_pin.borrow();
-                    return tracked_value_at_path(&legacy_pin.root, &legacy_pin.segments);
+                    if let LegacyHostPathRoot::Snapshot(root) = &legacy_pin.root {
+                        return tracked_value_at_path(root, &legacy_pin.segments);
+                    }
                 }
                 let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
+                if let Some(value) = read_host_element(element, args, segments)? {
+                    return Ok(TrackedValue::runtime(value));
+                }
                 read_path(&function(args)?, segments).map(TrackedValue::runtime)
             }
         }
@@ -3009,6 +3047,7 @@ impl LValueRef {
             }
             LValueRef::HostPath {
                 function,
+                element,
                 args,
                 caller,
                 global_call_context_hook,
@@ -3026,14 +3065,19 @@ impl LValueRef {
                 }
                 let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
+                if write_host_element(element, args, segments, &tracked.value)? {
+                    return Ok(());
+                }
                 let replacement = if segments.is_empty() {
                     tracked.set_copy().value
                 } else {
-                    let mut root = if let Some(legacy_pin) = legacy_pin {
-                        legacy_pin.borrow().root.value.clone()
-                    } else {
-                        function(args)?
-                    };
+                    let pinned = legacy_pin.as_ref().and_then(|legacy_pin| {
+                        match &legacy_pin.borrow().root {
+                            LegacyHostPathRoot::Snapshot(root) => Some(root.value.clone()),
+                            LegacyHostPathRoot::LiveElement { .. } => None,
+                        }
+                    });
+                    let mut root = pinned.map_or_else(|| function(args), Ok)?;
                     write_path(&mut root, segments, tracked.value)?;
                     root
                 };
@@ -3100,6 +3144,7 @@ impl LValueRef {
             }
             LValueRef::HostPath {
                 function,
+                element,
                 args,
                 caller,
                 global_call_context_hook,
@@ -3127,6 +3172,7 @@ impl LValueRef {
                 segments.push(segment);
                 let legacy_pin = legacy_host_path_pin_for_append(
                     function,
+                    element,
                     args,
                     caller,
                     global_call_context_hook,
@@ -3135,6 +3181,7 @@ impl LValueRef {
                 )?;
                 LValueRef::HostPath {
                     function: function.clone(),
+                    element: element.clone(),
                     args: args.clone(),
                     caller: caller.clone(),
                     global_call_context_hook: global_call_context_hook.clone(),
@@ -3237,9 +3284,34 @@ pub(crate) struct LegacyPathPin {
 
 pub(crate) struct LegacyHostPathPin {
     args: Vec<Value>,
-    root: TrackedValue,
+    root: LegacyHostPathRoot,
     segments: Vec<PathSegment>,
     resolved: Option<TrackedValue>,
+}
+
+/// What a host-path pin holds of the container it points into.
+pub(crate) enum LegacyHostPathRoot {
+    /// A copy of the host's value, kept in step by every write through a host
+    /// path to the same address.
+    Snapshot(TrackedValue),
+    /// The pin addresses one existing element of an array the host keeps, and
+    /// reads and writes it there. C++ holds a `C4V_pC4Value` into the array
+    /// itself, so there is nothing to copy; a copy of a large array for every
+    /// element assignment is what clonk-org/clonk-rs#1674 measured.
+    LiveElement {
+        accessor: HostElementAccessor,
+        index: i32,
+    },
+}
+
+/// The one shape the host can serve in place: a single plain, non-negative
+/// integer index. `array_index` clamps a negative index to zero and converts
+/// other types, so everything else keeps the whole-value path.
+fn host_element_index(segments: &[PathSegment]) -> Option<i32> {
+    match segments {
+        [PathSegment::Index(Value::Int(index))] if *index >= 0 => Some(*index),
+        _ => None,
+    }
 }
 
 thread_local! {
@@ -3358,6 +3430,7 @@ fn resolved_legacy_path_value(pin: &Option<Rc<RefCell<LegacyPathPin>>>) -> Optio
 
 fn legacy_host_path_pin_for_append(
     function: &HostFunction,
+    element: &Option<HostElementAccessor>,
     args: &[Value],
     caller: &ScriptCallerContext,
     global_call_context_hook: &Option<GlobalCallContextHook>,
@@ -3367,12 +3440,21 @@ fn legacy_host_path_pin_for_append(
     if !legacy_path_pin_creation_active() {
         return Ok(None);
     }
-    let root = if let Some(previous) = previous {
-        previous.borrow().root.clone()
-    } else {
-        let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
-        let _guard = CallerContextGuard::enter(Some(caller.clone()));
-        TrackedValue::runtime(function(args)?)
+    let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
+    let _guard = CallerContextGuard::enter(Some(caller.clone()));
+    let snapshot = previous
+        .as_ref()
+        .and_then(|previous| match &previous.borrow().root {
+            LegacyHostPathRoot::Snapshot(root) => Some(root.clone()),
+            LegacyHostPathRoot::LiveElement { .. } => None,
+        });
+    let root = match snapshot {
+        Some(root) => LegacyHostPathRoot::Snapshot(root),
+        // An element the host already holds is addressed where it is.
+        None => match live_host_element(element, args, segments)? {
+            Some(root) => root,
+            None => LegacyHostPathRoot::Snapshot(TrackedValue::runtime(function(args)?)),
+        },
     };
     let pin = Rc::new(RefCell::new(LegacyHostPathPin {
         args: args.to_vec(),
@@ -3432,13 +3514,28 @@ fn notify_legacy_host_path_pins_before_write(args: &[Value], segments: &[PathSeg
             let pin = pin.borrow();
             pin.resolved.is_none()
                 && legacy_host_path_roots_match(&pin, args)
-                && path_is_strict_prefix(&pin.root.value, segments, &pin.segments)
+                && match &pin.root {
+                    LegacyHostPathRoot::Snapshot(root) => {
+                        path_is_strict_prefix(&root.value, segments, &pin.segments)
+                    }
+                    // A live element is one step below the host's value, so
+                    // only a write to that whole value is a strict prefix.
+                    LegacyHostPathRoot::LiveElement { .. } => segments.is_empty(),
+                }
         })
         .collect::<Vec<_>>();
     for pin in pins {
         let resolved = {
             let pin = pin.borrow();
-            tracked_value_at_path(&pin.root, &pin.segments)
+            match &pin.root {
+                LegacyHostPathRoot::Snapshot(root) => tracked_value_at_path(root, &pin.segments),
+                // This runs before the replacing write, so the host still
+                // holds the element the reference was taken to.
+                LegacyHostPathRoot::LiveElement { accessor, index } => {
+                    accessor(&pin.args, *index, None)
+                        .map(|element| TrackedValue::runtime(element.unwrap_or(Value::Nil)))
+                }
+            }
         };
         if let Ok(resolved) = resolved {
             pin.borrow_mut().resolved = Some(resolved);
@@ -3446,12 +3543,74 @@ fn notify_legacy_host_path_pins_before_write(args: &[Value], segments: &[PathSeg
     }
 }
 
+/// A pin on an element the host can serve in place, when `segments` names one
+/// and the host holds it.
+fn live_host_element(
+    element: &Option<HostElementAccessor>,
+    args: &[Value],
+    segments: &[PathSegment],
+) -> Result<Option<LegacyHostPathRoot>, RuntimeError> {
+    let (Some(accessor), Some(index)) = (element, host_element_index(segments)) else {
+        return Ok(None);
+    };
+    Ok(
+        accessor(args, index, None)?.map(|_| LegacyHostPathRoot::LiveElement {
+            accessor: accessor.clone(),
+            index,
+        }),
+    )
+}
+
+fn read_host_element(
+    element: &Option<HostElementAccessor>,
+    args: &[Value],
+    segments: &[PathSegment],
+) -> Result<Option<Value>, RuntimeError> {
+    match (element, host_element_index(segments)) {
+        (Some(accessor), Some(index)) => accessor(args, index, None),
+        _ => Ok(None),
+    }
+}
+
+/// Writes one element where the host keeps it. Pins holding a copy of the same
+/// host value take the same element write, which is what replacing their root
+/// with the rewritten value did.
+fn write_host_element(
+    element: &Option<HostElementAccessor>,
+    args: &[Value],
+    segments: &[PathSegment],
+    value: &Value,
+) -> Result<bool, RuntimeError> {
+    let (Some(accessor), Some(index)) = (element, host_element_index(segments)) else {
+        return Ok(false);
+    };
+    if accessor(args, index, None)?.is_none() {
+        return Ok(false);
+    }
+    notify_legacy_host_path_pins_before_write(args, segments);
+    if accessor(args, index, Some(value))?.is_none() {
+        return Ok(false);
+    }
+    for pin in live_legacy_host_path_pins() {
+        let mut pin = pin.borrow_mut();
+        if pin.resolved.is_none() && legacy_host_path_roots_match(&pin, args) {
+            if let LegacyHostPathRoot::Snapshot(root) = &mut pin.root {
+                // A copy that has no such element is left as it is.
+                let _ = write_path(&mut root.value, segments, value.clone());
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn update_legacy_host_path_pins_after_write(args: &[Value], replacement: Value) {
     let replacement = TrackedValue::runtime(replacement);
     for pin in live_legacy_host_path_pins() {
         let mut pin = pin.borrow_mut();
         if pin.resolved.is_none() && legacy_host_path_roots_match(&pin, args) {
-            pin.root = replacement.clone();
+            if let LegacyHostPathRoot::Snapshot(root) = &mut pin.root {
+                *root = replacement.clone();
+            }
         }
     }
 }
@@ -7781,6 +7940,7 @@ impl<'a> Vm<'a> {
         let args = self.call_args_to_values(&prepared_args)?.into_vec();
         Ok(ReturnValue::Reference(LValueRef::HostPath {
             function: function.callback().clone(),
+            element: function.element_accessor().cloned(),
             args,
             caller,
             global_call_context_hook: self
@@ -8244,6 +8404,20 @@ impl<'a> Vm<'a> {
         env: &Environment,
         hook_stack_slots: Option<usize>,
     ) -> Result<ReturnValue, RuntimeError> {
+        // An element of an array the host keeps is reached where it is, as
+        // AB_ARRAYA_R reaches it through the C4V_pC4Value (C4AulExec.cpp:
+        // 923-947). Everything the host does not serve takes the path below.
+        if let ReturnValue::Reference(reference) = &base {
+            if let Some(element) = reference.host_element(&index)? {
+                return if legacy_path_pin_creation_active() {
+                    reference
+                        .append(PathSegment::Index(index))
+                        .map(ReturnValue::Reference)
+                } else {
+                    Ok(ReturnValue::Value(TrackedValue::runtime(element)))
+                };
+            }
+        }
         if !legacy_path_pin_creation_active() {
             let base = match base {
                 ReturnValue::Value(value) => value,
@@ -14391,6 +14565,165 @@ mod tests {
                 .expect("effect slot loop succeeds") => Value::Int(247));
         check_eq!(*writes.lock().expect("effect write log lock") => vec![9, 8, 7]);
         check_eq!(compiled_function_execution_count() => 1);
+    }
+
+    /// A host that keeps an array in the slot can serve one element of it.
+    /// C++ `EffectVar` returns a `C4V_pC4Value` and `AB_ARRAYA_R` indexes the
+    /// array it refers to (C4Script.cpp:5576-5586; C4AulExec.cpp:923-947), so
+    /// an indexed read never copies the array. Without the accessor every such
+    /// read fetched and converted the whole slot (clonk-org/clonk-rs#1674).
+    #[test]
+    fn an_indexed_effect_slot_read_asks_the_host_for_one_element() {
+        let whole_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let host_whole_reads = std::sync::Arc::clone(&whole_reads);
+        let mut engine = crate::engine::Engine::new();
+        engine.register_host_function("EffectVar", move |_| {
+            host_whole_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Value::Array(vec![
+                Value::Int(10),
+                Value::Int(20),
+                Value::Int(30),
+            ]))
+        });
+        engine.register_host_element_accessor("EffectVar", |_, index, replacement| {
+            Ok(match (index, replacement) {
+                (0..=2, None) => Some(Value::Int((index + 1) * 10)),
+                _ => None,
+            })
+        });
+        engine
+            .load_script(
+                r#"#strict 2
+                    func Probe() { return EffectVar(0, 0, 1)[1] + EffectVar(0, 0, 1)[2]; }
+                "#,
+            )
+            .expect("script loads");
+
+        check_eq!(engine.call("Probe", &[]).expect("indexed reads succeed") => Value::Int(50));
+        check_eq!(whole_reads.load(std::sync::atomic::Ordering::Relaxed) => 0);
+    }
+
+    /// A host slot holding `[10, 20, 30]`, with the whole-value entry counting
+    /// how often it is used and the element accessor serving indexes in range.
+    #[cfg(test)]
+    fn array_slot_host(
+        engine: &mut crate::engine::Engine,
+        with_accessor: bool,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<Value>>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(Value::Array(vec![
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(30),
+        ])));
+        let whole = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (host_slot, host_whole) = (std::sync::Arc::clone(&slot), std::sync::Arc::clone(&whole));
+        engine.register_host_function("EffectVar", move |args| {
+            host_whole.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut slot = host_slot.lock().expect("slot lock");
+            if let Some(replacement) = args.get(3) {
+                *slot = replacement.clone();
+            }
+            Ok(slot.clone())
+        });
+        if with_accessor {
+            let host_slot = std::sync::Arc::clone(&slot);
+            engine.register_host_element_accessor("EffectVar", move |_, index, replacement| {
+                let mut slot = host_slot.lock().expect("slot lock");
+                let Value::Array(elements) = &mut *slot else {
+                    return Ok(None);
+                };
+                let Some(element) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| elements.get_mut(index))
+                else {
+                    return Ok(None);
+                };
+                if let Some(replacement) = replacement {
+                    *element = replacement.clone();
+                }
+                Ok(Some(element.clone()))
+            });
+        }
+        (slot, whole)
+    }
+
+    /// Assigning to an element the host holds changes that element where it
+    /// is. Through the whole-value path one such assignment copied the array
+    /// about fourteen times (clonk-org/clonk-rs#1674).
+    #[test]
+    fn an_indexed_effect_slot_write_changes_one_element_in_the_host() {
+        let mut engine = crate::engine::Engine::new();
+        let (slot, whole) = array_slot_host(&mut engine, true);
+        engine
+            .load_script(
+                r#"#strict 2
+                    func Probe() {
+                        EffectVar(0, 0, 1)[1] = 7;
+                        EffectVar(0, 0, 1)[2] += 5;
+                        var cursor = 0;
+                        EffectVar(0, 0, 1)[cursor++] = cursor;
+                        return EffectVar(0, 0, 1)[1] * 100 + EffectVar(0, 0, 1)[2];
+                    }
+                "#,
+            )
+            .expect("script loads");
+
+        check_eq!(engine.call("Probe", &[]).expect("indexed writes succeed") => Value::Int(735));
+        check_eq!(*slot.lock().expect("slot lock") => Value::Array(vec![
+            Value::Int(1),
+            Value::Int(7),
+            Value::Int(35),
+        ]));
+        check_eq!(whole.load(std::sync::atomic::Ordering::Relaxed) => 0);
+    }
+
+    /// The accessor is a shortcut and never a second semantics: whatever a
+    /// script does to a host array, the result and the array the host is left
+    /// holding are those of the whole-value path. The cases are the ones the
+    /// shortcut declines or has to keep in step with: growth, a negative
+    /// index, nested containers, a container replaced while a reference into
+    /// it is live, and a slot that is no array.
+    #[test]
+    fn the_element_accessor_changes_no_indexed_effect_slot_outcome() {
+        for body in [
+            "EffectVar(0, 0, 1)[1] = 7; return EffectVar(0, 0, 1)[1];",
+            "EffectVar(0, 0, 1)[5] = 1; return EffectVar(0, 0, 1)[5];",
+            "EffectVar(0, 0, 1)[-1] = 4; return EffectVar(0, 0, 1)[0];",
+            "return EffectVar(0, 0, 1)[9];",
+            "return EffectVar(0, 0, 1)[-2];",
+            "EffectVar(0, 0, 1)[1] = [1, 2]; EffectVar(0, 0, 1)[1][0] = 9; return EffectVar(0, 0, 1)[1][0];",
+            "EffectVar(0, 0, 1)[1] = Reassign(); return EffectVar(0, 0, 1)[1];",
+            "EffectVar(0, 0, 1)[Shrink()] = 6; return EffectVar(0, 0, 1)[0];",
+            "EffectVar(0, 0, 1)[2] = EffectVar(0, 0, 1)[0]++; return EffectVar(0, 0, 1)[2];",
+            "++EffectVar(0, 0, 1)[0]; EffectVar(0, 0, 1)[1]--; return EffectVar(0, 0, 1)[0] - EffectVar(0, 0, 1)[1];",
+            "EffectVar(0, 0, 1)[0] = \"text\"; return EffectVar(0, 0, 1)[0];",
+            "EffectVar(0, 0, 1) = 5; EffectVar(0, 0, 1)[0] = 1; return EffectVar(0, 0, 1);",
+            "EffectVar(0, 0, 1) = 5; return EffectVar(0, 0, 1)[0];",
+            "var copy = EffectVar(0, 0, 1); EffectVar(0, 0, 1)[0] = 99; return copy[0];",
+            "var cursor = 0; while (cursor < 3) EffectVar(0, 0, 1)[cursor++] = cursor * 2; return EffectVar(0, 0, 1)[2];",
+        ] {
+            let outcomes = [false, true].map(|with_accessor| {
+                let mut engine = crate::engine::Engine::new();
+                let (slot, _) = array_slot_host(&mut engine, with_accessor);
+                engine
+                    .load_script(&format!(
+                        "#strict 2\n\
+                         func Reassign() {{ EffectVar(0, 0, 1) = [0, 0, 0, 0]; return 5; }}\n\
+                         func Shrink() {{ EffectVar(0, 0, 1) = [8]; return 2; }}\n\
+                         func Probe() {{ {body} }}"
+                    ))
+                    .expect("script loads");
+                let result = engine
+                    .call("Probe", &[])
+                    .map_err(|error| error.to_string());
+                let held = slot.lock().expect("slot lock").clone();
+                (result, held)
+            });
+            check_eq!(outcomes[1] => outcomes[0], "for `{body}`");
+        }
     }
 
     #[test]

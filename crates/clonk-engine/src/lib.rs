@@ -13107,7 +13107,10 @@ fn remove_effect_from_stack(stack: &mut Vec<EffectState>, number: i32) -> Option
         .map(|index| stack.remove(index))
 }
 
-fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[EffectCommand]) {
+pub(crate) fn apply_effect_commands_to_stack(
+    target: &mut Vec<EffectState>,
+    commands: &[EffectCommand],
+) {
     for command in commands {
         match command {
             EffectCommand::Add { effect, .. } => insert_effect_into_stack(target, effect.clone()),
@@ -13117,6 +13120,28 @@ fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[Eff
                     .find(|existing| existing.number == effect.number)
                 {
                     *existing = effect.clone();
+                }
+            }
+            EffectCommand::UpdateVar { number, var, value } => {
+                if let Some(existing) = target
+                    .iter_mut()
+                    .find(|existing| existing.number == *number)
+                {
+                    existing.set_var(*var, value.clone());
+                }
+            }
+            EffectCommand::UpdateVarElement {
+                number,
+                var,
+                index,
+                value,
+            } => {
+                if let Some(element) = target
+                    .iter_mut()
+                    .find(|existing| existing.number == *number)
+                    .and_then(|existing| existing.var_element_mut(*var, *index))
+                {
+                    *element = value.clone();
                 }
             }
             EffectCommand::Remove { name, .. } => {

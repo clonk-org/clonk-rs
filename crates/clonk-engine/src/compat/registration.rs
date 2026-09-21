@@ -254,6 +254,22 @@ fn install_cpp_add_func_argument_extractors(script: &mut ScriptEngine) {
     );
 }
 
+/// `EffectVar(...)[index]` served in place, behind the same argument
+/// extraction the wrapped native applies. Arguments that extraction refuses
+/// are left to the native itself, so the error a script sees is unchanged.
+fn install_effect_var_element_accessor(script: &mut ScriptEngine) {
+    let parameter_types = crate::native_function_parameters::native_function_parameter_entries()
+        .find_map(|(name, parameter_types)| (name == "EffectVar").then_some(parameter_types))
+        .expect("EffectVar has a native signature");
+    script.register_host_element_accessor("EffectVar", move |args, index, replacement| {
+        extract_cpp_native_arguments("EffectVar", parameter_types, &args[..args.len().min(3)])
+            .ok()
+            .map_or(Ok(None), |extracted| {
+                effect_var_element(&extracted, index, replacement)
+            })
+    });
+}
+
 pub(crate) fn public_console_host_function_names(script: &ScriptEngine) -> Vec<String> {
     script
         .host_function_names()
@@ -1248,6 +1264,9 @@ fn populate_host_registration_template(script: &mut ScriptEngine) {
     // Wrap only ordinary C++ AddFunc callbacks here so their bodies receive
     // the later native primitive extraction performed by C4AulEngineFunc.
     install_cpp_add_func_argument_extractors(script.engine);
+    // After the pass above: it registers every native afresh, which drops an
+    // accessor attached before it.
+    install_effect_var_element_accessor(script.engine);
 
     // C4AulEngineFunc retains `C4ValueConv<Par>::Type()` for every native
     // slot. Keep this separate declarative table authoritative for both the

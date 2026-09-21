@@ -477,17 +477,27 @@ public func Probe(object carrier)
 
         result.test_value();
         assert_eq!(outcome.object.len(), 4);
-        match &outcome.object[3] {
-            // EffectVar writes fold as number-keyed UPDATEs — an Add
-            // would resurrect an effect killed earlier the same frame.
-            EffectCommand::Update(effect) => {
-                assert_eq!(effect.vars().len(), 3);
-                assert_eq!(effect.vars()[0], EffectVarValue::Int(3));
-                assert_eq!(effect.vars()[1], EffectVarValue::Object(44));
-                assert_eq!(effect.vars()[2], EffectVarValue::String("beam".into()));
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
+        // EffectVar writes fold as number-keyed updates of the one variable —
+        // an Add would resurrect an effect killed earlier the same frame.
+        assert!(
+            matches!(
+                &outcome.object[3],
+                EffectCommand::UpdateVar { var: 2, value, .. }
+                    if *value == EffectVarValue::String("beam".into())
+            ),
+            "unexpected command: {:?}",
+            outcome.object[3]
+        );
+        let mut folded = Vec::new();
+        crate::apply_effect_commands_to_stack(&mut folded, &outcome.object);
+        assert_eq!(
+            folded[0].vars(),
+            [
+                EffectVarValue::Int(3),
+                EffectVarValue::Object(44),
+                EffectVarValue::String("beam".into()),
+            ]
+        );
     }
 
     #[test]
