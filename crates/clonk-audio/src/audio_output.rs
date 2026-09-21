@@ -105,6 +105,7 @@ impl OutputCallback {
 #[cfg(feature = "cpal")]
 pub(super) struct CpalBackend {
     control: Arc<OutputControl>,
+    input_catalog: Option<crate::voice_devices::VoiceInputDeviceCatalog>,
 }
 
 #[cfg(feature = "cpal")]
@@ -157,7 +158,10 @@ impl CpalBackend {
         max_channels: usize,
         resampling_mode: ResamplingMode,
     ) -> Result<(Arc<AudioMixer>, Self), AudioError> {
-        Self::with_driver(max_channels, resampling_mode, NativeOutputDriver::new)
+        let (mixer, mut backend) =
+            Self::with_driver(max_channels, resampling_mode, NativeOutputDriver::new)?;
+        backend.input_catalog = Some(crate::voice_devices::VoiceInputDeviceCatalog::new());
+        Ok((mixer, backend))
     }
 
     fn with_driver<D: OutputDriver + 'static>(
@@ -176,6 +180,7 @@ impl CpalBackend {
         let mixer = Arc::new(mixer);
         let backend = Self {
             control: control.clone(),
+            input_catalog: None,
         };
         let device_control = control.clone();
         thread::Builder::new()
@@ -222,6 +227,19 @@ impl CpalBackend {
                 .saturating_add(buffer.stale_frames.load(Ordering::Relaxed));
         }
         stats
+    }
+
+    pub(super) fn input_inventory(&self) -> crate::VoiceInputDeviceInventory {
+        self.input_catalog
+            .as_ref()
+            .map(|catalog| catalog.snapshot())
+            .unwrap_or_else(|| crate::VoiceInputDeviceInventory::Ready(Vec::new()))
+    }
+
+    pub(super) fn refresh_inputs(&self) {
+        if let Some(catalog) = &self.input_catalog {
+            catalog.refresh();
+        }
     }
 
     pub(super) fn devices(&self) -> Vec<AudioOutputDevice> {
@@ -811,7 +829,10 @@ mod tests {
             },
             control.clone(),
         );
-        let backend = CpalBackend { control };
+        let backend = CpalBackend {
+            control,
+            input_catalog: None,
+        };
         let now = Instant::now();
         manager.service(now);
         assert_eq!(backend.stats().callback_frames, 1024);
@@ -859,6 +880,7 @@ mod tests {
     fn output_diagnostics_count_stale_audio_and_keep_failure_counts_across_retries() {
         let backend = CpalBackend {
             control: OutputControl::new(),
+            input_catalog: None,
         };
         let buffer = OutputBuffer::new(48_000);
         backend.control.state.lock().unwrap().buffer = Some(buffer.clone());
@@ -1094,6 +1116,7 @@ mod tests {
         );
         let backend = CpalBackend {
             control: control.clone(),
+            input_catalog: None,
         };
         let now = Instant::now();
         manager.service(now);

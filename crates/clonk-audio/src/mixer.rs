@@ -547,6 +547,21 @@ impl AudioSystem {
         AudioOutputStats::default()
     }
 
+    pub fn voice_input_inventory(&self) -> crate::VoiceInputDeviceInventory {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.input_inventory();
+        }
+        crate::VoiceInputDeviceInventory::Unavailable("audio devices are not active".into())
+    }
+
+    pub fn refresh_voice_input_devices(&self) {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            backend.refresh_inputs();
+        }
+    }
+
     pub fn output_devices(&self) -> Vec<AudioOutputDevice> {
         #[cfg(feature = "cpal")]
         if let Backend::Cpal(backend) = &self._backend {
