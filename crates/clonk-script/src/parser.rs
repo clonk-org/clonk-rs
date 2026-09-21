@@ -75,6 +75,18 @@ pub struct Parser<'a> {
     /// Whether the body being parsed belongs to a `global func`, which is the
     /// only place a named `local` is rejected (`C4AulParse.cpp:2000-2004`).
     parsing_global_function: bool,
+    /// Inside the braces of a new-style function, where a declaration in
+    /// statement position ends the function (`C4AulParse.cpp:2005-2011,
+    /// 2167-2189`). Old-style bodies end at their boundary scan instead.
+    parsing_new_style_body: bool,
+    /// The parameters and `var`s the function being parsed has declared so
+    /// far. C4Aul matches an identifier against these, and the script's locals
+    /// and statics, before it asks whether it is `func`
+    /// (`C4AulParse.cpp:1975-2011`), so a variable named `func` stays one.
+    function_value_names: std::collections::HashSet<String>,
+    /// Set by the statement that met such a declaration; every enclosing
+    /// statement loop stops on it, as C4Aul's loops stop on `Done`.
+    body_ended_by_declaration: bool,
     /// Identifiers that body named, with the line of each first use. Resolved
     /// against the script's `local` declarations once the whole script is
     /// parsed, because a `local` may be declared below the function that names
@@ -109,6 +121,9 @@ impl<'a> Parser<'a> {
             hard_inherited_stmt_index: None,
             current_body_stmt_index: 0,
             parsing_global_function: false,
+            parsing_new_style_body: false,
+            function_value_names: std::collections::HashSet::new(),
+            body_ended_by_declaration: false,
             global_local_candidates: Vec::new(),
             global_function_shadowing_names: std::collections::HashSet::new(),
         }
@@ -294,10 +309,29 @@ impl<'a> Parser<'a> {
         let error = match self.parse_function_description() {
             Ok(parsed) => {
                 description = parsed;
+                self.parsing_new_style_body = true;
+                self.body_ended_by_declaration = false;
                 let (parsed_body, error) = self.parse_block_statements_until_error();
+                self.parsing_new_style_body = false;
                 body = parsed_body;
                 match error {
                     Some(error) => Some(error),
+                    None if std::mem::take(&mut self.body_ended_by_declaration) => {
+                        // Parse_FuncHead's `Match(ATT_BLCLOSE)` fails on the
+                        // declaration's token in the preparser, which reports it
+                        // and goes on; the parser pass never runs that match
+                        // (`C4AulParse.cpp:1706-1709,1400-1427`), so the
+                        // function keeps every statement and no error chunk.
+                        let found = self
+                            .peek()
+                            .map_or((0, 0), |token| (token.line, token.column));
+                        self.non_fatal_diagnostics.push(ParseError::new(
+                            "'}' expected, but found identifier",
+                            found.0,
+                            found.1,
+                        ));
+                        None
+                    }
                     None => self
                         .expect_symbol(Symbol::RBrace, "expected '}' after function body")
                         .err(),
@@ -346,6 +380,7 @@ impl<'a> Parser<'a> {
     /// (`C4AulParse.cpp:2000-2004`), so only its body collects candidates, and
     /// its parameters are the first names that shadow one.
     fn begin_global_local_tracking(&mut self, access: AccessLevel, params: &[Parameter]) {
+        self.function_value_names = params.iter().map(|param| param.name.clone()).collect();
         self.parsing_global_function = access == AccessLevel::Global;
         self.global_local_candidates.clear();
         self.global_function_shadowing_names.clear();
@@ -706,7 +741,13 @@ impl<'a> Parser<'a> {
     fn parse_block_statements(&mut self) -> Result<Vec<Stmt>, ParseError> {
         let mut statements = Vec::new();
         while !self.check_symbol(Symbol::RBrace)? && !self.is_eof()? {
-            statements.push(self.parse_statement()?);
+            let statement = self.parse_statement()?;
+            if !self.is_end_of_body_marker(&statement) {
+                statements.push(statement);
+            }
+            if self.body_ended_by_declaration {
+                break;
+            }
         }
         Ok(statements)
     }
@@ -729,7 +770,14 @@ impl<'a> Parser<'a> {
             }
             self.current_body_stmt_index = statements.len();
             match self.parse_statement() {
-                Ok(statement) => statements.push(statement),
+                Ok(statement) => {
+                    if !self.is_end_of_body_marker(&statement) {
+                        statements.push(statement);
+                    }
+                    if self.body_ended_by_declaration {
+                        return (statements, None);
+                    }
+                }
                 Err(error) => return (statements, Some(error)),
             }
         }
@@ -829,6 +877,7 @@ impl<'a> Parser<'a> {
     /// right-hand side to the new `var` rather than falling through to the
     /// local check.
     fn note_function_var(&mut self, name: &str) {
+        self.function_value_names.insert(name.to_owned());
         if self.parsing_global_function {
             self.global_function_shadowing_names.insert(name.to_owned());
         }
@@ -841,7 +890,55 @@ impl<'a> Parser<'a> {
         body
     }
 
+    /// Whether the statement position holds the start of the next function.
+    /// `Parse_Statement` ends the function for a bare `func`
+    /// (`C4AulParse.cpp:2005-2011`) and, having shifted past an access keyword,
+    /// for a `func` or an old-style `Name:` that follows it (`:2167-2189`). The
+    /// keyword stays consumed, so the declaration that `Parse_Script` resumes
+    /// at has lost it and is public.
+    fn declaration_ends_body(&mut self) -> Result<bool, ParseError> {
+        if !self.parsing_new_style_body {
+            return Ok(false);
+        }
+        let is_func =
+            |kind: &TokenKind| matches!(kind, TokenKind::Identifier(name) if name == "func");
+        if is_func(&self.peek()?.kind) {
+            let names_a_value = self.function_value_names.contains("func")
+                || self.script_var_decls.iter().any(|decl| {
+                    decl.name == "func"
+                        && matches!(decl.kind, VarDeclKind::Local | VarDeclKind::Static)
+                });
+            return Ok(!names_a_value);
+        }
+        if !matches!(
+            self.peek()?.kind,
+            TokenKind::Keyword(
+                Keyword::Private | Keyword::Protected | Keyword::Public | Keyword::Global
+            )
+        ) {
+            return Ok(false);
+        }
+        self.consume()?;
+        if !is_func(&self.peek()?.kind) {
+            self.expect_identifier("identifier expected")?;
+            self.expect_symbol(Symbol::Colon, "':' expected")?;
+        }
+        Ok(true)
+    }
+
+    /// The empty statement `parse_statement` hands back where the next
+    /// declaration begins. A statement that merely contains that point, such as
+    /// an `if` whose block it cut short, is a real statement and is kept.
+    fn is_end_of_body_marker(&self, statement: &Stmt) -> bool {
+        self.body_ended_by_declaration
+            && matches!(statement, Stmt::Block(statements) if statements.is_empty())
+    }
+
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
+        if self.declaration_ends_body()? {
+            self.body_ended_by_declaration = true;
+            return Ok(Stmt::Block(Vec::new()));
+        }
         if self.consume_if_keyword(Keyword::Var)?.is_some() {
             return self.parse_var_decl();
         }
@@ -923,7 +1020,10 @@ impl<'a> Parser<'a> {
         }
         if self.consume_if_symbol(Symbol::LBrace)?.is_some() {
             let body = self.parse_block_statements()?;
-            self.expect_symbol(Symbol::RBrace, "expected '}' to close block")?;
+            // A block the next declaration cut short has no brace to close it.
+            if !self.body_ended_by_declaration {
+                self.expect_symbol(Symbol::RBrace, "expected '}' to close block")?;
+            }
             return Ok(Stmt::Block(body));
         }
 
@@ -3034,6 +3134,82 @@ mod tests {
             .map(|function| function.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(refused, ["DropAll"]);
+    }
+
+    /// A function declaration met inside a function body ends that function:
+    /// `Parse_Statement` sets `Done` for a bare `func`
+    /// (`C4AulParse.cpp:2005-2011`) and for an access keyword that `func`
+    /// follows (`:2167-2189`). In the preparser `Parse_FuncHead` then fails its
+    /// `Match(ATT_BLCLOSE)` on that token, which is reported, and `Parse_Script`
+    /// goes on with the declaration (`:1706-1709`, `:1429-1560`); the parser
+    /// pass runs `Parse_Function` alone (`:1400-1427`), so the first function
+    /// keeps every statement and gets no error chunk. The access keyword has
+    /// been shifted past by then, so the function that follows is public.
+    /// Goldwipfcaves' Wipf is this shape: a second `protected func Activity()`
+    /// pasted into the first one's body.
+    #[test]
+    fn a_function_declared_inside_a_body_ends_that_function_and_is_kept() {
+        for nested in ["func", "protected func", "private func", "global func"] {
+            let source = format!(
+                "#strict\nfunc First() {{\n  Before();\n  if (x) {{ Inner();\n\n{nested} Second() {{\n  return(1);\n}}\n"
+            );
+            let (script, diagnostics) = Parser::new(&source).parse_script_recovering();
+            let messages = diagnostics
+                .iter()
+                .map(|error| error.message().to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                messages,
+                ["'}' expected, but found identifier"],
+                "for `{nested}`"
+            );
+            let functions = script
+                .functions
+                .iter()
+                .map(|function| (function.name.as_str(), function.access))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                functions,
+                [
+                    ("First", AccessLevel::Public),
+                    ("Second", AccessLevel::Public)
+                ],
+                "for `{nested}`"
+            );
+            let first = &script.functions[0].body;
+            assert_eq!(first.len(), 2, "First keeps both statements: {first:?}");
+            assert!(
+                !first
+                    .iter()
+                    .any(|statement| matches!(statement, Stmt::ParseError { .. })),
+                "and carries no error: {first:?}"
+            );
+            assert!(script.functions[1].global_local_reference.is_none());
+        }
+    }
+
+    /// The same branch ends the function for an access keyword that an
+    /// old-style `Name:` follows, and there it matches the keyword, the name and
+    /// the colon itself before setting `Done` (`C4AulParse.cpp:2181-2188`). So
+    /// `Parse_Script` resumes *after* that header: the labelled function is never
+    /// declared, and its statements are skipped, one reported token at a time,
+    /// until the next declaration. Faithful, not pretty.
+    #[test]
+    fn an_access_keyword_and_label_inside_a_body_end_it_and_are_consumed() {
+        let source = "#strict\nfunc First() {\n  Before();\n\nprotected Lost:\n  Inside();\n  return(1);\n\nfunc Third() {\n  return(3);\n}\n";
+        let (script, diagnostics) = Parser::new(source).parse_script_recovering();
+
+        let names = script
+            .functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["First", "Third"], "diagnostics: {diagnostics:?}");
+        assert_eq!(script.functions[0].body.len(), 1, "First keeps `Before();`");
+        assert_eq!(
+            diagnostics.first().map(|error| error.message().to_string()),
+            Some("'}' expected, but found identifier".to_string())
+        );
     }
 
     #[test]
