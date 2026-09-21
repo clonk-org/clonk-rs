@@ -22,6 +22,11 @@ assembly and material rendering. Both stages used imagegen to obtain transparent
 alpha. The selected final output was reduced to 320×320 with macOS `sips`.
 The legacy atlas is unchanged.
 
+The review comparisons show the [original and initial upscale](speaking-upscale-comparison.png)
+and the [initial upscale and integrated realistic refinement](speaking-realism-comparison.png).
+Both include the unchanged 20×20 in-game footprint. The artwork in these
+comparisons has the same attribution and license as the runtime icon above.
+
 Initial super-resolution prompt:
 
 > Faithfully super-resolve this exact game icon. Image 1 is an enlarged view of the original 40x40 sprite; Image 2 is that original at native resolution. Return this same complete icon at high resolution with smooth edges and genuine transparent alpha. Preserve precisely the original layout, proportions, perspective, framing, silhouette, colors, shadows and highlights. It is a silver/gray speaker occupying the left and center, with TWO GOLD SOUND-WAVE ARCS on its lower right; both gold arcs are essential parts of the icon and must remain in exactly their original positions, sizes and curves. Preserve the rear metal casing at left, central domed cone and surrounding rings exactly where they are. Only reconstruct smooth detail implied by the pixels. Do not add mounting holes, tabs, a foot or any new features. Do not redesign the speaker. Do not remove, shift or redesign the gold arcs. Keep original margins and crop. Make the background genuinely transparent, with no checkerboard, backdrop or shadow outside the original silhouette. This is a resolution restoration of an existing sprite, not an invitation to make a new icon.
