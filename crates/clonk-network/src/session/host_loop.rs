@@ -88,9 +88,6 @@ async fn next_host_voice_media(
 fn host_voice_routes(
     state: &HostState,
 ) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceMediaCipher)> {
-    if !state.config.voice_enabled {
-        return Vec::new();
-    }
     let mut selected = BTreeSet::new();
     state
         .accepted_routes
@@ -114,9 +111,6 @@ fn host_voice_ingress(
     state: &HostState,
     source: SocketAddr,
 ) -> Option<(ClientId, crate::voice::VoiceMediaCipher)> {
-    if !state.config.voice_enabled {
-        return None;
-    }
     let source = crate::canonical_reliable_udp_peer_address(source);
     state.accepted_routes.values().find_map(|route| {
         if !route.voice_auth.is_negotiated() {
@@ -139,6 +133,9 @@ fn send_host_voice_frame(
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
     state: &HostState,
 ) {
+    if !state.config.voice_enabled {
+        return;
+    }
     let Some(udp_handle) = udp_handle else {
         return;
     };
@@ -177,7 +174,9 @@ fn handle_host_voice_media(
     else {
         return;
     };
-    let _ = voice_events.try_send_at(frame.clone(), media.queued_at);
+    if state.config.voice_enabled {
+        let _ = voice_events.try_send_at(frame.clone(), media.queued_at);
+    }
     let Some(udp_handle) = udp_handle else {
         return;
     };
@@ -532,7 +531,7 @@ pub(crate) async fn run_host(
                 .map(|route| route.client_id),
         );
         voice_available.store(
-            !host_voice_routes(&state).is_empty(),
+            state.config.voice_enabled && !host_voice_routes(&state).is_empty(),
             std::sync::atomic::Ordering::Release,
         );
         if published_control_send_time_epoch != Some(state.control_send_time_epoch) {
@@ -557,8 +556,10 @@ pub(crate) async fn run_host(
         // arm. A command racing this check can be delayed by at most one
         // network operation before the next pass observes it.
         let command_pending = !commands.is_empty();
-        let voice_media_ready = state.config.voice_enabled
-            && crate::voice::voice_media_may_run(command_pending, !client_rx.is_empty());
+        // Relay permission is independent of this host's local capture/listen
+        // opt-in. All media still yields to lockstep and admitted control input.
+        let voice_media_ready =
+            crate::voice::voice_media_may_run(command_pending, !client_rx.is_empty());
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
@@ -1494,7 +1495,7 @@ pub(crate) async fn handle_client_accepted(
         ));
         return;
     }
-    let voice_auth = if state.config.voice_enabled && protocol == crate::NetworkProtocol::Udp {
+    let voice_auth = if protocol == crate::NetworkProtocol::Udp {
         crate::voice::VoiceRouteAuthentication::new_udp()
     } else {
         crate::voice::VoiceRouteAuthentication::default()

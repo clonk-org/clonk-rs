@@ -4982,6 +4982,67 @@ mod tests {
         host.shutdown().await.test_value();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_with_local_voice_disabled_relays_without_listening_or_transmitting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let mut host = start_host(
+            listener,
+            host_config!(
+                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                voice_enabled: false
+            ),
+        )
+        .await
+        .test_value();
+        let host_address = host.udp_local_addr().test_value();
+        let mut alpha = connect_udp_client(
+            host_address,
+            ClientConfig::new("Alpha", ParticipantKind::Player),
+        )
+        .await
+        .test_value();
+        let mut beta = connect_udp_client(
+            host_address,
+            ClientConfig::new("Beta", ParticipantKind::Player),
+        )
+        .await
+        .test_value();
+        let mut host_voice = host.take_voice_receiver();
+        let mut alpha_voice = alpha.take_voice_receiver();
+        let mut beta_voice = beta.take_voice_receiver();
+        timeout(Duration::from_secs(2), async {
+            while !alpha.voice_available() || !beta.voice_available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host relay must negotiate voice independently of its local opt-in");
+        assert!(!host.voice_available());
+        assert!(!host.voice_sender().is_available());
+        assert!(!alpha.mesh_peer_ids().await.contains(&beta.client_id()));
+        let frame = crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; 120]).test_value();
+        alpha.voice_sender().try_send(frame.clone()).test_value();
+        let received = await_test(beta_voice.recv()).await;
+        assert_eq!(received, frame.with_authenticated_source(alpha.client_id()));
+        // Even a caller bypassing the availability hint cannot transmit from
+        // a locally disabled host. Relaying grants no local audio permission.
+        host.voice_sender()
+            .try_send(crate::VoiceFrame::outbound(17, 4, 0, vec![0x6a; 120]).test_value())
+            .test_value();
+        assert!(timeout(Duration::from_millis(100), host_voice.recv())
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(100), alpha_voice.recv())
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(100), beta_voice.recv())
+            .await
+            .is_err());
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
+    }
+
     #[test]
     fn application_voice_queue_holds_at_most_160_milliseconds() {
         assert!(
@@ -4991,7 +5052,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn voice_policy_requires_both_udp_endpoints_to_opt_in() {
+    async fn voice_policy_preserves_local_opt_in_while_the_host_can_relay() {
         async fn assert_mixed_policy(host_voice_enabled: bool, client_voice_enabled: bool) {
             let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
             let mut host = start_host(
@@ -5017,9 +5078,19 @@ mod tests {
             let mut host_voice = host.take_voice_receiver();
             let mut client_voice = client.take_voice_receiver();
 
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            if client_voice_enabled {
+                timeout(EVENT_WAIT, async {
+                    while !client.voice_available() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .test_value();
+            } else {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             assert!(!host.voice_available());
-            assert!(!client.voice_available());
+            assert_eq!(client.voice_available(), client_voice_enabled);
 
             client
                 .voice_sender()

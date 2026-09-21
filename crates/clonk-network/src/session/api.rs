@@ -360,8 +360,9 @@ pub struct HostConfig {
     /// bound host transport. Direct API callers opt in explicitly; the app
     /// applies the stock `Config.Network.EnableUPnP` default.
     pub enable_upnp: bool,
-    /// Enables the negotiated Rust voice-media extension on UDP routes.
-    /// Peers that do not opt in remain compatible with the stock C++ protocol.
+    /// Enables this host's local voice transmission and reception. The host
+    /// can still relay authenticated media between opted-in Rust clients when
+    /// false; this grants no local microphone or playback permission.
     pub voice_enabled: bool,
     pub initial_join_snapshot: Option<HostJoinSnapshot>,
     /// Whether [`Self::initial_join_snapshot`] announces directory-backed
