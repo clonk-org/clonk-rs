@@ -4,6 +4,31 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-09-21
+
+### Bug fixes
+
+- Recover release publication with device loss diagnostics (#1688)
+- Decide whether an old-style function is global from its own declaration (#1675)
+- Preserve completed UDP sends across peer closure (#1676)
+- Let a global func's for-loop vars shadow a declaring script's locals (#1672)
+- Refuse window pointer input in the capture oracle so the real pointer cannot reach a capture (#1670)
+
+### Features
+
+- Hold the reconciled compatibility evidence so the profile may be claimed (#1662)
+
+### Performance
+
+- Reuse catalog metadata during scenario search (#1685)
+- Read and write one element of an effect variable's array in place (#1678)
+
+### Testing
+
+- Audit keyboard and gamepad capture pixels (#1680)
+- Separate lobby join timing from coverage checks (#1677)
+- Audit options reset confirmation pixels (#1667)
+
 ## [0.28.0] - 2026-09-20
 
 ### Bug fixes
