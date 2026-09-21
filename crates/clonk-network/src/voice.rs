@@ -15,40 +15,16 @@ use crate::ClientId;
 /// Duration represented by every encoded voice payload. Keeping this fixed
 /// avoids trusting a sender-controlled sample count during decoder allocation.
 pub const VOICE_FRAME_DURATION_MS: u16 = 20;
-/// This wire version's exact independently decodable IMA ADPCM payload size. A
-/// different codec or frame shape must use a new wire signature rather than
-/// making this version sender-sized.
-pub const VOICE_PAYLOAD_BYTES: usize = 164;
-pub const MAX_VOICE_PAYLOAD_BYTES: usize = VOICE_PAYLOAD_BYTES;
-/// How many peers one talking client will address directly before it stops and
-/// leans on the host relay.
-///
-/// # Why the mesh, and not a relay (clonk-org/clonk-rs#425)
-///
-/// Send bandwidth in a mesh grows with the number of listeners, which is worth
-/// measuring rather than assuming. Measured off the real encoder by
-/// `the_voice_mesh_costs_one_sealed_datagram_per_listener_per_frame`: a sealed
-/// direct datagram is 231 bytes, 259 with IPv4 and UDP headers, sent 50 times a
-/// second — **103.6 kbit/s of the speaker's uplink per listener**.
-///
-/// Two things bound what that can reach:
-///
-/// - **Push-to-talk.** A peer that is not holding its key sends nothing at all,
-///   so this is a cost per *speaker*, not per participant. The mesh's total is
-///   set by how many people talk at once, which in practice is one or two.
-/// - **This cap.** A speaker addresses at most 32 peers directly, so the worst
-///   case the code permits is about **3.3 Mbit/s** of uplink while the key is
-///   held. Beyond 32 the host relay carries the rest.
-///
-/// A relay that *replaced* direct fanout would move that load onto the host —
-/// which pays it for every speaker at once — and add a hop of latency to every
-/// listener, on a lane whose whole design is bounded and droppable. At the
-/// session sizes this project targets that is a worse trade, so the mesh
-/// stands and the relay stays what it already is: the path for peers direct
-/// fanout cannot reach, and the valve for a saturated media queue.
-///
-/// Revisit if the codec, the frame rate or this cap change — the test above
-/// fails rather than letting the figure drift silently.
+/// Maximum encoded Opus payload. An empty payload explicitly ends a talkspurt.
+/// Every nonempty payload must decode to 20 ms of mono 48 kHz audio; the media
+/// consumer validates that geometry before touching its decoder state.
+pub const MAX_VOICE_PAYLOAD_BYTES: usize = 512;
+#[cfg(test)]
+pub(crate) const TEST_VOICE_PAYLOAD_BYTES: usize = 120;
+/// Bound direct fanout before using the host relay. At 48 kbit/s of codec
+/// payload, IPv4/UDP and sealing bring the nominal cost to 86 kbit/s per
+/// listener (DTX, VBR and FEC alter the actual rate). The worst-size sealed
+/// packet remains below the IPv6 minimum MTU even with a full recipient list.
 pub(crate) const MAX_VOICE_DIRECT_RECIPIENTS: usize = 32;
 pub(crate) const VOICE_ROUTE_COOKIE_BYTES: usize = 16;
 
@@ -63,12 +39,9 @@ pub(crate) const VOICE_MEDIA_FAMILY: &[u8; 4] = b"\x7fC4V";
 
 /// This build's exact wire version, and the only one it will encode or open.
 ///
-/// V2 seals everything after the route cookie. The version is bumped rather
-/// than reused because a V1 build reads the cookie out of a V2 announcement
-/// happily — it simply ignores the trailing agreement key — and would then
-/// parse ciphertext as a cleartext packet. Bumping makes that mismatch fail at
-/// the cheapest possible check instead of deep inside a length-driven parse.
-pub(crate) const VOICE_MEDIA_PREFIX: &[u8; 5] = b"\x7fC4V2";
+/// V3 carries bounded variable-length Opus and an explicit end-of-talk marker.
+/// V1 (cleartext) and V2 (fixed ADPCM) are diverted as media but never admitted.
+pub(crate) const VOICE_MEDIA_PREFIX: &[u8; 5] = b"\x7fC4V3";
 
 /// X25519 public value exchanged in the capability announcement.
 pub(crate) const VOICE_KEY_AGREEMENT_PUBLIC_BYTES: usize = 32;
@@ -82,7 +55,7 @@ const VOICE_MEDIA_TAG_BYTES: usize = 16;
 /// exchange; the info string is qualified by the *receiving* route cookie,
 /// which is what makes the two directions independent (see
 /// [`derive_route_media_keys`]).
-const VOICE_MEDIA_KEY_SALT: &[u8] = b"clonk-rs voice media v2";
+const VOICE_MEDIA_KEY_SALT: &[u8] = b"clonk-rs voice media v3";
 const VOICE_MEDIA_KEY_INFO: &[u8] = b"media key";
 
 const VOICE_PACKET_DIRECT: u8 = 0;
@@ -530,7 +503,7 @@ pub(crate) enum VoicePacket {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum VoiceCodecError {
-    #[error("voice payload has {actual} bytes; this wire version requires exactly {expected}")]
+    #[error("voice payload has {actual} bytes; maximum is {expected}")]
     InvalidPayloadLength { actual: usize, expected: usize },
     #[error("voice relay names {0} direct recipients; at most {MAX_VOICE_DIRECT_RECIPIENTS} are allowed")]
     TooManyDirectRecipients(usize),
@@ -561,10 +534,10 @@ pub enum VoiceSendError {
 }
 
 pub(crate) fn validate_voice_payload(payload: &[u8]) -> Result<(), VoiceCodecError> {
-    if payload.len() != VOICE_PAYLOAD_BYTES {
+    if payload.len() > MAX_VOICE_PAYLOAD_BYTES {
         return Err(VoiceCodecError::InvalidPayloadLength {
             actual: payload.len(),
-            expected: VOICE_PAYLOAD_BYTES,
+            expected: MAX_VOICE_PAYLOAD_BYTES,
         });
     }
     Ok(())
@@ -773,10 +746,10 @@ pub(crate) fn decode_voice_packet(wire: &[u8]) -> Result<VoicePacket, VoiceCodec
     if recipient_count > MAX_VOICE_DIRECT_RECIPIENTS {
         return Err(VoiceCodecError::TooManyDirectRecipients(recipient_count));
     }
-    if payload_len != VOICE_PAYLOAD_BYTES {
+    if payload_len > MAX_VOICE_PAYLOAD_BYTES {
         return Err(VoiceCodecError::InvalidPayloadLength {
             actual: payload_len,
-            expected: VOICE_PAYLOAD_BYTES,
+            expected: MAX_VOICE_PAYLOAD_BYTES,
         });
     }
     let recipients_len = recipient_count
@@ -894,18 +867,18 @@ mod tests {
             [0x42; VOICE_MEDIA_KEY_BYTES],
         );
         let packet = VoicePacket::Direct(
-            VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+            VoiceFrame::outbound(7, 11, 29, vec![0x5a; TEST_VOICE_PAYLOAD_BYTES]).unwrap(),
         );
         let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
         let datagram = wire.len() + IP_AND_UDP_HEADER_BYTES;
 
         let per_listener_bits = datagram * FRAMES_PER_SECOND * 8;
         assert!(
-            (95_000..115_000).contains(&per_listener_bits),
+            (80_000..90_000).contains(&per_listener_bits),
             "one listener costs {per_listener_bits} bit/s of a speaker's uplink"
         );
 
-        // The worst case this code permits: one peer talking with the direct
+        // Nominal bitrate with one peer talking and the direct
         // fanout saturated. Beyond this the sender stops adding direct
         // recipients and leans on the host relay.
         let saturated = per_listener_bits * MAX_VOICE_DIRECT_RECIPIENTS;
@@ -933,7 +906,7 @@ mod tests {
             VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
             [0x42; VOICE_MEDIA_KEY_BYTES],
         );
-        let payload = vec![0x5a; VOICE_PAYLOAD_BYTES];
+        let payload = vec![0x5a; TEST_VOICE_PAYLOAD_BYTES];
         let packet = VoicePacket::Direct(VoiceFrame::outbound(7, 11, 29, payload.clone()).unwrap());
 
         let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
@@ -955,7 +928,7 @@ mod tests {
             [0x42; VOICE_MEDIA_KEY_BYTES],
         );
         let packet = VoicePacket::Direct(
-            VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+            VoiceFrame::outbound(7, 11, 29, vec![0x5a; TEST_VOICE_PAYLOAD_BYTES]).unwrap(),
         );
         let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
 
@@ -988,26 +961,29 @@ mod tests {
 
     #[test]
     fn an_older_media_version_is_still_diverted_off_the_reliable_path() {
-        // The transport routes on the family, so a peer speaking V1 is kept
-        // away from `receive_at` — where "C4V1" would be observed as a reliable
+        // The transport routes on the family, so a peer speaking V2 is kept
+        // away from `receive_at` — where "C4V2" would be observed as a reliable
         // packet number and poison the receive window — and is then refused by
         // the codec for not being this version.
-        let mut v1 = Vec::from(*b"\x7fC4V1");
-        v1.extend_from_slice(&[0x11; VOICE_ROUTE_COOKIE_BYTES]);
-        v1.extend_from_slice(&[0x5a; VOICE_PACKET_FIXED_HEADER + VOICE_PAYLOAD_BYTES]);
+        let mut old = Vec::from(*b"\x7fC4V2");
+        old.extend_from_slice(&[0x11; VOICE_ROUTE_COOKIE_BYTES]);
+        old.extend_from_slice(&[0x5a; VOICE_PACKET_FIXED_HEADER + TEST_VOICE_PAYLOAD_BYTES]);
         let cipher = VoiceMediaCipher::from_parts(
             VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
             [0x42; VOICE_MEDIA_KEY_BYTES],
         );
 
-        assert!(is_voice_media_datagram(&v1), "still recognized as media");
-        assert!(!voice_datagram_has_cookie(&v1, cipher.cookie()));
+        assert!(is_voice_media_datagram(&old), "still recognized as media");
+        assert!(!voice_datagram_has_cookie(&old, cipher.cookie()));
         assert_eq!(
-            decode_authenticated_voice_packet(&v1, &cipher),
+            decode_authenticated_voice_packet(&old, &cipher),
             Err(VoiceCodecError::MissingSignature),
             "but never opened as this version"
         );
-        assert!(v1.len() <= MAX_VOICE_WIRE_BYTES, "and still inside the cap");
+        assert!(
+            old.len() <= MAX_VOICE_WIRE_BYTES,
+            "and still inside the cap"
+        );
     }
 
     /// The same diversion, for *every* version byte a release could carry
@@ -1034,7 +1010,7 @@ mod tests {
             let mut wire = Vec::from(*VOICE_MEDIA_FAMILY);
             wire.push(version);
             wire.extend_from_slice(&[0x11; VOICE_ROUTE_COOKIE_BYTES]);
-            wire.extend_from_slice(&[0x5a; VOICE_PACKET_FIXED_HEADER + VOICE_PAYLOAD_BYTES]);
+            wire.extend_from_slice(&[0x5a; VOICE_PACKET_FIXED_HEADER + TEST_VOICE_PAYLOAD_BYTES]);
             assert!(
                 is_voice_media_datagram(&wire),
                 "media version {version} would reach the reliable path",
@@ -1058,13 +1034,17 @@ mod tests {
             [0x42; VOICE_MEDIA_KEY_BYTES],
         );
         let largest = VoicePacket::RelayRequest {
-            frame: VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+            frame: VoiceFrame::outbound(7, 11, 29, vec![0x5a; MAX_VOICE_PAYLOAD_BYTES]).unwrap(),
             direct_recipients: (0..MAX_VOICE_DIRECT_RECIPIENTS as ClientId).collect(),
         };
 
         let wire = encode_authenticated_voice_packet(&cipher, &largest).unwrap();
 
         assert_eq!(wire.len(), MAX_VOICE_WIRE_BYTES);
+        assert!(
+            wire.len() + 48 <= 1_280,
+            "the IPv6/UDP packet must not require fragmentation"
+        );
         assert_eq!(
             decode_authenticated_voice_packet(&wire, &cipher),
             Ok(largest)
@@ -1084,7 +1064,8 @@ mod tests {
         let stream = (0..8)
             .map(|sequence| {
                 VoicePacket::Direct(
-                    VoiceFrame::outbound(7, 11, sequence, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+                    VoiceFrame::outbound(7, 11, sequence, vec![0x5a; TEST_VOICE_PAYLOAD_BYTES])
+                        .unwrap(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1193,7 +1174,7 @@ mod tests {
         let (local, peer) = negotiated_route_pair();
 
         assert!(local.is_negotiated() && peer.is_negotiated());
-        let frame = VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap();
+        let frame = VoiceFrame::outbound(7, 11, 29, vec![0x5a; TEST_VOICE_PAYLOAD_BYTES]).unwrap();
         let packet = VoicePacket::Direct(frame);
         // What one side seals to send, the other opens on receive.
         let outbound =
@@ -1341,10 +1322,13 @@ mod tests {
     }
 
     #[test]
-    fn the_wire_version_accepts_only_the_fixed_codec_payload_size() {
-        assert!(VoiceFrame::outbound(7, 11, 29, vec![0; 163]).is_err());
-        assert!(VoiceFrame::outbound(7, 11, 29, vec![0; 164]).is_ok());
-        assert!(VoiceFrame::outbound(7, 11, 29, vec![0; 165]).is_err());
+    fn opus_media_uses_a_new_version_with_bounded_variable_packets() {
+        assert_eq!(VOICE_MEDIA_PREFIX, b"\x7fC4V3");
+        for length in [0, 3, 96, 160, 512] {
+            let frame = VoiceFrame::outbound(7, 11, 29, vec![0; length]).unwrap();
+            assert_eq!(frame.payload.len(), length);
+        }
+        assert!(VoiceFrame::outbound(7, 11, 29, vec![0; 513]).is_err());
     }
 
     #[test]
@@ -1379,7 +1363,7 @@ mod tests {
         let unsealable =
             VoiceMediaCipher::from_parts(expected.cookie(), [0xaa; VOICE_MEDIA_KEY_BYTES]);
         let packet = VoicePacket::Direct(
-            VoiceFrame::outbound(7, 11, 29, vec![0x5a; VOICE_PAYLOAD_BYTES]).unwrap(),
+            VoiceFrame::outbound(7, 11, 29, vec![0x5a; TEST_VOICE_PAYLOAD_BYTES]).unwrap(),
         );
         let valid_wire = encode_authenticated_voice_packet(expected, &packet).unwrap();
         let forged_wire = encode_authenticated_voice_packet(forged, &packet).unwrap();

@@ -4,6 +4,7 @@ mod midi;
 mod mixer;
 mod tracker;
 mod voice;
+mod voice_codec;
 // Without the `cpal` feature nothing can open a microphone, so the capture-side
 // halves of these two have no caller in that build. They still compile, and
 // their tests still run.
@@ -24,6 +25,10 @@ pub use voice::{
     EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceCaptureOptions, VoiceCodecError,
     VoiceInputDevice, VoiceInputDeviceId, VoiceInputDeviceIdParseError, VoiceInputFrame,
     VOICE_CAPTURE_QUEUE_FRAMES, VOICE_ENCODED_FRAME_BYTES, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
+};
+pub use voice_codec::{
+    EncodedOpusFrame, OpusCodecError, VoiceDecoder, VoiceEncoder, OPUS_FRAME_SAMPLES,
+    OPUS_MAX_PACKET_BYTES, OPUS_SAMPLE_RATE,
 };
 pub use voice_echo::VoiceEchoReference;
 pub use voice_processing::{VoiceProcessingConfig, VoiceProcessingSwitches};

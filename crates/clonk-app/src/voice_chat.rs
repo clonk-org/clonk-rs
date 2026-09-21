@@ -11,7 +11,7 @@
 //! player who has taken neither opt-in is never recorded at all.
 //!
 //! **The determinism boundary is the invariant to protect.** Fixed 20 ms,
-//! 16 kHz mono IMA ADPCM frames travel on a bounded, droppable UDP media lane
+//! 48 kHz mono Opus frames travel on a bounded, droppable UDP media lane
 //! after positive Rust-to-Rust capability negotiation. They never enter
 //! lockstep controls, snapshots, savegames, records/replays, sync checks or
 //! PostMortem recovery, and nothing here may change that: a peer that cannot
@@ -58,9 +58,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clonk_audio::{
-    decode_voice_frame, EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceCaptureOptions,
-    VoiceEchoReference, VoiceInputDeviceId, VoiceInputFrame, VoiceProcessingConfig,
-    VoiceProcessingSwitches,
+    EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceCaptureOptions, VoiceEchoReference,
+    VoiceInputDeviceId, VoiceInputFrame, VoiceProcessingConfig, VoiceProcessingSwitches,
 };
 use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
 
@@ -186,6 +185,11 @@ impl VoiceActivationGate {
     }
 }
 
+pub(crate) struct AcceptedRemoteVoicePacket {
+    pub(crate) stream_id: u64,
+    pub(crate) reset_stream: bool,
+}
+
 pub(crate) struct AcceptedRemoteVoiceFrame {
     pub(crate) stream_id: u64,
     pub(crate) sequence: u16,
@@ -225,7 +229,7 @@ pub(crate) struct RemoteVoiceStream {
 #[derive(Debug)]
 struct BufferedRemoteVoiceFrame {
     sequence: u16,
-    samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
+    payload: EncodedVoiceFrame,
 }
 
 #[derive(Debug)]
@@ -256,6 +260,7 @@ struct RemoteVoiceJitterBuffer {
     highest_arrival_sequence: Option<u16>,
     reordered_frames: u64,
     concealed_frames: u64,
+    decoder: Result<clonk_audio::VoiceDecoder, clonk_audio::OpusCodecError>,
 }
 
 impl Default for RemoteVoiceJitterBuffer {
@@ -273,6 +278,7 @@ impl Default for RemoteVoiceJitterBuffer {
             highest_arrival_sequence: None,
             reordered_frames: 0,
             concealed_frames: 0,
+            decoder: clonk_audio::VoiceDecoder::new(),
         }
     }
 }
@@ -319,12 +325,7 @@ impl RemoteVoiceJitterBuffer {
         (!self.started && usize::from(rewind) < VOICE_SEQUENCE_WINDOW_FRAMES).then_some(sequence)
     }
 
-    fn insert(
-        &mut self,
-        sequence: u16,
-        received_at: Instant,
-        samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
-    ) -> bool {
+    fn insert(&mut self, sequence: u16, received_at: Instant, payload: EncodedVoiceFrame) -> bool {
         if !self.can_insert(sequence) {
             return false;
         }
@@ -367,7 +368,7 @@ impl RemoteVoiceJitterBuffer {
             self.next_playout_sequence = Some(sequence);
         }
         self.pending
-            .push(BufferedRemoteVoiceFrame { sequence, samples });
+            .push(BufferedRemoteVoiceFrame { sequence, payload });
         self.pending
             .sort_unstable_by_key(|pending| pending.sequence.wrapping_sub(next_playout_sequence));
         self.observe_arrival(sequence, received_at);
@@ -460,11 +461,11 @@ impl RemoteVoiceJitterBuffer {
                     .pending
                     .iter()
                     .min_by_key(|pending| pending.sequence.wrapping_sub(expected))
-                    .map(|pending| (pending.sequence, pending.samples[0]));
-                let Some((successor_sequence, successor_first)) = successor else {
+                    .map(|pending| (pending.sequence, pending.payload));
+                let Some((successor_sequence, successor_payload)) = successor else {
                     break;
                 };
-                let Some(previous_output) = self.previous_output else {
+                let Some(_) = self.previous_output else {
                     break;
                 };
                 let successor_distance = successor_sequence.wrapping_sub(expected);
@@ -475,7 +476,7 @@ impl RemoteVoiceJitterBuffer {
                 if buffered_headroom > VOICE_PLAYOUT_GUARD_FRAMES {
                     break;
                 }
-                let samples = concealed_voice_frame(&previous_output, successor_first);
+                let samples = self.decode_for_playout(Some(successor_payload), true);
                 self.previous_output = Some(samples);
                 ready.push(RemoteVoicePlayoutFrame {
                     sequence: expected,
@@ -491,15 +492,34 @@ impl RemoteVoiceJitterBuffer {
                 continue;
             };
             let frame = self.pending.remove(position);
-            self.previous_output = Some(frame.samples);
+            let samples = self.decode_for_playout(Some(frame.payload), false);
+            self.previous_output = Some(samples);
             ready.push(RemoteVoicePlayoutFrame {
                 sequence: frame.sequence,
-                samples: frame.samples,
+                samples,
                 concealed: false,
             });
             self.next_playout_sequence = Some(expected.wrapping_add(1));
         }
         ready
+    }
+
+    fn decode_for_playout(
+        &mut self,
+        packet: Option<EncodedVoiceFrame>,
+        fec: bool,
+    ) -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
+        let Ok(decoder) = self.decoder.as_mut() else {
+            return [0; clonk_audio::VOICE_FRAME_SAMPLES];
+        };
+        let decoded = if let Some(packet) = packet {
+            decoder.decode(&packet, fec)
+        } else {
+            decoder.conceal()
+        };
+        decoded
+            .or_else(|_| decoder.conceal())
+            .unwrap_or([0; clonk_audio::VOICE_FRAME_SAMPLES])
     }
 
     fn stats(&self) -> RemoteVoicePlayoutStats {
@@ -513,32 +533,6 @@ impl RemoteVoiceJitterBuffer {
 
 fn duration_nanos(duration: Duration) -> i128 {
     i128::try_from(duration.as_nanos()).unwrap_or(i128::MAX)
-}
-
-fn concealed_voice_frame(
-    previous_frame: &[i16; clonk_audio::VOICE_FRAME_SAMPLES],
-    next_sample: i16,
-) -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
-    let previous_first = i64::from(previous_frame[0]);
-    let previous_last = i64::from(previous_frame[clonk_audio::VOICE_FRAME_SAMPLES - 1]);
-    let bridge_difference = i64::from(next_sample).saturating_sub(previous_last);
-    let bridge_denominator =
-        i64::try_from(clonk_audio::VOICE_FRAME_SAMPLES + 1).unwrap_or(i64::MAX);
-    let texture_denominator =
-        i64::try_from(clonk_audio::VOICE_FRAME_SAMPLES - 1).unwrap_or(i64::MAX);
-    let previous_difference = previous_last.saturating_sub(previous_first);
-    std::array::from_fn(|index| {
-        let texture_numerator = i64::try_from(index).unwrap_or(i64::MAX);
-        let previous_baseline = previous_first.saturating_add(
-            previous_difference.saturating_mul(texture_numerator) / texture_denominator,
-        );
-        let texture = i64::from(previous_frame[index]).saturating_sub(previous_baseline);
-        let bridge_numerator = i64::try_from(index + 1).unwrap_or(i64::MAX);
-        previous_last
-            .saturating_add(bridge_difference.saturating_mul(bridge_numerator) / bridge_denominator)
-            .saturating_add(texture)
-            .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
-    })
 }
 
 pub(crate) struct VoiceChatState {
@@ -961,8 +955,8 @@ impl VoiceChatState {
         snapshot: &SimulationSnapshot,
         frame: &clonk_network::VoiceFrame,
         received_at: Instant,
-    ) -> Option<AcceptedRemoteVoiceFrame> {
-        let (client_id, samples) = self.prepare_remote_frame(frame)?;
+    ) -> Option<AcceptedRemoteVoicePacket> {
+        let (client_id, payload) = self.prepare_remote_frame(frame)?;
         let disposition = self.note_remote_frame(
             snapshot,
             client_id,
@@ -971,7 +965,7 @@ impl VoiceChatState {
             frame.sequence,
             received_at,
         );
-        self.finish_remote_frame(frame, received_at, client_id, samples, disposition)
+        self.finish_remote_frame(frame, received_at, client_id, payload, disposition)
     }
 
     /// Admit a decoded media frame after the caller has authorized its
@@ -982,8 +976,8 @@ impl VoiceChatState {
         &mut self,
         frame: &clonk_network::VoiceFrame,
         received_at: Instant,
-    ) -> Option<AcceptedRemoteVoiceFrame> {
-        let (client_id, samples) = self.prepare_remote_frame(frame)?;
+    ) -> Option<AcceptedRemoteVoicePacket> {
+        let (client_id, payload) = self.prepare_remote_frame(frame)?;
         let disposition = self.note_authenticated_remote_frame(
             client_id,
             frame.player_id,
@@ -991,20 +985,20 @@ impl VoiceChatState {
             frame.sequence,
             received_at,
         );
-        self.finish_remote_frame(frame, received_at, client_id, samples, disposition)
+        self.finish_remote_frame(frame, received_at, client_id, payload, disposition)
     }
 
     fn prepare_remote_frame(
         &self,
         frame: &clonk_network::VoiceFrame,
-    ) -> Option<(i32, [i16; clonk_audio::VOICE_FRAME_SAMPLES])> {
+    ) -> Option<(i32, EncodedVoiceFrame)> {
         let client_id = i32::try_from(frame.client_id).ok()?;
         // Before decoding: a muted peer costs nothing beyond the bytes the
         // transport already read.
         if self.is_client_muted(client_id) {
             return None;
         }
-        let samples = decode_voice_frame(&frame.payload).ok()?;
+        let payload = EncodedVoiceFrame::from_packet(&frame.payload).ok()?;
         if self
             .remote_streams
             .get(&(client_id, frame.player_id))
@@ -1015,7 +1009,7 @@ impl VoiceChatState {
         {
             return None;
         }
-        Some((client_id, samples))
+        Some((client_id, payload))
     }
 
     fn finish_remote_frame(
@@ -1023,25 +1017,22 @@ impl VoiceChatState {
         frame: &clonk_network::VoiceFrame,
         received_at: Instant,
         client_id: i32,
-        samples: [i16; clonk_audio::VOICE_FRAME_SAMPLES],
+        payload: EncodedVoiceFrame,
         disposition: VoiceFrameDisposition,
-    ) -> Option<AcceptedRemoteVoiceFrame> {
+    ) -> Option<AcceptedRemoteVoicePacket> {
         match disposition {
             VoiceFrameDisposition::Accepted | VoiceFrameDisposition::AcceptedNewEpoch => {
                 let inserted = self
                     .remote_streams
                     .get_mut(&(client_id, frame.player_id))
                     .is_some_and(|stream| {
-                        stream.jitter.insert(frame.sequence, received_at, samples)
+                        stream.jitter.insert(frame.sequence, received_at, payload)
                     });
                 if !inserted {
                     return None;
                 }
-                Some(AcceptedRemoteVoiceFrame {
+                Some(AcceptedRemoteVoicePacket {
                     stream_id: voice_stream_id(client_id, frame.player_id),
-                    sequence: frame.sequence,
-                    samples,
-                    concealed: false,
                     reset_stream: disposition == VoiceFrameDisposition::AcceptedNewEpoch,
                 })
             }
@@ -1398,20 +1389,18 @@ mod tests {
         snapshot
     }
 
-    fn ramp_voice_frame(sequence: u16) -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
+    fn speech_voice_frame(sequence: u16) -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
         std::array::from_fn(|sample| {
-            let absolute_sample = usize::from(sequence) * clonk_audio::VOICE_FRAME_SAMPLES + sample;
-            4_000 + i16::try_from(absolute_sample * 8).unwrap_or(i16::MAX)
+            let position = usize::from(sequence) * clonk_audio::VOICE_FRAME_SAMPLES + sample;
+            (12_000.0
+                * (std::f64::consts::TAU * 200.0 * position as f64
+                    / f64::from(clonk_audio::VOICE_SAMPLE_RATE))
+                .sin()) as i16
         })
     }
 
     fn bipolar_voice_frame() -> [i16; clonk_audio::VOICE_FRAME_SAMPLES] {
-        std::array::from_fn(|sample| match sample {
-            0..=79 => i16::try_from(sample * 100).unwrap_or(i16::MAX),
-            80..=159 => i16::try_from((159 - sample) * 100).unwrap_or(i16::MAX),
-            160..=239 => -i16::try_from((sample - 160) * 100).unwrap_or(i16::MAX),
-            _ => -i16::try_from((319 - sample) * 100).unwrap_or(i16::MAX),
-        })
+        speech_voice_frame(0)
     }
 
     struct TestVoiceSource {
@@ -1434,7 +1423,10 @@ mod tests {
                     levels
                         .iter()
                         .map(|&level| VoiceInputFrame {
-                            payload: [0; clonk_audio::VOICE_ENCODED_FRAME_BYTES],
+                            payload: clonk_audio::encode_voice_frame(
+                                &[0; clonk_audio::VOICE_FRAME_SAMPLES],
+                            )
+                            .unwrap(),
                             level,
                         })
                         .collect(),
@@ -1577,21 +1569,25 @@ mod tests {
         let start = Instant::now();
         let mut jitter = RemoteVoiceJitterBuffer::default();
 
-        assert!(jitter.insert(40, start, [40; clonk_audio::VOICE_FRAME_SAMPLES]));
+        assert!(jitter.insert(
+            40,
+            start,
+            clonk_audio::encode_voice_frame(&[40; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap()
+        ));
         assert!(jitter.insert(
             42,
             start + Duration::from_millis(20),
-            [42; clonk_audio::VOICE_FRAME_SAMPLES],
+            clonk_audio::encode_voice_frame(&[42; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert!(jitter.insert(
             41,
             start + Duration::from_millis(35),
-            [41; clonk_audio::VOICE_FRAME_SAMPLES],
+            clonk_audio::encode_voice_frame(&[41; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert!(jitter.insert(
             43,
             start + Duration::from_millis(60),
-            [43; clonk_audio::VOICE_FRAME_SAMPLES],
+            clonk_audio::encode_voice_frame(&[43; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
 
         let ready = jitter.drain_ready(start + Duration::from_millis(60), usize::MAX);
@@ -1611,7 +1607,10 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + Duration::from_millis(arrival_ms),
-                [sequence as i16; clonk_audio::VOICE_FRAME_SAMPLES],
+                clonk_audio::encode_voice_frame(
+                    &[sequence as i16; clonk_audio::VOICE_FRAME_SAMPLES]
+                )
+                .unwrap(),
             ));
         }
 
@@ -1630,8 +1629,16 @@ mod tests {
         let start = Instant::now();
         let mut jitter = RemoteVoiceJitterBuffer::default();
 
-        assert!(jitter.insert(13, start, bipolar_voice_frame()));
-        assert!(jitter.insert(0, start + Duration::from_millis(10), bipolar_voice_frame(),));
+        assert!(jitter.insert(
+            13,
+            start,
+            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap()
+        ));
+        assert!(jitter.insert(
+            0,
+            start + Duration::from_millis(10),
+            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
+        ));
     }
 
     #[test]
@@ -1642,7 +1649,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + Duration::from_millis(arrival_ms),
-                bipolar_voice_frame(),
+                clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
             ));
         }
 
@@ -1664,11 +1671,15 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                ramp_voice_frame(sequence),
+                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
-        assert!(jitter.insert(1, start + Duration::from_millis(170), ramp_voice_frame(1),));
+        assert!(jitter.insert(
+            1,
+            start + Duration::from_millis(170),
+            clonk_audio::encode_voice_frame(&speech_voice_frame(1)).unwrap(),
+        ));
         assert_eq!(
             jitter
                 .drain_ready(start + Duration::from_millis(170), usize::MAX)
@@ -1684,23 +1695,27 @@ mod tests {
         let start = Instant::now();
         let mut jitter = RemoteVoiceJitterBuffer::default();
 
-        assert!(jitter.insert(0, start, [0; clonk_audio::VOICE_FRAME_SAMPLES]));
+        assert!(jitter.insert(
+            0,
+            start,
+            clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap()
+        ));
         assert!(jitter.insert(
             1,
             start + VOICE_FRAME_DURATION,
-            [1; clonk_audio::VOICE_FRAME_SAMPLES],
+            clonk_audio::encode_voice_frame(&[1; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert!(jitter.insert(
             2,
             start + VOICE_FRAME_DURATION.saturating_mul(2),
-            [2; clonk_audio::VOICE_FRAME_SAMPLES],
+            clonk_audio::encode_voice_frame(&[2; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert_eq!(jitter.target_frames(), 2);
 
         assert!(jitter.insert(
             3,
             start + VOICE_FRAME_DURATION.saturating_mul(6),
-            [3; clonk_audio::VOICE_FRAME_SAMPLES],
+            clonk_audio::encode_voice_frame(&[3; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
         ));
         assert_eq!(jitter.target_frames(), 4);
     }
@@ -1713,7 +1728,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                ramp_voice_frame(sequence),
+                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
         assert_eq!(jitter.target_frames(), 2);
@@ -1724,7 +1739,11 @@ mod tests {
             3,
         );
 
-        assert!(jitter.insert(3, start + Duration::from_millis(120), ramp_voice_frame(3),));
+        assert!(jitter.insert(
+            3,
+            start + Duration::from_millis(120),
+            clonk_audio::encode_voice_frame(&speech_voice_frame(3)).unwrap(),
+        ));
         assert_eq!(
             jitter.target_frames(),
             2,
@@ -1733,20 +1752,22 @@ mod tests {
     }
 
     #[test]
-    fn remote_voice_jitter_buffer_conceals_one_lost_frame_without_a_gap_or_click() {
+    fn stateful_voice_decode_follows_playout_order_and_recovers_a_lost_interval() {
         let start = Instant::now();
+        let mut encoder = clonk_audio::VoiceEncoder::new().unwrap();
+        let packets = (0..6)
+            .map(|sequence| encoder.encode(&speech_voice_frame(sequence)).unwrap())
+            .collect::<Vec<_>>();
         let mut jitter = RemoteVoiceJitterBuffer::default();
         for (sequence, arrival_ms) in [(0, 0), (2, 21), (1, 52), (3, 65), (5, 100)] {
             assert!(jitter.insert(
                 sequence,
                 start + Duration::from_millis(arrival_ms),
-                ramp_voice_frame(sequence),
+                packets[usize::from(sequence)]
             ));
         }
-
         let mut ready = jitter.drain_ready(start + Duration::from_millis(100), usize::MAX);
         ready.extend(jitter.drain_ready(start + Duration::from_millis(180), usize::MAX));
-
         assert_eq!(
             ready
                 .iter()
@@ -1759,26 +1780,32 @@ mod tests {
                 (3, false),
                 (4, true),
                 (5, false)
-            ],
+            ]
         );
-        let played_samples = ready
-            .iter()
-            .flat_map(|frame| frame.samples)
-            .collect::<Vec<_>>();
-        let expected_samples = (0..6).flat_map(ramp_voice_frame).collect::<Vec<_>>();
-        assert_eq!(played_samples, expected_samples);
-        assert!(played_samples.windows(2).all(|pair| pair[1] - pair[0] == 8));
+        let mut reference = clonk_audio::VoiceDecoder::new().unwrap();
+        for (sequence, frame) in ready.iter().enumerate() {
+            let packet = packets[if sequence == 4 { 5 } else { sequence }];
+            assert_eq!(
+                frame.samples,
+                reference.decode(&packet, sequence == 4).unwrap()
+            );
+        }
     }
 
     #[test]
     fn concealed_voice_preserves_energy_across_zero_crossing_boundaries() {
         let start = Instant::now();
         let mut jitter = RemoteVoiceJitterBuffer::default();
-        for sequence in [0, 1, 2, 3, 5] {
+        let mut encoder = clonk_audio::VoiceEncoder::new().unwrap();
+        for sequence in 0..6 {
+            let packet = encoder.encode(&speech_voice_frame(sequence)).unwrap();
+            if sequence == 4 {
+                continue;
+            }
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                bipolar_voice_frame(),
+                packet,
             ));
         }
 
@@ -1808,11 +1835,9 @@ mod tests {
                 .sum::<i64>()
                 > 500_000
         );
-        assert_eq!(concealed[0], 0);
-        assert_eq!(concealed[clonk_audio::VOICE_FRAME_SAMPLES - 1], 0);
         assert!(concealed
             .windows(2)
-            .all(|pair| (pair[1] - pair[0]).abs() <= 100));
+            .all(|pair| i32::from(pair[1]).abs_diff(i32::from(pair[0])) <= 1_000));
     }
 
     #[test]
@@ -1823,7 +1848,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + Duration::from_millis(arrival_ms),
-                ramp_voice_frame(sequence),
+                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
@@ -1853,7 +1878,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                ramp_voice_frame(sequence),
+                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
@@ -1877,7 +1902,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(4, true), (6, false)],
         );
-        assert!(jitter.insert(7, start + Duration::from_millis(140), ramp_voice_frame(7),));
+        assert!(jitter.insert(
+            7,
+            start + Duration::from_millis(140),
+            clonk_audio::encode_voice_frame(&speech_voice_frame(7)).unwrap(),
+        ));
         assert_eq!(
             jitter
                 .drain_ready(start + Duration::from_millis(140), usize::MAX)
@@ -1896,7 +1925,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                bipolar_voice_frame(),
+                clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
             ));
         }
 
@@ -1923,9 +1952,13 @@ mod tests {
         assert!(jitter.insert(
             14,
             start + Duration::from_millis(280),
-            bipolar_voice_frame(),
+            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
         ));
-        assert!(!jitter.insert(5, start + Duration::from_millis(280), bipolar_voice_frame(),));
+        assert!(!jitter.insert(
+            5,
+            start + Duration::from_millis(280),
+            clonk_audio::encode_voice_frame(&bipolar_voice_frame()).unwrap(),
+        ));
         assert_eq!(
             jitter
                 .drain_ready(start + Duration::from_millis(280), usize::MAX)
@@ -1944,7 +1977,7 @@ mod tests {
             assert!(jitter.insert(
                 sequence,
                 start + VOICE_FRAME_DURATION.saturating_mul(u32::from(sequence)),
-                ramp_voice_frame(sequence),
+                clonk_audio::encode_voice_frame(&speech_voice_frame(sequence)).unwrap(),
             ));
         }
 
@@ -2024,6 +2057,7 @@ mod tests {
             stream_epoch,
             sequence,
             payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap()
                 .to_vec(),
         };
 
@@ -2062,6 +2096,7 @@ mod tests {
             stream_epoch,
             sequence,
             payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap()
                 .to_vec(),
         };
 
@@ -2100,6 +2135,7 @@ mod tests {
             stream_epoch: 5,
             sequence,
             payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap()
                 .to_vec(),
         };
 
@@ -2138,6 +2174,7 @@ mod tests {
             stream_epoch: 5,
             sequence,
             payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap()
                 .to_vec(),
         };
 
@@ -2167,6 +2204,7 @@ mod tests {
             stream_epoch: 5,
             sequence,
             payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap()
                 .to_vec(),
         };
 
@@ -2285,7 +2323,9 @@ mod tests {
         let observed_opens = opens.clone();
         let mut voice = VoiceChatState::with_capture_opener(move |_| {
             observed_opens.set(observed_opens.get() + 1);
-            Ok(TestVoiceSource::with_frame([0; 164]))
+            Ok(TestVoiceSource::with_frame(
+                clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            ))
         });
 
         assert_eq!(opens.get(), 0);
@@ -2350,7 +2390,9 @@ mod tests {
         let observed_options = observed.clone();
         let mut voice = VoiceChatState::with_capture_opener(move |options| {
             *observed_options.borrow_mut() = options.input_device;
-            Ok(TestVoiceSource::with_frame([0; 164]))
+            Ok(TestVoiceSource::with_frame(
+                clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            ))
         });
         let selected = r#"coreaudio:USB #1 — \"room\""#
             .parse::<clonk_audio::VoiceInputDeviceId>()
@@ -2400,7 +2442,10 @@ mod tests {
             observed_opens.borrow_mut().push(options.input_device);
             Ok(DroppingVoiceSource {
                 frame: RefCell::new(Some(VoiceInputFrame {
-                    payload: [0; clonk_audio::VOICE_ENCODED_FRAME_BYTES],
+                    payload: clonk_audio::encode_voice_frame(
+                        &[0; clonk_audio::VOICE_FRAME_SAMPLES],
+                    )
+                    .unwrap(),
                     level: 1.0,
                 })),
                 drops: observed_drops.clone(),
@@ -2456,7 +2501,10 @@ mod tests {
             if observed_attempts.get() == 1 {
                 Err(VoiceCaptureError::NoInputDevice)
             } else {
-                Ok(TestVoiceSource::with_frame([0; 164]))
+                Ok(TestVoiceSource::with_frame(
+                    clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                        .unwrap(),
+                ))
             }
         });
         let start = Instant::now();
@@ -2525,7 +2573,8 @@ mod tests {
 
         let mut capture_one = || {
             frames.borrow_mut().push(VoiceInputFrame {
-                payload: [0; clonk_audio::VOICE_ENCODED_FRAME_BYTES],
+                payload: clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES])
+                    .unwrap(),
                 level: 1.0,
             });
             voice
@@ -2547,7 +2596,9 @@ mod tests {
         let observed = opened.clone();
         let mut voice = VoiceChatState::with_capture_opener(move |options| {
             *observed.borrow_mut() = Some(options.processing.clone());
-            Ok(TestVoiceSource::with_frame([0; 164]))
+            Ok(TestVoiceSource::with_frame(
+                clonk_audio::encode_voice_frame(&[0; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap(),
+            ))
         });
         let quiet_room = VoiceProcessingConfig {
             noise_suppression: false,
@@ -2675,7 +2726,9 @@ mod tests {
         assert!(voice.active_speakers(now).is_empty());
 
         let valid = clonk_network::VoiceFrame {
-            payload: clonk_audio::encode_voice_frame(&[1_000; 320]).to_vec(),
+            payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap()
+                .to_vec(),
             ..malformed
         };
         let accepted = voice
@@ -2683,7 +2736,12 @@ mod tests {
             .expect("the malformed frame did not consume its sequence");
         assert_eq!(accepted.stream_id, voice_stream_id(7, 17));
         assert!(!accepted.reset_stream);
-        assert_eq!(accepted.samples, [1_000; 320]);
+        let playout = voice.drain_remote_playout(7, 17, now + Duration::from_millis(100), 1, 0);
+        assert_eq!(playout.len(), 1);
+        assert!(playout[0]
+            .samples
+            .iter()
+            .any(|sample| sample.unsigned_abs() > 100));
         assert_eq!(voice.active_speakers(now), vec![(7, 17)]);
     }
 
@@ -2698,6 +2756,7 @@ mod tests {
             stream_epoch: 5,
             sequence,
             payload: clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap()
                 .to_vec(),
         };
 
@@ -2729,7 +2788,11 @@ mod tests {
                 player_id: 17,
                 stream_epoch: 5,
                 sequence,
-                payload: clonk_audio::encode_voice_frame(&[sequence as i16; 320]).to_vec(),
+                payload: clonk_audio::encode_voice_frame(
+                    &[sequence as i16; clonk_audio::VOICE_FRAME_SAMPLES],
+                )
+                .unwrap()
+                .to_vec(),
             };
             assert!(voice.accept_remote_frame(&snapshot, &frame, now).is_some());
         }
@@ -2756,7 +2819,9 @@ mod tests {
                 player_id: 17,
                 stream_epoch: 5,
                 sequence,
-                payload: clonk_audio::encode_voice_frame(&ramp_voice_frame(sequence)).to_vec(),
+                payload: clonk_audio::encode_voice_frame(&speech_voice_frame(sequence))
+                    .unwrap()
+                    .to_vec(),
             };
             assert!(voice
                 .accept_remote_frame(&snapshot, &frame, start)
@@ -2783,7 +2848,9 @@ mod tests {
             player_id: 17,
             stream_epoch: 5,
             sequence: 4,
-            payload: clonk_audio::encode_voice_frame(&ramp_voice_frame(4)).to_vec(),
+            payload: clonk_audio::encode_voice_frame(&speech_voice_frame(4))
+                .unwrap()
+                .to_vec(),
         };
         assert!(voice
             .accept_remote_frame(&snapshot, &late, start + Duration::from_millis(200))

@@ -17,9 +17,9 @@ use aec3::audio_processing::stream_config::StreamConfig;
 use crate::voice::StreamingVoiceResampler;
 use crate::VOICE_FRAME_SAMPLES;
 
-/// Just over a second of 16 kHz mono history. A power of two so the write
+/// Over a second of 48 kHz mono history. A power of two so the write
 /// position masks into an index.
-const ECHO_REFERENCE_SAMPLES: usize = 16_384;
+const ECHO_REFERENCE_SAMPLES: usize = 65_536;
 
 /// How far the reader may trail the writer before it gives up on the samples in
 /// between. A steady lag is harmless — the canceller simply models a shorter
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn echo_cancellation_removes_a_delayed_copy_of_what_the_mixer_played() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(11);
         let delay = 700;
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn echo_cancellation_quiets_speaker_bleed_within_a_short_utterance() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(17);
         let delay = 700;
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn echo_cancellation_still_lets_someone_talk_over_the_game() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(23);
         let delay = 400;
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn converged_echo_cancellation_keeps_a_quiet_talker_over_loud_game_audio() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(31);
         let delay = 400;
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn cold_echo_cancellation_keeps_speech_over_the_game() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(29);
         let delay = 400;
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn the_echo_reference_hands_the_capture_side_what_the_mixer_wrote() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut reader = EchoReferenceReader::new(tap.reference());
 
         for index in 0..VOICE_FRAME_SAMPLES {
@@ -533,12 +533,17 @@ mod tests {
         }
         reader.read(&mut far);
         assert_eq!(far[0], 0.0);
-        assert!((far[VOICE_FRAME_SAMPLES - 1] - 319.0 / 320.0).abs() < 1e-6);
+        assert!(
+            (far[VOICE_FRAME_SAMPLES - 1]
+                - (VOICE_FRAME_SAMPLES - 1) as f32 / VOICE_FRAME_SAMPLES as f32)
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]
     fn a_reader_ahead_of_the_mixer_reads_silence_and_keeps_the_samples_it_missed() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut reader = EchoReferenceReader::new(tap.reference());
         let mut far = [1.0; VOICE_FRAME_SAMPLES];
 
@@ -579,7 +584,7 @@ mod tests {
 
     #[test]
     fn a_reader_that_falls_far_behind_jumps_back_to_the_live_signal() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut reader = EchoReferenceReader::new(tap.reference());
 
         for index in 0..MAX_REFERENCE_LAG_SAMPLES + VOICE_FRAME_SAMPLES as u64 {

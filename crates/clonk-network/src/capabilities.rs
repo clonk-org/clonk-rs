@@ -68,17 +68,11 @@ impl PortCapabilities {
     /// Host-routed control waits identify whether this client or a different
     /// participant held up the aggregate tick.
     pub const CONTROL_WAIT_ATTRIBUTION: u32 = 1 << 4;
-    /// Best-effort voice media carried outside reliable packet accounting and
-    /// sealed under the route's own key exchange.
-    ///
-    /// This takes a fresh bit rather than reusing bit 3 because the bit is what
-    /// an older build acts on. That build reads bit 3 as "this peer accepts my
-    /// voice", marks the route negotiated on the cookie alone, and opens its
-    /// microphone — putting *its* audio on the wire in the clear, for a lane
-    /// this build can no longer even receive. Retiring the bit means such a
-    /// peer sees no voice offer at all, which is the only honest answer: the
-    /// two builds cannot carry voice between them.
-    pub const VOICE_CHAT: u32 = 1 << 5;
+    /// Earlier sealed ADPCM media, retired without reusing its negotiation bit.
+    pub const RETIRED_ADPCM_VOICE_CHAT: u32 = 1 << 5;
+    /// Sealed V3 voice: mono Opus at 48 kHz, bounded variable payloads and
+    /// explicit end-of-talk. Old builds see no compatible voice offer.
+    pub const VOICE_CHAT: u32 = 1 << 10;
     /// The host can replace the round bootstrap in-place, fencing retained
     /// client ingress with a nonce until each client installs fresh JoinData.
     ///
@@ -421,10 +415,16 @@ mod tests {
         }
 
         // Every retired bit, and what a released build would do with it.
-        const RETIRED: [(u32, &str); 1] = [(
-            PortCapabilities::RETIRED_CLEARTEXT_VOICE_CHAT,
-            "opens its microphone onto a cleartext lane this build cannot receive",
-        )];
+        const RETIRED: [(u32, &str); 2] = [
+            (
+                PortCapabilities::RETIRED_CLEARTEXT_VOICE_CHAT,
+                "opens an unsupported cleartext voice lane",
+            ),
+            (
+                PortCapabilities::RETIRED_ADPCM_VOICE_CHAT,
+                "opens an unsupported ADPCM voice lane",
+            ),
+        ];
 
         // Both shapes this build announces: bare, and with a voice route
         // offered. The cookie and key ride *after* the bitset, so neither can
@@ -487,11 +487,11 @@ mod tests {
                 0x70, // Vocabulary version 1, little-endian u16.
                 0x01, 0x00,
                 // Bits, little-endian u32: ROUND_RESTART_V2 (1 << 6) |
-                // VOICE_CHAT (1 << 5) | CONTROL_WAIT_ATTRIBUTION (1 << 4) |
+                // VOICE_CHAT (1 << 10) | CONTROL_WAIT_ATTRIBUTION (1 << 4) |
                 // DEFERRED_RESOURCE_CORES (1 << 9).
                 // Bit 3 is retired and stays clear — see the retired-capability
                 // test above.
-                0x70, 0x02, 0x00, 0x00,
+                0x50, 0x06, 0x00, 0x00,
             ],
             "the bare announcement moved; an older peer reads these offsets",
         );
@@ -504,7 +504,7 @@ mod tests {
             .with_voice_cookie(crate::voice::VoiceRouteCookie::from_bytes(cookie))
             .with_voice_public_key(public_key);
 
-        let mut expected = vec![0x70, 0x01, 0x00, 0x70, 0x02, 0x00, 0x00];
+        let mut expected = vec![0x70, 0x01, 0x00, 0x50, 0x06, 0x00, 0x00];
         expected.extend_from_slice(&cookie);
         expected.extend_from_slice(&public_key);
         assert_eq!(
@@ -519,7 +519,7 @@ mod tests {
             encode_port_capabilities(
                 PortCapabilities::supported().with_voice_public_key(public_key)
             ),
-            vec![0x70, 0x01, 0x00, 0x70, 0x02, 0x00, 0x00],
+            vec![0x70, 0x01, 0x00, 0x50, 0x06, 0x00, 0x00],
             "a public key without its cookie must not reach the wire",
         );
     }

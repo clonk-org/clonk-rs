@@ -2615,7 +2615,7 @@ mod tests {
 
     #[test]
     fn streaming_voice_resampling_interpolates_across_frame_boundaries() {
-        let mixer = AudioMixer::new(11_025, 0);
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE * 2, 0);
         let stream_id = 75;
 
         mixer.queue_voice_stream(stream_id, [0; VOICE_FRAME_SAMPLES]);
@@ -2623,10 +2623,10 @@ mod tests {
 
         let state = mixer.state.lock().unwrap();
         let stream = &state.voice_streams[&stream_id];
-        assert_eq!(stream.frames[0].samples.len(), 220);
+        assert_eq!(stream.frames[0].samples.len(), VOICE_FRAME_SAMPLES * 2 - 1);
         let boundary_sample = stream.frames[1].samples[0][0];
         assert!(
-            (0.27..0.28).contains(&boundary_sample),
+            (0.49..0.51).contains(&boundary_sample),
             "boundary interpolation was {boundary_sample}"
         );
     }

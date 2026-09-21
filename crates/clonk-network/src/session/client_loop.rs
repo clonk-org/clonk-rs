@@ -3097,10 +3097,14 @@ mod tests {
             .map(|(client_id, peer, _)| (*peer, *client_id))
             .collect::<BTreeMap<_, _>>();
         let (udp_handle, mut queued) = crate::ReliableUdpSessionHandle::test_voice_queue();
-        let frame =
-            crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; crate::voice::VOICE_PAYLOAD_BYTES])
-                .unwrap()
-                .with_authenticated_source(77);
+        let frame = crate::VoiceFrame::outbound(
+            17,
+            3,
+            9,
+            vec![0x5a; crate::voice::TEST_VOICE_PAYLOAD_BYTES],
+        )
+        .unwrap()
+        .with_authenticated_source(77);
 
         send_client_voice_frame_to_routes(frame, routes, &udp_handle);
 

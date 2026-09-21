@@ -1,10 +1,9 @@
-use clonk_audio::{
-    decode_voice_frame, encode_voice_frame, VoiceCaptureOptions, VoiceCodecError, VoiceInputDevice,
-    VoiceInputDeviceId, VoiceProcessingConfig, VoiceProcessingSwitches, VOICE_ENCODED_FRAME_BYTES,
-    VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
-};
 #[cfg(not(feature = "cpal"))]
 use clonk_audio::{voice_input_devices, VoiceCapture, VoiceCaptureError};
+use clonk_audio::{
+    VoiceCaptureOptions, VoiceInputDevice, VoiceInputDeviceId, VoiceProcessingConfig,
+    VoiceProcessingSwitches, VOICE_ENCODED_FRAME_BYTES, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE,
+};
 
 #[test]
 fn input_device_ids_round_trip_without_using_display_names() {
@@ -62,135 +61,116 @@ fn capture_options_use_the_system_default_until_an_exact_device_is_selected() {
 }
 
 #[test]
-fn voice_codec_encodes_fixed_independently_decodable_twenty_millisecond_frames() {
-    assert_eq!(VOICE_SAMPLE_RATE, 16_000);
-    assert_eq!(VOICE_FRAME_SAMPLES, 320);
-
-    let first = std::array::from_fn(|index| {
-        let phase = index as f32 * 440.0 * std::f32::consts::TAU / VOICE_SAMPLE_RATE as f32;
-        (phase.sin() * 12_000.0) as i16
-    });
-    let second = [-9_000; VOICE_FRAME_SAMPLES];
-
-    let first_encoded = encode_voice_frame(&first);
-    let second_encoded = encode_voice_frame(&second);
-    assert_eq!(first_encoded.len(), VOICE_ENCODED_FRAME_BYTES);
-    assert_eq!(second_encoded.len(), VOICE_ENCODED_FRAME_BYTES);
-
-    let first_decoded = decode_voice_frame(&first_encoded).expect("first frame should decode");
-    let second_decoded = decode_voice_frame(&second_encoded).expect("second frame should decode");
-    assert_eq!(first_decoded[0], first[0]);
-    assert_eq!(second_decoded[0], second[0]);
-    assert!(second_decoded.iter().all(|sample| *sample == -9_000));
-
-    let mean_error = first
-        .iter()
-        .zip(first_decoded)
-        .map(|(expected, actual)| i32::from(*expected).abs_diff(i32::from(actual)) as u64)
-        .sum::<u64>()
-        / VOICE_FRAME_SAMPLES as u64;
-    assert!(mean_error < 1_500, "IMA ADPCM mean error was {mean_error}");
-}
-
-#[test]
-fn voice_codec_chooses_an_initial_step_that_avoids_a_frame_start_transient() {
-    let samples = std::array::from_fn(|index| {
-        let phase = index as f32 * 1_000.0 * std::f32::consts::TAU / VOICE_SAMPLE_RATE as f32;
-        (phase.sin() * 28_000.0) as i16
-    });
-
-    let encoded = encode_voice_frame(&samples);
-    let decoded = decode_voice_frame(&encoded).expect("the encoded voice frame should decode");
-    let transient_samples = 32;
-    let (signal_energy, error_energy) = samples[..transient_samples]
-        .iter()
-        .zip(&decoded[..transient_samples])
-        .fold((0.0_f64, 0.0_f64), |(signal, error), (expected, actual)| {
-            let expected = f64::from(*expected);
-            let difference = expected - f64::from(*actual);
-            (
-                signal + expected * expected,
-                error + difference * difference,
-            )
+fn voice_codec_preserves_speech_spectrum_with_low_distortion() {
+    assert_eq!(VOICE_SAMPLE_RATE, 48_000);
+    assert_eq!(VOICE_FRAME_SAMPLES, 960);
+    let mut encoder = clonk_audio::VoiceEncoder::new().unwrap();
+    let mut decoder = clonk_audio::VoiceDecoder::new().unwrap();
+    let delay = encoder.lookahead_samples().unwrap();
+    let mut output = Vec::new();
+    for frame in 0..100 {
+        let samples = std::array::from_fn(|index| {
+            let time = (frame * VOICE_FRAME_SAMPLES + index) as f64 / f64::from(VOICE_SAMPLE_RATE);
+            ((std::f64::consts::TAU * 440.0 * time).sin() * 12_000.0
+                + (std::f64::consts::TAU * 1_320.0 * time).sin() * 4_000.0) as i16
         });
-    let transient_snr_db = 10.0 * (signal_energy / error_energy).log10();
-
-    assert!(
-        transient_snr_db >= 25.0,
-        "the first two milliseconds had only {transient_snr_db:.1} dB SNR",
-    );
-    assert_ne!(
-        encoded[2], 0,
-        "a steep frame start must advertise a useful initial IMA step index",
-    );
-}
-
-#[test]
-fn voice_codec_sizes_its_initial_step_from_more_than_one_flat_transition() {
-    let samples = std::array::from_fn(|index| {
-        if index < 2 {
-            return 0;
+        let packet = encoder.encode(&samples).unwrap();
+        assert!(packet.len() <= VOICE_ENCODED_FRAME_BYTES);
+        output.extend(decoder.decode(&packet, false).unwrap());
+    }
+    // VoIP filtering and prediction alter phase. Pin spectral gain and added
+    // distortion here; the short-utterance test separately pins startup/tail.
+    let settled = &output[VOICE_FRAME_SAMPLES * 10 + delay..];
+    let mut reconstruction = vec![0.0; settled.len()];
+    for (frequency, expected_amplitude) in [(440.0, 12_000.0), (1_320.0, 4_000.0)] {
+        let (sin, cos) = settled
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sin, cos), (i, &sample)| {
+                let phase =
+                    std::f64::consts::TAU * frequency * i as f64 / f64::from(VOICE_SAMPLE_RATE);
+                (
+                    sin + f64::from(sample) * phase.sin(),
+                    cos + f64::from(sample) * phase.cos(),
+                )
+            });
+        let sin = 2.0 * sin / settled.len() as f64;
+        let cos = 2.0 * cos / settled.len() as f64;
+        assert!(
+            (sin.hypot(cos) / expected_amplitude - 1.0).abs() < 0.05,
+            "{frequency} Hz gain changed by more than 5%"
+        );
+        for (i, value) in reconstruction.iter_mut().enumerate() {
+            let phase = std::f64::consts::TAU * frequency * i as f64 / f64::from(VOICE_SAMPLE_RATE);
+            *value += sin * phase.sin() + cos * phase.cos();
         }
-        let phase = (index - 1) as f32 * 1_000.0 * std::f32::consts::TAU / VOICE_SAMPLE_RATE as f32;
-        (phase.sin() * 28_000.0) as i16
+    }
+    let residual = settled
+        .iter()
+        .zip(&reconstruction)
+        .map(|(&sample, reference)| (f64::from(sample) - reference).powi(2))
+        .sum::<f64>();
+    let projected = reconstruction
+        .iter()
+        .map(|sample| sample.powi(2))
+        .sum::<f64>();
+    let snr = 10.0 * (projected / residual).log10();
+    assert!(snr > 25.0, "speech distortion SNR was {snr:.1} dB");
+}
+
+#[test]
+fn voice_codec_preserves_a_short_utterance_when_its_lookahead_is_flushed() {
+    let mut encoder = clonk_audio::VoiceEncoder::new().unwrap();
+    let mut decoder = clonk_audio::VoiceDecoder::new().unwrap();
+    let delay = encoder.lookahead_samples().unwrap();
+    let samples = std::array::from_fn(|index| {
+        let phase = index as f64 * 1_000.0 * std::f64::consts::TAU / f64::from(VOICE_SAMPLE_RATE);
+        (phase.sin() * 20_000.0) as i16
     });
-
-    let decoded = decode_voice_frame(&encode_voice_frame(&samples))
-        .expect("the encoded voice frame should decode");
-    let (signal_energy, error_energy) = samples[..34].iter().zip(&decoded[..34]).fold(
-        (0.0_f64, 0.0_f64),
-        |(signal, error), (expected, actual)| {
-            let expected = f64::from(*expected);
-            let difference = expected - f64::from(*actual);
-            (
-                signal + expected * expected,
-                error + difference * difference,
-            )
-        },
-    );
-    let transient_snr_db = 10.0 * (signal_energy / error_energy).log10();
-
+    let mut output = Vec::new();
+    for frame in [samples, [0; VOICE_FRAME_SAMPLES], [0; VOICE_FRAME_SAMPLES]] {
+        output.extend(
+            decoder
+                .decode(&encoder.encode(&frame).unwrap(), false)
+                .unwrap(),
+        );
+    }
+    let output_energy = output[delay..delay + VOICE_FRAME_SAMPLES]
+        .iter()
+        .map(|&sample| f64::from(sample).powi(2))
+        .sum::<f64>();
+    let input_energy = samples
+        .iter()
+        .map(|&sample| f64::from(sample).powi(2))
+        .sum::<f64>();
     assert!(
-        transient_snr_db >= 25.0,
-        "a flat first transition hid the frame's required IMA step; SNR was {transient_snr_db:.1} dB",
+        output_energy > input_energy * 0.5,
+        "short utterance was lost in codec startup"
     );
 }
 
 #[test]
-fn voice_codec_rejects_every_noncanonical_frame_shape() {
-    let encoded = encode_voice_frame(&[0; VOICE_FRAME_SAMPLES]);
-    assert!(matches!(
-        decode_voice_frame(&encoded[..encoded.len() - 1]),
-        Err(VoiceCodecError::InvalidLength { .. })
-    ));
-
-    let mut oversized = encoded.to_vec();
-    oversized.push(0);
-    assert!(matches!(
-        decode_voice_frame(&oversized),
-        Err(VoiceCodecError::InvalidLength { .. })
-    ));
-
-    let mut invalid_index = encoded;
-    invalid_index[2] = 89;
-    assert_eq!(
-        decode_voice_frame(&invalid_index),
-        Err(VoiceCodecError::InvalidStepIndex(89))
-    );
-
-    let mut invalid_reserved = encoded;
-    invalid_reserved[3] = 1;
-    assert_eq!(
-        decode_voice_frame(&invalid_reserved),
-        Err(VoiceCodecError::InvalidReservedByte)
-    );
-
-    let mut invalid_padding = encoded;
-    invalid_padding[VOICE_ENCODED_FRAME_BYTES - 1] = 0x10;
-    assert_eq!(
-        decode_voice_frame(&invalid_padding),
-        Err(VoiceCodecError::InvalidPadding)
-    );
+fn voice_codec_rejects_oversized_packets_and_unnegotiated_frame_durations() {
+    let mut decoder = clonk_audio::VoiceDecoder::new().unwrap();
+    assert!(decoder
+        .decode(&vec![0; VOICE_ENCODED_FRAME_BYTES + 1], false)
+        .is_err());
+    let mut encoder = opus::Encoder::new(
+        VOICE_SAMPLE_RATE,
+        opus::Channels::Mono,
+        opus::Application::Voip,
+    )
+    .unwrap();
+    for sample_count in [
+        VOICE_FRAME_SAMPLES / 2,
+        VOICE_FRAME_SAMPLES * 2,
+        VOICE_FRAME_SAMPLES * 3,
+    ] {
+        let packet = encoder
+            .encode_vec(&vec![1_000; sample_count], VOICE_ENCODED_FRAME_BYTES)
+            .unwrap();
+        assert!(decoder.decode(&packet, false).is_err());
+    }
 }
 
 #[cfg(not(feature = "cpal"))]

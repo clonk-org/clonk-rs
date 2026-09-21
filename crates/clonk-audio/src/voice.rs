@@ -19,17 +19,12 @@ use crate::voice_echo::VoiceEchoReference;
 use crate::voice_processing::VoiceProcessing;
 use crate::voice_processing::VoiceProcessingSwitches;
 
-/// Voice chat uses independently decodable 20 ms mono frames at 16 kHz.
-pub const VOICE_SAMPLE_RATE: u32 = 16_000;
-pub const VOICE_FRAME_SAMPLES: usize = 320;
-
-const IMA_HEADER_BYTES: usize = 4;
-const IMA_CODE_BYTES: usize = (VOICE_FRAME_SAMPLES - 1).div_ceil(2);
-
-/// Two-byte predictor, one-byte IMA step index, one reserved byte, and 319
-/// four-bit deltas. Every frame carries its own predictor/index state.
-pub const VOICE_ENCODED_FRAME_BYTES: usize = IMA_HEADER_BYTES + IMA_CODE_BYTES;
-pub type EncodedVoiceFrame = [u8; VOICE_ENCODED_FRAME_BYTES];
+/// Fixed 20 ms mono capture and playout geometry, including codec concealment.
+pub const VOICE_SAMPLE_RATE: u32 = crate::voice_codec::OPUS_SAMPLE_RATE;
+pub const VOICE_FRAME_SAMPLES: usize = crate::voice_codec::OPUS_FRAME_SAMPLES;
+pub const VOICE_ENCODED_FRAME_BYTES: usize = crate::voice_codec::OPUS_MAX_PACKET_BYTES;
+pub type EncodedVoiceFrame = crate::voice_codec::EncodedOpusFrame;
+pub use crate::voice_codec::OpusCodecError as VoiceCodecError;
 
 /// Opaque CPAL input-endpoint identity suitable for persistence.
 ///
@@ -139,29 +134,6 @@ const MIN_VOICE_CAPTURE_SAMPLE_RATE: u32 = 8_000;
 const MAX_VOICE_CAPTURE_SAMPLE_RATE: u32 = 192_000;
 #[cfg(any(feature = "cpal", test))]
 const MAX_VOICE_CAPTURE_CHANNELS: u16 = 32;
-
-const IMA_INDEX_TABLE: [i8; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
-
-const IMA_STEP_TABLE: [i32; 89] = [
-    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
-    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
-    494, 544, 598, 658, 724, 796, 876, 963, 1_060, 1_166, 1_282, 1_411, 1_552, 1_707, 1_878, 2_066,
-    2_272, 2_499, 2_749, 3_024, 3_327, 3_660, 4_026, 4_428, 4_871, 5_358, 5_894, 6_484, 7_132,
-    7_845, 8_630, 9_493, 10_442, 11_487, 12_635, 13_899, 15_289, 16_818, 18_500, 20_350, 22_385,
-    24_623, 27_086, 29_794, 32_767,
-];
-
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum VoiceCodecError {
-    #[error("voice frame has {actual} bytes; expected exactly {expected}")]
-    InvalidLength { actual: usize, expected: usize },
-    #[error("voice frame has invalid IMA step index {0}")]
-    InvalidStepIndex(u8),
-    #[error("voice frame reserved byte must be zero")]
-    InvalidReservedByte,
-    #[error("voice frame has nonzero padding bits")]
-    InvalidPadding,
-}
 
 #[derive(Debug, Error)]
 pub enum VoiceCaptureError {
@@ -816,10 +788,13 @@ where
     // worker, so neither expensive processing nor its allocations can miss a
     // hardware callback deadline. Dropping the stream closes this worker's
     // only raw producer; it then drains its bounded tail and exits.
+    let encoder =
+        crate::VoiceEncoder::new().map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
     std::thread::Builder::new()
         .name("voice-capture".to_owned())
         .spawn(move || {
             let mut sink = ProcessedCaptureSink {
+                encoder,
                 processing: VoiceProcessing::new(options.processing, options.echo_reference),
                 callbacks,
             };
@@ -896,6 +871,7 @@ trait CaptureFrameSink {
 
 #[cfg(any(feature = "cpal", test))]
 struct ProcessedCaptureSink {
+    encoder: crate::VoiceEncoder,
     processing: VoiceProcessing,
     callbacks: CaptureStreamCallbacks,
 }
@@ -905,10 +881,15 @@ impl CaptureFrameSink for ProcessedCaptureSink {
     fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) {
         let level = self.processing.process(frame);
         let samples = std::array::from_fn(|index| voice_f32_to_i16(frame[index]));
-        self.callbacks.send_frame(VoiceInputFrame {
-            payload: encode_voice_frame(&samples),
-            level,
-        });
+        match self.encoder.encode(&samples) {
+            Ok(payload) => self
+                .callbacks
+                .send_frame(VoiceInputFrame { payload, level }),
+            Err(error) => {
+                tracing::warn!(%error, "voice encoder could not process capture");
+                self.callbacks.report(CaptureStreamEventAction::Invalidate);
+            }
+        }
     }
 }
 
@@ -950,6 +931,8 @@ impl VoiceCaptureProcessor<ProcessedCaptureSink> {
             sample_rate,
             channels,
             ProcessedCaptureSink {
+                encoder: crate::VoiceEncoder::new()
+                    .map_err(|error| VoiceCaptureError::Stream(error.to_string()))?,
                 processing,
                 callbacks: CaptureStreamCallbacks {
                     generation: 1,
@@ -1152,142 +1135,17 @@ pub(crate) fn voice_level_from_rms(rms: f64) -> f32 {
     (1.0 - dbfs / VOICE_ACTIVATION_FLOOR_DBFS).clamp(0.0, 1.0) as f32
 }
 
-/// Encodes one complete voice frame as self-contained IMA ADPCM.
-pub fn encode_voice_frame(samples: &[i16; VOICE_FRAME_SAMPLES]) -> [u8; VOICE_ENCODED_FRAME_BYTES] {
-    let mut encoded = [0_u8; VOICE_ENCODED_FRAME_BYTES];
-    encoded[..2].copy_from_slice(&samples[0].to_le_bytes());
-
-    let mut predictor = i32::from(samples[0]);
-    let mut step_index = initial_ima_step_index(samples);
-    encoded[2] = step_index;
-
-    for (code_index, sample) in samples[1..].iter().enumerate() {
-        let code = encode_ima_sample(i32::from(*sample), &mut predictor, &mut step_index);
-        let byte = &mut encoded[IMA_HEADER_BYTES + code_index / 2];
-        if code_index.is_multiple_of(2) {
-            *byte = code;
-        } else {
-            *byte |= code << 4;
-        }
-    }
-    encoded
+/// Encodes an isolated frame. Continuous capture keeps a [`crate::VoiceEncoder`]
+/// alive for the entire stream so prediction, FEC and DTX retain their history.
+pub fn encode_voice_frame(
+    samples: &[i16; VOICE_FRAME_SAMPLES],
+) -> Result<EncodedVoiceFrame, VoiceCodecError> {
+    crate::VoiceEncoder::new()?.encode(samples)
 }
 
-/// Chooses the self-contained frame's initial quantizer state. Reusing index
-/// zero every 20 ms forces IMA to reacquire the signal at a 50 Hz cadence, so
-/// evaluate every legal state and keep the one with the least frame error.
-fn initial_ima_step_index(samples: &[i16; VOICE_FRAME_SAMPLES]) -> u8 {
-    (0..IMA_STEP_TABLE.len())
-        .min_by_key(|candidate| {
-            let mut predictor = i32::from(samples[0]);
-            let mut step_index = *candidate as u8;
-            samples[1..]
-                .iter()
-                .map(|sample| {
-                    encode_ima_sample(i32::from(*sample), &mut predictor, &mut step_index);
-                    i64::from(i32::from(*sample) - predictor)
-                        .unsigned_abs()
-                        .pow(2)
-                })
-                .sum::<u64>()
-        })
-        .unwrap_or_default() as u8
-}
-
-/// Decodes one complete self-contained voice frame.
+/// Decodes an isolated frame. Playout must retain a decoder per ordered stream.
 pub fn decode_voice_frame(encoded: &[u8]) -> Result<[i16; VOICE_FRAME_SAMPLES], VoiceCodecError> {
-    if encoded.len() != VOICE_ENCODED_FRAME_BYTES {
-        return Err(VoiceCodecError::InvalidLength {
-            actual: encoded.len(),
-            expected: VOICE_ENCODED_FRAME_BYTES,
-        });
-    }
-    if encoded[2] as usize >= IMA_STEP_TABLE.len() {
-        return Err(VoiceCodecError::InvalidStepIndex(encoded[2]));
-    }
-    if encoded[3] != 0 {
-        return Err(VoiceCodecError::InvalidReservedByte);
-    }
-    if encoded[VOICE_ENCODED_FRAME_BYTES - 1] & 0xf0 != 0 {
-        return Err(VoiceCodecError::InvalidPadding);
-    }
-
-    let mut decoded = [0_i16; VOICE_FRAME_SAMPLES];
-    decoded[0] = i16::from_le_bytes([encoded[0], encoded[1]]);
-    let mut predictor = i32::from(decoded[0]);
-    let mut step_index = encoded[2];
-    for code_index in 0..VOICE_FRAME_SAMPLES - 1 {
-        let packed = encoded[IMA_HEADER_BYTES + code_index / 2];
-        let code = if code_index.is_multiple_of(2) {
-            packed & 0x0f
-        } else {
-            packed >> 4
-        };
-        decoded[code_index + 1] = decode_ima_sample(code, &mut predictor, &mut step_index);
-    }
-    Ok(decoded)
-}
-
-fn encode_ima_sample(sample: i32, predictor: &mut i32, step_index: &mut u8) -> u8 {
-    let step = IMA_STEP_TABLE[usize::from(*step_index)];
-    let mut difference = sample - *predictor;
-    let mut code = 0_u8;
-    if difference < 0 {
-        code = 8;
-        difference = -difference;
-    }
-
-    let mut reconstructed_difference = step >> 3;
-    if difference >= step {
-        code |= 4;
-        difference -= step;
-        reconstructed_difference += step;
-    }
-    if difference >= step >> 1 {
-        code |= 2;
-        difference -= step >> 1;
-        reconstructed_difference += step >> 1;
-    }
-    if difference >= step >> 2 {
-        code |= 1;
-        reconstructed_difference += step >> 2;
-    }
-
-    if code & 8 != 0 {
-        *predictor -= reconstructed_difference;
-    } else {
-        *predictor += reconstructed_difference;
-    }
-    *predictor = (*predictor).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-    update_step_index(code, step_index);
-    code
-}
-
-fn decode_ima_sample(code: u8, predictor: &mut i32, step_index: &mut u8) -> i16 {
-    let step = IMA_STEP_TABLE[usize::from(*step_index)];
-    let mut difference = step >> 3;
-    if code & 4 != 0 {
-        difference += step;
-    }
-    if code & 2 != 0 {
-        difference += step >> 1;
-    }
-    if code & 1 != 0 {
-        difference += step >> 2;
-    }
-    if code & 8 != 0 {
-        *predictor -= difference;
-    } else {
-        *predictor += difference;
-    }
-    *predictor = (*predictor).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-    update_step_index(code, step_index);
-    *predictor as i16
-}
-
-fn update_step_index(code: u8, step_index: &mut u8) {
-    let next = i16::from(*step_index) + i16::from(IMA_INDEX_TABLE[usize::from(code & 0x0f)]);
-    *step_index = next.clamp(0, (IMA_STEP_TABLE.len() - 1) as i16) as u8;
+    crate::VoiceDecoder::new()?.decode(encoded, false)
 }
 
 #[cfg(test)]
@@ -1466,7 +1324,7 @@ mod tests {
 
     fn input_frame(marker: u8) -> VoiceInputFrame {
         VoiceInputFrame {
-            payload: [marker; VOICE_ENCODED_FRAME_BYTES],
+            payload: encode_voice_frame(&[i16::from(marker); VOICE_FRAME_SAMPLES]).unwrap(),
             level: f32::from(marker) / 255.0,
         }
     }
@@ -2101,32 +1959,32 @@ mod tests {
 
     #[test]
     fn capture_processor_downmixes_and_stream_resamples_across_callbacks() {
-        let (sender, receiver) = mpsc::sync_channel(2);
-        let dropped = Arc::new(AtomicU64::new(0));
+        #[derive(Default)]
+        struct SampleSink(Vec<[f32; VOICE_FRAME_SAMPLES]>);
+        impl CaptureFrameSink for SampleSink {
+            fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) {
+                self.0.push(*frame);
+            }
+        }
         let mut processor =
-            VoiceCaptureProcessor::new(48_000, 2, sender, dropped.clone(), raw_processing())
-                .expect("48 kHz stereo capture should be supported");
-        let stereo = [1_000.0 / 32_768.0, 3_000.0 / 32_768.0].repeat(960);
-
+            VoiceCaptureProcessor::new_with_sink(96_000, 2, SampleSink::default()).unwrap();
+        let stereo = [1_000.0 / 32_768.0, 3_000.0 / 32_768.0].repeat(1_920);
         processor.process_interleaved(&stereo[..734]);
-        assert!(receiver.try_recv().is_err());
+        assert!(processor.sink.0.is_empty());
         processor.process_interleaved(&stereo[734..]);
-
-        let frame = receiver.try_recv().expect("one 20 ms frame").frame;
-        let decoded =
-            decode_voice_frame(&frame.payload).expect("captured frame should be canonical");
-        assert!(decoded.iter().all(|sample| sample.abs_diff(2_000) <= 1));
-        assert_eq!(dropped.load(Ordering::Relaxed), 0);
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(processor.sink.0.len(), 1);
+        assert!(processor.sink.0[0]
+            .iter()
+            .all(|sample| (sample * 32_768.0 - 2_000.0).abs() <= 1.0));
     }
 
     #[test]
     fn capture_resampling_rejects_frequencies_above_voice_nyquist() {
         let resampled_rms = |frequency_hz: f32| {
-            let mut resampler = StreamingVoiceResampler::new(48_000);
+            let mut resampler = StreamingVoiceResampler::new(96_000);
             let mut output = Vec::new();
             for index in 0..4_800 {
-                let phase = std::f32::consts::TAU * frequency_hz * index as f32 / 48_000.0;
+                let phase = std::f32::consts::TAU * frequency_hz * index as f32 / 96_000.0;
                 resampler.push_sample(phase.sin(), |sample| output.push(sample));
             }
             let settled = &output[400..];
@@ -2135,12 +1993,12 @@ mod tests {
         };
 
         let speech = resampled_rms(1_000.0);
-        let ultrasonic = resampled_rms(12_000.0);
+        let ultrasonic = resampled_rms(36_000.0);
 
         assert!(speech > 0.65, "the speech band was attenuated to {speech}");
         assert!(
             ultrasonic < speech * 0.01,
-            "12 kHz aliased into the 16 kHz voice signal at {ultrasonic}, versus {speech} in-band",
+            "36 kHz aliased into the 48 kHz voice signal at {ultrasonic}, versus {speech} in-band",
         );
     }
 
@@ -2148,9 +2006,14 @@ mod tests {
     fn capture_processor_uses_bounded_try_send_without_blocking() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let dropped = Arc::new(AtomicU64::new(0));
-        let mut processor =
-            VoiceCaptureProcessor::new(16_000, 1, sender, dropped.clone(), raw_processing())
-                .expect("16 kHz mono capture should be supported");
+        let mut processor = VoiceCaptureProcessor::new(
+            VOICE_SAMPLE_RATE,
+            1,
+            sender,
+            dropped.clone(),
+            raw_processing(),
+        )
+        .expect("native-rate mono capture should be supported");
 
         processor.process_interleaved(&vec![0.25_f32; VOICE_FRAME_SAMPLES * 2]);
 
@@ -2163,8 +2026,8 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(2);
         let dropped = Arc::new(AtomicU64::new(0));
         let mut processor =
-            VoiceCaptureProcessor::new(16_000, 1, sender, dropped, raw_processing())
-                .expect("16 kHz mono capture should be supported");
+            VoiceCaptureProcessor::new(VOICE_SAMPLE_RATE, 1, sender, dropped, raw_processing())
+                .expect("native-rate mono capture should be supported");
 
         processor.process_interleaved(&[0.0_f32; VOICE_FRAME_SAMPLES]);
         processor.process_interleaved(&[0.25_f32; VOICE_FRAME_SAMPLES]);
