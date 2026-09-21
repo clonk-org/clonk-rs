@@ -1057,6 +1057,7 @@ struct VoiceLimiter {
 
 #[derive(Debug)]
 struct VoicePlaybackResampler {
+    filter: crate::voice_resampling::SincHistory,
     output_sample_rate: u32,
     previous: Option<[f32; 2]>,
     current_source_index: u128,
@@ -1987,12 +1988,17 @@ impl VoicePlaybackResampler {
     }
 
     fn new(output_sample_rate: u32) -> Self {
+        let output_sample_rate = if output_sample_rate == 0 {
+            VOICE_SAMPLE_RATE
+        } else {
+            output_sample_rate
+        };
         Self {
-            output_sample_rate: if output_sample_rate == 0 {
-                VOICE_SAMPLE_RATE
-            } else {
-                output_sample_rate
-            },
+            filter: crate::voice_resampling::SincHistory::new(
+                VOICE_SAMPLE_RATE,
+                output_sample_rate.max(1),
+            ),
+            output_sample_rate,
             previous: None,
             current_source_index: 0,
             next_output_position: 0,
@@ -2005,12 +2011,6 @@ impl VoicePlaybackResampler {
         samples: [i16; VOICE_FRAME_SAMPLES],
         mode: ResamplingMode,
     ) -> Box<[[f32; 2]]> {
-        match mode {
-            ResamplingMode::Default | ResamplingMode::Linear => self.push_frame_linear(samples),
-        }
-    }
-
-    fn push_frame_linear(&mut self, samples: [i16; VOICE_FRAME_SAMPLES]) -> Box<[[f32; 2]]> {
         // Integer phase keeps long calls exact at unity while allowing small
         // continuous clock corrections without inserting or dropping frames.
         const CLOCK_SCALE: u128 = 1_000_000;
@@ -2021,6 +2021,7 @@ impl VoicePlaybackResampler {
         for sample in samples {
             let sample = f32::from(sample) / 32_768.0;
             let current = [sample, sample];
+            self.filter.push(sample);
             let Some(previous) = self.previous else {
                 output.push(current);
                 self.previous = Some(current);
@@ -2037,10 +2038,13 @@ impl VoicePlaybackResampler {
                     break;
                 }
                 let fraction = (output_position - interval_start) as f64 / output_rate as f64;
-                output.push([
-                    previous[0] + (current[0] - previous[0]) * fraction as f32,
-                    previous[1] + (current[1] - previous[1]) * fraction as f32,
-                ]);
+                let sample = match mode {
+                    ResamplingMode::Default => self.filter.interpolate(fraction),
+                    ResamplingMode::Linear => {
+                        previous[0] + (current[0] - previous[0]) * fraction as f32
+                    }
+                };
+                output.push([sample, sample]);
                 self.next_output_position += step;
             }
             self.previous = Some(current);
@@ -2052,6 +2056,43 @@ impl VoicePlaybackResampler {
 #[cfg(test)]
 mod voice_clock_tests {
     use super::*;
+
+    #[test]
+    fn fullband_voice_survives_mixer_and_device_rate_conversion() {
+        // A 48 kHz decoded voice crosses the 44.1 kHz game mixer before a
+        // common 48 kHz output device. Measure the original tone, not total
+        // RMS: alias images must not count as preserved speech.
+        let mut playback = VoicePlaybackResampler::new(44_100);
+        let mut device = crate::voice::StreamingVoiceResampler::with_output_rate(44_100, 48_000);
+        let mut output = Vec::new();
+        for frame in 0..50 {
+            let samples = std::array::from_fn(|i| {
+                let position = (frame * VOICE_FRAME_SAMPLES + i) as f64;
+                (0.3 * 32_768.0 * (std::f64::consts::TAU * 15_000.0 * position / 48_000.0).sin())
+                    as i16
+            });
+            for sample in playback.push_frame(samples, ResamplingMode::Default) {
+                device.push_sample(sample[0], |value| output.push(value));
+            }
+        }
+        let settled = &output[4_800..];
+        let (sine, cosine) =
+            settled
+                .iter()
+                .enumerate()
+                .fold((0.0, 0.0), |(sin, cos), (i, value)| {
+                    let phase = std::f64::consts::TAU * 15_000.0 * i as f64 / 48_000.0;
+                    (
+                        sin + f64::from(*value) * phase.sin(),
+                        cos + f64::from(*value) * phase.cos(),
+                    )
+                });
+        let amplitude = 2.0 * sine.hypot(cosine) / settled.len() as f64;
+        assert!(
+            (amplitude / 0.3 - 1.0).abs() < 0.05,
+            "15 kHz speech must survive both conversions within 5%: amplitude={amplitude}"
+        );
+    }
 
     #[test]
     fn playback_resampling_tracks_device_clock_skew_without_dropping_frames() {
@@ -2625,12 +2666,15 @@ mod tests {
 
         let mut first = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
         mixer.mix_f32(&mut first);
-        assert!((first[0] - 2_000.0 / 32_768.0).abs() < 0.000_1);
-        assert!((first[1] - 2_000.0 / 32_768.0).abs() < 0.000_1);
+        // The causal converter retains less than a millisecond of filter
+        // history. Beyond its 64-tap support, only the retained frame may play.
+        let settled = crate::voice_resampling::TAPS * 2;
+        assert!((first[settled] - 2_000.0 / 32_768.0).abs() < 0.000_1);
+        assert!((first[settled + 1] - 2_000.0 / 32_768.0).abs() < 0.000_1);
 
         let mut second = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
         mixer.mix_f32(&mut second);
-        assert!((second[0] - 3_000.0 / 32_768.0).abs() < 0.000_1);
+        assert!((second[settled] - 3_000.0 / 32_768.0).abs() < 0.000_1);
         assert_eq!(mixer.voice_stream_stats(stream_id).queued_frames, 0);
 
         let mut underrun = vec![1.0_f32; 32];
@@ -2662,20 +2706,22 @@ mod tests {
 
     #[test]
     fn streaming_voice_resampling_interpolates_across_frame_boundaries() {
-        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE * 2, 0);
-        let stream_id = 75;
-
-        mixer.queue_voice_stream(stream_id, [0; VOICE_FRAME_SAMPLES]);
-        mixer.queue_voice_stream(stream_id, [i16::MAX; VOICE_FRAME_SAMPLES]);
-
-        let state = mixer.state.lock().unwrap();
-        let stream = &state.voice_streams[&stream_id];
-        assert_eq!(stream.frames[0].samples.len(), VOICE_FRAME_SAMPLES * 2 - 1);
-        let boundary_sample = stream.frames[1].samples[0][0];
-        assert!(
-            (0.49..0.51).contains(&boundary_sample),
-            "boundary interpolation was {boundary_sample}"
-        );
+        for (mode, delay) in [(ResamplingMode::Linear, 0), (ResamplingMode::Default, 62)] {
+            let mixer = AudioMixer::new_with_resampling(VOICE_SAMPLE_RATE * 2, 0, mode);
+            let stream_id = 75;
+            mixer.queue_voice_stream(stream_id, [0; VOICE_FRAME_SAMPLES]);
+            mixer.queue_voice_stream(stream_id, [i16::MAX; VOICE_FRAME_SAMPLES]);
+            let state = mixer.state.lock().unwrap();
+            let stream = &state.voice_streams[&stream_id];
+            assert_eq!(stream.frames[0].samples.len(), VOICE_FRAME_SAMPLES * 2 - 1);
+            // The default filter delays by 31 source samples; interpolation
+            // still spans packets instead of restarting at each boundary.
+            let boundary_sample = stream.frames[1].samples[delay][0];
+            assert!(
+                (0.49..0.51).contains(&boundary_sample),
+                "boundary interpolation was {boundary_sample} with {mode:?}"
+            );
+        }
     }
 
     #[test]

@@ -1323,7 +1323,7 @@ impl<S: CaptureFrameSink> VoiceCaptureProcessor<S> {
             .unwrap_or_else(|| self.control.finish_time().unwrap_or_else(Instant::now));
         // Flush the causal resampler using synthetic silence, never another
         // device read. At most one extra raw frame is needed at supported rates.
-        for _ in 0..VOICE_ANTI_ALIAS_TAPS {
+        for _ in 0..VOICE_RESAMPLER_TAIL {
             let Self {
                 resampler,
                 frame,
@@ -1375,32 +1375,19 @@ impl<S: CaptureFrameSink> Drop for VoiceCaptureProcessor<S> {
     }
 }
 
-/// Streaming conversion to [`VOICE_SAMPLE_RATE`], with a low-pass filter before
-/// downsampling and linear interpolation between source samples. Capture uses
-/// it on the microphone's own rate; the echo reference uses it on the mixer's
-/// output rate, so both sides of the canceller see the same conversion.
+/// Streaming, band-limited conversion with an integer clock. Equal device
+/// rates pass through exactly; other rates use a prepared causal sinc filter.
 #[derive(Debug)]
 pub(crate) struct StreamingVoiceResampler {
-    source_per_output: f64,
-    anti_alias: Option<VoiceAntiAliasFilter>,
-    previous: Option<f32>,
-    current_source_index: u64,
-    next_output_position: f64,
+    source_rate: u32,
+    output_rate: u32,
+    filter: crate::voice_resampling::SincHistory,
+    current_source_index: u128,
+    next_output_position: u128,
+    started: bool,
 }
 
-/// A causal low-pass ahead of downsampling. Linear interpolation alone is not
-/// a sample-rate converter when the source is faster: it aliases everything
-/// above the destination Nyquist back into the speech band, where it sounds like noise and no
-/// longer matches the echo reference produced by another device rate.
-#[derive(Debug)]
-struct VoiceAntiAliasFilter {
-    coefficients: Box<[f32]>,
-    history: Box<[f32]>,
-    newest: usize,
-    primed: bool,
-}
-
-const VOICE_ANTI_ALIAS_TAPS: usize = 127;
+const VOICE_RESAMPLER_TAIL: usize = crate::voice_resampling::TAPS;
 
 impl StreamingVoiceResampler {
     pub(crate) fn new(source_rate: u32) -> Self {
@@ -1408,87 +1395,39 @@ impl StreamingVoiceResampler {
     }
 
     pub(crate) fn with_output_rate(source_rate: u32, output_rate: u32) -> Self {
+        let source_rate = source_rate.max(1);
+        let output_rate = output_rate.max(1);
         Self {
-            source_per_output: f64::from(source_rate) / f64::from(output_rate),
-            anti_alias: VoiceAntiAliasFilter::new(source_rate, output_rate),
-            previous: None,
+            source_rate,
+            output_rate,
+            filter: crate::voice_resampling::SincHistory::new(source_rate, output_rate),
             current_source_index: 0,
-            next_output_position: 0.0,
+            next_output_position: 0,
+            started: false,
         }
     }
 
-    pub(crate) fn push_sample(&mut self, mut sample: f32, mut emit: impl FnMut(f32)) {
-        if let Some(filter) = self.anti_alias.as_mut() {
-            sample = filter.process(sample);
-        }
-        let Some(previous) = self.previous else {
-            self.previous = Some(sample);
+    pub(crate) fn push_sample(&mut self, sample: f32, mut emit: impl FnMut(f32)) {
+        if self.source_rate == self.output_rate {
             emit(sample);
-            self.next_output_position = self.source_per_output;
             return;
-        };
-
-        self.current_source_index = self.current_source_index.saturating_add(1);
-        let interval_end = self.current_source_index as f64;
-        let interval_start = interval_end - 1.0;
+        }
+        self.filter.push(sample);
+        if !self.started {
+            self.started = true;
+            emit(sample);
+            self.next_output_position = u128::from(self.source_rate);
+            return;
+        }
+        self.current_source_index += 1;
+        let output_rate = u128::from(self.output_rate);
+        let interval_end = self.current_source_index * output_rate;
+        let interval_start = interval_end - output_rate;
         while self.next_output_position <= interval_end {
-            let fraction = (self.next_output_position - interval_start).clamp(0.0, 1.0) as f32;
-            emit(previous + (sample - previous) * fraction);
-            self.next_output_position += self.source_per_output;
+            let fraction = (self.next_output_position - interval_start) as f64 / output_rate as f64;
+            emit(self.filter.interpolate(fraction));
+            self.next_output_position += u128::from(self.source_rate);
         }
-        self.previous = Some(sample);
-    }
-}
-
-impl VoiceAntiAliasFilter {
-    fn new(source_rate: u32, output_rate: u32) -> Option<Self> {
-        if source_rate <= output_rate {
-            return None;
-        }
-        let cutoff = 0.45 * f64::from(output_rate) / f64::from(source_rate);
-        let center = (VOICE_ANTI_ALIAS_TAPS - 1) as f64 * 0.5;
-        let mut coefficients = (0..VOICE_ANTI_ALIAS_TAPS)
-            .map(|index| {
-                let offset = index as f64 - center;
-                let sinc = if offset == 0.0 {
-                    2.0 * cutoff
-                } else {
-                    (2.0 * std::f64::consts::PI * cutoff * offset).sin()
-                        / (std::f64::consts::PI * offset)
-                };
-                let phase =
-                    std::f64::consts::TAU * index as f64 / (VOICE_ANTI_ALIAS_TAPS - 1) as f64;
-                let blackman = 0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
-                (sinc * blackman) as f32
-            })
-            .collect::<Vec<_>>();
-        let sum = coefficients.iter().sum::<f32>();
-        for coefficient in &mut coefficients {
-            *coefficient /= sum;
-        }
-        Some(Self {
-            coefficients: coefficients.into_boxed_slice(),
-            history: vec![0.0; VOICE_ANTI_ALIAS_TAPS].into_boxed_slice(),
-            newest: VOICE_ANTI_ALIAS_TAPS - 1,
-            primed: false,
-        })
-    }
-
-    fn process(&mut self, sample: f32) -> f32 {
-        if !self.primed {
-            self.history.fill(sample);
-            self.primed = true;
-            return sample;
-        }
-        self.newest = (self.newest + 1) % self.history.len();
-        self.history[self.newest] = sample;
-        let oldest = (self.newest + 1) % self.history.len();
-        let (early, late) = self.history.split_at(oldest);
-        self.coefficients
-            .iter()
-            .zip(late.iter().chain(early))
-            .map(|(coefficient, sample)| coefficient * sample)
-            .sum()
     }
 }
 
@@ -2678,6 +2617,49 @@ mod tests {
             decoded.len() <= VOICE_FRAME_SAMPLES * 4,
             "the tail must stay bounded"
         );
+    }
+
+    #[test]
+    fn device_rate_conversion_preserves_fullband_speech_without_alias_images() {
+        for source_rate in [44_100, 48_000, 96_000, 192_000] {
+            let mut converter = StreamingVoiceResampler::new(source_rate);
+            let mut output = Vec::new();
+            for index in 0..source_rate / 2 {
+                let phase =
+                    std::f64::consts::TAU * 15_000.0 * f64::from(index) / f64::from(source_rate);
+                converter.push_sample(phase.sin() as f32, |sample| output.push(sample));
+            }
+            let settled = &output[4_800..];
+            let (sin, cos) =
+                settled
+                    .iter()
+                    .enumerate()
+                    .fold((0.0, 0.0), |(sin, cos), (i, value)| {
+                        let phase = std::f64::consts::TAU * 15_000.0 * i as f64 / 48_000.0;
+                        (
+                            sin + f64::from(*value) * phase.sin(),
+                            cos + f64::from(*value) * phase.cos(),
+                        )
+                    });
+            let sin = 2.0 * sin / settled.len() as f64;
+            let cos = 2.0 * cos / settled.len() as f64;
+            let gain = sin.hypot(cos);
+            let error = settled
+                .iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    let phase = std::f64::consts::TAU * 15_000.0 * i as f64 / 48_000.0;
+                    (f64::from(*value) - sin * phase.sin() - cos * phase.cos()).powi(2)
+                })
+                .sum::<f64>()
+                / settled.len() as f64;
+            assert!((gain - 1.0).abs() < 0.05, "{source_rate} Hz gain {gain}");
+            assert!(
+                error.sqrt() < 0.002,
+                "{source_rate} Hz interpolation noise {}",
+                error.sqrt()
+            );
+        }
     }
 
     #[test]
