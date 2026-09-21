@@ -156,6 +156,7 @@ fn handle_host_voice_media(
     voice_events: &crate::VoiceInboxSender,
     state: &HostState,
     limiter: &mut crate::voice::VoiceIngressLimiter,
+    health: &mut crate::voice_route_health::VoiceRouteHealth,
 ) {
     let Some((source_client_id, receive_cipher)) = host_voice_ingress(state, media.peer) else {
         return;
@@ -169,6 +170,18 @@ fn handle_host_voice_media(
     ) else {
         return;
     };
+    if matches!(
+        packet,
+        crate::voice::VoicePacket::Probe(_) | crate::voice::VoicePacket::ProbeAck(_)
+    ) {
+        if let Some((_, _, send_cipher)) = host_voice_routes(state)
+            .into_iter()
+            .find(|(_, peer, _)| *peer == media.peer)
+        {
+            health.receive_control(media.peer, &send_cipher, packet, udp_handle, Instant::now());
+        }
+        return;
+    }
     let Some((frame, direct_recipients)) =
         crate::voice::authenticate_host_ingress(source_client_id, packet)
     else {
@@ -502,6 +515,9 @@ pub(crate) async fn run_host(
     let mut runtime_dynamic_timer = interval(Duration::from_secs(1));
     let mut published_control_send_time_epoch = None;
     let mut voice_ingress_limiter = crate::voice::VoiceIngressLimiter::default();
+    let mut voice_route_health = crate::voice_route_health::VoiceRouteHealth::default();
+    let mut voice_probe_timer = interval(Duration::from_millis(50));
+    voice_probe_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     if let Some(error) = udp_start_error {
         let _ = state
@@ -531,7 +547,10 @@ pub(crate) async fn run_host(
                 .map(|route| route.client_id),
         );
         voice_available.store(
-            state.config.voice_enabled && !host_voice_routes(&state).is_empty(),
+            state.config.voice_enabled
+                && host_voice_routes(&state).iter().any(|(_, peer, cipher)| {
+                    voice_route_health.confirmed(*peer, cipher.cookie(), Instant::now())
+                }),
             std::sync::atomic::Ordering::Release,
         );
         if published_control_send_time_epoch != Some(state.control_send_time_epoch) {
@@ -1120,10 +1139,14 @@ pub(crate) async fn run_host(
                     &voice_events,
                     &state,
                     &mut voice_ingress_limiter,
+                    &mut voice_route_health,
                 );
             }
             Some(frame) = voice_commands.recv(), if voice_media_ready => {
                 send_host_voice_frame(frame, udp_handle.as_ref(), &state);
+            }
+            _ = voice_probe_timer.tick(), if voice_media_ready => {
+                voice_route_health.poll(&host_voice_routes(&state), udp_handle.as_ref(), Instant::now());
             }
             _ = wait_for_chase_target_update(chase_target_update_deadline) => {
                 update_chase_targets(&mut state).await;

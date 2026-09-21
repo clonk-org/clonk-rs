@@ -61,6 +61,8 @@ const VOICE_MEDIA_KEY_INFO: &[u8] = b"media key";
 const VOICE_PACKET_DIRECT: u8 = 0;
 const VOICE_PACKET_RELAY_REQUEST: u8 = 1;
 const VOICE_PACKET_RELAYED: u8 = 2;
+const VOICE_PACKET_PROBE: u8 = 3;
+const VOICE_PACKET_PROBE_ACK: u8 = 4;
 const VOICE_PACKET_FIXED_HEADER: usize = 18;
 pub(crate) const MAX_VOICE_WIRE_BYTES: usize = VOICE_MEDIA_PREFIX.len()
     + VOICE_ROUTE_COOKIE_BYTES
@@ -499,6 +501,8 @@ pub(crate) enum VoicePacket {
         direct_recipients: Vec<ClientId>,
     },
     Relayed(VoiceFrame),
+    Probe([u8; 16]),
+    ProbeAck([u8; 16]),
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -562,6 +566,10 @@ pub(crate) fn encode_voice_packet(packet: &VoicePacket) -> Result<Vec<u8>, Voice
             direct_recipients,
         } => (VOICE_PACKET_RELAY_REQUEST, frame, direct_recipients),
         VoicePacket::Relayed(frame) => (VOICE_PACKET_RELAYED, frame, &[]),
+        VoicePacket::Probe(nonce) => return Ok(encode_voice_probe(VOICE_PACKET_PROBE, nonce)),
+        VoicePacket::ProbeAck(nonce) => {
+            return Ok(encode_voice_probe(VOICE_PACKET_PROBE_ACK, nonce))
+        }
     };
     validate_voice_payload(&frame.payload)?;
     if direct_recipients.len() > MAX_VOICE_DIRECT_RECIPIENTS {
@@ -589,6 +597,14 @@ pub(crate) fn encode_voice_packet(packet: &VoicePacket) -> Result<Vec<u8>, Voice
     }
     wire.extend_from_slice(&frame.payload);
     Ok(wire)
+}
+
+fn encode_voice_probe(kind: u8, nonce: &[u8; 16]) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(VOICE_MEDIA_PREFIX.len() + 1 + nonce.len());
+    wire.extend_from_slice(VOICE_MEDIA_PREFIX);
+    wire.push(kind);
+    wire.extend_from_slice(nonce);
+    wire
 }
 
 /// Seals one packet for one route direction.
@@ -706,17 +722,35 @@ pub(crate) fn admit_voice_ingress(
         return None;
     }
     let packet = decode_authenticated_voice_packet(wire, cipher).ok()?;
-    limiter.allow(authenticated_source, now).then_some(packet)
+    // Health control has its own bounded reply policy and must not spend a
+    // speaker's audio budget. It has already authenticated under this route.
+    (matches!(packet, VoicePacket::Probe(_) | VoicePacket::ProbeAck(_))
+        || limiter.allow(authenticated_source, now))
+    .then_some(packet)
 }
 
 pub(crate) fn decode_voice_packet(wire: &[u8]) -> Result<VoicePacket, VoiceCodecError> {
     let body = wire
         .strip_prefix(VOICE_MEDIA_PREFIX)
         .ok_or(VoiceCodecError::MissingSignature)?;
+    let kind = *body.first().ok_or(VoiceCodecError::Truncated)?;
+    if matches!(kind, VOICE_PACKET_PROBE | VOICE_PACKET_PROBE_ACK) {
+        let nonce = body
+            .get(1..17)
+            .and_then(|nonce| nonce.try_into().ok())
+            .ok_or(VoiceCodecError::Truncated)?;
+        if body.len() != 17 {
+            return Err(VoiceCodecError::TrailingBytes);
+        }
+        return Ok(if kind == VOICE_PACKET_PROBE {
+            VoicePacket::Probe(nonce)
+        } else {
+            VoicePacket::ProbeAck(nonce)
+        });
+    }
     if body.len() < VOICE_PACKET_FIXED_HEADER {
         return Err(VoiceCodecError::Truncated);
     }
-    let kind = body[0];
     let source_client_id = u32::from_le_bytes(
         body[1..5]
             .try_into()
@@ -814,7 +848,7 @@ pub(crate) fn authenticate_host_ingress(
             frame.with_authenticated_source(ingress_client_id),
             direct_recipients,
         )),
-        VoicePacket::Relayed(_) => None,
+        VoicePacket::Relayed(_) | VoicePacket::Probe(_) | VoicePacket::ProbeAck(_) => None,
     }
 }
 
@@ -854,6 +888,35 @@ mod tests {
     /// so its uplink carries `listeners x 50 x datagram` for as long as the
     /// key is held. Pinning it here means a codec, header or sealing change
     /// cannot move that number without saying so.
+    #[test]
+    fn media_health_probes_are_sealed_bounded_and_never_treated_as_audio() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
+            [22; VOICE_MEDIA_KEY_BYTES],
+        );
+        let foreign = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
+            [33; VOICE_MEDIA_KEY_BYTES],
+        );
+        for packet in [
+            VoicePacket::Probe([44; 16]),
+            VoicePacket::ProbeAck([55; 16]),
+        ] {
+            let sealed = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
+            assert_eq!(
+                decode_authenticated_voice_packet(&sealed, &cipher),
+                Ok(packet.clone())
+            );
+            assert!(decode_authenticated_voice_packet(&sealed, &foreign).is_err());
+            assert!(authenticate_host_ingress(7, packet.clone()).is_none());
+            assert!(authenticate_client_ingress(7, false, packet.clone()).is_none());
+            let mut wire = encode_voice_packet(&packet).unwrap();
+            assert!(decode_voice_packet(&wire[..wire.len() - 1]).is_err());
+            wire.push(0);
+            assert!(decode_voice_packet(&wire).is_err());
+        }
+    }
+
     #[test]
     fn the_voice_mesh_costs_one_sealed_datagram_per_listener_per_frame() {
         /// IPv4 20 + UDP 8. The lane is UDP, and this is the smaller of the

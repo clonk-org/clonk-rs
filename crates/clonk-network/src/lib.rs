@@ -56,6 +56,7 @@ mod udp_session;
 mod upnp;
 mod voice;
 mod voice_inbox;
+mod voice_route_health;
 
 pub use voice_inbox::{voice_inbox, ReceivedVoiceFrame, VoiceInboxReceiver, VoiceInboxSender};
 
