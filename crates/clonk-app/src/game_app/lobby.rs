@@ -5140,6 +5140,7 @@ impl GameApp {
                         is_editable: false,
                         is_playable: true,
                         mission_access: None,
+                        selector_metadata: None,
                         path: Some(working_path.clone()),
                         source_paths: vec![working_path.clone()],
                         root_label: None,

@@ -10304,6 +10304,9 @@ pub(crate) struct FrontendScenario {
     /// Scenario.txt `[Head] MissionAccess`. This is presentation/catalog
     /// metadata only; the live process-local store decides current access.
     pub(crate) mission_access: Option<String>,
+    /// Catalog-generation snapshot for row labels and the game-option strip.
+    /// Activation still reads the current file through the start-time loader.
+    pub(crate) selector_metadata: Option<Arc<ScenarioSelectorMetadata>>,
     pub(crate) path: Option<PathBuf>,
     /// Every real/logical group path that contributed to this merged entry.
     /// `path` remains the first-root presentation source, while parity
