@@ -1,0 +1,10 @@
+Speaking.png is a high-resolution adaptation of the GUIIcons.png sound icon
+by RedWolf Design and Jonathan Veit (AniProGuy), with refined speaker
+construction. Generated with OpenAI imagegen for Clonk Rust in 2026.
+
+This artwork is licensed under Creative Commons Attribution-NonCommercial 4.0
+(CC BY-NC 4.0): https://creativecommons.org/licenses/by-nc/4.0/
+
+Original source: planet/Graphics.c4g/GUIIcons.png, sound icon at (200, 120),
+40x40 pixels. See planet/Graphics.c4g/COPYING for the original attribution
+and docs/art/speaking-icon.md for the generation and refinement prompts.

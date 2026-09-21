@@ -849,8 +849,10 @@ pub struct CrewNameOverlay {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpeakingOverlay {
     pub object_ids: Vec<ObjectId>,
-    /// Complete Graphics.c4g/GUIIcons.png sheet. The renderer extracts the
-    /// classic `Ico_Sound` phase so runtime graphics overloads remain active.
+    /// Complete transparent speaking sprite, at any resolution.
+    pub icon: Option<ImageData>,
+    /// Fallback Graphics.c4g/GUIIcons.png sheet when no standalone sprite is
+    /// supplied. The renderer extracts the classic `Ico_Sound` phase.
     pub gui_icons: Option<ImageData>,
 }
 

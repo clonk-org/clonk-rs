@@ -6517,6 +6517,22 @@ impl FrontendAssets {
                 None => (None, None, None),
             };
         let mut startup_dialog_images = HashMap::new();
+        // Voice chat is port-owned UI. Embed its icon independently of the
+        // legacy graphics bundle used by the presentation oracle.
+        static SPEAKING_ICON: OnceLock<Option<ImageData>> = OnceLock::new();
+        if let Some(icon) = SPEAKING_ICON.get_or_init(|| {
+            clonk_resources::load_image_from_memory_with_format(
+                include_bytes!("../../assets/Speaking.png"),
+                image::ImageFormat::Png,
+            )
+            .ok()
+            .map(|image| {
+                let rgba = image.into_rgba8();
+                ImageData::new(rgba.width(), rgba.height(), rgba.into_raw())
+            })
+        }) {
+            startup_dialog_images.insert("Speaking.png".to_string(), icon.clone());
+        }
         let mut startup_bootstrap_image_failures = HashMap::new();
         let mut global_gui_font_failures = HashMap::new();
         let mut global_gui_sheet_failures = HashMap::new();

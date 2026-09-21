@@ -14846,6 +14846,45 @@ mod tests {
     }
 
     #[test]
+    fn speaking_indicator_uses_complete_high_resolution_sprite_at_original_size() {
+        let mut snapshot = make_snapshot();
+        let object_id = snapshot.objects[0].id;
+        snapshot.objects[0].ocf |= clonk_engine::ocf::CREW_MEMBER;
+        let colors = [
+            [231_u8, 71, 193, 255],
+            [41, 193, 71, 255],
+            [71, 41, 193, 255],
+            [193, 231, 41, 255],
+        ];
+        let pixels = (0..256)
+            .flat_map(|y| (0..256).flat_map(move |x| colors[(y / 128) * 2 + x / 128]))
+            .collect();
+        let mut graphics = test_graphics((200, 120, 120), "High resolution speaking icon");
+        graphics.update_overlay(&GraphicsOverlay {
+            speaking: SpeakingOverlay {
+                object_ids: vec![object_id],
+                icon: Some(ImageData::new(256, 256, pixels)),
+                ..SpeakingOverlay::default()
+            },
+            ..graphics_overlay_fixture()
+        });
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+
+        for color in colors {
+            let count = graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .filter(|pixel| *pixel == color)
+                .count();
+            front_assert_eq! {count => 100, "each quadrant occupies 10x10 pixels in the 20x20 indicator"};
+        }
+    }
+
+    #[test]
     fn speaking_indicator_draws_gui_sound_phase_over_remote_selected_crew() {
         let mut snapshot = make_snapshot();
         let object_id = snapshot.objects[0].id;
@@ -14879,6 +14918,7 @@ mod tests {
             speaking: SpeakingOverlay {
                 object_ids: vec![object_id],
                 gui_icons: Some(gui_icons),
+                ..SpeakingOverlay::default()
             },
             ..graphics_overlay_fixture()
         });

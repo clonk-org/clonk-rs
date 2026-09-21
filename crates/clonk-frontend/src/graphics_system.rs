@@ -10591,22 +10591,42 @@ impl GraphicsSystem {
         const INDICATOR_SIZE: f32 = 20.0;
         const HEAD_GAP: f32 = 2.0;
 
-        let Some(gui_icons) = self.speaking.gui_icons.clone() else {
-            return;
+        let (icon, source, sampling) = if let Some(icon) = self
+            .speaking
+            .icon
+            .clone()
+            .filter(|icon| icon.width() > 0 && icon.height() > 0)
+        {
+            let source = FloatSourceRect {
+                x: 0.0,
+                y: 0.0,
+                width: icon.width() as f32,
+                height: icon.height() as f32,
+            };
+            (icon, source, BlitSampling::Linear)
+        } else {
+            let Some(gui_icons) = self.speaking.gui_icons.clone() else {
+                return;
+            };
+            let columns = gui_icons.width() as i32 / GUI_ICON_CELL;
+            if columns <= 0 {
+                return;
+            }
+            let source = SourceRect::new(
+                SOUND_PHASE % columns * GUI_ICON_CELL,
+                SOUND_PHASE / columns * GUI_ICON_CELL,
+                GUI_ICON_CELL,
+                GUI_ICON_CELL,
+            );
+            if !Self::source_within_image(&gui_icons, &source) {
+                return;
+            }
+            (
+                gui_icons,
+                FloatSourceRect::scaled(source, 1.0),
+                BlitSampling::Nearest,
+            )
         };
-        let columns = gui_icons.width() as i32 / GUI_ICON_CELL;
-        if columns <= 0 {
-            return;
-        }
-        let source = SourceRect::new(
-            SOUND_PHASE % columns * GUI_ICON_CELL,
-            SOUND_PHASE / columns * GUI_ICON_CELL,
-            GUI_ICON_CELL,
-            GUI_ICON_CELL,
-        );
-        if !Self::source_within_image(&gui_icons, &source) {
-            return;
-        }
 
         let object_ids = self.speaking.object_ids.clone();
         for object_id in object_ids {
@@ -10642,12 +10662,13 @@ impl GraphicsSystem {
                 GuiSize::new(INDICATOR_SIZE, INDICATOR_SIZE),
             );
             let fog = self.fog_draw_context();
-            draw_image_region(
+            draw_image_region_float_source(
                 &mut self.surface,
                 &rect,
-                &gui_icons,
+                &icon,
                 None,
                 &source,
+                sampling,
                 false,
                 None,
                 SpriteBlitState::normal().with_renderer_config(self.advanced_renderer_config),
