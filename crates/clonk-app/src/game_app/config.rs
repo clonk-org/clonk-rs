@@ -1483,6 +1483,9 @@ impl GameApp {
             let mut audio = audio.borrow_mut();
             let music_volume = reloaded_audio.music_volume_percent();
             let sound_volume = reloaded_audio.sound_volume_percent();
+            audio
+                .system
+                .select_output_device(reloaded_audio.voice_output_device.clone());
             audio.options = reloaded_audio;
             audio.set_music_volume_percent(music_volume);
             audio.set_sound_volume_percent(sound_volume);

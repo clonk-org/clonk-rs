@@ -2841,6 +2841,7 @@ impl AudioContext {
             || options.menu_sound_enabled
             || options.voice_enabled;
         let system = runtime_audio_system(&options, resampling_mode, device_independent_capture)?;
+        system.select_output_device(options.voice_output_device.clone());
         #[cfg(test)]
         let (resolver, music_resolver) = if audio_resources_enabled {
             (
