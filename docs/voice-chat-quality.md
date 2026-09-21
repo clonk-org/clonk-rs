@@ -13,7 +13,7 @@ media never enters simulation, lockstep controls or recordings.
 - [x] Recover microphone devices outside the game and media threads.
 - [x] Keep host relaying independent of the host's microphone preference, and
   require a recent authenticated round trip before bypassing the host relay.
-- [ ] Preserve utterance endings on push-to-talk release and beginnings in voice
+- [x] Preserve utterance endings on push-to-talk release and beginnings in voice
   activation, while privacy cancellation immediately discards pending capture.
 - [ ] Recover output devices and keep expensive work out of output callbacks.
 - [ ] Continuously adapt playout to jitter and device clock drift.

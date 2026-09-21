@@ -1139,9 +1139,13 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
     let outbound = voice.try_recv_outbound().test_value();
     main_assert_eq!(outbound.player_id => local_player);
     main_assert_eq!(outbound.sequence => 0);
+    let speech = voice.try_recv_outbound().test_value();
+    main_assert_eq!(speech.player_id => local_player);
+    main_assert_eq!(speech.stream_epoch => outbound.stream_epoch);
+    main_assert_eq!(speech.sequence => 1);
     main_assert!(
         voice.try_recv_outbound().is_none(),
-        "the frame below the threshold must never reach the wire",
+        "speech includes its short preroll, without transmitting unrelated silence",
     );
     main_assert!(app
         .voice_chat

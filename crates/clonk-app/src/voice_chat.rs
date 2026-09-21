@@ -53,7 +53,7 @@
 //! this app layer's [`VoiceActivityTracker`] owns duplicate/late suppression
 //! through its shared epoch and sequence window.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -637,6 +637,7 @@ pub(crate) struct VoiceChatState {
     next_capture_retry_at: Option<Instant>,
     capture_stream_generation: u64,
     activation_gate: VoiceActivationGate,
+    activation_preroll: VecDeque<VoiceInputFrame>,
     activation_open_failed: bool,
     stream_epoch: u32,
     next_sequence: u16,
@@ -694,6 +695,7 @@ impl VoiceChatState {
             next_capture_retry_at: None,
             capture_stream_generation: 0,
             activation_gate: VoiceActivationGate::default(),
+            activation_preroll: VecDeque::with_capacity(3),
             activation_open_failed: false,
             stream_epoch: 0,
             next_sequence: 0,
@@ -817,6 +819,7 @@ impl VoiceChatState {
         self.next_capture_retry_at = None;
         self.activation_gate.close();
         self.stream_epoch = self.stream_epoch.wrapping_add(1).max(1);
+        self.activation_preroll.clear();
         self.next_sequence = 0;
         self.capture_sample_origin = None;
         self.transmitted_in_epoch = false;
@@ -913,6 +916,7 @@ impl VoiceChatState {
         self.capture_stream_generation = 0;
         self.activation_open_failed = false;
         self.activation_gate.close();
+        self.activation_preroll.clear();
     }
 
     pub(crate) fn finish_capture_at(&mut self, at: Instant) {
@@ -963,24 +967,52 @@ impl VoiceChatState {
             self.capture_sample_origin = None;
             self.transmitted_in_epoch = false;
             self.activation_gate.close();
+            self.activation_preroll.clear();
         }
         let now = Instant::now();
-        let mut result = frames
-            .into_iter()
-            .filter(|frame| frame.is_fresh_at(now))
-            .filter_map(|frame| match activation {
-                None => Some((frame, false)),
-                Some(activation) => self
-                    .activation_gate
-                    .admit(frame.level, activation)
-                    .map(|reopened| (frame, reopened)),
-            })
-            // The gate borrows `self` mutably, so the stamping pass cannot be
-            // fused into it.
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|(frame, reopened)| self.stamp_captured_frame(frame, reopened))
-            .collect::<Vec<_>>();
+        let mut result = Vec::new();
+        for frame in frames.into_iter().filter(|frame| frame.is_fresh_at(now)) {
+            let Some(activation) = activation else {
+                result.push(self.stamp_captured_frame(frame, false));
+                continue;
+            };
+            let was_open = self.activation_gate.open;
+            if let Some(mut reopened) = self.activation_gate.admit(frame.level, activation) {
+                while let Some(previous) = self.activation_preroll.pop_front() {
+                    let nearby = previous
+                        .capture_timing()
+                        .zip(frame.capture_timing())
+                        .is_none_or(|(before, current)| {
+                            current
+                                .captured_at
+                                .saturating_duration_since(before.captured_at)
+                                <= Duration::from_millis(60)
+                        });
+                    if previous.is_fresh_at(now) && nearby {
+                        result.push(self.stamp_captured_frame(previous, reopened));
+                        reopened = false;
+                    }
+                }
+                result.push(self.stamp_captured_frame(frame, reopened));
+            } else if was_open {
+                // One quiet packet releases Opus lookahead, including when
+                // the user selects zero hangover. Never replay it as preroll.
+                let tail = self.stamp_captured_frame(frame, false);
+                let captured_at = tail.captured_at;
+                result.push(tail);
+                result.push(CapturedVoiceFrame {
+                    stream_epoch: self.stream_epoch,
+                    sequence: self.next_sequence,
+                    captured_at,
+                    payload: None,
+                });
+            } else {
+                if self.activation_preroll.len() == 3 {
+                    self.activation_preroll.pop_front();
+                }
+                self.activation_preroll.push_back(frame);
+            }
+        }
         if let Some(at) = self.finishing_capture.filter(|at| {
             finished || now.saturating_duration_since(*at) >= Duration::from_millis(160)
         }) {
@@ -2988,10 +3020,99 @@ mod tests {
                 .into_iter()
                 .map(|frame| (frame.stream_epoch, frame.sequence))
                 .collect::<Vec<_>>(),
-            vec![(1, 0), (1, 1), (1, 2), (2, 0)],
-            "silence before speech is dropped, two frames of tail follow it, \
-             and speaking again after the tail expires starts a new stream",
+            vec![(1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (2, 0)],
+            "preroll precedes speech, hangover and codec tail precede the end marker, \
+             and speaking again starts a new stream",
         );
+    }
+
+    #[test]
+    fn voice_activation_keeps_sixty_milliseconds_of_preroll_and_ends_the_utterance() {
+        let payload =
+            clonk_audio::test_encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES])
+                .unwrap();
+        let start = Instant::now() - Duration::from_millis(120);
+        let mut voice = VoiceChatState::with_capture_opener(move |_| {
+            Ok(TestVoiceSource {
+                frames: RefCell::new(
+                    [0.0, 0.1, 0.2, 0.3, 0.9, 0.1, 0.1]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, level)| {
+                            VoiceInputFrame::test_frame(payload, level).with_test_timing(
+                                clonk_audio::VoiceCaptureTiming {
+                                    captured_at: start + Duration::from_millis(i as u64 * 20),
+                                    sample_offset: i as u64
+                                        * clonk_audio::VOICE_FRAME_SAMPLES as u64,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+            })
+        });
+        voice.start_capture(None, None).unwrap();
+        let activation = VoiceActivation {
+            threshold: 0.5,
+            hangover_frames: 0,
+        };
+        let frames = voice.drain_captured_frames(Some(&activation));
+        assert_eq!(
+            frames
+                .iter()
+                .map(|f| (f.sequence, f.payload.is_some()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, true),
+                (1, true),
+                (2, true),
+                (3, true),
+                (4, true),
+                (5, false)
+            ]
+        );
+        assert_eq!(frames[0].captured_at, start + Duration::from_millis(20));
+        assert_eq!(frames[4].captured_at, start + Duration::from_millis(100));
+        assert!(voice.drain_captured_frames(Some(&activation)).is_empty());
+        voice.stop_capture();
+        voice.start_capture(None, None).unwrap();
+        assert!(
+            voice
+                .drain_captured_frames(Some(&VoiceActivation {
+                    threshold: 1.0,
+                    hangover_frames: 0
+                }))
+                .is_empty(),
+            "silence alone never opens a stream"
+        );
+    }
+
+    #[test]
+    fn voice_activation_preroll_cannot_cross_a_privacy_cancellation() {
+        let opens = Cell::new(0);
+        let mut voice = VoiceChatState::with_capture_opener(move |_| {
+            opens.set(opens.get() + 1);
+            Ok(TestVoiceSource::with_levels(if opens.get() == 1 {
+                &[0.1, 0.2]
+            } else {
+                &[0.9]
+            }))
+        });
+        let activation = VoiceActivation {
+            threshold: 0.5,
+            hangover_frames: 0,
+        };
+        voice.start_capture(None, None).unwrap();
+        assert!(voice.drain_captured_frames(Some(&activation)).is_empty());
+        voice.stop_capture();
+        voice.start_capture(None, None).unwrap();
+        let frames = voice.drain_captured_frames(Some(&activation));
+        assert_eq!(
+            frames.len(),
+            1,
+            "audio retained before privacy revocation must be gone"
+        );
+        assert_eq!((frames[0].stream_epoch, frames[0].sequence), (2, 0));
     }
 
     #[test]
