@@ -1,8 +1,8 @@
 use ring::rand::{SecureRandom as _, SystemRandom};
 use ring::{aead, agreement, hkdf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, collections::BTreeSet};
@@ -121,10 +121,9 @@ impl VoiceRouteCookie {
 
 /// One direction of one route's media protection: the cookie that names the
 /// direction on the wire, and the key that seals everything behind it.
-/// The codec is intentionally stateless: each call authenticates one datagram
-/// and does not retain `(stream_epoch, sequence)` replay state. Once a frame is
-/// decoded, duplicate/late suppression belongs to the application layer's
-/// `VoiceActivityTracker`.
+/// A route-wide nonce counter and replay window protect every speaker and
+/// health packet, independently of wrapping application sequence numbers.
+/// Clones share both counters; copying a route cannot restart either one.
 /// Deliberately not `Copy`: a `Copy` type cannot have a destructor, and every
 /// implicit copy would be one more unerasable image of the key
 /// (clonk-org/clonk-rs#470). `Clone` stays, so a route that genuinely needs a
@@ -133,6 +132,50 @@ impl VoiceRouteCookie {
 pub(crate) struct VoiceMediaCipher {
     cookie: VoiceRouteCookie,
     key: [u8; VOICE_MEDIA_KEY_BYTES],
+    next_nonce: Arc<AtomicU64>,
+    replay: Arc<Mutex<VoiceReplayWindow>>,
+}
+
+// Larger than the host's full 64-speaker x 8-frame fair send queue, including
+// health messages. This tolerates loss and reordering without acknowledgements.
+const VOICE_REPLAY_WINDOW: u64 = 2048;
+
+#[derive(Default)]
+struct VoiceReplayWindow {
+    highest: Option<u64>,
+    seen: [u64; (VOICE_REPLAY_WINDOW / 64) as usize],
+}
+
+impl VoiceReplayWindow {
+    /// Only call after authenticating the nonce and packet under this key.
+    /// The fixed bitmap follows RFC 3711 section 3.3.2; advancing never waits
+    /// for a missing packet and unauthenticated input cannot advance it.
+    fn accept(&mut self, counter: u64) -> bool {
+        if let Some(highest) = self.highest {
+            if counter > highest {
+                let advance = counter - highest;
+                if advance >= VOICE_REPLAY_WINDOW {
+                    self.seen.fill(0);
+                } else {
+                    for cleared in highest + 1..=counter {
+                        let slot = cleared % VOICE_REPLAY_WINDOW;
+                        self.seen[(slot / 64) as usize] &= !(1 << (slot % 64));
+                    }
+                }
+            } else if highest - counter >= VOICE_REPLAY_WINDOW {
+                return false;
+            }
+        }
+        self.highest = Some(self.highest.map_or(counter, |highest| highest.max(counter)));
+        let slot = counter % VOICE_REPLAY_WINDOW;
+        let word = &mut self.seen[(slot / 64) as usize];
+        let mask = 1 << (slot % 64);
+        if *word & mask != 0 {
+            return false;
+        }
+        *word |= mask;
+        true
+    }
 }
 
 /// Erases the key when the cipher goes away, so a route's key material is not
@@ -162,12 +205,13 @@ impl std::fmt::Debug for VoiceMediaCipher {
 }
 
 impl VoiceMediaCipher {
-    #[cfg(test)]
-    pub(crate) const fn from_parts(
-        cookie: VoiceRouteCookie,
-        key: [u8; VOICE_MEDIA_KEY_BYTES],
-    ) -> Self {
-        Self { cookie, key }
+    pub(crate) fn from_parts(cookie: VoiceRouteCookie, key: [u8; VOICE_MEDIA_KEY_BYTES]) -> Self {
+        Self {
+            cookie,
+            key,
+            next_nonce: Arc::new(AtomicU64::new(0)),
+            replay: Arc::new(Mutex::new(VoiceReplayWindow::default())),
+        }
     }
 
     pub(crate) const fn cookie(&self) -> VoiceRouteCookie {
@@ -238,14 +282,8 @@ fn derive_route_media_keys(
             .zip(expand_media_key(&secret, peer_cookie))
             .map(|(receive, send)| {
                 (
-                    VoiceMediaCipher {
-                        cookie: local_cookie,
-                        key: *receive,
-                    },
-                    VoiceMediaCipher {
-                        cookie: peer_cookie,
-                        key: *send,
-                    },
+                    VoiceMediaCipher::from_parts(local_cookie, *receive),
+                    VoiceMediaCipher::from_parts(peer_cookie, *send),
                 )
             })
     })
@@ -531,6 +569,8 @@ pub enum VoiceCodecError {
     MediaKeyUnusable,
     #[error("voice media packet did not authenticate under this route's key")]
     MediaNotAuthentic,
+    #[error("voice media packet was replayed or is outside the receive window")]
+    MediaReplay,
     #[error("voice media packet is truncated")]
     Truncated,
     #[error("voice media packet kind {0} is unknown")]
@@ -625,18 +665,22 @@ fn encode_voice_probe(kind: u8, nonce: &[u8; 16]) -> Vec<u8> {
 /// header, because the header is not unique under a single key: `sequence` is
 /// a `u16` that wraps after about 22 minutes of continuous speech without
 /// advancing `stream_epoch`, and a host relays many sources' frames under one
-/// key, so two speakers routinely share a header. A random 96-bit nonce keeps
-/// the lane stateless — nothing to resynchronize, so nothing that would make a
-/// dropped or reordered datagram anyone's problem.
+/// key, so two speakers routinely share a header. RFC 8439 sections 2.6/2.8
+/// require a unique nonce per key. A checked route-wide counter supplies it,
+/// including across cipher clones; exhaustion fails closed rather than wraps.
 pub(crate) fn encode_authenticated_voice_packet(
     cipher: &VoiceMediaCipher,
     packet: &VoicePacket,
 ) -> Result<Vec<u8>, VoiceCodecError> {
     let packet = encode_voice_packet(packet)?;
     let mut nonce = [0_u8; VOICE_MEDIA_NONCE_BYTES];
-    SystemRandom::new()
-        .fill(&mut nonce)
+    let counter = cipher
+        .next_nonce
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| {
+            counter.checked_add(1)
+        })
         .map_err(|_| VoiceCodecError::MediaKeyUnusable)?;
+    nonce[4..].copy_from_slice(&counter.to_le_bytes());
     let mut sealed = packet[VOICE_MEDIA_PREFIX.len()..].to_vec();
     cipher
         .sealing_key()?
@@ -686,6 +730,12 @@ pub(crate) fn decode_authenticated_voice_packet(
     wire: &[u8],
     cipher: &VoiceMediaCipher,
 ) -> Result<VoicePacket, VoiceCodecError> {
+    if wire.len() > MAX_VOICE_WIRE_BYTES {
+        return Err(VoiceCodecError::InvalidPayloadLength {
+            actual: wire.len(),
+            expected: MAX_VOICE_WIRE_BYTES,
+        });
+    }
     let body = wire
         .strip_prefix(VOICE_MEDIA_PREFIX)
         .ok_or(VoiceCodecError::MissingSignature)?;
@@ -712,6 +762,22 @@ pub(crate) fn decode_authenticated_voice_packet(
             &mut sealed,
         )
         .map_err(|_| VoiceCodecError::MediaNotAuthentic)?;
+    if nonce[..4] != [0; 4] {
+        return Err(VoiceCodecError::MediaNotAuthentic);
+    }
+    let counter = u64::from_le_bytes(
+        nonce[4..]
+            .try_into()
+            .map_err(|_| VoiceCodecError::Truncated)?,
+    );
+    if !cipher
+        .replay
+        .lock()
+        .map_err(|_| VoiceCodecError::MediaKeyUnusable)?
+        .accept(counter)
+    {
+        return Err(VoiceCodecError::MediaReplay);
+    }
 
     let mut packet = Vec::with_capacity(VOICE_MEDIA_PREFIX.len() + opened.len());
     packet.extend_from_slice(VOICE_MEDIA_PREFIX);
@@ -997,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn sealed_media_leaves_replay_suppression_to_the_application_tracker() {
+    fn sealed_media_rejects_replays_before_application_dispatch() {
         let cipher = VoiceMediaCipher::from_parts(
             VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
             [0x42; VOICE_MEDIA_KEY_BYTES],
@@ -1013,8 +1079,8 @@ mod tests {
         );
         assert_eq!(
             decode_authenticated_voice_packet(&wire, &cipher),
-            Ok(packet),
-            "the network seal authenticates both deliveries; the app tracker owns replay suppression",
+            Err(VoiceCodecError::MediaReplay),
+            "replay rejection must precede application sequence tracking",
         );
     }
 
@@ -1127,11 +1193,167 @@ mod tests {
     }
 
     #[test]
+    fn oversized_sealed_media_is_rejected_before_authentication() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
+            [42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let wire = vec![0; MAX_VOICE_WIRE_BYTES + 1];
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire, &cipher),
+            Err(VoiceCodecError::InvalidPayloadLength {
+                actual: wire.len(),
+                expected: MAX_VOICE_WIRE_BYTES
+            })
+        );
+    }
+
+    #[test]
+    fn route_cipher_clones_share_nonce_and_replay_state() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
+            [42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let clone = cipher.clone();
+        let packet = VoicePacket::Probe([7; 16]);
+        let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
+        let next = encode_authenticated_voice_packet(&clone, &packet).unwrap();
+        assert_ne!(wire, next);
+        assert_eq!(
+            decode_authenticated_voice_packet(&next, &cipher),
+            Ok(packet.clone())
+        );
+        assert_eq!(
+            decode_authenticated_voice_packet(&next, &clone),
+            Err(VoiceCodecError::MediaReplay)
+        );
+        assert_eq!(decode_authenticated_voice_packet(&wire, &clone), Ok(packet));
+    }
+
+    #[test]
+    fn nonce_exhaustion_fails_closed_across_cipher_clones() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
+            [42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let clone = cipher.clone();
+        let packet = VoicePacket::Probe([7; 16]);
+        cipher.next_nonce.store(u64::MAX - 1, Ordering::Relaxed);
+        assert!(encode_authenticated_voice_packet(&cipher, &packet).is_ok());
+        assert_eq!(
+            encode_authenticated_voice_packet(&clone, &packet),
+            Err(VoiceCodecError::MediaKeyUnusable)
+        );
+        assert_eq!(
+            encode_authenticated_voice_packet(&cipher, &packet),
+            Err(VoiceCodecError::MediaKeyUnusable)
+        );
+    }
+
+    #[test]
+    fn a_forged_future_nonce_cannot_advance_the_replay_window() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
+            [42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let packet = VoicePacket::Probe([7; 16]);
+        let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
+        let mut forged = wire.clone();
+        forged[VOICE_MEDIA_PREFIX.len() + VOICE_ROUTE_COOKIE_BYTES + 11] = 0x7f;
+        assert_eq!(
+            decode_authenticated_voice_packet(&forged, &cipher),
+            Err(VoiceCodecError::MediaNotAuthentic)
+        );
+        assert_eq!(
+            decode_authenticated_voice_packet(&wire, &cipher),
+            Ok(packet)
+        );
+    }
+
+    #[test]
+    fn replay_window_accepts_a_full_reordered_host_queue_and_rejects_expired_nonces() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([11; VOICE_ROUTE_COOKIE_BYTES]),
+            [42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let packets = (0..=VOICE_REPLAY_WINDOW)
+            .map(|index| {
+                encode_authenticated_voice_packet(&cipher, &VoicePacket::Probe([index as u8; 16]))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for wire in packets[1..].iter().rev() {
+            assert!(decode_authenticated_voice_packet(wire, &cipher).is_ok());
+        }
+        assert_eq!(
+            decode_authenticated_voice_packet(&packets[0], &cipher),
+            Err(VoiceCodecError::MediaReplay)
+        );
+        assert_eq!(
+            decode_authenticated_voice_packet(&packets[1], &cipher),
+            Err(VoiceCodecError::MediaReplay)
+        );
+    }
+
+    #[test]
+    fn replay_bitmap_matches_a_received_set_under_loss_reordering_and_large_jumps() {
+        let mut window = VoiceReplayWindow::default();
+        let mut received = BTreeSet::new();
+        let mut highest = 0_u64;
+        let mut rng = 0x93b712_u64;
+        for _ in 0..20_000 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let counter = if rng & 3 == 0 {
+                highest.saturating_sub((rng >> 32) % 4000)
+            } else {
+                highest + (rng >> 32) % 4000
+            };
+            let expected = !received.contains(&counter)
+                && highest.saturating_sub(counter) < VOICE_REPLAY_WINDOW;
+            assert_eq!(
+                window.accept(counter),
+                expected,
+                "counter={counter} high={highest}"
+            );
+            if expected {
+                received.insert(counter);
+                highest = highest.max(counter);
+            }
+        }
+    }
+
+    #[test]
+    fn an_old_sealed_frame_cannot_replay_after_the_media_sequence_wraps() {
+        let cipher = VoiceMediaCipher::from_parts(
+            VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
+            [0x42; VOICE_MEDIA_KEY_BYTES],
+        );
+        let mut original = Vec::new();
+        for sequence in 0..=u32::from(u16::MAX) + 1 {
+            let packet = VoicePacket::Direct(
+                VoiceFrame::outbound(7, 11, sequence as u16, vec![0x5a; TEST_VOICE_PAYLOAD_BYTES])
+                    .unwrap(),
+            );
+            let wire = encode_authenticated_voice_packet(&cipher, &packet).unwrap();
+            assert_eq!(
+                decode_authenticated_voice_packet(&wire, &cipher),
+                Ok(packet)
+            );
+            if sequence == 0 {
+                original = wire;
+            }
+        }
+        assert!(
+            decode_authenticated_voice_packet(&original, &cipher).is_err(),
+            "application sequence numbers wrap; the route must reject old ciphertext itself"
+        );
+    }
+
+    #[test]
     fn sealing_leaves_the_lane_droppable_and_reorderable() {
         // The lane stays off the lockstep path precisely because losing or
-        // reordering a datagram costs nothing. A seal carrying per-connection
-        // state — a rolling nonce, a replay window, a rekey schedule — would
-        // quietly turn a dropped frame into a stalled stream.
+        // reordering a datagram costs nothing. The receive window admits
+        // unseen reordered nonces without waiting for any lost packet.
         let cipher = VoiceMediaCipher::from_parts(
             VoiceRouteCookie::from_bytes([0x11; VOICE_ROUTE_COOKIE_BYTES]),
             [0x42; VOICE_MEDIA_KEY_BYTES],
@@ -1479,6 +1701,7 @@ mod tests {
             );
         }
         for _ in 0..75 {
+            let valid_wire = encode_authenticated_voice_packet(expected, &packet).unwrap();
             assert_eq!(
                 admit_voice_ingress(&valid_wire, expected, 7, &mut limiter, start),
                 Some(packet.clone())
