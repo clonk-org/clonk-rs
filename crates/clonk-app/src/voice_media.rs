@@ -121,7 +121,9 @@ pub(crate) fn service_voice_media(
             player_id,
             captured.stream_epoch,
             captured.sequence,
-            captured.payload.to_vec(),
+            captured
+                .payload
+                .map_or_else(Vec::new, |payload| payload.to_vec()),
         ) {
             Ok(frame) => frame,
             Err(error) => {
@@ -129,7 +131,7 @@ pub(crate) fn service_voice_media(
                 continue;
             }
         };
-        if transport.send(frame, captured.captured_at).is_ok() {
+        if transport.send(frame, captured.captured_at).is_ok() && captured.payload.is_some() {
             state.note_local_frame(client_id, player_id, now);
         }
     }

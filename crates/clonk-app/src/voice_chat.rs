@@ -58,8 +58,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clonk_audio::{
-    EncodedVoiceFrame, VoiceCapture, VoiceCaptureError, VoiceCaptureOptions, VoiceEchoReference,
-    VoiceInputDeviceId, VoiceInputFrame, VoiceProcessingConfig, VoiceProcessingSwitches,
+    EncodedVoiceFrame, VoiceCapture, VoiceCaptureControl, VoiceCaptureError, VoiceCaptureOptions,
+    VoiceEchoReference, VoiceInputDeviceId, VoiceInputFrame, VoiceProcessingConfig,
+    VoiceProcessingSwitches,
 };
 use clonk_engine::{ObjectSnapshot, PlayerStatus, SimulationSnapshot};
 
@@ -146,7 +147,7 @@ pub(crate) struct CapturedVoiceFrame {
     pub(crate) stream_epoch: u32,
     pub(crate) sequence: u16,
     pub(crate) captured_at: Instant,
-    pub(crate) payload: EncodedVoiceFrame,
+    pub(crate) payload: Option<EncodedVoiceFrame>,
 }
 
 /// Decides which captured frames a voice-activated capture actually transmits.
@@ -203,6 +204,12 @@ pub(crate) struct AcceptedRemoteVoiceFrame {
 pub(crate) trait VoiceFrameSource {
     fn drain_frames(&self) -> Vec<VoiceInputFrame>;
 
+    fn finish_at(&self, _at: Instant) {}
+
+    fn is_finished(&self) -> bool {
+        true
+    }
+
     fn stream_generation(&self) -> u64 {
         0
     }
@@ -215,6 +222,14 @@ impl VoiceFrameSource for VoiceCapture {
 
     fn stream_generation(&self) -> u64 {
         self.stream_generation()
+    }
+
+    fn finish_at(&self, at: Instant) {
+        self.finish_at(at);
+    }
+
+    fn is_finished(&self) -> bool {
+        self.is_finished()
     }
 }
 
@@ -610,6 +625,8 @@ pub(crate) struct VoiceChatState {
     context: Option<VoiceChatContext>,
     activity: VoiceActivityTracker,
     capture: Option<Box<dyn VoiceFrameSource>>,
+    capture_control: Option<VoiceCaptureControl>,
+    finishing_capture: Option<Instant>,
     capture_opener: VoiceCaptureOpener,
     /// Shared with the live capture, so a settings change reaches the
     /// microphone thread on its next frame instead of waiting for the
@@ -666,6 +683,8 @@ impl VoiceChatState {
             context: None,
             activity: VoiceActivityTracker::default(),
             capture: None,
+            capture_control: None,
+            finishing_capture: None,
             capture_opener: Box::new(move |options| {
                 opener(options).map(|source| Box::new(source) as Box<dyn VoiceFrameSource>)
             }),
@@ -751,6 +770,16 @@ impl VoiceChatState {
         self.start_capture_on_device_at(key, echo_reference, input_device, Instant::now())
     }
 
+    pub(crate) fn capture_control(&self) -> Option<VoiceCaptureControl> {
+        self.capture_control.clone()
+    }
+
+    pub(crate) fn set_capture_control(&mut self, control: VoiceCaptureControl) {
+        if self.capture.is_none() {
+            self.capture_control = Some(control);
+        }
+    }
+
     fn start_capture_on_device_at(
         &mut self,
         key: Option<winit::keyboard::KeyCode>,
@@ -758,6 +787,9 @@ impl VoiceChatState {
         input_device: Option<VoiceInputDeviceId>,
         now: Instant,
     ) -> Result<(), VoiceCaptureError> {
+        if self.finishing_capture.is_some() {
+            self.stop_capture();
+        }
         if self.capture.is_some() {
             return Ok(());
         }
@@ -767,6 +799,10 @@ impl VoiceChatState {
         self.capture_key = key;
         self.capture_input_device = input_device.clone();
         let mut options = VoiceCaptureOptions::new(self.processing.clone());
+        options.control = self
+            .capture_control
+            .get_or_insert_with(VoiceCaptureControl::default)
+            .clone();
         options.input_device = input_device;
         options.echo_reference = echo_reference;
         let capture = match (self.capture_opener)(options) {
@@ -823,6 +859,12 @@ impl VoiceChatState {
         echo_reference: Option<VoiceEchoReference>,
         now: Instant,
     ) -> Result<(), VoiceCaptureError> {
+        if self.finishing_capture.is_some() {
+            if self.capture_input_device != input_device {
+                self.stop_capture();
+            }
+            return Ok(());
+        }
         if self.capture_input_device == input_device {
             if self.capture.is_none()
                 && self.capture_key.is_some()
@@ -842,6 +884,9 @@ impl VoiceChatState {
         let requested =
             self.capture.is_some() || self.capture_key.is_some() || self.activation_open_failed;
         let key = self.capture_key;
+        if let Some(control) = self.capture_control.take() {
+            control.abort();
+        }
         self.capture = None;
         self.capture_input_device = input_device.clone();
         self.next_capture_retry_at = None;
@@ -857,7 +902,11 @@ impl VoiceChatState {
     }
 
     pub(crate) fn stop_capture(&mut self) {
+        if let Some(control) = self.capture_control.take() {
+            control.abort();
+        }
         self.capture = None;
+        self.finishing_capture = None;
         self.capture_key = None;
         self.capture_input_device = None;
         self.next_capture_retry_at = None;
@@ -866,8 +915,20 @@ impl VoiceChatState {
         self.activation_gate.close();
     }
 
+    pub(crate) fn finish_capture_at(&mut self, at: Instant) {
+        self.capture_key = None;
+        self.next_capture_retry_at = None;
+        if let Some(control) = &self.capture_control {
+            control.finish_at(at);
+        }
+        if let Some(capture) = &self.capture {
+            self.finishing_capture.get_or_insert(at);
+            capture.finish_at(at);
+        }
+    }
+
     pub(crate) fn capture_active(&self) -> bool {
-        self.capture.is_some()
+        self.capture.is_some() && self.finishing_capture.is_none()
     }
 
     pub(crate) fn capture_key(&self) -> Option<winit::keyboard::KeyCode> {
@@ -875,7 +936,9 @@ impl VoiceChatState {
     }
 
     pub(crate) fn voice_activated_capture_requested(&self) -> bool {
-        self.capture_key.is_none() && (self.capture.is_some() || self.activation_open_failed)
+        self.finishing_capture.is_none()
+            && self.capture_key.is_none()
+            && (self.capture.is_some() || self.activation_open_failed)
     }
 
     /// `activation` is `Some` only in voice-activated mode, where it decides
@@ -888,6 +951,9 @@ impl VoiceChatState {
         let Some(capture) = self.capture.as_ref() else {
             return Vec::new();
         };
+        // Completion is sampled before draining: the last DSP enqueue must
+        // precede the end marker, even when completion races this pump.
+        let finished = capture.is_finished();
         let frames = capture.drain_frames();
         let generation = capture.stream_generation();
         if generation != self.capture_stream_generation {
@@ -899,7 +965,7 @@ impl VoiceChatState {
             self.activation_gate.close();
         }
         let now = Instant::now();
-        frames
+        let mut result = frames
             .into_iter()
             .filter(|frame| frame.is_fresh_at(now))
             .filter_map(|frame| match activation {
@@ -914,7 +980,21 @@ impl VoiceChatState {
             .collect::<Vec<_>>()
             .into_iter()
             .map(|(frame, reopened)| self.stamp_captured_frame(frame, reopened))
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(at) = self.finishing_capture.filter(|at| {
+            finished || now.saturating_duration_since(*at) >= Duration::from_millis(160)
+        }) {
+            if self.transmitted_in_epoch {
+                result.push(CapturedVoiceFrame {
+                    stream_epoch: self.stream_epoch,
+                    sequence: self.next_sequence,
+                    captured_at: at,
+                    payload: None,
+                });
+            }
+            self.stop_capture();
+        }
+        result
     }
 
     fn stamp_captured_frame(
@@ -944,7 +1024,7 @@ impl VoiceChatState {
             captured_at: frame
                 .capture_timing()
                 .map_or_else(Instant::now, |timing| timing.captured_at),
-            payload: frame.payload,
+            payload: Some(frame.payload),
         }
     }
 
@@ -2554,6 +2634,36 @@ mod tests {
                 .map(|frame| (frame.sequence, frame.captured_at))
                 .collect::<Vec<_>>(),
             vec![(0, now), (3, now)]
+        );
+    }
+
+    #[test]
+    fn push_to_talk_release_sends_captured_speech_then_one_end_marker() {
+        let mut voice =
+            VoiceChatState::with_capture_opener(|_| Ok(TestVoiceSource::with_levels(&[0.8, 0.7])));
+        voice
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
+            .unwrap();
+        voice.finish_capture_at(Instant::now());
+        assert!(!voice.capture_active());
+        assert!(voice.capture_key().is_none());
+        let frames = voice.drain_captured_frames(None);
+        assert_eq!(
+            frames
+                .iter()
+                .map(|f| (f.stream_epoch, f.sequence, f.payload.is_some()))
+                .collect::<Vec<_>>(),
+            vec![(1, 0, true), (1, 1, true), (1, 2, false)]
+        );
+        assert!(voice.drain_captured_frames(None).is_empty());
+        voice
+            .start_capture(Some(winit::keyboard::KeyCode::Backquote), None)
+            .unwrap();
+        voice.finish_capture_at(Instant::now());
+        voice.stop_capture();
+        assert!(
+            voice.drain_captured_frames(None).is_empty(),
+            "privacy cancellation overrides graceful release"
         );
     }
 

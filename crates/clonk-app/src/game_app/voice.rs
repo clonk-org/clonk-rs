@@ -101,7 +101,11 @@ impl GameApp {
             crate::voice_chat::PushToTalkAction::Ignore => return false,
             crate::voice_chat::PushToTalkAction::Consume => return true,
             crate::voice_chat::PushToTalkAction::Stop => {
-                self.voice_chat.stop_capture();
+                if eligible && self.voice_chat_enabled() {
+                    self.voice_chat.finish_capture_at(Instant::now());
+                } else {
+                    self.voice_chat.stop_capture();
+                }
                 return true;
             }
             crate::voice_chat::PushToTalkAction::Start => {}

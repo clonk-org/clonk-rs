@@ -144,6 +144,17 @@ impl VoiceChatService {
             worker.request_capture(None);
         }
     }
+    pub(crate) fn finish_capture_at(&mut self, at: Instant) {
+        #[cfg(test)]
+        if let Some(state) = self.manual.as_mut() {
+            state.finish_capture_at(at);
+            return;
+        }
+        self.pending_key = None;
+        if let Some(worker) = &self.worker {
+            worker.finish_capture_at(at);
+        }
+    }
     pub(crate) fn capture_key(&self) -> Option<KeyCode> {
         #[cfg(test)]
         if let Some(state) = self.manual.as_ref() {

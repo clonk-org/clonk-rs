@@ -4,6 +4,7 @@ mod midi;
 mod mixer;
 mod tracker;
 mod voice;
+mod voice_capture_control;
 mod voice_codec;
 // Without the `cpal` feature nothing can open a microphone, so the capture-side
 // halves of these two have no caller in that build. They still compile, and
@@ -25,6 +26,7 @@ pub use voice::{
     VoiceCaptureOptions, VoiceCaptureStatus, VoiceCaptureTiming, VoiceInputDevice,
     VoiceInputDeviceId, VoiceInputDeviceIdParseError, VoiceInputFrame, VOICE_CAPTURE_QUEUE_FRAMES,
 };
+pub use voice_capture_control::VoiceCaptureControl;
 #[cfg(any(test, feature = "test-hooks"))]
 pub use voice_codec::test_encode_voice_frame;
 pub use voice_codec::{

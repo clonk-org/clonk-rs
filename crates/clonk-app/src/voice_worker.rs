@@ -10,7 +10,7 @@ use crate::voice_chat::{
     voice_stream_id, RemoteVoicePlayoutStats, VoiceActivityTracker, VoiceChatState,
 };
 use crate::voice_media::{service_voice_media, VoiceMediaPolicy, VoiceMediaTransport};
-use clonk_audio::AudioWorkerHandle;
+use clonk_audio::{AudioWorkerHandle, VoiceCaptureControl};
 use parking_lot::Mutex;
 use winit::keyboard::KeyCode;
 
@@ -21,6 +21,8 @@ struct WorkerControl {
     privacy_revision: u64,
     policy: Option<VoiceMediaPolicy>,
     capture_key: Option<KeyCode>,
+    capture_control: VoiceCaptureControl,
+    finish_capture_at: Option<Instant>,
     capture_suspended: bool,
     capture_revision: u64,
     clear_revision: u64,
@@ -56,6 +58,8 @@ impl VoiceMediaWorker {
             privacy_revision: 1,
             policy: Some(policy),
             capture_key: None,
+            capture_control: VoiceCaptureControl::default(),
+            finish_capture_at: None,
             capture_suspended: false,
             capture_revision: 0,
             clear_revision: 0,
@@ -87,6 +91,7 @@ impl VoiceMediaWorker {
                     (control.revision != revision).then(|| WorkerControl {
                         revision: control.revision, privacy_revision: control.privacy_revision, policy: control.policy.clone(),
                         capture_key: control.capture_key, capture_suspended: control.capture_suspended, capture_revision: control.capture_revision,
+                        capture_control: control.capture_control.clone(), finish_capture_at: control.finish_capture_at,
                         clear_revision: control.clear_revision, muted: control.muted.clone(),
                         forgotten: std::mem::take(&mut control.forgotten),
                         transport: control.transport.take(), audio: control.audio.take(),
@@ -122,7 +127,14 @@ impl VoiceMediaWorker {
                         muted.clone_from(&control.muted);
                         if capture_revision != control.capture_revision {
                             capture_revision = control.capture_revision;
-                            state.stop_capture();
+                            if let Some(at) = control.finish_capture_at {
+                                state.finish_capture_at(at);
+                            } else {
+                                state.stop_capture();
+                            }
+                        }
+                        if control.capture_control.is_recording() {
+                            state.set_capture_control(control.capture_control.clone());
                         }
                         capture_key = control.capture_key;
                 }
@@ -155,8 +167,11 @@ impl VoiceMediaWorker {
                     service_voice_media(&mut state, policy, &mut guarded, &audio, Instant::now());
                 }
                 // Never publish a status from before a mute/privacy update.
-                let control = thread_control.lock();
+                let mut control = thread_control.lock();
                 if control.revision == revision {
+                    if let Some(capture_control) = state.capture_control() {
+                        control.capture_control = capture_control;
+                    }
                     *thread_status.lock() = WorkerStatus {
                         activity: state.activity_snapshot(),
                         capture_active: state.capture_active(),
@@ -204,6 +219,14 @@ impl VoiceMediaWorker {
                 || old.activation != policy.activation
                 || old.input_device != policy.input_device
         }) || transport.is_some();
+        if privacy_changed {
+            control.capture_control.abort();
+            control.capture_control = VoiceCaptureControl::default();
+            control.finish_capture_at = None;
+            control.capture_revision = control.capture_revision.wrapping_add(1);
+        } else if control.capture_control.is_aborted() && control.finish_capture_at.is_none() {
+            control.capture_control = VoiceCaptureControl::default();
+        }
         control.capture_suspended = false;
         control.policy = Some(policy);
         if transport.is_some() {
@@ -220,8 +243,24 @@ impl VoiceMediaWorker {
 
     pub(crate) fn request_capture(&self, key: Option<KeyCode>) {
         let mut control = self.control.lock();
+        control.capture_control.abort();
+        control.capture_control = VoiceCaptureControl::default();
+        control.finish_capture_at = None;
         control.capture_key = key;
         control.capture_suspended = key.is_none();
+        control.capture_revision = control.capture_revision.wrapping_add(1);
+        control.privacy_revision = control.privacy_revision.wrapping_add(1);
+        control.revision = control.revision.wrapping_add(1);
+        drop(control);
+        self.thread.thread().unpark();
+    }
+
+    pub(crate) fn finish_capture_at(&self, at: Instant) {
+        let mut control = self.control.lock();
+        control.capture_control.finish_at(at);
+        control.capture_key = None;
+        control.capture_suspended = false;
+        control.finish_capture_at.get_or_insert(at);
         control.capture_revision = control.capture_revision.wrapping_add(1);
         control.privacy_revision = control.privacy_revision.wrapping_add(1);
         control.revision = control.revision.wrapping_add(1);
@@ -233,7 +272,7 @@ impl VoiceMediaWorker {
         self.control.lock().capture_key
     }
     pub(crate) fn capture_active(&self) -> bool {
-        self.status.lock().capture_active
+        self.control.lock().finish_capture_at.is_none() && self.status.lock().capture_active
     }
     pub(crate) fn active_speakers(&self, now: Instant) -> Vec<(i32, i32)> {
         self.status.lock().activity.active_speakers(now)
@@ -253,6 +292,8 @@ impl VoiceMediaWorker {
         let streams = self.stream_keys();
         let mut control = self.control.lock();
         control.policy = None;
+        control.capture_control.abort();
+        control.finish_capture_at = None;
         control.capture_key = None;
         control.clear_revision = control.clear_revision.wrapping_add(1);
         control.privacy_revision = control.privacy_revision.wrapping_add(1);
@@ -330,6 +371,7 @@ impl VoiceMediaTransport for PrivacyGuardedTransport<'_> {
 impl Drop for VoiceMediaWorker {
     fn drop(&mut self) {
         let mut control = self.control.lock();
+        control.capture_control.abort();
         control.privacy_revision = control.privacy_revision.wrapping_add(1);
         drop(control);
         self.running.store(false, Ordering::Release);
@@ -396,6 +438,57 @@ mod tests {
             processing: VoiceProcessingConfig::DISABLED,
             input_device: None,
         }
+    }
+
+    #[test]
+    fn push_to_talk_release_flushes_and_ends_without_a_game_update() {
+        let (tx, rx) = mpsc::sync_channel(32);
+        let audio = clonk_audio::AudioSystem::new_manual_with_resampling(
+            8,
+            clonk_audio::ResamplingMode::Linear,
+        );
+        let mut policy = policy();
+        policy.activation = None;
+        let worker = VoiceMediaWorker::spawn(
+            || {
+                VoiceChatState::with_source_opener(|_| {
+                    Ok(TimedSource {
+                        next: Cell::new(Instant::now()),
+                        frame: VoiceInputFrame::test_frame(
+                            clonk_audio::test_encode_voice_frame(
+                                &[1_000; clonk_audio::VOICE_FRAME_SAMPLES],
+                            )
+                            .unwrap(),
+                            1.0,
+                        ),
+                    })
+                })
+            },
+            policy,
+            TestTransport(tx),
+            audio.worker_handle(),
+        )
+        .unwrap();
+        worker.request_capture(Some(KeyCode::Backquote));
+        assert!(!rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .payload
+            .is_empty());
+        worker.finish_capture_at(Instant::now());
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            let frame = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("release must flush an end marker without a game update");
+            if frame.payload.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            rx.recv_timeout(Duration::from_millis(40)).is_err(),
+            "capture continued after its end marker"
+        );
     }
     #[test]
     fn disabling_voice_during_a_slow_microphone_open_is_nonblocking_and_sends_nothing() {

@@ -97,6 +97,14 @@ pub(crate) struct VoiceProcessing {
 }
 
 impl VoiceProcessing {
+    pub(crate) fn delay_samples(&self) -> usize {
+        if self.switches.get().noise_suppression {
+            VOICE_FRAME_SAMPLES
+        } else {
+            0
+        }
+    }
+
     pub(crate) fn new(
         switches: Arc<VoiceProcessingSwitches>,
         echo_reference: Option<VoiceEchoReference>,

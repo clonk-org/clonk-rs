@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::VoiceCaptureControl;
 use thiserror::Error;
 
 use crate::voice_echo::VoiceEchoReference;
@@ -231,6 +232,7 @@ struct CaptureStreamEvent {
 struct CaptureStreamCallbacks {
     generation: u64,
     stopped: Arc<AtomicBool>,
+    control: VoiceCaptureControl,
     frames: CaptureFrameQueue,
     dropped_frames: Arc<AtomicU64>,
     active_generation: Arc<AtomicU64>,
@@ -243,6 +245,7 @@ struct CaptureStreamCallbacks {
 impl CaptureStreamCallbacks {
     fn send_frame(&self, frame: VoiceInputFrame) {
         if self.stopped.load(Ordering::Acquire)
+            || self.control.is_aborted()
             || self.active_generation.load(Ordering::Acquire) != self.generation
         {
             return;
@@ -368,7 +371,7 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
     }
 
     fn ensure_requested(&self) -> Result<(), VoiceCaptureError> {
-        if self.stopped.load(Ordering::Acquire) {
+        if self.stopped.load(Ordering::Acquire) || !self.options.control.is_recording() {
             Err(VoiceCaptureError::Cancelled)
         } else {
             Ok(())
@@ -402,6 +405,7 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
         let callbacks = CaptureStreamCallbacks {
             generation: callback_generation,
             stopped: self.stopped.clone(),
+            control: self.options.control.clone(),
             frames: self.frames.clone(),
             dropped_frames: self.dropped_frames.clone(),
             active_generation: self.active_generation.clone(),
@@ -588,6 +592,9 @@ impl<B: VoiceCaptureBackend> VoiceCaptureManager<B> {
 /// far-end signal the echo canceller needs.
 #[derive(Clone, Debug)]
 pub struct VoiceCaptureOptions {
+    /// Shared with the caller so release and privacy revocation reach the
+    /// callback immediately, even while the media worker is busy.
+    pub control: VoiceCaptureControl,
     /// `None` follows the system default. `Some` opens only the matching CPAL
     /// endpoint ID; this layer never substitutes another ID. An endpoint may
     /// itself be a host routing alias (notably under ALSA).
@@ -604,6 +611,7 @@ pub struct VoiceCaptureOptions {
 impl VoiceCaptureOptions {
     pub fn new(processing: Arc<VoiceProcessingSwitches>) -> Self {
         Self {
+            control: VoiceCaptureControl::default(),
             input_device: None,
             processing,
             echo_reference: None,
@@ -659,6 +667,7 @@ fn cpal_capture_error(error: cpal::Error) -> VoiceCaptureError {
 /// recovery and closing run on a dedicated worker, including initial failures.
 /// Merely constructing an audio system never requests microphone permission.
 pub struct VoiceCapture {
+    control: VoiceCaptureControl,
     frames: CaptureFrameQueue,
     dropped_frames: Arc<AtomicU64>,
     active_generation: Arc<AtomicU64>,
@@ -686,6 +695,9 @@ impl VoiceCapture {
     /// Drains fresh audio without performing device IO. A batch belongs to
     /// exactly one capture generation, even if a device changes concurrently.
     pub fn drain_frames(&self) -> Vec<VoiceInputFrame> {
+        if self.control.is_aborted() {
+            return Vec::new();
+        }
         let generation = self.active_generation.load(Ordering::Acquire);
         let now = Instant::now();
         let frames = std::iter::from_fn(|| self.frames.pop())
@@ -721,6 +733,16 @@ impl VoiceCapture {
             .clone()
     }
 
+    /// Stop acquiring samples at `at`, then drain the bounded processor tail.
+    /// Dropping the capture instead aborts and discards all pending speech.
+    pub fn finish_at(&self, at: Instant) {
+        self.control.finish_at(at);
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.control.is_finished()
+    }
+
     pub fn dropped_frames(&self) -> u64 {
         self.dropped_frames.load(Ordering::Relaxed)
     }
@@ -740,6 +762,7 @@ impl VoiceCapture {
         let stopped = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Mutex::new(VoiceCaptureStatus::Opening));
         let capture = Self {
+            control: options.control.clone(),
             frames: frames.clone(),
             dropped_frames: dropped_frames.clone(),
             active_generation: active_generation.clone(),
@@ -768,7 +791,7 @@ impl VoiceCapture {
                             .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
                     };
                 set_status(manager.open_initial(), &manager);
-                while !stopped.load(Ordering::Acquire) {
+                while !stopped.load(Ordering::Acquire) && manager.options.control.is_recording() {
                     let now = Instant::now();
                     let poll_due = now >= manager.next_poll;
                     let had_stream = manager.active.is_some();
@@ -778,7 +801,16 @@ impl VoiceCapture {
                     }
                     std::thread::park_timeout(Duration::from_millis(5));
                 }
-                manager.deactivate();
+                if manager.options.control.finish_time().is_some()
+                    && !manager.options.control.is_aborted()
+                {
+                    // Closing the producer flushes its authorized tail. Keep
+                    // this generation valid until the consumer drains it.
+                    drop(manager.active.take());
+                } else {
+                    manager.deactivate();
+                }
+                manager.options.control.device_closed();
             })
             .map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
         Ok(capture)
@@ -787,6 +819,7 @@ impl VoiceCapture {
 
 impl Drop for VoiceCapture {
     fn drop(&mut self) {
+        self.control.abort();
         #[cfg(any(feature = "cpal", test))]
         self.stopped.store(true, Ordering::Release);
         self.active_generation.store(0, Ordering::Release);
@@ -936,6 +969,7 @@ where
     use cpal::traits::DeviceTrait;
 
     let stopped = callbacks.stopped.clone();
+    let control = options.control.clone();
     let error_callbacks = callbacks.clone();
     let raw_frames = Arc::new(crossbeam_queue::ArrayQueue::<RawCapturedFrame>::new(
         VOICE_CAPTURE_QUEUE_FRAMES,
@@ -950,15 +984,21 @@ where
     // only raw producer; it then drains its bounded tail and exits.
     let encoder =
         crate::VoiceEncoder::new().map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
+    let processing_guard = control.processing_guard();
     std::thread::Builder::new()
         .name("voice-capture".to_owned())
         .spawn(move || {
+            let _processing_guard = processing_guard;
             let mut sink = ProcessedCaptureSink {
                 encoder,
                 processing: VoiceProcessing::new(options.processing, options.echo_reference),
                 callbacks,
+                last_timing: None,
             };
             loop {
+                if sink.callbacks.control.is_aborted() {
+                    break;
+                }
                 if let Some(mut frame) = raw_rx.pop() {
                     sink.process(&mut frame.samples, frame.timing);
                 } else if raw_closed.load(Ordering::Acquire) {
@@ -970,6 +1010,7 @@ where
                     std::thread::park_timeout(Duration::from_millis(2));
                 }
             }
+            sink.finish();
         })
         .map_err(|error| VoiceCaptureError::Stream(error.to_string()))?;
     let mut processor = VoiceCaptureProcessor::new_with_sink(
@@ -980,6 +1021,7 @@ where
             closed,
             dropped_frames,
         },
+        control,
     )?;
     device
         .build_input_stream(
@@ -1046,6 +1088,8 @@ impl_voice_input_sample!(
 #[cfg(any(feature = "cpal", test))]
 trait CaptureFrameSink {
     fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES], timing: VoiceCaptureTiming);
+
+    fn finish(&mut self) {}
 }
 
 #[cfg(any(feature = "cpal", test))]
@@ -1053,6 +1097,7 @@ struct ProcessedCaptureSink {
     encoder: crate::VoiceEncoder,
     processing: VoiceProcessing,
     callbacks: CaptureStreamCallbacks,
+    last_timing: Option<VoiceCaptureTiming>,
 }
 
 #[cfg(any(feature = "cpal", test))]
@@ -1064,6 +1109,7 @@ impl CaptureFrameSink for ProcessedCaptureSink {
                 .fetch_add(1, Ordering::Relaxed);
             return;
         }
+        self.last_timing = Some(timing);
         let level = self.processing.process(frame);
         let samples = std::array::from_fn(|index| voice_f32_to_i16(frame[index]));
         match self.encoder.encode(&samples) {
@@ -1077,6 +1123,32 @@ impl CaptureFrameSink for ProcessedCaptureSink {
                 self.callbacks.report(CaptureStreamEventAction::Invalidate);
             }
         }
+    }
+
+    fn finish(&mut self) {
+        let Some(mut timing) = self.last_timing.take() else {
+            return;
+        };
+        if self.callbacks.control.finish_time().is_none() || self.callbacks.control.is_aborted() {
+            return;
+        }
+        let lookahead = match self.encoder.lookahead_samples() {
+            Ok(samples) => samples,
+            Err(error) => {
+                tracing::warn!(%error, "voice encoder could not flush capture");
+                return;
+            }
+        };
+        let frames = (self.processing.delay_samples() + lookahead).div_ceil(VOICE_FRAME_SAMPLES);
+        for _ in 0..frames.min(2) {
+            timing.sample_offset = timing
+                .sample_offset
+                .saturating_add(VOICE_FRAME_SAMPLES as u64);
+            // The deadline stays attached to the last real input. Padding
+            // releases the DSP/codec tail; it is never new microphone audio.
+            self.process(&mut [0.0; VOICE_FRAME_SAMPLES], timing);
+        }
+        self.last_timing = None;
     }
 }
 
@@ -1117,7 +1189,9 @@ impl Drop for RawCaptureSink {
 }
 
 #[cfg(any(feature = "cpal", test))]
-struct VoiceCaptureProcessor<S> {
+struct VoiceCaptureProcessor<S: CaptureFrameSink> {
+    control: VoiceCaptureControl,
+    finished: bool,
     channels: usize,
     sample_rate: u32,
     frame_capture_time: Option<Instant>,
@@ -1138,6 +1212,7 @@ impl VoiceCaptureProcessor<ProcessedCaptureSink> {
         processing: VoiceProcessing,
     ) -> Result<Self, VoiceCaptureError> {
         let (events, _) = std::sync::mpsc::sync_channel(1);
+        let control = VoiceCaptureControl::default();
         Self::new_with_sink(
             sample_rate,
             channels,
@@ -1148,6 +1223,7 @@ impl VoiceCaptureProcessor<ProcessedCaptureSink> {
                 callbacks: CaptureStreamCallbacks {
                     generation: 1,
                     stopped: Arc::new(AtomicBool::new(false)),
+                    control: control.clone(),
                     frames: sender,
                     dropped_frames,
                     active_generation: Arc::new(AtomicU64::new(1)),
@@ -1155,16 +1231,25 @@ impl VoiceCaptureProcessor<ProcessedCaptureSink> {
                     route_changed_generation: Arc::new(AtomicU64::new(0)),
                     events,
                 },
+                last_timing: None,
             },
+            control,
         )
     }
 }
 
 #[cfg(any(feature = "cpal", test))]
 impl<S: CaptureFrameSink> VoiceCaptureProcessor<S> {
-    fn new_with_sink(sample_rate: u32, channels: u16, sink: S) -> Result<Self, VoiceCaptureError> {
+    fn new_with_sink(
+        sample_rate: u32,
+        channels: u16,
+        sink: S,
+        control: VoiceCaptureControl,
+    ) -> Result<Self, VoiceCaptureError> {
         validate_capture_config(sample_rate, channels)?;
         Ok(Self {
+            control,
+            finished: false,
             channels: usize::from(channels),
             sample_rate,
             frame_capture_time: None,
@@ -1182,9 +1267,15 @@ impl<S: CaptureFrameSink> VoiceCaptureProcessor<S> {
     }
 
     fn process_interleaved_at<T: VoiceInputSample>(&mut self, input: &[T], captured_at: Instant) {
+        if self.finished {
+            return;
+        }
         for (index, input_frame) in input.chunks_exact(self.channels).enumerate() {
             let sample_time =
                 captured_at + Duration::from_secs_f64(index as f64 / f64::from(self.sample_rate));
+            if !self.control.accepts_sample_at(sample_time) {
+                break;
+            }
             let mono = input_frame
                 .iter()
                 .map(|sample| sample.to_voice_f32())
@@ -1216,6 +1307,70 @@ impl<S: CaptureFrameSink> VoiceCaptureProcessor<S> {
                     *frame_capture_time = None;
                 }
             });
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.finished || self.control.is_aborted() {
+            return;
+        }
+        self.finished = true;
+        if self.sample_count == 0 && self.sample_offset == 0 {
+            return;
+        }
+        let captured_at = self
+            .frame_capture_time
+            .unwrap_or_else(|| self.control.finish_time().unwrap_or_else(Instant::now));
+        // Flush the causal resampler using synthetic silence, never another
+        // device read. At most one extra raw frame is needed at supported rates.
+        for _ in 0..VOICE_ANTI_ALIAS_TAPS {
+            let Self {
+                resampler,
+                frame,
+                sample_count,
+                sample_offset,
+                sink,
+                ..
+            } = self;
+            resampler.push_sample(0.0, |sample| {
+                frame[*sample_count] = sample;
+                *sample_count += 1;
+                if *sample_count == VOICE_FRAME_SAMPLES {
+                    sink.process(
+                        frame,
+                        VoiceCaptureTiming {
+                            captured_at,
+                            sample_offset: *sample_offset,
+                        },
+                    );
+                    *sample_offset = sample_offset.saturating_add(VOICE_FRAME_SAMPLES as u64);
+                    *sample_count = 0;
+                }
+            });
+        }
+        if self.sample_count > 0 {
+            self.frame[self.sample_count..].fill(0.0);
+            self.sink.process(
+                &mut self.frame,
+                VoiceCaptureTiming {
+                    captured_at,
+                    sample_offset: self.sample_offset,
+                },
+            );
+            self.sample_offset = self
+                .sample_offset
+                .saturating_add(VOICE_FRAME_SAMPLES as u64);
+            self.sample_count = 0;
+        }
+        self.sink.finish();
+    }
+}
+
+#[cfg(any(feature = "cpal", test))]
+impl<S: CaptureFrameSink> Drop for VoiceCaptureProcessor<S> {
+    fn drop(&mut self) {
+        if self.control.finish_time().is_some() {
+            self.finish();
         }
     }
 }
@@ -1721,6 +1876,38 @@ mod tests {
             observed.opens().is_empty(),
             "cancelled capture opened a microphone after permission was revoked"
         );
+    }
+
+    #[test]
+    fn release_during_device_initialization_finishes_without_opening_late() {
+        let default = input_device_id("test:default");
+        let backend = FakeCaptureBackend::new(CaptureDeviceInventory {
+            default: Some(default.clone()),
+            inputs: vec![default],
+        });
+        let observed = backend.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let options = VoiceCaptureOptions::new(VoiceProcessingSwitches::new(
+            VoiceProcessingConfig::DISABLED,
+        ));
+        let control = options.control.clone();
+        let capture = VoiceCapture::open_with_backend(options, move || {
+            wait.recv().unwrap();
+            backend
+        })
+        .unwrap();
+        control.finish_at(Instant::now());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !capture.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(capture.is_finished());
+        assert!(
+            observed.opens().is_empty(),
+            "a released key cannot open a microphone later"
+        );
+        assert!(capture.drain_frames().is_empty());
     }
 
     #[test]
@@ -2362,8 +2549,13 @@ mod tests {
                 self.0.push(*frame);
             }
         }
-        let mut processor =
-            VoiceCaptureProcessor::new_with_sink(96_000, 2, SampleSink::default()).unwrap();
+        let mut processor = VoiceCaptureProcessor::new_with_sink(
+            96_000,
+            2,
+            SampleSink::default(),
+            VoiceCaptureControl::default(),
+        )
+        .unwrap();
         let stereo = [1_000.0 / 32_768.0, 3_000.0 / 32_768.0].repeat(1_920);
         processor.process_interleaved(&stereo[..734]);
         assert!(processor.sink.0.is_empty());
@@ -2372,6 +2564,98 @@ mod tests {
         assert!(processor.sink.0[0]
             .iter()
             .all(|sample| (sample * 32_768.0 - 2_000.0).abs() <= 1.0));
+    }
+
+    #[test]
+    fn releasing_capture_flushes_the_partial_frame_without_recording_after_release() {
+        #[derive(Default)]
+        struct SampleSink(Vec<[f32; VOICE_FRAME_SAMPLES]>);
+        impl CaptureFrameSink for SampleSink {
+            fn process(
+                &mut self,
+                frame: &mut [f32; VOICE_FRAME_SAMPLES],
+                _timing: VoiceCaptureTiming,
+            ) {
+                self.0.push(*frame);
+            }
+        }
+        let control = VoiceCaptureControl::default();
+        let start = Instant::now();
+        let cutoff = start + Duration::from_millis(25);
+        control.finish_at(cutoff);
+        let mut processor = VoiceCaptureProcessor::new_with_sink(
+            VOICE_SAMPLE_RATE,
+            1,
+            SampleSink::default(),
+            control,
+        )
+        .unwrap();
+        // A delayed callback contains speech from before and after the key
+        // release. Only the first 25 ms is authorized.
+        let mut samples = vec![0.25; VOICE_FRAME_SAMPLES * 2];
+        samples[1_200..].fill(0.75);
+        processor.process_interleaved_at(&samples, start);
+        processor.finish();
+        processor.finish();
+        assert_eq!(processor.sink.0.len(), 2, "flush is bounded and idempotent");
+        assert!(processor.sink.0[0].iter().all(|&sample| sample == 0.25));
+        assert!(processor.sink.0[1][..240]
+            .iter()
+            .all(|&sample| sample == 0.25));
+        assert!(processor.sink.0[1][240..]
+            .iter()
+            .all(|&sample| sample == 0.0));
+    }
+
+    #[test]
+    fn released_speech_survives_noise_suppression_and_codec_lookahead() {
+        let frames = Arc::new(crossbeam_queue::ArrayQueue::new(8));
+        let mut processor = VoiceCaptureProcessor::new(
+            VOICE_SAMPLE_RATE,
+            1,
+            frames.clone(),
+            Arc::new(AtomicU64::new(0)),
+            VoiceProcessing::new(
+                VoiceProcessingSwitches::new(VoiceProcessingConfig::default()),
+                None,
+            ),
+        )
+        .unwrap();
+        let start = Instant::now();
+        let samples = (0..1_200)
+            .map(|i| {
+                (std::f32::consts::TAU * 800.0 * i as f32 / VOICE_SAMPLE_RATE as f32).sin() * 0.25
+            })
+            .collect::<Vec<_>>();
+        processor.process_interleaved_at(&samples, start);
+        processor
+            .control
+            .finish_at(start + Duration::from_millis(25));
+        let lookahead = processor.sink.encoder.lookahead_samples().unwrap();
+        processor.finish();
+        let mut decoder = crate::VoiceDecoder::new().unwrap();
+        let decoded = std::iter::from_fn(|| frames.pop())
+            .flat_map(|frame| decoder.decode(&frame.frame.payload, false).unwrap())
+            .collect::<Vec<_>>();
+        let end = VOICE_FRAME_SAMPLES + lookahead + samples.len();
+        assert!(
+            decoded.len() >= end,
+            "processor delays must not truncate the final syllable"
+        );
+        let tail_rms = (decoded[end - 200..end]
+            .iter()
+            .map(|&s| f64::from(s).powi(2))
+            .sum::<f64>()
+            / 200.0)
+            .sqrt();
+        assert!(
+            tail_rms > 1_000.0,
+            "the final speech was lost: RMS {tail_rms}"
+        );
+        assert!(
+            decoded.len() <= VOICE_FRAME_SAMPLES * 4,
+            "the tail must stay bounded"
+        );
     }
 
     #[test]
