@@ -1,6 +1,6 @@
 # Speaking icon
 
-`planet/Graphics.c4g/Speaking.png` is a 320×320 RGBA super-resolution
+`crates/clonk-app/assets/Speaking.png` is a 320×320 RGBA super-resolution
 adaptation of the original 40×40 sound icon in `GUIIcons.png`: phase 23,
 rectangle `(200, 120, 40, 40)`. It retains the silver speaker and two gold
 sound-wave arcs, with a refined rear basket and magnet connection for more
@@ -8,7 +8,12 @@ realistic construction. The talking overlay still occupies 20×20 logical pixels
 
 Source artwork: RedWolf Design and Jonathan Veit (AniProGuy).
 License: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/),
-as recorded in `planet/Graphics.c4g/COPYING`.
+as recorded in `crates/clonk-app/assets/COPYING`.
+
+The app embeds and caches this port-owned voice-chat asset. The legacy
+`planet` resource tree remains identical to the presentation oracle's pinned
+inputs. The renderer can still use the atlas sound icon as a fallback when
+no standalone sprite is supplied.
 
 Created using the built-in OpenAI imagegen tool on 2026-09-21. The reference
 inputs were the original cell and a 640×640 enlargement of that cell.

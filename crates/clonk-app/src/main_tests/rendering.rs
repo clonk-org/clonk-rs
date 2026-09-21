@@ -1960,6 +1960,15 @@ fn viewport_overlay_collection_skips_unpresented_remote_players() {
 }
 
 #[test]
+fn speaking_icon_is_embedded_without_legacy_graphics_resources() {
+    let assets = FrontendAssets::load(None);
+    let icon = assets.dialog_image("Speaking.png").test_value();
+    main_assert_eq!((icon.width(), icon.height()) => (320, 320));
+    main_assert!(icon.pixels().chunks_exact(4).any(|pixel| pixel[3] == 0));
+    main_assert!(icon.pixels().chunks_exact(4).any(|pixel| pixel[3] == 255));
+}
+
+#[test]
 fn speaking_overlay_maps_authenticated_player_to_selected_cursor() {
     let mut app = new_lightweight_running_sandbox_app();
     let (player_id, selected) = {

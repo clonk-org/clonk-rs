@@ -18,7 +18,6 @@ If no author is specified, the file was authored by RedWolf Design.
 
 Multiple contributors:
 GUIIcons.png: RedWolf Design, Jonathan Veit (AniProGuy)
-Speaking.png: high-resolution adaptation of the GUIIcons.png sound icon by RedWolf Design and Jonathan Veit (AniProGuy), with refined speaker construction, generated with OpenAI imagegen for Clonk Rust in 2026; see docs/art/speaking-icon.md for the source and prompts. The CC BY-NC 4.0 license above applies.
 LoaderGoldmine1.png, LoaderWatercave1.png, StartupMainMenuBG.png: Matthes Bender (matthes), Christopher Graulich (Funni)
 CursorXLarge.png, CursorXXLarge.png, CursorXXXLarge.png, CursorXXXXLarge.png, CursorXXXXXLarge.png: Arthur Möller (Aqua), Markus Mittendrein (Der Tod)
 Logo.png: based on LegacyClonk artwork by Jonathan Veit (AniProGuy) and Markus Mittendrein (Der Tod); modified for Clonk Rust by syb0rg in 2026
