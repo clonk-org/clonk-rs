@@ -2649,14 +2649,12 @@ impl GameApp {
                 }
             }
         }
-        let voice_enabled = audio_options.voice_enabled;
+        // Negotiate transport capability independently of microphone opt-in.
+        // The live media policy owns capture and playback, so enabling voice
+        // from the in-game setup panel does not need another connection.
         let network_mode = runtime.network.clone();
         let network = match network_mode.clone() {
-            Some(mode) => Some(NetworkManager::for_mode_with_voice_enabled(
-                mode,
-                runtime.player_owner,
-                voice_enabled,
-            )?),
+            Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
             None => None,
         };
         let player_name = runtime.player_name.clone();

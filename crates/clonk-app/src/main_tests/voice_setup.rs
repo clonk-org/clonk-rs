@@ -124,3 +124,63 @@ fn closing_voice_setup_refreshes_the_underlying_audio_options() {
         .sound()
         .checkbox(SoundCheckboxId::VoiceEnabled));
 }
+
+#[test]
+fn a_client_negotiates_voice_before_microphone_opt_in() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let host = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        clonk_network::start_host(
+            listener,
+            clonk_network::HostConfig {
+                udp_bind_address: Some("127.0.0.1:0".parse().unwrap()),
+                ..clonk_network::HostConfig::default()
+            },
+        )
+        .await
+        .unwrap()
+    });
+    let address = host.udp_local_addr().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let mut settings = ClientSettings::new(address, "Voice setup test").with_join_attempts([
+        clonk_network::NetworkAddress::new(clonk_network::NetworkProtocol::Udp, address),
+    ]);
+    settings.resource_directory = files.path().to_owned();
+    let app = GameApp::new(
+        640,
+        480,
+        AudioOptions {
+            voice_enabled: false,
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        },
+        None,
+        RuntimeConfig {
+            player_owner: 1,
+            player_name: "Voice setup test".into(),
+            network: Some(NetworkMode::Client(settings)),
+            record_enabled: false,
+        },
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !app.netplay.manager.as_ref().unwrap().voice_available() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let negotiated = app.netplay.manager.as_ref().unwrap().voice_available();
+    assert!(!app.voice_chat_enabled());
+    assert!(!app.voice_chat.capture_active());
+    drop(app);
+    runtime.block_on(host.shutdown()).unwrap();
+    assert!(
+        negotiated,
+        "local microphone opt-in must not require reconnecting to negotiate UDP voice"
+    );
+}

@@ -5572,7 +5572,6 @@ impl GameApp {
         let (sender, receiver) = mpsc::channel();
         let (preparation_sender, preparation_receiver) = mpsc::channel();
         let local_owner = self.players.local_owner;
-        let voice_enabled = self.voice_chat_enabled();
         let spawn = thread::Builder::new()
             .name("lc-prepare-network-host".to_string())
             .spawn(move || {
@@ -5588,7 +5587,7 @@ impl GameApp {
                     settings,
                     preparing_config,
                     local_owner,
-                    voice_enabled,
+                    true,
                 ) {
                     Ok(manager) => manager,
                     Err(error) => {
@@ -5662,18 +5661,13 @@ impl GameApp {
             prepared: Some(prepared),
         });
         let local_owner = self.players.local_owner;
-        let voice_enabled = self.voice_chat_enabled();
         self.clear_live_network_session();
         let (sender, receiver) = mpsc::channel();
         let spawn = thread::Builder::new()
             .name("lc-finalize-network-host".to_string())
             .spawn(move || {
-                let result = NetworkManager::for_mode_with_voice_enabled(
-                    mode.clone(),
-                    local_owner,
-                    voice_enabled,
-                )
-                .map(|manager| (mode, manager));
+                let result = NetworkManager::for_mode(mode.clone(), local_owner)
+                    .map(|manager| (mode, manager));
                 let _ = sender.send(result);
             });
         match spawn {
@@ -5713,7 +5707,6 @@ impl GameApp {
         self.prepare_network_join_game_state();
         self.startup_network.game_search = None;
         let local_owner = self.players.local_owner;
-        let voice_enabled = self.voice_chat_enabled();
         let player_name = self.players.local_name.clone();
         let app_paths = self.app_paths.clone();
         let group_maker = self
@@ -5740,13 +5733,8 @@ impl GameApp {
                 settings.group_maker = group_maker;
             }
             let mode = NetworkMode::Client(settings.clone());
-            NetworkManager::for_client_cancellable_with_voice_enabled(
-                settings,
-                local_owner,
-                cancellation,
-                voice_enabled,
-            )
-            .map(|manager| (mode, manager))
+            NetworkManager::for_client_cancellable(settings, local_owner, cancellation)
+                .map(|manager| (mode, manager))
         });
         match spawn {
             Ok((receiver, attempt)) => {
@@ -6070,16 +6058,10 @@ impl GameApp {
             StartupJoinTarget::Game(settings.game_name.clone())
         };
         let local_owner = self.players.local_owner;
-        let voice_enabled = self.voice_chat_enabled();
         let spawn = spawn_startup_network_attempt("lc-startup-network", move |cancellation| {
             let mode = NetworkMode::Client(settings.clone());
-            NetworkManager::for_client_cancellable_with_voice_enabled(
-                settings,
-                local_owner,
-                cancellation,
-                voice_enabled,
-            )
-            .map(|manager| (mode, manager))
+            NetworkManager::for_client_cancellable(settings, local_owner, cancellation)
+                .map(|manager| (mode, manager))
         });
         match spawn {
             Ok((receiver, attempt)) => {
