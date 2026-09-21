@@ -192,6 +192,8 @@ mod update_download;
 mod viewport_window_host;
 mod voice_chat;
 mod voice_media;
+mod voice_service;
+mod voice_worker;
 mod window_icon;
 
 // `GameApp` methods are partitioned into per-area extension modules. They stay
@@ -3148,7 +3150,7 @@ impl GameApp {
                 context: audio,
                 ..SoundState::default()
             },
-            voice_chat: crate::voice_chat::VoiceChatState::default(),
+            voice_chat: crate::voice_service::VoiceChatService::new(),
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,

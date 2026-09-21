@@ -26,22 +26,22 @@ pub(crate) trait VoiceMediaTransport {
     fn send(&self, frame: VoiceFrame) -> Result<(), VoiceSendError>;
 }
 
-impl VoiceMediaTransport for crate::network::NetworkManager {
+impl VoiceMediaTransport for crate::network::NetworkVoiceEndpoint {
     fn available(&self) -> bool {
-        self.voice_available()
+        self.is_available()
     }
     fn receive(&mut self) -> Vec<ReceivedVoiceFrame> {
-        self.poll_timed_voice_frames()
+        self.receive()
     }
     fn send(&self, frame: VoiceFrame) -> Result<(), VoiceSendError> {
-        self.try_send_voice(frame)
+        self.try_send(frame)
     }
 }
 
 pub(crate) fn service_voice_media(
     state: &mut VoiceChatState,
     policy: &VoiceMediaPolicy,
-    transport: &mut impl VoiceMediaTransport,
+    transport: &mut (impl VoiceMediaTransport + ?Sized),
     audio: &AudioWorkerHandle,
     now: Instant,
 ) {

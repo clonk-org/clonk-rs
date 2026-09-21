@@ -812,6 +812,10 @@ pub struct AudioWorkerHandle {
 }
 
 impl AudioWorkerHandle {
+    pub fn shares_mixer(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.mixer, &other.mixer)
+    }
+
     pub fn queue_voice_stream_with_mix(
         &self,
         stream_id: u64,

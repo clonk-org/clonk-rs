@@ -136,7 +136,7 @@ struct SpeakerActivity {
     visually_active: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct VoiceActivityTracker {
     speakers: BTreeMap<(i32, i32), SpeakerActivity>,
     local_speaker: Option<((i32, i32), Instant)>,
@@ -691,6 +691,10 @@ impl VoiceChatState {
 
     /// Which capture-processing stages run. Takes effect on the microphone's
     /// next frame, whether or not one is open.
+    pub(crate) fn activity_snapshot(&self) -> VoiceActivityTracker {
+        self.activity.clone()
+    }
+
     pub(crate) fn set_processing(&self, config: VoiceProcessingConfig) {
         self.processing.set(config);
     }

@@ -1660,6 +1660,57 @@ impl ClientActivationState {
     }
 }
 
+/// An independently serviced media lane. Detaching it leaves all game controls
+/// on NetworkManager; cloning only retains the same bounded media inbox.
+#[derive(Clone)]
+pub struct NetworkVoiceEndpoint {
+    receiver: Arc<Mutex<clonk_network::VoiceInboxReceiver>>,
+    sender: NetworkVoiceSender,
+}
+
+#[derive(Clone)]
+enum NetworkVoiceSender {
+    Session(clonk_network::VoiceSender),
+    #[cfg(any(test, feature = "test-hooks"))]
+    Test(tokio_mpsc::Sender<clonk_network::VoiceFrame>),
+}
+
+impl NetworkVoiceEndpoint {
+    pub fn is_available(&self) -> bool {
+        match &self.sender {
+            NetworkVoiceSender::Session(sender) => sender.is_available(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            NetworkVoiceSender::Test(_) => true,
+        }
+    }
+
+    pub fn try_send(
+        &self,
+        frame: clonk_network::VoiceFrame,
+    ) -> std::result::Result<(), clonk_network::VoiceSendError> {
+        match &self.sender {
+            NetworkVoiceSender::Session(sender) => sender.try_send(frame),
+            #[cfg(any(test, feature = "test-hooks"))]
+            NetworkVoiceSender::Test(sender) => {
+                sender.try_send(frame).map_err(|error| match error {
+                    tokio_mpsc::error::TrySendError::Full(_) => clonk_network::VoiceSendError::Full,
+                    tokio_mpsc::error::TrySendError::Closed(_) => {
+                        clonk_network::VoiceSendError::Closed
+                    }
+                })
+            }
+        }
+    }
+
+    pub fn receive(&mut self) -> Vec<clonk_network::ReceivedVoiceFrame> {
+        let mut receiver = self.receiver.lock();
+        // Bound each pump even if authenticated producers keep filling it.
+        std::iter::from_fn(|| receiver.try_recv_timed().ok())
+            .take(128)
+            .collect()
+    }
+}
+
 #[derive(Debug)]
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
@@ -5853,6 +5904,23 @@ impl NetworkManager {
             .as_ref()
             .ok_or(clonk_network::VoiceSendError::Closed)?
             .try_send(frame)
+    }
+
+    /// Transfers application media polling to the dedicated voice worker.
+    pub fn take_voice_endpoint(&mut self) -> Option<NetworkVoiceEndpoint> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let sender = self
+            .test_voice_outbound
+            .as_ref()
+            .cloned()
+            .map(NetworkVoiceSender::Test)
+            .or_else(|| self.voice_sender.clone().map(NetworkVoiceSender::Session))?;
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let sender = NetworkVoiceSender::Session(self.voice_sender.clone()?);
+        Some(NetworkVoiceEndpoint {
+            receiver: Arc::new(Mutex::new(self.voice_event_rx.take()?)),
+            sender,
+        })
     }
 
     pub fn poll_voice_frames(&mut self) -> Vec<clonk_network::VoiceFrame> {

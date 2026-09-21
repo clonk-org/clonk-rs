@@ -564,7 +564,7 @@ fn push_to_talk_opens_capture_in_a_network_lobby() {
     let (manager, _events, mut voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
     app.netplay.manager = Some(manager);
     app.test_audio_mut().options.voice_enabled = true;
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(|_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(|_| {
         Ok(N2ConstantVoiceSource {
             sample: 1_000,
             level: 1.0,
@@ -596,7 +596,7 @@ fn network_lobby_voice_activation_uses_a_client_scoped_wire_identity() {
         audio.options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
         audio.options.voice_activation_threshold = 0.0;
     }
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(N2VoiceFrames::new(vec![n2_voice_input_frame(1_000, 1.0)]))
     });
     let simulation_before_voice = app.engine.snapshot();
@@ -687,7 +687,7 @@ fn network_lobby_voice_plays_authenticated_clients_non_positionally() {
         0,
         "the retained route must not replay lobby frames after an inactive transition",
     );
-    main_assert!(app.voice_chat.remote_streams.is_empty());
+    main_assert!(app.voice_chat.remote_streams_empty());
 
     for sequence in 0..4 {
         n2_send_voice(
@@ -724,7 +724,7 @@ fn network_lobby_voice_rejects_unknown_clients_and_non_lobby_scopes() {
 
     app.update_voice_chat_at(admitted_at);
 
-    main_assert!(app.voice_chat.remote_streams.is_empty());
+    main_assert!(app.voice_chat.remote_streams_empty());
     main_assert!(app.voice_chat.active_speakers(admitted_at).is_empty());
 }
 
@@ -739,7 +739,7 @@ fn voice_capture_does_not_cross_the_game_and_lobby_identity_boundary() {
     app.netplay.manager = Some(manager);
     app.test_audio_mut().options.voice_enabled = true;
     app.voice_chat =
-        crate::voice_chat::VoiceChatState::with_source_opener(|_| Ok(N2SilentVoiceSource));
+        crate::voice_service::VoiceChatService::with_source_opener(|_| Ok(N2SilentVoiceSource));
     app.update_voice_chat();
     main_assert!(app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed));
     main_assert!(app.voice_chat.capture_active());
@@ -833,7 +833,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     app.netplay.manager = Some(manager);
     app.test_audio_mut().options.voice_enabled = true;
     let captured = n2_voice_input_frame(1_000, 1.0);
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(N2VoiceFrames::new(vec![captured]))
     });
 
@@ -993,8 +993,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     app.update_voice_chat_at(admission_started_at + Duration::from_millis(200));
     main_assert!(
         !app.voice_chat
-            .remote_streams
-            .contains_key(&(remote_client, remote_player)),
+            .has_remote_stream(remote_client, remote_player),
         "invalidated ownership must discard pending remote playout",
     );
 
@@ -1117,7 +1116,7 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
 
     let payload =
         clonk_audio::test_encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap();
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(N2VoiceFrames::new(vec![
             clonk_audio::VoiceInputFrame {
                 payload,
@@ -1177,7 +1176,7 @@ fn voice_activation_never_opens_a_microphone_the_player_did_not_opt_in_to() {
         audio.options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
         audio.options.voice_activation_threshold = 0.0;
     }
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         observed.set(observed.get() + 1);
         Ok(N2SilentVoiceSource)
     });
@@ -1199,7 +1198,7 @@ fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
     // A stub source, never the real `VoiceCapture`: a test must not depend on
     // the host owning a microphone, and must certainly not open one.
     app.voice_chat =
-        crate::voice_chat::VoiceChatState::with_source_opener(|_| Ok(N2SilentVoiceSource));
+        crate::voice_service::VoiceChatService::with_source_opener(|_| Ok(N2SilentVoiceSource));
 
     app.update_voice_chat();
     main_assert!(app.voice_chat.capture_active());
@@ -1221,7 +1220,7 @@ fn capture_processing_follows_the_settings_without_reopening_the_microphone() {
     let (mut app, _voice) = n2_classic_voice_app(local_client);
     n2_enable_voice_activation(&mut app);
     app.test_audio_mut().options.voice_noise_suppression = false;
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         observed_opens.set(observed_opens.get() + 1);
         *observed_switches.borrow_mut() = Some(options.processing.clone());
         Ok(N2SilentVoiceSource)
@@ -1266,7 +1265,7 @@ fn voice_activation_opens_the_exact_configured_input_device() {
     let (mut app, _voice) = n2_classic_voice_app(local_client);
     n2_enable_voice_activation(&mut app);
     app.test_audio_mut().options.voice_input_device = Some(selected.clone());
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         *observed_options.borrow_mut() = options.input_device;
         Ok(N2SilentVoiceSource)
     });
@@ -1297,7 +1296,7 @@ fn clearing_the_live_network_session_drops_microphone_capture_without_another_ti
     let mut app = new_classic_running_sandbox_app();
     let (manager, _events, _voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
     app.netplay.manager = Some(manager);
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(DroppingVoiceSource(observed_drops.clone()))
     });
     app.voice_chat
@@ -1349,7 +1348,7 @@ fn changing_voice_input_keeps_the_network_and_simulation_session() {
         audio.options.voice_activation_threshold = 0.0;
         audio.options.voice_input_device = Some(first.clone());
     }
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         observed_opens.borrow_mut().push(options.input_device);
         Ok(OneFrameVoiceSource {
             frame: std::cell::RefCell::new(Some(n2_voice_input_frame(1_000, 1.0))),
@@ -1381,7 +1380,7 @@ fn every_capture_carries_the_reference_echo_cancellation_can_be_switched_on_with
     n2_enable_voice_activation(&mut app);
     // Switched off at the moment the microphone opens, and switched on later.
     app.test_audio_mut().options.voice_echo_cancellation = false;
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         observed.set(Some(options.echo_reference.is_some()));
         Ok(N2SilentVoiceSource)
     });
@@ -1404,7 +1403,7 @@ fn a_microphone_voice_activation_cannot_open_is_not_retried_every_tick() {
     let (mut app, _voice) = n2_classic_voice_app(local_client);
     n2_enable_voice_activation(&mut app);
 
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(
         move |_| -> Result<N2UnreachableVoiceSource, _> {
             observed.set(observed.get() + 1);
             Err(clonk_audio::VoiceCaptureError::NoInputDevice)

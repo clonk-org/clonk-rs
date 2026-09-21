@@ -201,13 +201,8 @@ impl GameApp {
         let audio_worker = audio.system.worker_handle();
         drop(audio);
         if let Some(network) = self.netplay.manager.as_mut() {
-            crate::voice_media::service_voice_media(
-                &mut self.voice_chat,
-                &policy,
-                network,
-                &audio_worker,
-                now,
-            );
+            let endpoint = network.take_voice_endpoint();
+            self.voice_chat.update(policy, endpoint, audio_worker, now);
         } else {
             let removed = self.voice_chat.clear();
             self.remove_voice_playback(removed);
