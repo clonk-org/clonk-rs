@@ -11,9 +11,6 @@ pub(crate) const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5)
 pub(crate) const CONTROL_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const CLIENT_BACKLOG_LIMIT: usize = 256;
 pub(crate) const CLIENT_MESH_PENDING_LIMIT: usize = 64;
-/// At 50 frames/s, no application-facing media stage can queue more than
-/// 160 ms of encoded speech while control traffic preempts it.
-pub(crate) const VOICE_APP_CHANNEL_CAPACITY: usize = 8;
 #[cfg(test)]
 pub(crate) const DEFAULT_CONTROL_TARGET_FPS: i32 = 38;
 pub(crate) const HOST_CLIENT_ID: ClientId = 0;
@@ -360,8 +357,9 @@ pub struct HostConfig {
     /// bound host transport. Direct API callers opt in explicitly; the app
     /// applies the stock `Config.Network.EnableUPnP` default.
     pub enable_upnp: bool,
-    /// Enables the negotiated Rust voice-media extension on UDP routes.
-    /// Peers that do not opt in remain compatible with the stock C++ protocol.
+    /// Enables this host's local voice transmission and reception. The host
+    /// can still relay authenticated media between opted-in Rust clients when
+    /// false; this grants no local microphone or playback permission.
     pub voice_enabled: bool,
     pub initial_join_snapshot: Option<HostJoinSnapshot>,
     /// Whether [`Self::initial_join_snapshot`] announces directory-backed
@@ -960,7 +958,7 @@ pub struct HostHandle {
     pub(crate) control_send_time: ControlSendTimeSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<HostEvent>>,
     pub(crate) voice_sender: crate::VoiceSender,
-    pub(crate) voice_event_rx: Option<mpsc::Receiver<crate::VoiceFrame>>,
+    pub(crate) voice_event_rx: Option<crate::VoiceInboxReceiver>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
     pub(crate) udp_local_addr: Option<SocketAddr>,
@@ -991,7 +989,7 @@ impl HostHandle {
             .ok()
     }
 
-    pub fn take_voice_receiver(&mut self) -> mpsc::Receiver<crate::VoiceFrame> {
+    pub fn take_voice_receiver(&mut self) -> crate::VoiceInboxReceiver {
         self.voice_event_rx
             .take()
             .expect("host voice receiver already taken")
@@ -1855,7 +1853,7 @@ pub struct ClientHandle {
     pub(crate) control_wait_attribution: crate::ControlWaitAttributionSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<ClientEvent>>,
     pub(crate) voice_sender: crate::VoiceSender,
-    pub(crate) voice_event_rx: Option<mpsc::Receiver<crate::VoiceFrame>>,
+    pub(crate) voice_event_rx: Option<crate::VoiceInboxReceiver>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
     pub(crate) client_id: ClientId,
@@ -1887,7 +1885,7 @@ impl ClientHandle {
             .ok()
     }
 
-    pub fn take_voice_receiver(&mut self) -> mpsc::Receiver<crate::VoiceFrame> {
+    pub fn take_voice_receiver(&mut self) -> crate::VoiceInboxReceiver {
         self.voice_event_rx
             .take()
             .expect("client voice receiver already taken")

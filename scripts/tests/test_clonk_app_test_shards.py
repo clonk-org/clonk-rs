@@ -32,7 +32,7 @@ EXPECTED_SHARDS = {
     "app-test-shard-7": {"scensel.rs", "startup.rs"},
     "app-test-shard-8": {"net_resources.rs", "saves.rs"},
     "app-test-shard-9": {"league.rs", "rendering.rs"},
-    "app-test-shard-10": {"netplay_2.rs"},
+    "app-test-shard-10": {"netplay_2.rs", "voice_setup.rs"},
     "app-test-shard-11": {
         "menus_2.rs",
         "scenario_routes_2.rs",

@@ -62,6 +62,7 @@ pub mod startup_scensel;
 pub(crate) mod test_support;
 mod viewport;
 pub mod viewport_projection;
+pub mod voice_setup;
 
 use clonk_engine::landscape::{PixelGrid, PixelGridRenderAnchor};
 use clonk_engine::{

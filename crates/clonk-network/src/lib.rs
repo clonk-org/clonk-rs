@@ -55,6 +55,10 @@ mod udp_runtime;
 mod udp_session;
 mod upnp;
 mod voice;
+mod voice_inbox;
+mod voice_route_health;
+
+pub use voice_inbox::{voice_inbox, ReceivedVoiceFrame, VoiceInboxReceiver, VoiceInboxSender};
 
 pub use address_packet::{
     append_received_address, decode_address_packet_payload, decode_tcp_sim_open_packet_payload,

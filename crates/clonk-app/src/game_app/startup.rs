@@ -809,10 +809,9 @@ impl GameApp {
     /// (clonk-org/clonk-rs#452). Like the classic rows this only edits the live
     /// options; the sheet's close-save writes them.
     ///
-    /// A session's `NetworkManager` snapshots this flag when it is constructed
-    /// (`main.rs`, `game_app::network`), so toggling it here reaches the next
-    /// hosted or joined game rather than one already running -- which the
-    /// startup Options dialog can never be open over.
+    /// Transport capability is negotiated independently. The live media
+    /// policy applies this opt-in without reconnecting, including when the
+    /// dedicated voice setup panel changes it during a game.
     pub(crate) fn set_startup_voice_enabled(&mut self, enabled: bool) -> Result<(), EngineError> {
         let audio = self.sound.context.as_ref().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(

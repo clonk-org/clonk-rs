@@ -383,8 +383,8 @@ mod tests {
                 command_tx,
                 control_send_time: test_control_send_time_snapshot(),
                 event_rx: Some(event_rx),
-                voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-                voice_event_rx: Some(mpsc::channel(1).1),
+                voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+                voice_event_rx: Some(crate::voice_inbox().1),
                 shutdown_tx: Some(shutdown_tx),
                 join_handle: tokio::spawn(async {}),
                 udp_local_addr: None,
@@ -4337,8 +4337,8 @@ mod tests {
             command_tx: host_command_tx,
             control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(host_event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+            voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(host_shutdown_tx),
             join_handle: tokio::spawn(async {}),
             udp_local_addr: None,
@@ -4368,8 +4368,8 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(client_event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+            voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(client_shutdown_tx),
             join_handle: tokio::spawn(async {}),
             client_id: 1,
@@ -4880,6 +4880,22 @@ mod tests {
         shutdown_test_session(client, host).await;
     }
 
+    async fn enqueue_test_voice(sender: crate::VoiceSender, frame: crate::VoiceFrame) {
+        // A droppable try_send may report transient contention while the
+        // session drains its inbox. Establish enqueue before testing routing.
+        timeout(EVENT_WAIT, async {
+            loop {
+                match sender.try_send(frame.clone()) {
+                    Ok(()) => break,
+                    Err(crate::VoiceSendError::Full) => tokio::task::yield_now().await,
+                    Err(error) => panic!("voice fixture could not enqueue: {error}"),
+                }
+            }
+        })
+        .await
+        .test_value();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn negotiated_udp_voice_round_trips_with_route_authenticated_sources() {
         let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
@@ -4908,13 +4924,13 @@ mod tests {
 
         let mut client_frame = crate::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).test_value();
         client_frame.client_id = 99;
-        client.voice_sender().try_send(client_frame).test_value();
+        enqueue_test_voice(client.voice_sender(), client_frame).await;
         let received = await_test(host_voice.recv()).await;
         assert_eq!(received.client_id, client_id);
 
         let mut host_frame = crate::VoiceFrame::outbound(8, 12, 30, vec![0xa5; 164]).test_value();
         host_frame.client_id = 99;
-        host.voice_sender().try_send(host_frame).test_value();
+        enqueue_test_voice(host.voice_sender(), host_frame).await;
         let received = await_test(client_voice.recv()).await;
         assert_eq!(received.client_id, HOST_CLIENT_ID);
 
@@ -4959,7 +4975,7 @@ mod tests {
         let mut beta_voice = beta.take_voice_receiver();
         let frame = crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; 164]).test_value();
 
-        alpha.voice_sender().try_send(frame.clone()).test_value();
+        enqueue_test_voice(alpha.voice_sender(), frame.clone()).await;
 
         let received_by_host = await_test(host_voice.recv()).await;
         let received_by_beta = await_test(beta_voice.recv()).await;
@@ -4982,16 +4998,82 @@ mod tests {
         host.shutdown().await.test_value();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_with_local_voice_disabled_relays_without_listening_or_transmitting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
+        let mut host = start_host(
+            listener,
+            host_config!(
+                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                voice_enabled: false
+            ),
+        )
+        .await
+        .test_value();
+        let host_address = host.udp_local_addr().test_value();
+        let mut alpha = connect_udp_client(
+            host_address,
+            ClientConfig::new("Alpha", ParticipantKind::Player),
+        )
+        .await
+        .test_value();
+        let mut beta = connect_udp_client(
+            host_address,
+            ClientConfig::new("Beta", ParticipantKind::Player),
+        )
+        .await
+        .test_value();
+        let mut host_voice = host.take_voice_receiver();
+        let mut alpha_voice = alpha.take_voice_receiver();
+        let mut beta_voice = beta.take_voice_receiver();
+        timeout(Duration::from_secs(2), async {
+            while !alpha.voice_available() || !beta.voice_available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host relay must negotiate voice independently of its local opt-in");
+        assert!(!host.voice_available());
+        assert!(!host.voice_sender().is_available());
+        assert!(!alpha.mesh_peer_ids().await.contains(&beta.client_id()));
+        let frame = crate::VoiceFrame::outbound(17, 3, 9, vec![0x5a; 120]).test_value();
+        enqueue_test_voice(alpha.voice_sender(), frame.clone()).await;
+        let received = await_test(beta_voice.recv()).await;
+        assert_eq!(received, frame.with_authenticated_source(alpha.client_id()));
+        // Even a caller bypassing the availability hint cannot transmit from
+        // a locally disabled host. Relaying grants no local audio permission.
+        enqueue_test_voice(
+            host.voice_sender(),
+            crate::VoiceFrame::outbound(17, 4, 0, vec![0x6a; 120]).test_value(),
+        )
+        .await;
+        assert!(timeout(Duration::from_millis(100), host_voice.recv())
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(100), alpha_voice.recv())
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(100), beta_voice.recv())
+            .await
+            .is_err());
+        alpha.shutdown().await.test_value();
+        beta.shutdown().await.test_value();
+        host.shutdown().await.test_value();
+    }
+
     #[test]
     fn application_voice_queue_holds_at_most_160_milliseconds() {
+        let frame = crate::VoiceFrame::outbound(1, 1, 0, Vec::new()).unwrap();
         assert!(
-            VOICE_APP_CHANNEL_CAPACITY * usize::from(crate::VOICE_FRAME_DURATION_MS) <= 160,
+            crate::voice_inbox::InboxFrame::max_queued_frames(&frame)
+                * usize::from(crate::VOICE_FRAME_DURATION_MS)
+                <= 160,
             "each bounded application stage must hold little encoded speech"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn voice_policy_requires_both_udp_endpoints_to_opt_in() {
+    async fn voice_policy_preserves_local_opt_in_while_the_host_can_relay() {
         async fn assert_mixed_policy(host_voice_enabled: bool, client_voice_enabled: bool) {
             let listener = TcpListener::bind("127.0.0.1:0").await.test_value();
             let mut host = start_host(
@@ -5017,17 +5099,30 @@ mod tests {
             let mut host_voice = host.take_voice_receiver();
             let mut client_voice = client.take_voice_receiver();
 
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            if client_voice_enabled {
+                timeout(EVENT_WAIT, async {
+                    while !client.voice_available() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .test_value();
+            } else {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             assert!(!host.voice_available());
-            assert!(!client.voice_available());
+            assert_eq!(client.voice_available(), client_voice_enabled);
 
-            client
-                .voice_sender()
-                .try_send(crate::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).test_value())
-                .test_value();
-            host.voice_sender()
-                .try_send(crate::VoiceFrame::outbound(8, 12, 30, vec![0xa5; 164]).test_value())
-                .test_value();
+            enqueue_test_voice(
+                client.voice_sender(),
+                crate::VoiceFrame::outbound(7, 11, 29, vec![0x5a; 164]).test_value(),
+            )
+            .await;
+            enqueue_test_voice(
+                host.voice_sender(),
+                crate::VoiceFrame::outbound(8, 12, 30, vec![0xa5; 164]).test_value(),
+            )
+            .await;
             assert!(timeout(Duration::from_millis(100), host_voice.recv())
                 .await
                 .is_err());
@@ -6328,8 +6423,8 @@ mod tests {
             command_tx,
             control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+            voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
             udp_local_addr: None,
@@ -6359,8 +6454,8 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+            voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
             client_id: 1,
@@ -8522,8 +8617,8 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+            voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: None,
             join_handle: tokio::spawn(async {}),
             client_id: 1,
@@ -9089,8 +9184,8 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+            voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
             client_id: 7,
@@ -15913,10 +16008,11 @@ mod tests {
                 "a TCP-only host is not a negotiated media relay"
             );
             let mut beta_voice = beta.take_voice_receiver();
-            alpha
-                .voice_sender()
-                .try_send(crate::VoiceFrame::outbound(9, 17, 4, vec![0x3c; 164]).test_value())
-                .test_value();
+            enqueue_test_voice(
+                alpha.voice_sender(),
+                crate::VoiceFrame::outbound(9, 17, 4, vec![0x3c; 164]).test_value(),
+            )
+            .await;
             let frame = await_test(beta_voice.recv()).await;
             assert_eq!(frame.client_id, alpha.client_id());
             assert_eq!(frame.player_id, 9);
@@ -18216,8 +18312,8 @@ mod tests {
             control_send_time: test_control_send_time_snapshot(),
             control_wait_attribution: Default::default(),
             event_rx: Some(event_rx),
-            voice_sender: crate::VoiceSender::new(mpsc::channel(1).0),
-            voice_event_rx: Some(mpsc::channel(1).1),
+            voice_sender: crate::VoiceSender::new(crate::voice_inbox().0),
+            voice_event_rx: Some(crate::voice_inbox().1),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
             client_id: 1,

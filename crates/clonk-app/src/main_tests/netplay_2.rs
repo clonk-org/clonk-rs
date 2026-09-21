@@ -228,10 +228,11 @@ impl crate::voice_chat::VoiceFrameSource for N2VoiceFrames {
 }
 
 fn n2_voice_input_frame(sample: i16, level: f32) -> clonk_audio::VoiceInputFrame {
-    clonk_audio::VoiceInputFrame {
-        payload: clonk_audio::encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES]),
+    clonk_audio::VoiceInputFrame::test_frame(
+        clonk_audio::test_encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES])
+            .unwrap(),
         level,
-    }
+    )
 }
 
 fn n2_voice_frame(
@@ -246,9 +247,38 @@ fn n2_voice_frame(
         player_id,
         stream_epoch,
         sequence,
-        payload: clonk_audio::encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES])
+        payload: clonk_audio::test_encode_voice_frame(&[sample; clonk_audio::VOICE_FRAME_SAMPLES])
+            .unwrap()
             .to_vec(),
     }
+}
+
+fn n2_voice_packets(
+    client_id: i32,
+    player_id: i32,
+    epoch: u32,
+    amplitude: i16,
+    count: u16,
+) -> Vec<clonk_network::VoiceFrame> {
+    let mut encoder = clonk_audio::VoiceEncoder::new().unwrap();
+    (0..count)
+        .map(|sequence| {
+            let samples = std::array::from_fn(|index| {
+                let position = usize::from(sequence) * clonk_audio::VOICE_FRAME_SAMPLES + index;
+                (f64::from(amplitude)
+                    * (std::f64::consts::TAU * 200.0 * position as f64
+                        / f64::from(clonk_audio::VOICE_SAMPLE_RATE))
+                    .sin()) as i16
+            });
+            clonk_network::VoiceFrame {
+                client_id: client_id as u32,
+                player_id,
+                stream_epoch: epoch,
+                sequence,
+                payload: encoder.encode(&samples).unwrap().to_vec(),
+            }
+        })
+        .collect()
 }
 
 fn n2_classic_voice_app(local_client: i32) -> (GameApp, network::TestVoiceChannels) {
@@ -534,7 +564,7 @@ fn push_to_talk_opens_capture_in_a_network_lobby() {
     let (manager, _events, mut voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
     app.netplay.manager = Some(manager);
     app.test_audio_mut().options.voice_enabled = true;
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(|_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(|_| {
         Ok(N2ConstantVoiceSource {
             sample: 1_000,
             level: 1.0,
@@ -566,7 +596,7 @@ fn network_lobby_voice_activation_uses_a_client_scoped_wire_identity() {
         audio.options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
         audio.options.voice_activation_threshold = 0.0;
     }
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(N2VoiceFrames::new(vec![n2_voice_input_frame(1_000, 1.0)]))
     });
     let simulation_before_voice = app.engine.snapshot();
@@ -594,7 +624,9 @@ fn network_lobby_voice_plays_authenticated_clients_non_positionally() {
     let (manager, _events, voice) = NetworkManager::test_stub_with_voice_for_client_id(0);
     app.netplay.manager = Some(manager);
     let remote_client = 7;
-    app.netplay.control_clients.register(remote_client, false, true);
+    app.netplay
+        .control_clients
+        .register(remote_client, false, true);
     let admitted_at = Instant::now();
     let simulation_before_voice = app.engine.snapshot();
     for sequence in [0, 0, 1, 2, 3] {
@@ -615,11 +647,18 @@ fn network_lobby_voice_plays_authenticated_clients_non_positionally() {
     let stream_id =
         crate::voice_chat::voice_stream_id(remote_client, crate::voice_chat::LOBBY_VOICE_PLAYER_ID);
     main_assert_eq!(app.test_audio_ref().system.voice_stream_stats(stream_id).queued_frames => 4,);
-    let mut mixed = [0_i16; 2];
+    let mut mixed =
+        vec![0_i16; app.test_audio_ref().system.mixer().sample_rate() as usize / 50 * 2];
     app.test_audio_ref().system.mixer().mix_i16(&mut mixed);
-    main_assert_ne!(mixed => [0, 0]);
-    main_assert_eq!(mixed[0] => mixed[1], "lobby voice is centered");
-    main_assert!(app.voice_chat.active_speakers(admitted_at).contains(&(remote_client, crate::voice_chat::LOBBY_VOICE_PLAYER_ID)));
+    main_assert!(mixed.iter().any(|&sample| sample != 0));
+    main_assert!(
+        mixed.chunks_exact(2).all(|frame| frame[0] == frame[1]),
+        "lobby voice is centered"
+    );
+    main_assert!(app
+        .voice_chat
+        .active_speakers(admitted_at)
+        .contains(&(remote_client, crate::voice_chat::LOBBY_VOICE_PLAYER_ID)));
     main_assert_eq!(app.engine.snapshot() => simulation_before_voice);
 
     app.mode = AppMode::Loading;
@@ -648,7 +687,7 @@ fn network_lobby_voice_plays_authenticated_clients_non_positionally() {
         0,
         "the retained route must not replay lobby frames after an inactive transition",
     );
-    main_assert!(app.voice_chat.remote_streams.is_empty());
+    main_assert!(app.voice_chat.remote_streams_empty());
 
     for sequence in 0..4 {
         n2_send_voice(
@@ -685,7 +724,7 @@ fn network_lobby_voice_rejects_unknown_clients_and_non_lobby_scopes() {
 
     app.update_voice_chat_at(admitted_at);
 
-    main_assert!(app.voice_chat.remote_streams.is_empty());
+    main_assert!(app.voice_chat.remote_streams_empty());
     main_assert!(app.voice_chat.active_speakers(admitted_at).is_empty());
 }
 
@@ -700,7 +739,7 @@ fn voice_capture_does_not_cross_the_game_and_lobby_identity_boundary() {
     app.netplay.manager = Some(manager);
     app.test_audio_mut().options.voice_enabled = true;
     app.voice_chat =
-        crate::voice_chat::VoiceChatState::with_source_opener(|_| Ok(N2SilentVoiceSource));
+        crate::voice_service::VoiceChatService::with_source_opener(|_| Ok(N2SilentVoiceSource));
     app.update_voice_chat();
     main_assert!(app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed));
     main_assert!(app.voice_chat.capture_active());
@@ -767,7 +806,9 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         "the runtime seam exercises a speaking selected crew inside a container",
     );
     let viewport_inputs = collect_viewport_inputs(&app.snapshot).test_value();
-    app.rendering.graphics.render_frame(&app.snapshot, &viewport_inputs);
+    app.rendering
+        .graphics
+        .render_frame(&app.snapshot, &viewport_inputs);
     let remote_position = crate::voice_chat::authenticated_selected_voice_crew(
         &app.snapshot,
         remote_client,
@@ -792,7 +833,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     app.netplay.manager = Some(manager);
     app.test_audio_mut().options.voice_enabled = true;
     let captured = n2_voice_input_frame(1_000, 1.0);
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(N2VoiceFrames::new(vec![captured]))
     });
 
@@ -812,21 +853,21 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
 
     app.window_active = false;
     app.handle_focus_lost().test_value();
-    main_assert!(!app.voice_chat.capture_active(), "focus loss must close an active push-to-talk capture",);
+    main_assert!(
+        !app.voice_chat.capture_active(),
+        "focus loss must close an active push-to-talk capture",
+    );
 
     let simulation_before_remote_voice = app.engine.snapshot();
     let admission_started_at = Instant::now();
     let batched_admission_at = admission_started_at + Duration::from_millis(65);
+    let remote_packets = n2_voice_packets(remote_client, remote_player, 4, 2_000, 6);
     for sequence in [0, 2, 1, 3] {
-        let inbound = n2_voice_frame(
-            remote_client,
-            remote_player,
-            4,
-            sequence,
-            2_000 + sequence as i16,
-        );
-        main_assert!(reference_voice.accept_remote_frame(&app.snapshot, &inbound, batched_admission_at).is_some());
-        voice.send_inbound(inbound).test_value();
+        let inbound = remote_packets[sequence].clone();
+        main_assert!(reference_voice
+            .accept_remote_frame(&app.snapshot, &inbound, batched_admission_at)
+            .is_some());
+        voice.send_inbound_at(inbound, batched_admission_at).test_value();
     }
     app.update_voice_chat_at(batched_admission_at);
 
@@ -858,7 +899,8 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     let sample_rate =
         usize::try_from(app.test_audio_ref().system.mixer().sample_rate()).unwrap_or(usize::MAX);
     let first_mix_frames = sample_rate.saturating_mul(35) / 1_000;
-    let second_mix_frames = sample_rate.saturating_mul(20) / 1_000;
+    // Let another frame play before declaring the reordered packet lost.
+    let second_mix_frames = sample_rate.saturating_mul(40) / 1_000;
     let total_mix_frames = sample_rate.saturating_mul(120) / 1_000;
     let final_mix_frames = total_mix_frames
         .saturating_sub(first_mix_frames)
@@ -866,21 +908,45 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     let mut actual_output = mix_frames(&app.test_audio_ref().system, first_mix_frames);
     let mut expected_output = mix_frames(&reference_audio, first_mix_frames);
 
-    let missing_successor = n2_voice_frame(remote_client, remote_player, 4, 5, 2_005);
-    main_assert!(reference_voice.accept_remote_frame(&app.snapshot, &missing_successor, admission_started_at + Duration::from_millis(100),).is_some());
-    voice.send_inbound(missing_successor).test_value();
+    let missing_successor = remote_packets[5].clone();
+    main_assert!(reference_voice
+        .accept_remote_frame(
+            &app.snapshot,
+            &missing_successor,
+            admission_started_at + Duration::from_millis(100),
+        )
+        .is_some());
+    voice.send_inbound_at(missing_successor, admission_started_at + Duration::from_millis(100)).test_value();
     app.update_voice_chat_at(admission_started_at + Duration::from_millis(100));
-    main_assert!(reference_voice.drain_remote_playout(remote_client, remote_player, admission_started_at + Duration::from_millis(100), 2, 3,).is_empty());
+    let rate = reference_voice.update_playout_clock(
+        remote_client, remote_player, admission_started_at + Duration::from_millis(100),
+        reference_audio.voice_stream_stats(stream_id).queued_duration,
+    );
+    reference_audio.worker_handle().set_voice_playout_rate(stream_id, rate);
+    main_assert!(reference_voice
+        .drain_remote_playout(
+            remote_client,
+            remote_player,
+            admission_started_at + Duration::from_millis(100),
+            2,
+            3,
+        )
+        .is_empty());
     actual_output.extend(mix_frames(&app.test_audio_ref().system, second_mix_frames));
     expected_output.extend(mix_frames(&reference_audio, second_mix_frames));
 
-    app.update_voice_chat_at(admission_started_at + Duration::from_millis(120));
+    app.update_voice_chat_at(admission_started_at + Duration::from_millis(140));
+    let rate = reference_voice.update_playout_clock(
+        remote_client, remote_player, admission_started_at + Duration::from_millis(140),
+        reference_audio.voice_stream_stats(stream_id).queued_duration,
+    );
+    reference_audio.worker_handle().set_voice_playout_rate(stream_id, rate);
     let final_reference_frames = reference_voice.drain_remote_playout(
         remote_client,
         remote_player,
-        admission_started_at + Duration::from_millis(120),
+        admission_started_at + Duration::from_millis(140),
         3,
-        2,
+        1,
     );
     main_assert_eq!(final_reference_frames.iter().map(|frame| (frame.sequence, frame.concealed)).collect::<Vec<_>>() => vec![(4, true), (5, false)],);
     for frame in final_reference_frames {
@@ -903,9 +969,15 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
     );
     main_assert_eq!(actual_output => expected_output, "the runtime must queue the ordered and concealed PCM into the mixer",);
     let stereo_frames = expected_output.chunks_exact(2).collect::<Vec<_>>();
-    main_assert!(stereo_frames.iter().any(|frame| frame.iter().any(|&sample| sample != 0)));
+    main_assert!(stereo_frames
+        .iter()
+        .any(|frame| frame.iter().any(|&sample| sample != 0)));
     let playout_frame_samples = sample_rate.saturating_mul(20) / 1_000;
-    main_assert!(stereo_frames.chunks(playout_frame_samples).all(|frame| frame.iter().any(|sample| sample.iter().any(|&value| value != 0))));
+    main_assert!(stereo_frames
+        .chunks(playout_frame_samples)
+        .all(|frame| frame
+            .iter()
+            .any(|sample| sample.iter().any(|&value| value != 0))));
     let last_active_frame = stereo_frames
         .iter()
         .rposition(|frame| frame.iter().any(|&sample| sample != 0))
@@ -919,7 +991,9 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         .voice_chat
         .active_speakers(admission_started_at + Duration::from_millis(120));
     main_assert!(remote_activity.contains(&(remote_client, remote_player)));
-    main_assert!(collect_speaking_overlay_objects(&app.snapshot, &remote_activity).contains(&remote_cursor));
+    main_assert!(
+        collect_speaking_overlay_objects(&app.snapshot, &remote_activity).contains(&remote_cursor)
+    );
 
     app.snapshot
         .players
@@ -928,7 +1002,11 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         .test_value()
         .cursor = None;
     app.update_voice_chat_at(admission_started_at + Duration::from_millis(200));
-    main_assert!(!app.voice_chat.remote_streams.contains_key(&(remote_client, remote_player)), "invalidated ownership must discard pending remote playout",);
+    main_assert!(
+        !app.voice_chat
+            .has_remote_stream(remote_client, remote_player),
+        "invalidated ownership must discard pending remote playout",
+    );
 
     app.test_audio_mut().options.voice_enabled = false;
     app.update_voice_chat();
@@ -949,7 +1027,7 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
 fn voice_volume_action_scales_remote_playback_gain_above_unity() {
     use clonk_frontend::startup_options_dlg::{OptionsDlgAction, SoundSheetAction, SoundVolumeId};
 
-    fn render_first_remote_sample(voice_volume: u8) -> i16 {
+    fn render_remote_peak(voice_volume: u8) -> i16 {
         let mut app = new_classic_running_sandbox_app();
         app.test_audio_mut().system = clonk_audio::AudioSystem::new_manual_with_resampling(
             8,
@@ -990,7 +1068,9 @@ fn voice_volume_action_scales_remote_playback_gain_above_unity() {
             .set_cursor(Some(remote_cursor));
         app.snapshot = app.engine.snapshot();
         let viewport_inputs = collect_viewport_inputs(&app.snapshot).test_value();
-        app.rendering.graphics.render_frame(&app.snapshot, &viewport_inputs);
+        app.rendering
+            .graphics
+            .render_frame(&app.snapshot, &viewport_inputs);
 
         let (manager, _events, voice) =
             NetworkManager::test_stub_with_voice_for_client_id(local_client as u32);
@@ -1014,14 +1094,18 @@ fn voice_volume_action_scales_remote_playback_gain_above_unity() {
         }
         app.update_voice_chat_at(now);
 
-        let mut output = [0_i16; 2];
+        let mut output =
+            vec![0_i16; app.test_audio_ref().system.mixer().sample_rate() as usize / 50 * 2];
         app.test_audio_ref().system.mixer().mix_i16(&mut output);
-        output[0]
+        output.into_iter().max().unwrap_or_default()
     }
 
-    let unity_volume = render_first_remote_sample(100);
-    let boosted_volume = render_first_remote_sample(200);
-    main_assert!(unity_volume > 0, "the remote frame must reach live playback");
+    let unity_volume = render_remote_peak(100);
+    let boosted_volume = render_remote_peak(200);
+    main_assert!(
+        unity_volume > 0,
+        "the remote frame must reach live playback"
+    );
     main_assert!(
         (i32::from(boosted_volume) - i32::from(unity_volume) * 2).abs() <= 1,
         "the app must pass 200% as exactly twice the queued gain of 100%: \
@@ -1041,22 +1125,23 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
         audio.options.voice_activation_hangover_ms = 0;
     }
 
-    let payload = clonk_audio::encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]);
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    let payload =
+        clonk_audio::test_encode_voice_frame(&[1_000; clonk_audio::VOICE_FRAME_SAMPLES]).unwrap();
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(N2VoiceFrames::new(vec![
-            clonk_audio::VoiceInputFrame {
-                payload,
-                level: 0.1,
-            },
-            clonk_audio::VoiceInputFrame {
-                payload,
-                level: 0.9,
-            },
+            clonk_audio::VoiceInputFrame::test_frame(payload, 0.1),
+            clonk_audio::VoiceInputFrame::test_frame(payload, 0.9),
         ]))
     });
 
-    main_assert!(!app.voice_chat.capture_active(), "no key has been pressed and no tick has run yet",);
-    main_assert!(!app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed), "voice activation must leave the push-to-talk key to the game",);
+    main_assert!(
+        !app.voice_chat.capture_active(),
+        "no key has been pressed and no tick has run yet",
+    );
+    main_assert!(
+        !app.handle_voice_key(VirtualKeyCode::Backquote, ElementState::Pressed),
+        "voice activation must leave the push-to-talk key to the game",
+    );
 
     app.update_voice_chat();
     main_assert!(app.voice_chat.capture_active());
@@ -1065,12 +1150,25 @@ fn voice_activation_opens_the_microphone_on_speech_and_leaves_the_key_to_the_gam
     let outbound = voice.try_recv_outbound().test_value();
     main_assert_eq!(outbound.player_id => local_player);
     main_assert_eq!(outbound.sequence => 0);
-    main_assert!(voice.try_recv_outbound().is_none(), "the frame below the threshold must never reach the wire",);
-    main_assert!(app.voice_chat.active_speakers(Instant::now()).contains(&(local_client, local_player)));
+    let speech = voice.try_recv_outbound().test_value();
+    main_assert_eq!(speech.player_id => local_player);
+    main_assert_eq!(speech.stream_epoch => outbound.stream_epoch);
+    main_assert_eq!(speech.sequence => 1);
+    main_assert!(
+        voice.try_recv_outbound().is_none(),
+        "speech includes its short preroll, without transmitting unrelated silence",
+    );
+    main_assert!(app
+        .voice_chat
+        .active_speakers(Instant::now())
+        .contains(&(local_client, local_player)));
 
     app.window_active = false;
     app.update_voice_chat();
-    main_assert!(!app.voice_chat.capture_active(), "leaving the window must close a voice-activated capture too",);
+    main_assert!(
+        !app.voice_chat.capture_active(),
+        "leaving the window must close a voice-activated capture too",
+    );
 }
 
 #[test]
@@ -1087,7 +1185,7 @@ fn voice_activation_never_opens_a_microphone_the_player_did_not_opt_in_to() {
         audio.options.voice_activation_mode = crate::settings::VoiceActivationMode::VoiceActivated;
         audio.options.voice_activation_threshold = 0.0;
     }
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         observed.set(observed.get() + 1);
         Ok(N2SilentVoiceSource)
     });
@@ -1109,7 +1207,7 @@ fn switching_back_to_push_to_talk_closes_a_voice_activated_capture() {
     // A stub source, never the real `VoiceCapture`: a test must not depend on
     // the host owning a microphone, and must certainly not open one.
     app.voice_chat =
-        crate::voice_chat::VoiceChatState::with_source_opener(|_| Ok(N2SilentVoiceSource));
+        crate::voice_service::VoiceChatService::with_source_opener(|_| Ok(N2SilentVoiceSource));
 
     app.update_voice_chat();
     main_assert!(app.voice_chat.capture_active());
@@ -1131,7 +1229,7 @@ fn capture_processing_follows_the_settings_without_reopening_the_microphone() {
     let (mut app, _voice) = n2_classic_voice_app(local_client);
     n2_enable_voice_activation(&mut app);
     app.test_audio_mut().options.voice_noise_suppression = false;
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         observed_opens.set(observed_opens.get() + 1);
         *observed_switches.borrow_mut() = Some(options.processing.clone());
         Ok(N2SilentVoiceSource)
@@ -1176,7 +1274,7 @@ fn voice_activation_opens_the_exact_configured_input_device() {
     let (mut app, _voice) = n2_classic_voice_app(local_client);
     n2_enable_voice_activation(&mut app);
     app.test_audio_mut().options.voice_input_device = Some(selected.clone());
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         *observed_options.borrow_mut() = options.input_device;
         Ok(N2SilentVoiceSource)
     });
@@ -1207,7 +1305,7 @@ fn clearing_the_live_network_session_drops_microphone_capture_without_another_ti
     let mut app = new_classic_running_sandbox_app();
     let (manager, _events, _voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
     app.netplay.manager = Some(manager);
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |_| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |_| {
         Ok(DroppingVoiceSource(observed_drops.clone()))
     });
     app.voice_chat
@@ -1259,7 +1357,7 @@ fn changing_voice_input_keeps_the_network_and_simulation_session() {
         audio.options.voice_activation_threshold = 0.0;
         audio.options.voice_input_device = Some(first.clone());
     }
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         observed_opens.borrow_mut().push(options.input_device);
         Ok(OneFrameVoiceSource {
             frame: std::cell::RefCell::new(Some(n2_voice_input_frame(1_000, 1.0))),
@@ -1291,7 +1389,7 @@ fn every_capture_carries_the_reference_echo_cancellation_can_be_switched_on_with
     n2_enable_voice_activation(&mut app);
     // Switched off at the moment the microphone opens, and switched on later.
     app.test_audio_mut().options.voice_echo_cancellation = false;
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(move |options| {
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(move |options| {
         observed.set(Some(options.echo_reference.is_some()));
         Ok(N2SilentVoiceSource)
     });
@@ -1314,7 +1412,7 @@ fn a_microphone_voice_activation_cannot_open_is_not_retried_every_tick() {
     let (mut app, _voice) = n2_classic_voice_app(local_client);
     n2_enable_voice_activation(&mut app);
 
-    app.voice_chat = crate::voice_chat::VoiceChatState::with_source_opener(
+    app.voice_chat = crate::voice_service::VoiceChatService::with_source_opener(
         move |_| -> Result<N2UnreachableVoiceSource, _> {
             observed.set(observed.get() + 1);
             Err(clonk_audio::VoiceCaptureError::NoInputDevice)

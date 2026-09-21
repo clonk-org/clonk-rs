@@ -728,12 +728,10 @@ pub(crate) async fn start_host_with_udp_binding_and_backend(
     let control_send_time = ControlSendTimeSnapshot::default();
     let worker_control_send_time = control_send_time.clone();
     let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
-    let (voice_command_tx, voice_command_rx) =
-        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let (voice_command_tx, voice_command_rx) = crate::voice_inbox();
     let voice_sender = crate::VoiceSender::new(voice_command_tx);
     let voice_available = voice_sender.availability();
-    let (voice_event_tx, voice_event_rx) =
-        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let (voice_event_tx, voice_event_rx) = crate::voice_inbox();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let task_io_statistics = io_statistics.clone();
     let join_handle = tokio::spawn(async move {
@@ -1582,12 +1580,10 @@ where
     let control_wait_attribution = crate::ControlWaitAttributionSnapshot::default();
     let worker_control_wait_attribution = control_wait_attribution.clone();
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
-    let (voice_command_tx, voice_command_rx) =
-        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let (voice_command_tx, voice_command_rx) = crate::voice_inbox();
     let voice_sender = crate::VoiceSender::new(voice_command_tx);
     let voice_available = voice_sender.availability();
-    let (voice_event_tx, voice_event_rx) =
-        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let (voice_event_tx, voice_event_rx) = crate::voice_inbox();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_client_loop_with_routes(
         routes,

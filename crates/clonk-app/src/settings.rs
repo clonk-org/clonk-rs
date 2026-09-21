@@ -90,6 +90,8 @@ pub struct AudioOptions {
     /// Opaque CPAL microphone endpoint ID. `None` follows the system default
     /// instead of pinning one host-provided endpoint.
     pub voice_input_device: Option<VoiceInputDeviceId>,
+    /// Shared game/voice output endpoint; None follows the system default.
+    pub voice_output_device: Option<String>,
     pub voice_push_to_talk: VirtualKeyCode,
     pub voice_activation_mode: VoiceActivationMode,
     /// Level a captured frame must reach to open a voice-activated capture, on
@@ -125,6 +127,7 @@ impl Default for AudioOptions {
             voice_enabled: false,
             voice_volume: 1.0,
             voice_input_device: None,
+            voice_output_device: None,
             voice_push_to_talk: VirtualKeyCode::Backquote,
             voice_activation_mode: VoiceActivationMode::default(),
             // -36 dBFS: above a quiet room, below ordinary speech.
@@ -245,6 +248,10 @@ impl AudioOptions {
             if let Some(value) = parse_native_config_integer(raw) {
                 self.set_voice_volume_percent(value);
             }
+        }
+
+        if let Some(raw) = config.get_in(Some("Voice"), "OutputDevice") {
+            self.voice_output_device = (!raw.is_empty()).then(|| raw.to_owned());
         }
 
         if let Some(raw) = config.get_in(Some("Voice"), "InputDevice") {
@@ -374,6 +381,19 @@ impl AudioOptions {
         );
     }
 
+    /// The dedicated setup panel also owns the capture-processing switches.
+    pub(crate) fn write_voice_setup_config(&self, config: &mut Config) {
+        self.write_startup_voice_config(config);
+        let section = Some("Voice");
+        for (key, enabled) in [
+            ("EchoCancellation", self.voice_echo_cancellation),
+            ("NoiseSuppression", self.voice_noise_suppression),
+            ("AutomaticGainControl", self.voice_automatic_gain_control),
+        ] {
+            config.set_in(section, key, bool_config_value(enabled));
+        }
+    }
+
     /// The port-only `[Voice]` keys the Audio sheet edits
     /// (clonk-org/clonk-rs#452). They live in their own section rather than
     /// `[Sound]` because `[Sound]` is C4Config's on-disk layout and every key
@@ -381,7 +401,13 @@ impl AudioOptions {
     pub(crate) fn write_startup_voice_config(&self, config: &mut Config) {
         let section = Some("Voice");
         config.set_in(section, "Enabled", bool_config_value(self.voice_enabled));
+
         config.set_in(section, "Volume", self.voice_volume_percent().to_string());
+        config.set_in(
+            section,
+            "OutputDevice",
+            self.voice_output_device.as_deref().unwrap_or(""),
+        );
         config.set_in(
             section,
             "InputDevice",
@@ -579,6 +605,7 @@ mod tests {
             voice_enabled: true,
             voice_volume: 0.42,
             voice_input_device: None,
+            voice_output_device: None,
             voice_push_to_talk: VirtualKeyCode::KeyT,
             voice_activation_mode: VoiceActivationMode::VoiceActivated,
             voice_activation_threshold: 0.25,
@@ -670,6 +697,37 @@ mod tests {
             reloaded.voice_activation_mode,
             VoiceActivationMode::VoiceActivated
         );
+    }
+
+    #[test]
+    fn voice_setup_processing_choices_survive_reload() {
+        let options = AudioOptions {
+            voice_echo_cancellation: false,
+            voice_noise_suppression: false,
+            voice_automatic_gain_control: false,
+            ..AudioOptions::default()
+        };
+        let mut config = Config::new();
+        options.write_voice_setup_config(&mut config);
+        let mut loaded = AudioOptions::default();
+        loaded.apply_config(&config);
+        assert_eq!(loaded.voice_processing(), options.voice_processing());
+    }
+
+    #[test]
+    fn voice_output_selection_survives_reload_and_can_return_to_default() {
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "OutputDevice", "coreaudio:USB Headset");
+        let mut options = AudioOptions::default();
+        options.apply_config(&config);
+        let mut saved = Config::new();
+        options.write_startup_voice_config(&mut saved);
+        assert_eq!(
+            saved.get_in(Some("Voice"), "OutputDevice"),
+            Some("coreaudio:USB Headset")
+        );
+        AudioOptions::default().write_startup_voice_config(&mut saved);
+        assert_eq!(saved.get_in(Some("Voice"), "OutputDevice"), Some(""));
     }
 
     #[test]

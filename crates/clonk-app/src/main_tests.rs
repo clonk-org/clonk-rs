@@ -4895,3 +4895,5 @@ include_main_test_fragment!("app-test-shard-12", "main_tests/runtime_allocations
 include!("main_tests/presentation_profile.rs");
 #[cfg(all(test, feature = "presentation-profile"))]
 include!("main_tests/scenario_frame_profile.rs");
+
+include_main_test_fragment!("app-test-shard-10", "main_tests/voice_setup.rs");

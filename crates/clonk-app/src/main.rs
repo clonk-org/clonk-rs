@@ -191,6 +191,9 @@ mod update_check;
 mod update_download;
 mod viewport_window_host;
 mod voice_chat;
+mod voice_media;
+mod voice_service;
+mod voice_worker;
 mod window_icon;
 
 // `GameApp` methods are partitioned into per-area extension modules. They stay
@@ -230,6 +233,8 @@ mod game_app_tick;
 mod game_app_update;
 #[path = "game_app/voice.rs"]
 mod game_app_voice;
+#[path = "game_app/voice_setup.rs"]
+mod game_app_voice_setup;
 
 #[path = "main_parts/app_state.rs"]
 mod main_app_state;
@@ -2644,14 +2649,12 @@ impl GameApp {
                 }
             }
         }
-        let voice_enabled = audio_options.voice_enabled;
+        // Negotiate transport capability independently of microphone opt-in.
+        // The live media policy owns capture and playback, so enabling voice
+        // from the in-game setup panel does not need another connection.
         let network_mode = runtime.network.clone();
         let network = match network_mode.clone() {
-            Some(mode) => Some(NetworkManager::for_mode_with_voice_enabled(
-                mode,
-                runtime.player_owner,
-                voice_enabled,
-            )?),
+            Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
             None => None,
         };
         let player_name = runtime.player_name.clone();
@@ -3147,7 +3150,8 @@ impl GameApp {
                 context: audio,
                 ..SoundState::default()
             },
-            voice_chat: crate::voice_chat::VoiceChatState::default(),
+            voice_chat: crate::voice_service::VoiceChatService::new(),
+            voice_setup: None,
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,
@@ -3859,6 +3863,9 @@ impl GameApp {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        if let Some(setup) = self.voice_setup.as_mut() {
+            setup.controller.cancel_interaction();
+        }
         self.reject_classic_global_gui_bootstrap()?;
         let restart_same_dialog_fade = self
             .startup
@@ -4818,6 +4825,7 @@ impl GameApp {
     }
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
+        self.cancel_voice_setup_test();
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
         self.input_routing.live.primary_left_down = false;

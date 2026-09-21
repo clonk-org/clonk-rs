@@ -204,7 +204,7 @@ pub(crate) async fn handle_client_message(
             notify_peer_capability_waiters(state);
             if let Some(route) = state.accepted_routes.get_mut(&connection_id) {
                 route.peer_is_port = true;
-                if state.config.voice_enabled && route.protocol == crate::NetworkProtocol::Udp {
+                if route.protocol == crate::NetworkProtocol::Udp {
                     route.voice_auth.record_peer_capabilities(capabilities);
                 }
                 let announcement = route

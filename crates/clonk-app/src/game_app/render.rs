@@ -1409,6 +1409,7 @@ impl GameApp {
                 .console
                 .render(self.rendering.graphics.surface_mut(), font.as_ref());
             self.render_message_dialogs(None)?;
+            self.render_voice_setup(None)?;
             let surface = self.rendering.graphics.surface();
             if !surface.is_gpu_scene_capture_active() {
                 if surface.pixels().len() == frame.len() {
@@ -1552,6 +1553,9 @@ impl GameApp {
                             )?;
                         }
                     }
+                    if self.render_voice_setup(gamma.as_ref())? && ordered_native {
+                        self.next_pending_native_overlay();
+                    }
                     let gui_cursor_drawn = self.draw_classic_gui_cursor(gamma.as_ref());
                     if ordered_native && gui_cursor_drawn {
                         self.next_pending_native_overlay();
@@ -1654,14 +1658,16 @@ impl GameApp {
                 let league_signup_open = self.dialogs.league_signup.is_some();
                 // A fading C4GUI::Dialog is inactive even when it retains its
                 // focused control. Reuse the renderer's inactive-focus path.
-                let context_menu_open = self.context_menus.open.is_some()
+                let context_menu_open = self.voice_setup.is_some()
+                    || self.context_menus.open.is_some()
                     || self.startup.player_properties_dialog.is_some()
                     || league_signup_open
                     || self.chat.external_dialog_visible
                     || self.dialogs.client_list.is_some()
                     || fade_draw_inactive;
-                let options_draw_focus =
-                    self.startup_options_dialog_has_focus_owner() && !fade_draw_inactive;
+                let options_draw_focus = self.startup_options_dialog_has_focus_owner()
+                    && !fade_draw_inactive
+                    && self.voice_setup.is_none();
                 let base_context_menu = if ordered_native || fade_was_active {
                     None
                 } else {
@@ -1954,6 +1960,9 @@ impl GameApp {
                         )?;
                     }
                 }
+                if self.render_voice_setup(Some(menu_gamma))? && ordered_native {
+                    self.next_pending_native_overlay();
+                }
                 let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(menu_gamma));
                 if ordered_native && gui_cursor_drawn {
                     self.next_pending_native_overlay();
@@ -1994,7 +2003,9 @@ impl GameApp {
                         .graphics
                         .surface()
                         .is_gpu_scene_capture_active()
-                    && (fade_was_active
+                    && (self.voice_setup.is_some()
+                        || self.voice_setup_launcher().is_some()
+                        || fade_was_active
                         || self.startup.player_properties_dialog.is_some()
                         || definition_selector_open
                         || game_option_input_open
@@ -7234,6 +7245,9 @@ impl GameApp {
                 context_menu
                     .render_panels(self.rendering.graphics.surface_mut(), Some(&frame_gamma))?;
             }
+        }
+        if self.render_voice_setup(Some(&frame_gamma))? && ordered_native {
+            self.next_pending_native_overlay();
         }
         let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(&frame_gamma));
         if ordered_native && gui_cursor_drawn {

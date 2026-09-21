@@ -8,11 +8,17 @@ use std::time::Instant;
 
 use thiserror::Error;
 
+#[cfg(feature = "cpal")]
+#[path = "audio_output.rs"]
+mod output;
+#[cfg(feature = "cpal")]
+use output::CpalBackend;
+
 use crate::decoder::{
     decode_audio_bounded_for_output, AudioDecodeError, MusicStream, SharedAudioData,
 };
-use crate::voice::{VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
 use crate::voice_echo::{VoiceEchoReference, VoiceEchoTap};
+use crate::{VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE};
 
 const SDL_MIXER_MAX_VOLUME: f32 = 128.0;
 const SDL_MIXER_MAX_PANNING: f32 = 255.0;
@@ -101,6 +107,7 @@ pub enum VoiceFrameQueueOutcome {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct VoiceStreamStats {
     pub queued_frames: usize,
+    pub queued_duration: Duration,
     pub dropped_stale_frames: u64,
 }
 
@@ -206,6 +213,30 @@ impl MusicHandle {
     }
 }
 
+/// Metadata cached by the output worker; reading it never opens a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioOutputDevice {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioOutputStatus {
+    Headless,
+    Opening,
+    Active { device: String, sample_rate: u32 },
+    Unavailable,
+    Retrying(String),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AudioOutputStats {
+    pub queued_duration: Duration,
+    pub callback_frames: usize,
+    pub underrun_callbacks: u64,
+    pub stale_frames: u64,
+}
+
 pub struct AudioSystem {
     mixer: Arc<AudioMixer>,
     _backend: Backend,
@@ -216,7 +247,7 @@ enum Backend {
     #[cfg(feature = "cpal")]
     Cpal(CpalBackend),
     Inert,
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     Manual,
     Null(NullBackend),
     DeferredNull(Arc<DeferredNullBackend>),
@@ -299,7 +330,7 @@ impl AudioSystem {
 
     /// Construct a live mixer without a worker thread so tests can advance it
     /// by calling [`AudioMixer::mix_i16`] themselves.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn new_manual_with_resampling(
         max_channels: usize,
         resampling_mode: ResamplingMode,
@@ -493,14 +524,71 @@ impl AudioSystem {
         self.mixer.voice_echo_reference()
     }
 
+    /// Prepare the shorter voice buffer before the first utterance. The
+    /// preference stays latched to avoid reopening output between key presses.
+    /// This does not open a microphone or start voice transmission.
+    pub fn prepare_voice_output(&self) {
+        self.mixer.voice_output_mode.store(true, Ordering::Release);
+    }
+
+    pub fn output_status(&self) -> AudioOutputStatus {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.status();
+        }
+        AudioOutputStatus::Headless
+    }
+
+    pub fn output_stats(&self) -> AudioOutputStats {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.stats();
+        }
+        AudioOutputStats::default()
+    }
+
+    pub fn voice_input_inventory(&self) -> crate::VoiceInputDeviceInventory {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.input_inventory();
+        }
+        crate::VoiceInputDeviceInventory::Unavailable("audio devices are not active".into())
+    }
+
+    pub fn refresh_voice_input_devices(&self) {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            backend.refresh_inputs();
+        }
+    }
+
+    pub fn output_devices(&self) -> Vec<AudioOutputDevice> {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            return backend.devices();
+        }
+        Vec::new()
+    }
+
+    pub fn select_output_device(&self, selected: Option<String>) {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            backend.select(selected);
+        }
+        #[cfg(not(feature = "cpal"))]
+        let _ = selected;
+    }
+
+    pub fn retry_output(&self) {
+        #[cfg(feature = "cpal")]
+        if let Backend::Cpal(backend) = &self._backend {
+            backend.retry();
+        }
+    }
+
     pub fn resampling_mode(&self) -> ResamplingMode {
         self.mixer.resampling_mode
     }
-}
-
-#[cfg(feature = "cpal")]
-struct CpalBackend {
-    _stream: cpal::Stream,
 }
 
 #[cfg(feature = "cpal")]
@@ -663,147 +751,6 @@ fn try_cpal_stream_configs<T, E>(
     Err(last_error.expect("at least one CPAL stream configuration was attempted"))
 }
 
-#[cfg(feature = "cpal")]
-fn build_cpal_output_stream<T>(
-    device: &cpal::Device,
-    config: cpal::StreamConfig,
-    mixer: Arc<AudioMixer>,
-) -> Result<cpal::Stream, AudioError>
-where
-    T: cpal::SizedSample + SampleWrite + Send + 'static,
-{
-    use cpal::traits::DeviceTrait;
-
-    let output_channels = usize::from(config.channels);
-    let stream_error_started = Instant::now();
-    let mut stream_error_reporter = CpalStreamErrorReporter::default();
-    device
-        .build_output_stream(
-            config,
-            move |data: &mut [T], _| {
-                mixer.mix_into_channels(data, output_channels);
-            },
-            move |error| match stream_error_reporter
-                .record(error.kind(), stream_error_started.elapsed())
-            {
-                Some(CpalStreamErrorReport::RecoveredXrun {
-                    total_occurrences,
-                    occurrences_since_previous_report,
-                }) => tracing::warn!(
-                    %error,
-                    total_occurrences,
-                    occurrences_since_previous_report,
-                    "cpal output stream buffer underrun or overrun"
-                ),
-                Some(CpalStreamErrorReport::Immediate) => {
-                    tracing::error!(%error, "cpal stream error");
-                }
-                None => {}
-            },
-            None,
-        )
-        .map_err(|error| AudioError::Stream(error.to_string()))
-}
-
-#[cfg(feature = "cpal")]
-impl CpalBackend {
-    fn try_new(
-        max_channels: usize,
-        resampling_mode: ResamplingMode,
-    ) -> Result<(Arc<AudioMixer>, Self), AudioError> {
-        use cpal::traits::{DeviceTrait, HostTrait};
-
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or(AudioError::NoAudioDevice)?;
-        let supported_configs = device.supported_output_configs().map_err(|err| {
-            AudioError::Stream(format!("failed to enumerate output formats: {err}"))
-        })?;
-        let configs = cpal_output_config_candidates(supported_configs);
-        if configs.is_empty() {
-            return Err(AudioError::Stream(
-                "no safely convertible PCM output configuration with 1 to 8 channels".to_string(),
-            ));
-        }
-
-        try_cpal_output_candidates(configs, |config| {
-            Self::try_config(&device, config, max_channels, resampling_mode)
-        })
-    }
-
-    fn try_config(
-        device: &cpal::Device,
-        config: cpal::SupportedStreamConfig,
-        max_channels: usize,
-        resampling_mode: ResamplingMode,
-    ) -> Result<(Arc<AudioMixer>, Self), AudioError> {
-        use cpal::traits::StreamTrait;
-
-        let sample_rate = config.sample_rate();
-        let sample_format = config.sample_format();
-        let stream_configs = cpal_output_stream_config_candidates(config);
-
-        let mixer = Arc::new(AudioMixer::new_with_resampling(
-            sample_rate,
-            max_channels,
-            resampling_mode,
-        ));
-
-        let stream = try_cpal_stream_configs(stream_configs, |stream_config| {
-            let stream = match sample_format {
-                cpal::SampleFormat::I8 => {
-                    build_cpal_output_stream::<i8>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::I16 => {
-                    build_cpal_output_stream::<i16>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::I24 => {
-                    build_cpal_output_stream::<cpal::I24>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::I32 => {
-                    build_cpal_output_stream::<i32>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::I64 => {
-                    build_cpal_output_stream::<i64>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::U8 => {
-                    build_cpal_output_stream::<u8>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::U16 => {
-                    build_cpal_output_stream::<u16>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::U24 => {
-                    build_cpal_output_stream::<cpal::U24>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::U32 => {
-                    build_cpal_output_stream::<u32>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::U64 => {
-                    build_cpal_output_stream::<u64>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::F32 => {
-                    build_cpal_output_stream::<f32>(device, stream_config, mixer.clone())?
-                }
-                cpal::SampleFormat::F64 => {
-                    build_cpal_output_stream::<f64>(device, stream_config, mixer.clone())?
-                }
-                _ => {
-                    return Err(AudioError::Stream(
-                        "unsupported audio sample format".to_string(),
-                    ));
-                }
-            };
-            stream
-                .play()
-                .map_err(|err| AudioError::Stream(err.to_string()))?;
-            Ok(stream)
-        })?;
-
-        Ok((mixer, Self { _stream: stream }))
-    }
-}
-
 /// See [`AudioSystem::worker_handle`]: decode-and-play from worker threads.
 #[derive(Clone)]
 pub struct AudioWorkerHandle {
@@ -812,6 +759,57 @@ pub struct AudioWorkerHandle {
 }
 
 impl AudioWorkerHandle {
+    /// Smooth corrections are bounded to one percent inside the resampler.
+    pub fn set_voice_playout_rate(&self, stream_id: u64, parts_per_million: i32) {
+        if let Some(stream) = self
+            .mixer
+            .state
+            .lock()
+            .unwrap()
+            .voice_streams
+            .get_mut(&stream_id)
+        {
+            stream.resampler.set_rate_adjustment(parts_per_million);
+        }
+    }
+
+    pub fn shares_mixer(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.mixer, &other.mixer)
+    }
+
+    pub fn queue_voice_stream_with_mix(
+        &self,
+        stream_id: u64,
+        samples: [i16; VOICE_FRAME_SAMPLES],
+        volume: f32,
+        pan: f32,
+    ) -> VoiceFrameQueueOutcome {
+        if let Some(backend) = &self.deferred_null_backend {
+            backend.ensure_running();
+        }
+        self.mixer
+            .queue_voice_stream_with_mix(stream_id, samples, volume, pan)
+    }
+
+    /// Updates an existing voice source. Returns false when no frame has been
+    /// queued for this key yet.
+    pub fn update_voice_stream(&self, stream_id: u64, volume: f32, pan: f32) -> bool {
+        self.mixer.update_voice_stream(stream_id, volume, pan)
+    }
+
+    /// Removes a keyed live voice source and all of its buffered audio.
+    pub fn remove_voice_stream(&self, stream_id: u64) -> bool {
+        self.mixer.remove_voice_stream(stream_id)
+    }
+
+    pub fn voice_stream_stats(&self, stream_id: u64) -> VoiceStreamStats {
+        self.mixer.voice_stream_stats(stream_id)
+    }
+
+    pub fn voice_echo_reference(&self) -> VoiceEchoReference {
+        self.mixer.voice_echo_reference()
+    }
+
     pub fn load_music(&self, data: &[u8]) -> Result<MusicHandle, AudioError> {
         let id = self.mixer.load_music(data)?;
         Ok(MusicHandle::new(self.mixer.clone(), id))
@@ -920,6 +918,8 @@ pub struct AudioMixer {
     sample_rate: u32,
     resampling_mode: ResamplingMode,
     inert: bool,
+    output_reference: Option<VoiceEchoReference>,
+    voice_output_mode: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -1057,10 +1057,12 @@ struct VoiceLimiter {
 
 #[derive(Debug)]
 struct VoicePlaybackResampler {
+    filter: crate::voice_resampling::SincHistory,
     output_sample_rate: u32,
     previous: Option<[f32; 2]>,
     current_source_index: u128,
-    next_output_index: u128,
+    next_output_position: u128,
+    rate_adjustment: i32,
 }
 
 #[derive(Debug)]
@@ -1164,6 +1166,8 @@ impl AudioMixer {
             sample_rate,
             resampling_mode,
             inert,
+            output_reference: None,
+            voice_output_mode: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1344,6 +1348,7 @@ impl AudioMixer {
         if self.inert {
             return VoiceFrameQueueOutcome::Queued;
         }
+        self.voice_output_mode.store(true, Ordering::Release);
         let mut state = self.state.lock().unwrap();
         state
             .voice_streams
@@ -1364,6 +1369,7 @@ impl AudioMixer {
         if self.inert {
             return VoiceFrameQueueOutcome::Queued;
         }
+        self.voice_output_mode.store(true, Ordering::Release);
         let mut state = self.state.lock().unwrap();
         let stream = state.voice_streams.entry(id).or_insert_with(|| {
             VoiceStreamPlayback::new(DEFAULT_VOICE_BUFFERED_FRAMES, self.sample_rate)
@@ -1544,6 +1550,10 @@ impl AudioMixer {
     /// thing that makes the mixer publish it; a session that never opens a
     /// capture never pays for it.
     pub fn voice_echo_reference(&self) -> VoiceEchoReference {
+        self.voice_output_mode.store(true, Ordering::Release);
+        if let Some(reference) = &self.output_reference {
+            return reference.clone();
+        }
         let mut state = self.state.lock().unwrap();
         state
             .echo_tap
@@ -1705,11 +1715,6 @@ impl AudioMixer {
                         voice_right += frame[1] * stream.right_gain;
                     }
                 }
-                let voice_gain =
-                    voice_limiter.gain_for_peak(voice_left.abs().max(voice_right.abs()));
-                left += voice_left * voice_gain;
-                right += voice_right * voice_gain;
-
                 if !finished_music {
                     if let Some(music) = active_music.as_mut() {
                         if let Some(frame) = music.next_frame() {
@@ -1734,6 +1739,13 @@ impl AudioMixer {
                         }
                     }
                 }
+
+                // Only voice may yield: keep the established sound/music
+                // arithmetic, while reserving actual headroom in both ears.
+                let voice_gain =
+                    voice_limiter.gain_for_mix([voice_left, voice_right], [left, right]);
+                left += voice_left * voice_gain;
+                right += voice_right * voice_gain;
 
                 if let Some(tap) = echo_tap.as_mut() {
                     tap.push_output_frame(left.clamp(-1.0, 1.0), right.clamp(-1.0, 1.0));
@@ -1903,6 +1915,13 @@ impl VoiceStreamPlayback {
     fn stats(&self) -> VoiceStreamStats {
         VoiceStreamStats {
             queued_frames: self.frames.len(),
+            queued_duration: Duration::from_secs_f64(
+                self.frames
+                    .iter()
+                    .map(|frame| frame.samples.len() - frame.position)
+                    .sum::<usize>() as f64
+                    / f64::from(self.resampler.output_sample_rate),
+            ),
             dropped_stale_frames: self.dropped_stale_frames,
         }
     }
@@ -1928,12 +1947,27 @@ impl VoiceLimiter {
     /// instantaneous, so `gain <= VOICE_BUS_CEILING / peak` holds on the very
     /// first sample of a burst instead of one release later; only handing the
     /// gain back is smoothed, which is what keeps the limiter inaudible.
+    #[cfg(test)]
     fn gain_for_peak(&mut self, peak: f32) -> f32 {
-        let target = if peak > VOICE_BUS_CEILING {
+        self.gain_for_mix([peak, 0.0], [0.0, 0.0])
+    }
+
+    fn gain_for_mix(&mut self, voice: [f32; 2], background: [f32; 2]) -> f32 {
+        let peak = voice[0].abs().max(voice[1].abs());
+        let mut target = if peak > VOICE_BUS_CEILING {
             VOICE_BUS_CEILING / peak
         } else {
             1.0
         };
+        // One signed gain for both ears preserves stereo placement. The
+        // one-PCM-step margin also avoids rounding onto the output clamp.
+        const OUTPUT_CEILING: f32 = 1.0 - 1.0 / 32_768.0;
+        for (sample, background) in voice.into_iter().zip(background) {
+            if sample != 0.0 {
+                let headroom = OUTPUT_CEILING - background * sample.signum();
+                target = target.min((headroom / sample.abs()).clamp(0.0, 1.0));
+            }
+        }
         self.gain = if target < self.gain {
             target
         } else {
@@ -1949,16 +1983,26 @@ impl VoiceLimiter {
 }
 
 impl VoicePlaybackResampler {
+    fn set_rate_adjustment(&mut self, parts_per_million: i32) {
+        self.rate_adjustment = parts_per_million.clamp(-10_000, 10_000);
+    }
+
     fn new(output_sample_rate: u32) -> Self {
+        let output_sample_rate = if output_sample_rate == 0 {
+            VOICE_SAMPLE_RATE
+        } else {
+            output_sample_rate
+        };
         Self {
-            output_sample_rate: if output_sample_rate == 0 {
-                VOICE_SAMPLE_RATE
-            } else {
-                output_sample_rate
-            },
+            filter: crate::voice_resampling::SincHistory::new(
+                VOICE_SAMPLE_RATE,
+                output_sample_rate.max(1),
+            ),
+            output_sample_rate,
             previous: None,
             current_source_index: 0,
-            next_output_index: 0,
+            next_output_position: 0,
+            rate_adjustment: 0,
         }
     }
 
@@ -1967,47 +2011,108 @@ impl VoicePlaybackResampler {
         samples: [i16; VOICE_FRAME_SAMPLES],
         mode: ResamplingMode,
     ) -> Box<[[f32; 2]]> {
-        match mode {
-            ResamplingMode::Default | ResamplingMode::Linear => self.push_frame_linear(samples),
-        }
-    }
-
-    fn push_frame_linear(&mut self, samples: [i16; VOICE_FRAME_SAMPLES]) -> Box<[[f32; 2]]> {
-        let mut output = Vec::with_capacity(
-            (VOICE_FRAME_SAMPLES as u128 * u128::from(self.output_sample_rate)
-                / u128::from(VOICE_SAMPLE_RATE)) as usize
-                + 1,
-        );
+        // Integer phase keeps long calls exact at unity while allowing small
+        // continuous clock corrections without inserting or dropping frames.
+        const CLOCK_SCALE: u128 = 1_000_000;
+        let output_rate = u128::from(self.output_sample_rate) * CLOCK_SCALE;
+        let step = u128::from(VOICE_SAMPLE_RATE) * (1_000_000 + self.rate_adjustment) as u128;
+        let mut output =
+            Vec::with_capacity((VOICE_FRAME_SAMPLES as u128 * output_rate / step) as usize + 2);
         for sample in samples {
             let sample = f32::from(sample) / 32_768.0;
             let current = [sample, sample];
+            self.filter.push(sample);
             let Some(previous) = self.previous else {
                 output.push(current);
                 self.previous = Some(current);
-                self.next_output_index = 1;
+                self.next_output_position = step;
                 continue;
             };
 
             self.current_source_index += 1;
-            let interval_start =
-                (self.current_source_index - 1) * u128::from(self.output_sample_rate);
-            let interval_end = self.current_source_index * u128::from(self.output_sample_rate);
+            let interval_start = (self.current_source_index - 1) * output_rate;
+            let interval_end = self.current_source_index * output_rate;
             loop {
-                let output_position = self.next_output_index * u128::from(VOICE_SAMPLE_RATE);
+                let output_position = self.next_output_position;
                 if output_position > interval_end {
                     break;
                 }
-                let fraction =
-                    (output_position - interval_start) as f64 / f64::from(self.output_sample_rate);
-                output.push([
-                    previous[0] + (current[0] - previous[0]) * fraction as f32,
-                    previous[1] + (current[1] - previous[1]) * fraction as f32,
-                ]);
-                self.next_output_index += 1;
+                let fraction = (output_position - interval_start) as f64 / output_rate as f64;
+                let sample = match mode {
+                    ResamplingMode::Default => self.filter.interpolate(fraction),
+                    ResamplingMode::Linear => {
+                        previous[0] + (current[0] - previous[0]) * fraction as f32
+                    }
+                };
+                output.push([sample, sample]);
+                self.next_output_position += step;
             }
             self.previous = Some(current);
         }
         output.into_boxed_slice()
+    }
+}
+
+#[cfg(test)]
+mod voice_clock_tests {
+    use super::*;
+
+    #[test]
+    fn fullband_voice_survives_mixer_and_device_rate_conversion() {
+        // A 48 kHz decoded voice crosses the 44.1 kHz game mixer before a
+        // common 48 kHz output device. Measure the original tone, not total
+        // RMS: alias images must not count as preserved speech.
+        let mut playback = VoicePlaybackResampler::new(44_100);
+        let mut device = crate::voice::StreamingVoiceResampler::with_output_rate(44_100, 48_000);
+        let mut output = Vec::new();
+        for frame in 0..50 {
+            let samples = std::array::from_fn(|i| {
+                let position = (frame * VOICE_FRAME_SAMPLES + i) as f64;
+                (0.3 * 32_768.0 * (std::f64::consts::TAU * 15_000.0 * position / 48_000.0).sin())
+                    as i16
+            });
+            for sample in playback.push_frame(samples, ResamplingMode::Default) {
+                device.push_sample(sample[0], |value| output.push(value));
+            }
+        }
+        let settled = &output[4_800..];
+        let (sine, cosine) =
+            settled
+                .iter()
+                .enumerate()
+                .fold((0.0, 0.0), |(sin, cos), (i, value)| {
+                    let phase = std::f64::consts::TAU * 15_000.0 * i as f64 / 48_000.0;
+                    (
+                        sin + f64::from(*value) * phase.sin(),
+                        cos + f64::from(*value) * phase.cos(),
+                    )
+                });
+        let amplitude = 2.0 * sine.hypot(cosine) / settled.len() as f64;
+        assert!(
+            (amplitude / 0.3 - 1.0).abs() < 0.05,
+            "15 kHz speech must survive both conversions within 5%: amplitude={amplitude}"
+        );
+    }
+
+    #[test]
+    fn playback_resampling_tracks_device_clock_skew_without_dropping_frames() {
+        for parts_per_million in [-1_000, 1_000] {
+            let mut resampler = VoicePlaybackResampler::new(VOICE_SAMPLE_RATE);
+            resampler.set_rate_adjustment(parts_per_million);
+            let mut output_samples = 0;
+            for _ in 0..100 {
+                let samples =
+                    resampler.push_frame([8_192; VOICE_FRAME_SAMPLES], ResamplingMode::Linear);
+                assert!(samples
+                    .iter()
+                    .all(|frame| (frame[0] - 0.25).abs() < 0.000_001));
+                output_samples += samples.len();
+            }
+            let expected = (100 * VOICE_FRAME_SAMPLES) as f64
+                / (1.0 + f64::from(parts_per_million) / 1_000_000.0);
+            assert!((output_samples as f64 - expected).abs() <= 2.0,
+                "device clock correction must change duration continuously: {output_samples}, expected {expected}");
+        }
     }
 }
 
@@ -2561,12 +2666,15 @@ mod tests {
 
         let mut first = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
         mixer.mix_f32(&mut first);
-        assert!((first[0] - 2_000.0 / 32_768.0).abs() < 0.000_1);
-        assert!((first[1] - 2_000.0 / 32_768.0).abs() < 0.000_1);
+        // The causal converter retains less than a millisecond of filter
+        // history. Beyond its 64-tap support, only the retained frame may play.
+        let settled = crate::voice_resampling::TAPS * 2;
+        assert!((first[settled] - 2_000.0 / 32_768.0).abs() < 0.000_1);
+        assert!((first[settled + 1] - 2_000.0 / 32_768.0).abs() < 0.000_1);
 
         let mut second = vec![0.0_f32; VOICE_FRAME_SAMPLES * 2];
         mixer.mix_f32(&mut second);
-        assert!((second[0] - 3_000.0 / 32_768.0).abs() < 0.000_1);
+        assert!((second[settled] - 3_000.0 / 32_768.0).abs() < 0.000_1);
         assert_eq!(mixer.voice_stream_stats(stream_id).queued_frames, 0);
 
         let mut underrun = vec![1.0_f32; 32];
@@ -2598,20 +2706,22 @@ mod tests {
 
     #[test]
     fn streaming_voice_resampling_interpolates_across_frame_boundaries() {
-        let mixer = AudioMixer::new(11_025, 0);
-        let stream_id = 75;
-
-        mixer.queue_voice_stream(stream_id, [0; VOICE_FRAME_SAMPLES]);
-        mixer.queue_voice_stream(stream_id, [i16::MAX; VOICE_FRAME_SAMPLES]);
-
-        let state = mixer.state.lock().unwrap();
-        let stream = &state.voice_streams[&stream_id];
-        assert_eq!(stream.frames[0].samples.len(), 220);
-        let boundary_sample = stream.frames[1].samples[0][0];
-        assert!(
-            (0.27..0.28).contains(&boundary_sample),
-            "boundary interpolation was {boundary_sample}"
-        );
+        for (mode, delay) in [(ResamplingMode::Linear, 0), (ResamplingMode::Default, 62)] {
+            let mixer = AudioMixer::new_with_resampling(VOICE_SAMPLE_RATE * 2, 0, mode);
+            let stream_id = 75;
+            mixer.queue_voice_stream(stream_id, [0; VOICE_FRAME_SAMPLES]);
+            mixer.queue_voice_stream(stream_id, [i16::MAX; VOICE_FRAME_SAMPLES]);
+            let state = mixer.state.lock().unwrap();
+            let stream = &state.voice_streams[&stream_id];
+            assert_eq!(stream.frames[0].samples.len(), VOICE_FRAME_SAMPLES * 2 - 1);
+            // The default filter delays by 31 source samples; interpolation
+            // still spans packets instead of restarting at each boundary.
+            let boundary_sample = stream.frames[1].samples[delay][0];
+            assert!(
+                (0.49..0.51).contains(&boundary_sample),
+                "boundary interpolation was {boundary_sample} with {mode:?}"
+            );
+        }
     }
 
     #[test]
@@ -2661,6 +2771,27 @@ mod tests {
         mixer.mix_f32(&mut output);
         assert!((output[0] - 0.125).abs() < 0.000_1);
         assert_eq!(output[1], 0.0);
+    }
+
+    #[test]
+    fn voice_respects_loud_game_audio_headroom() {
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 1);
+        let data = float_stereo_wave(VOICE_SAMPLE_RATE, &[[0.9, 0.9]; VOICE_FRAME_SAMPLES]);
+        let sound = mixer.load_sound(&data).unwrap();
+        mixer.play_sound(sound, false).unwrap();
+        mixer.queue_voice_stream_with_mix(1, [20_000; VOICE_FRAME_SAMPLES], 1.0, 0.0);
+
+        let mut output = [0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        mixer.mix_f32(&mut output);
+
+        assert!(
+            output.iter().all(|sample| *sample < 1.0),
+            "speech must not drive loud game audio into the output clamp"
+        );
+        assert!(
+            output.iter().all(|sample| *sample > 0.9 * 100.0 / 128.0),
+            "speech must remain audible above the unchanged game mix"
+        );
     }
 
     #[test]

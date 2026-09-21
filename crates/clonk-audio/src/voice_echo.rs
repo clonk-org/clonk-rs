@@ -7,14 +7,22 @@
 //! audio callback may ever wait on the other.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use crate::voice_output_reference::OutputReference;
+
+use aec3::api::control::EchoControl;
+use aec3::audio_processing::aec3::echo_canceller3::EchoCanceller3;
+use aec3::audio_processing::audio_buffer::AudioBuffer;
+use aec3::audio_processing::stream_config::StreamConfig;
 
 use crate::voice::StreamingVoiceResampler;
 use crate::VOICE_FRAME_SAMPLES;
 
-/// Just over a second of 16 kHz mono history. A power of two so the write
+/// Over a second of 48 kHz mono history. A power of two so the write
 /// position masks into an index.
-const ECHO_REFERENCE_SAMPLES: usize = 16_384;
+const ECHO_REFERENCE_SAMPLES: usize = 65_536;
 
 /// How far the reader may trail the writer before it gives up on the samples in
 /// between. A steady lag is harmless — the canceller simply models a shorter
@@ -42,6 +50,7 @@ struct EchoRing {
 #[derive(Clone, Debug)]
 pub struct VoiceEchoReference {
     ring: Arc<EchoRing>,
+    output: Option<Arc<Mutex<Option<Arc<OutputReference>>>>>,
 }
 
 /// The mixer's end of the reference: downmixes and resamples the output it is
@@ -57,69 +66,27 @@ pub(crate) struct VoiceEchoTap {
 pub(crate) struct EchoReferenceReader {
     reference: VoiceEchoReference,
     position: u64,
+    active_output: Option<Arc<OutputReference>>,
+    output_epoch: u64,
 }
 
-/// How much of the echo path the adaptive filter can model: 2048 taps is 128 ms
-/// at [`VOICE_SAMPLE_RATE`](crate::VOICE_SAMPLE_RATE), which covers an ordinary
-/// output buffer, the device's own latency, the trip across the room and the
-/// capture buffer. A longer echo than that — a Bluetooth headset, say — is left
-/// to the residual suppressor below, which does not care where the echo came
-/// from. The filter costs about one percent of a core per 1024 taps.
-const ECHO_TAIL_SAMPLES: usize = 2_048;
-/// Normalized step size. Large enough to converge during the opening fraction
-/// of an utterance, while remaining within the NLMS stability bound.
-const ECHO_ADAPTATION_RATE: f32 = 1.0;
-/// Geigel double-talk detector: a room cannot return more sound than the
-/// speakers put into it, so a microphone louder than the far end that could
-/// have caused it is hearing someone speak, and the filter must not adapt to
-/// them. Deliberately permissive — quieter double talk only slows the filter
-/// down, and the residual suppressor below is what protects the near end.
-const ECHO_PATH_MAX_GAIN: f32 = 1.0;
-/// How much of the filter's own output is assumed to survive as residual echo.
-/// The adaptive filter never cancels a nonlinear speaker and microphone path,
-/// device-clock drift, or room-path changes perfectly.
-const ECHO_RESIDUAL_LEAKAGE: f32 = 0.25;
-/// Conservative residual energy assumed before the adaptive filter has learned
-/// enough of the room to produce its own estimate. Push-to-talk captures start
-/// cold, so relying on the learned estimate alone leaves the first short
-/// utterance almost completely uncancelled.
-const ECHO_COLD_START_RESIDUAL_RATIO: f32 = 0.25;
-/// Keep the conservative residual estimate only while the filter learns its
-/// first room path. The normal learned estimate takes over after this many
-/// frames that were safe to adapt, so quiet double talk is not held down for
-/// the rest of the capture.
-const ECHO_COLD_START_ADAPTATION_FRAMES: u32 = 12;
-/// Floor of the residual suppressor's gain: 30 dB down while the far end plays
-/// alone, which is quiet enough that no one hears themselves back.
-const ECHO_RESIDUAL_MIN_GAIN: f32 = 0.03;
-/// Share of the distance to the new residual gain covered per frame.
-const ECHO_RESIDUAL_SMOOTHING: f32 = 0.5;
-
-/// Subtracts what the mixer played from what the microphone heard.
-///
-/// A normalized least-mean-squares filter models the path from the speakers
-/// back into the microphone and subtracts its estimate; a Wiener-style
-/// suppressor then holds down whatever the filter could not model. Without a
-/// reference — voice chat with no audio device, or echo cancellation switched
-/// off before the capture opened — it is a no-op.
-#[derive(Debug)]
+/// WebRTC AEC3 tracks render-to-capture delay instead of requiring the echo
+/// path to fit inside a fixed time-domain filter. Processing uses 10 ms blocks;
+/// the media codec may packetize two of them together.
 pub(crate) struct EchoCanceller {
     reader: Option<EchoReferenceReader>,
-    weights: Box<[f32]>,
-    /// The far end from one tail before this frame up to its end, so that
-    /// `history[offset + 1..offset + 1 + ECHO_TAIL_SAMPLES]` is the tap window
-    /// for sample `offset` — oldest first, ending on the far-end sample that
-    /// shares its instant.
-    history: Box<[f32]>,
+    processor: Option<Box<EchoProcessor>>,
     far: [f32; VOICE_FRAME_SAMPLES],
-    /// Loudest far-end sample still inside the tap window, for the double-talk
-    /// detector.
-    far_peaks: [f32; ECHO_TAIL_FRAMES],
-    residual_gain: f32,
-    adapted_frames: u32,
 }
 
-const ECHO_TAIL_FRAMES: usize = ECHO_TAIL_SAMPLES.div_ceil(VOICE_FRAME_SAMPLES);
+impl std::fmt::Debug for EchoCanceller {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EchoCanceller")
+            .field("has_reference", &self.reader.is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 impl VoiceEchoReference {
     fn new() -> Self {
@@ -130,6 +97,20 @@ impl VoiceEchoReference {
                     .collect(),
                 written: AtomicU64::new(0),
             }),
+            output: None,
+        }
+    }
+
+    pub(crate) fn for_output() -> Self {
+        Self {
+            output: Some(Arc::new(Mutex::new(None))),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn set_output(&self, reference: Option<Arc<OutputReference>>) {
+        if let Some(output) = &self.output {
+            *output.lock().unwrap() = reference;
         }
     }
 
@@ -191,7 +172,35 @@ impl EchoReferenceReader {
         Self {
             reference,
             position,
+            active_output: None,
+            output_epoch: 0,
         }
+    }
+
+    pub(crate) fn read_at(
+        &mut self,
+        far: &mut [f32; VOICE_FRAME_SAMPLES],
+        captured_at: Instant,
+    ) -> bool {
+        if let Some(output) = &self.reference.output {
+            let next = output.lock().unwrap().clone();
+            let epoch = next.as_ref().map_or(0, |output| output.epoch());
+            let changed = match (&self.active_output, &next) {
+                (Some(old), Some(new)) => !Arc::ptr_eq(old, new) || self.output_epoch != epoch,
+                (None, None) => false,
+                _ => true,
+            };
+            self.active_output = next;
+            self.output_epoch = epoch;
+            if let Some(output) = &self.active_output {
+                output.read_at(far, captured_at);
+            } else {
+                far.fill(0.0);
+            }
+            return changed;
+        }
+        self.read(far);
+        false
     }
 
     /// The far-end block that lines up with the microphone frame being
@@ -217,89 +226,82 @@ impl EchoReferenceReader {
 
 impl EchoCanceller {
     pub(crate) fn new(reference: Option<VoiceEchoReference>) -> Self {
+        let processor = reference.as_ref().map(|_| Box::new(EchoProcessor::new()));
         Self {
             reader: reference.map(EchoReferenceReader::new),
-            weights: vec![0.0; ECHO_TAIL_SAMPLES].into_boxed_slice(),
-            history: vec![0.0; ECHO_TAIL_SAMPLES + VOICE_FRAME_SAMPLES].into_boxed_slice(),
+            processor,
             far: [0.0; VOICE_FRAME_SAMPLES],
-            far_peaks: [0.0; ECHO_TAIL_FRAMES],
-            residual_gain: 1.0,
-            adapted_frames: 0,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) {
-        let Some(reader) = self.reader.as_mut() else {
+        self.process_at(frame, Instant::now());
+    }
+
+    pub(crate) fn process_at(
+        &mut self,
+        frame: &mut [f32; VOICE_FRAME_SAMPLES],
+        captured_at: Instant,
+    ) {
+        let Some(reader) = &mut self.reader else {
             return;
         };
-        reader.read(&mut self.far);
-        self.history.copy_within(VOICE_FRAME_SAMPLES.., 0);
-        self.history[ECHO_TAIL_SAMPLES..].copy_from_slice(&self.far);
-        self.far_peaks.rotate_left(1);
-        self.far_peaks[ECHO_TAIL_FRAMES - 1] = self
-            .far
-            .iter()
-            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-
-        // One normalization per frame rather than per sample: the tap window
-        // moves by a single sample between them, and a frame-constant step is
-        // the standard block form of the update.
-        let energy = self.history[VOICE_FRAME_SAMPLES..]
-            .iter()
-            .map(|sample| sample * sample)
-            .sum::<f32>();
-        let far_peak = self
-            .far_peaks
-            .iter()
-            .fold(0.0_f32, |peak, value| peak.max(*value));
-        let microphone_peak = frame
-            .iter()
-            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-        let near_end_present = microphone_peak > far_peak * ECHO_PATH_MAX_GAIN;
-        let adapt = energy > 1e-6 && !near_end_present;
-        let cold_start = self.adapted_frames < ECHO_COLD_START_ADAPTATION_FRAMES;
-
-        let mut echo_energy = 0.0;
-        let mut error_energy = 0.0;
-        for (offset, sample) in frame.iter_mut().enumerate() {
-            let window = &self.history[offset + 1..offset + 1 + ECHO_TAIL_SAMPLES];
-            let estimate = self
-                .weights
-                .iter()
-                .zip(window)
-                .map(|(weight, far)| weight * far)
-                .sum::<f32>();
-            let error = *sample - estimate;
-            if adapt {
-                let step = ECHO_ADAPTATION_RATE * error / energy;
-                for (weight, far) in self.weights.iter_mut().zip(window) {
-                    *weight += step * far;
-                }
-            }
-            echo_energy += estimate * estimate;
-            error_energy += error * error;
-            *sample = error;
+        if reader.read_at(&mut self.far, captured_at) {
+            self.processor = Some(Box::new(EchoProcessor::new()));
         }
-        if adapt {
-            self.adapted_frames = self.adapted_frames.saturating_add(1);
-        }
-
-        // What the filter could not model is proportional to what it did model,
-        // so hold the frame down by the Wiener gain that would leave only the
-        // near end behind.
-        let far_frame_energy = self.far.iter().map(|sample| sample * sample).sum::<f32>();
-        let cold_start_residual = if cold_start && !near_end_present {
-            ECHO_COLD_START_RESIDUAL_RATIO * far_frame_energy
-        } else {
-            0.0
+        let Some(processor) = &mut self.processor else {
+            return;
         };
-        let residual = (ECHO_RESIDUAL_LEAKAGE * echo_energy).max(cold_start_residual);
-        let target =
-            (error_energy / (error_energy + residual + 1e-12)).clamp(ECHO_RESIDUAL_MIN_GAIN, 1.0);
-        self.residual_gain += (target - self.residual_gain) * ECHO_RESIDUAL_SMOOTHING;
-        for sample in frame.iter_mut() {
-            *sample *= self.residual_gain;
+        const BLOCK: usize = VOICE_FRAME_SAMPLES / 2;
+        for (render, capture) in self
+            .far
+            .chunks_exact(BLOCK)
+            .zip(frame.chunks_exact_mut(BLOCK))
+        {
+            processor.process(render, capture);
         }
+    }
+}
+
+/// Fixed buffers avoid the graph API's per-frame packet allocations and keep
+/// buffers reusable. The processor is constructed on its owning capture thread.
+struct EchoProcessor {
+    echo: EchoCanceller3,
+    render: AudioBuffer,
+    capture: AudioBuffer,
+    stream: StreamConfig,
+}
+
+impl EchoProcessor {
+    fn new() -> Self {
+        let mut config = aec3::api::config::EchoCanceller3Config::default();
+        // Detect nearby speech after 8 ms instead of 48 ms of qualifying
+        // blocks. Short push-to-talk utterances must survive the cold start;
+        // the echo-only and double-talk regressions pin both sides of this.
+        config
+            .suppressor
+            .dominant_nearend_detection
+            .trigger_threshold = 2;
+        let samples = VOICE_FRAME_SAMPLES / 2;
+        Self {
+            echo: EchoCanceller3::new(config, crate::VOICE_SAMPLE_RATE as i32, 1, 1),
+            render: AudioBuffer::new(samples, 1, samples, 1, samples),
+            capture: AudioBuffer::new(samples, 1, samples, 1, samples),
+            stream: StreamConfig::new(crate::VOICE_SAMPLE_RATE as usize, 1, false),
+        }
+    }
+
+    fn process(&mut self, render: &[f32], capture: &mut [f32]) {
+        self.render.copy_from(&[render], &self.stream);
+        self.render.split_into_frequency_bands();
+        self.echo.analyze_render(&mut self.render);
+        self.capture.copy_from(&[capture], &self.stream);
+        self.echo.analyze_capture(&mut self.capture);
+        self.capture.split_into_frequency_bands();
+        self.echo.process_capture(&mut self.capture, false);
+        self.capture.merge_frequency_bands();
+        self.capture.copy_to_stream(&self.stream, &mut [capture]);
     }
 }
 
@@ -332,8 +334,140 @@ mod tests {
     }
 
     #[test]
+    fn timed_device_reference_cancels_a_three_hundred_millisecond_echo() {
+        let output = OutputReference::new(VOICE_SAMPLE_RATE);
+        let reference = VoiceEchoReference::for_output();
+        reference.set_output(Some(output.clone()));
+        let mut canceller = EchoCanceller::new(Some(reference));
+        let mut signal = TestSignal(11);
+        let delay = VOICE_SAMPLE_RATE as usize * 300 / 1_000;
+        let mut played = vec![0.0; delay + 64 + VOICE_FRAME_SAMPLES];
+        let mut heard = Vec::new();
+        let mut sent = Vec::new();
+        let start = Instant::now();
+        for index in 0..400 {
+            let first = output.written();
+            let capture_time = start + std::time::Duration::from_millis(index * 20);
+            let frame = std::array::from_fn::<_, VOICE_FRAME_SAMPLES, _>(|_| {
+                let sample = signal.next() * 0.3;
+                output.push(sample);
+                sample
+            });
+            output.publish_timing(first, capture_time);
+            played.extend_from_slice(&frame);
+            let mut microphone = std::array::from_fn(|offset| {
+                echo_of(&played, played.len() - VOICE_FRAME_SAMPLES + offset, delay)
+            });
+            let raw = microphone;
+            canceller.process_at(&mut microphone, capture_time);
+            if index >= 380 {
+                heard.extend_from_slice(&raw);
+                sent.extend_from_slice(&microphone);
+            }
+        }
+        let reduction = 20.0 * (rms(&heard) / rms(&sent).max(1e-9)).log10();
+        assert!(
+            reduction >= 20.0,
+            "timed output reference reduced echo by only {reduction:.2} dB"
+        );
+    }
+
+    #[test]
+    fn echo_reference_resets_on_output_replacement_removal_and_clock_discontinuity() {
+        let reference = VoiceEchoReference::for_output();
+        let mut reader = EchoReferenceReader::new(reference.clone());
+        let mut far = [0.0; VOICE_FRAME_SAMPLES];
+        let start = Instant::now();
+        let first = OutputReference::new(48_000);
+        reference.set_output(Some(first.clone()));
+        assert!(reader.read_at(&mut far, start));
+        assert!(!reader.read_at(&mut far, start));
+        let second = OutputReference::new(96_000);
+        reference.set_output(Some(second.clone()));
+        let time = Instant::now();
+        for _ in 0..1920 {
+            second.push(0.1);
+        }
+        second.publish_timing(0, time);
+        assert!(reader.read_at(&mut far, time));
+        // The former output can still finish its callback on another thread.
+        for _ in 0..960 {
+            first.push(0.8);
+        }
+        first.publish_timing(0, time);
+        assert!(!reader.read_at(&mut far, time));
+        assert!(far[128..832]
+            .iter()
+            .all(|sample| (*sample - 0.1).abs() < 0.0001));
+        second.publish_timing(1920, time + std::time::Duration::from_secs(1));
+        assert!(reader.read_at(&mut far, time));
+        assert!(!reader.read_at(&mut far, time));
+        reference.set_output(None);
+        assert!(reader.read_at(&mut far, time));
+        assert!(far.iter().all(|sample| *sample == 0.0));
+        assert!(!reader.read_at(&mut far, time));
+    }
+
+    #[test]
+    fn output_echo_reference_uses_capture_time_after_a_dsp_scheduling_delay() {
+        let output = OutputReference::new(VOICE_SAMPLE_RATE);
+        let start = Instant::now();
+        for frame in 0..10 {
+            let position = output.written();
+            for _ in 0..VOICE_FRAME_SAMPLES {
+                output.push(frame as f32 * 0.05);
+            }
+            output.publish_timing(
+                position,
+                start + std::time::Duration::from_millis(frame * 20),
+            );
+        }
+        let reference = VoiceEchoReference::for_output();
+        reference.set_output(Some(output));
+        let mut reader = EchoReferenceReader::new(reference);
+        let mut far = [0.0; VOICE_FRAME_SAMPLES];
+        reader.read_at(&mut far, start + std::time::Duration::from_millis(40));
+        assert!(far[128..832]
+            .iter()
+            .all(|sample| (*sample - 0.1).abs() < 0.0001));
+    }
+
+    #[test]
+    fn echo_cancellation_rejects_a_three_hundred_millisecond_echo_path() {
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
+        let mut canceller = EchoCanceller::new(Some(tap.reference()));
+        let mut signal = TestSignal(11);
+        let delay = VOICE_SAMPLE_RATE as usize * 300 / 1_000;
+        let mut played = vec![0.0; delay + 64 + VOICE_FRAME_SAMPLES];
+        let mut heard = Vec::new();
+        let mut sent = Vec::new();
+        for index in 0..400 {
+            let frame = std::array::from_fn::<_, VOICE_FRAME_SAMPLES, _>(|_| {
+                let sample = signal.next() * 0.3;
+                tap.push_output_frame(sample, sample);
+                sample
+            });
+            played.extend_from_slice(&frame);
+            let mut microphone = std::array::from_fn(|offset| {
+                echo_of(&played, played.len() - VOICE_FRAME_SAMPLES + offset, delay)
+            });
+            let raw = microphone;
+            canceller.process(&mut microphone);
+            if index >= 380 {
+                heard.extend_from_slice(&raw);
+                sent.extend_from_slice(&microphone);
+            }
+        }
+        let reduction = 20.0 * (rms(&heard) / rms(&sent).max(1e-9)).log10();
+        assert!(
+            reduction >= 20.0,
+            "a long device path must still cancel echo, got {reduction:.1} dB"
+        );
+    }
+
+    #[test]
     fn echo_cancellation_removes_a_delayed_copy_of_what_the_mixer_played() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(11);
         let delay = 700;
@@ -369,7 +503,7 @@ mod tests {
 
     #[test]
     fn echo_cancellation_quiets_speaker_bleed_within_a_short_utterance() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(17);
         let delay = 700;
@@ -405,7 +539,7 @@ mod tests {
 
     #[test]
     fn echo_cancellation_still_lets_someone_talk_over_the_game() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(23);
         let delay = 400;
@@ -447,7 +581,7 @@ mod tests {
 
     #[test]
     fn converged_echo_cancellation_keeps_a_quiet_talker_over_loud_game_audio() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(31);
         let delay = 400;
@@ -488,7 +622,7 @@ mod tests {
 
     #[test]
     fn cold_echo_cancellation_keeps_speech_over_the_game() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut canceller = EchoCanceller::new(Some(tap.reference()));
         let mut signal = TestSignal(29);
         let delay = 400;
@@ -539,7 +673,7 @@ mod tests {
 
     #[test]
     fn the_echo_reference_hands_the_capture_side_what_the_mixer_wrote() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut reader = EchoReferenceReader::new(tap.reference());
 
         for index in 0..VOICE_FRAME_SAMPLES {
@@ -560,12 +694,17 @@ mod tests {
         }
         reader.read(&mut far);
         assert_eq!(far[0], 0.0);
-        assert!((far[VOICE_FRAME_SAMPLES - 1] - 319.0 / 320.0).abs() < 1e-6);
+        assert!(
+            (far[VOICE_FRAME_SAMPLES - 1]
+                - (VOICE_FRAME_SAMPLES - 1) as f32 / VOICE_FRAME_SAMPLES as f32)
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]
     fn a_reader_ahead_of_the_mixer_reads_silence_and_keeps_the_samples_it_missed() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut reader = EchoReferenceReader::new(tap.reference());
         let mut far = [1.0; VOICE_FRAME_SAMPLES];
 
@@ -606,7 +745,7 @@ mod tests {
 
     #[test]
     fn a_reader_that_falls_far_behind_jumps_back_to_the_live_signal() {
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(VOICE_SAMPLE_RATE);
         let mut reader = EchoReferenceReader::new(tap.reference());
 
         for index in 0..MAX_REFERENCE_LAG_SAMPLES + VOICE_FRAME_SAMPLES as u64 {

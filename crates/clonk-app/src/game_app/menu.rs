@@ -1331,7 +1331,7 @@ impl GameApp {
             MenuAction::ActivateOptions => {
                 self.ingame_menus.players.replace(
                     player,
-                    Some(IngameMenuState::options_menu(
+                    Some(self.ingame_options_menu(
                         &self.option_flags(player),
                         0,
                         &self.ingame_menu_labels(),
@@ -1568,6 +1568,9 @@ impl GameApp {
                     );
                 }
             }
+            MenuAction::VoiceSetup => {
+                self.open_voice_setup()?;
+            }
             MenuAction::ToggleSound => {
                 // Application.SoundSystem->ToggleOnOff() + reopen with the
                 // previous selection (C4MainMenu.cpp:842-852).
@@ -1575,7 +1578,7 @@ impl GameApp {
                 self.toggle_sound_option()?;
                 self.ingame_menus.players.replace(
                     player,
-                    Some(IngameMenuState::options_menu(
+                    Some(self.ingame_options_menu(
                         &self.option_flags(player),
                         selection,
                         &self.ingame_menu_labels(),
@@ -1587,7 +1590,7 @@ impl GameApp {
                 self.toggle_music_option()?;
                 self.ingame_menus.players.replace(
                     player,
-                    Some(IngameMenuState::options_menu(
+                    Some(self.ingame_options_menu(
                         &self.option_flags(player),
                         selection,
                         &self.ingame_menu_labels(),
@@ -1608,7 +1611,7 @@ impl GameApp {
                 }
                 self.ingame_menus.players.replace(
                     player,
-                    Some(IngameMenuState::options_menu(
+                    Some(self.ingame_options_menu(
                         &self.option_flags(player),
                         selection,
                         &self.ingame_menu_labels(),

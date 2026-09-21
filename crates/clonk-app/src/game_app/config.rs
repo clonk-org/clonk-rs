@@ -1359,12 +1359,18 @@ impl GameApp {
             .as_ref()
             .map(|dialog| dialog.active_sheet())
             .unwrap_or_default();
-        let voice_input_devices = match clonk_audio::voice_input_devices() {
-            Ok(devices) => devices,
-            Err(error) => {
+        let voice_input_devices = self
+            .sound
+            .context
+            .as_ref()
+            .map(|audio| audio.borrow().system.voice_input_inventory());
+        let voice_input_devices = match voice_input_devices {
+            Some(clonk_audio::VoiceInputDeviceInventory::Ready(devices)) => devices,
+            Some(clonk_audio::VoiceInputDeviceInventory::Unavailable(error)) => {
                 tracing::warn!(%error, "could not enumerate voice input devices");
                 Vec::new()
             }
+            Some(clonk_audio::VoiceInputDeviceInventory::Scanning) | None => Vec::new(),
         };
         let mut controller =
             clonk_frontend::startup_options_advanced::AdvancedConfigController::new(
@@ -1477,6 +1483,9 @@ impl GameApp {
             let mut audio = audio.borrow_mut();
             let music_volume = reloaded_audio.music_volume_percent();
             let sound_volume = reloaded_audio.sound_volume_percent();
+            audio
+                .system
+                .select_output_device(reloaded_audio.voice_output_device.clone());
             audio.options = reloaded_audio;
             audio.set_music_volume_percent(music_volume);
             audio.set_sound_volume_percent(sound_volume);

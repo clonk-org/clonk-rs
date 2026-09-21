@@ -573,6 +573,7 @@ fn voice(config: &Config, input_devices: &[VoiceInputDevice]) -> AdvancedConfigS
                 i128::from(MAX_VOICE_VOLUME_PERCENT),
             ),
             voice_input_device_row(config, input_devices),
+            text_row(config, section, "OutputDevice", ""),
             i32_row(config, section, "PushToTalkKey", default_push_to_talk),
             enum_row(
                 config,

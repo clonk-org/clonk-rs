@@ -5,10 +5,11 @@
 //! suppress the noise, then set the level — each switchable on its own
 //! (clonk-org/clonk-rs#421).
 //!
-//! It runs inside the microphone callback, on the fixed 20 ms, 16 kHz mono
+//! It runs on the capture worker, on the fixed 20 ms, 48 kHz mono
 //! frame the encoder is about to consume, and never changes that geometry.
-//! Every buffer it needs is allocated when the capture opens, so a frame costs
-//! no allocation and takes no lock.
+//! Steady processing reuses its buffers. Output-reference changes rebuild the
+//! echo processor on this worker; device metadata is shared through a brief
+//! snapshot lock, never a hardware-callback lock.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -97,6 +98,14 @@ pub(crate) struct VoiceProcessing {
 }
 
 impl VoiceProcessing {
+    pub(crate) fn delay_samples(&self) -> usize {
+        if self.switches.get().noise_suppression {
+            VOICE_FRAME_SAMPLES
+        } else {
+            0
+        }
+    }
+
     pub(crate) fn new(
         switches: Arc<VoiceProcessingSwitches>,
         echo_reference: Option<VoiceEchoReference>,
@@ -117,10 +126,19 @@ impl VoiceProcessing {
     /// Measuring after it would hand the voice-activation gate a signal in
     /// which every frame is equally loud, and the gate would hold the
     /// microphone open on a hum.
+    #[cfg(test)]
     pub(crate) fn process(&mut self, frame: &mut [f32; VOICE_FRAME_SAMPLES]) -> f32 {
+        self.process_at(frame, std::time::Instant::now())
+    }
+
+    pub(crate) fn process_at(
+        &mut self,
+        frame: &mut [f32; VOICE_FRAME_SAMPLES],
+        captured_at: std::time::Instant,
+    ) -> f32 {
         let config = self.switches.get();
         if config.echo_cancellation {
-            self.echo.process(frame);
+            self.echo.process_at(frame, captured_at);
         }
         if config.noise_suppression {
             self.noise.process(frame);
@@ -140,7 +158,7 @@ impl VoiceProcessing {
 /// from comes out as it went in.
 const NOISE_WINDOW_SAMPLES: usize = 2 * VOICE_FRAME_SAMPLES;
 /// The window zero-padded up to the next power of two the transform needs.
-const NOISE_TRANSFORM_SAMPLES: usize = 1_024;
+const NOISE_TRANSFORM_SAMPLES: usize = NOISE_WINDOW_SAMPLES.next_power_of_two();
 const NOISE_BINS: usize = NOISE_TRANSFORM_SAMPLES / 2 + 1;
 /// Quietest a bin may be held to. Voice sounds thin and starts to bubble when
 /// the noise between the harmonics is removed completely, so the floor is 24 dB
@@ -545,7 +563,7 @@ mod tests {
         for _ in 0..16 {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             for sample in frame.iter_mut() {
-                phase += std::f32::consts::TAU * 700.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 700.0 / crate::VOICE_SAMPLE_RATE as f32;
                 *sample = 0.4 * phase.sin();
             }
             spoken.extend_from_slice(&frame);
@@ -583,7 +601,7 @@ mod tests {
         for frame_index in 0..NOISE_FLOOR_SEED_FRAMES {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             for sample in frame.iter_mut() {
-                phase += std::f32::consts::TAU * 310.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 310.0 / crate::VOICE_SAMPLE_RATE as f32;
                 *sample = 0.3 * phase.sin() + 0.08 * (2.3 * phase).sin();
             }
             if frame_index + 1 < NOISE_FLOOR_SEED_FRAMES {
@@ -614,7 +632,7 @@ mod tests {
         for index in 0..20 {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             for sample in &mut frame {
-                phase += std::f32::consts::TAU * 310.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 310.0 / crate::VOICE_SAMPLE_RATE as f32;
                 *sample = 0.3 * phase.sin() + 0.08 * (2.3 * phase).sin();
             }
             if (5..19).contains(&index) {
@@ -673,7 +691,7 @@ mod tests {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             let mut speech = [0.0; VOICE_FRAME_SAMPLES];
             for (offset, sample) in frame.iter_mut().enumerate() {
-                phase += std::f32::consts::TAU * 300.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 300.0 / crate::VOICE_SAMPLE_RATE as f32;
                 speech[offset] = if talking {
                     0.25 * phase.sin() + 0.12 * (2.7 * phase).sin()
                 } else {
@@ -704,7 +722,7 @@ mod tests {
         for index in 0..250 {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             for sample in frame.iter_mut() {
-                phase += std::f32::consts::TAU * 300.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 300.0 / crate::VOICE_SAMPLE_RATE as f32;
                 *sample = 0.01 * phase.sin();
             }
             gain.process(&mut frame);
@@ -748,7 +766,7 @@ mod tests {
         for _ in 0..250 {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             for sample in &mut frame {
-                phase += std::f32::consts::TAU * 300.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 300.0 / crate::VOICE_SAMPLE_RATE as f32;
                 *sample = 0.01 * phase.sin();
             }
             gain.process(&mut frame);
@@ -784,7 +802,7 @@ mod tests {
         let mut quiet = |gain: &mut AutomaticGainControl| {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             for sample in frame.iter_mut() {
-                phase += std::f32::consts::TAU * 300.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 300.0 / crate::VOICE_SAMPLE_RATE as f32;
                 *sample = 0.01 * phase.sin();
             }
             gain.process(&mut frame);
@@ -828,7 +846,7 @@ mod tests {
         for _ in 0..250 {
             let mut frame = [0.0; VOICE_FRAME_SAMPLES];
             for sample in frame.iter_mut() {
-                phase += std::f32::consts::TAU * 300.0 / 16_000.0;
+                phase += std::f32::consts::TAU * 300.0 / crate::VOICE_SAMPLE_RATE as f32;
                 *sample = 0.01 * phase.sin();
             }
             level = processing.process(&mut frame);
@@ -853,7 +871,7 @@ mod tests {
             echo_cancellation: true,
             ..VoiceProcessingConfig::DISABLED
         });
-        let mut tap = VoiceEchoTap::new(16_000);
+        let mut tap = VoiceEchoTap::new(crate::VOICE_SAMPLE_RATE);
         let mut processing = VoiceProcessing::new(switches.clone(), Some(tap.reference()));
         let mut signal = TestSignal(31);
         let delay = 500;

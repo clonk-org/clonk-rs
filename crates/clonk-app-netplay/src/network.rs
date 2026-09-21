@@ -937,7 +937,7 @@ impl NetworkControlClock {
 struct NetworkWorkerReady {
     local_client_id: ClientId,
     voice_sender: clonk_network::VoiceSender,
-    voice_event_rx: tokio_mpsc::Receiver<clonk_network::VoiceFrame>,
+    voice_event_rx: clonk_network::VoiceInboxReceiver,
     control_send_time: clonk_network::ControlSendTimeSnapshot,
     control_wait_attribution: clonk_network::ControlWaitAttributionSnapshot,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
@@ -1660,6 +1660,58 @@ impl ClientActivationState {
     }
 }
 
+/// An independently serviced media lane. Detaching it leaves all game controls
+/// on NetworkManager; cloning only retains the same bounded media inbox.
+#[derive(Clone)]
+pub struct NetworkVoiceEndpoint {
+    receiver: Arc<Mutex<clonk_network::VoiceInboxReceiver>>,
+    sender: NetworkVoiceSender,
+}
+
+#[derive(Clone)]
+enum NetworkVoiceSender {
+    Session(clonk_network::VoiceSender),
+    #[cfg(any(test, feature = "test-hooks"))]
+    Test(tokio_mpsc::Sender<clonk_network::VoiceFrame>),
+}
+
+impl NetworkVoiceEndpoint {
+    pub fn is_available(&self) -> bool {
+        match &self.sender {
+            NetworkVoiceSender::Session(sender) => sender.is_available(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            NetworkVoiceSender::Test(_) => true,
+        }
+    }
+
+    pub fn try_send_at(
+        &self,
+        frame: clonk_network::VoiceFrame,
+        captured_at: Instant,
+    ) -> std::result::Result<(), clonk_network::VoiceSendError> {
+        match &self.sender {
+            NetworkVoiceSender::Session(sender) => sender.try_send_at(frame, captured_at),
+            #[cfg(any(test, feature = "test-hooks"))]
+            NetworkVoiceSender::Test(sender) => {
+                sender.try_send(frame).map_err(|error| match error {
+                    tokio_mpsc::error::TrySendError::Full(_) => clonk_network::VoiceSendError::Full,
+                    tokio_mpsc::error::TrySendError::Closed(_) => {
+                        clonk_network::VoiceSendError::Closed
+                    }
+                })
+            }
+        }
+    }
+
+    pub fn receive(&mut self) -> Vec<clonk_network::ReceivedVoiceFrame> {
+        let mut receiver = self.receiver.lock();
+        // Bound each pump even if authenticated producers keep filling it.
+        std::iter::from_fn(|| receiver.try_recv_timed().ok())
+            .take(128)
+            .collect()
+    }
+}
+
 #[derive(Debug)]
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
@@ -1670,7 +1722,7 @@ pub struct NetworkManager {
     event_rx: Receiver<NetworkEvent>,
     round_restart_retained_events: Mutex<VecDeque<NetworkEvent>>,
     voice_sender: Option<clonk_network::VoiceSender>,
-    voice_event_rx: Option<tokio_mpsc::Receiver<clonk_network::VoiceFrame>>,
+    voice_event_rx: Option<clonk_network::VoiceInboxReceiver>,
     telemetry_rx: Receiver<NetworkEvent>,
     event_wake: NetworkEventWakeHandle,
     worker: Option<thread::JoinHandle<()>>,
@@ -1698,7 +1750,7 @@ pub struct NetworkManager {
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub struct TestVoiceChannels {
-    inbound: tokio_mpsc::Sender<clonk_network::VoiceFrame>,
+    inbound: clonk_network::VoiceInboxSender,
     outbound: tokio_mpsc::Receiver<clonk_network::VoiceFrame>,
 }
 
@@ -1708,8 +1760,16 @@ impl TestVoiceChannels {
         &self,
         frame: clonk_network::VoiceFrame,
     ) -> std::result::Result<(), clonk_network::VoiceFrame> {
+        self.send_inbound_at(frame, Instant::now())
+    }
+
+    pub fn send_inbound_at(
+        &self,
+        frame: clonk_network::VoiceFrame,
+        received_at: Instant,
+    ) -> std::result::Result<(), clonk_network::VoiceFrame> {
         self.inbound
-            .try_send(frame)
+            .try_send_at(frame, received_at)
             .map_err(|error| error.into_inner())
     }
 
@@ -5855,12 +5915,36 @@ impl NetworkManager {
             .try_send(frame)
     }
 
+    /// Transfers application media polling to the dedicated voice worker.
+    pub fn take_voice_endpoint(&mut self) -> Option<NetworkVoiceEndpoint> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let sender = self
+            .test_voice_outbound
+            .as_ref()
+            .cloned()
+            .map(NetworkVoiceSender::Test)
+            .or_else(|| self.voice_sender.clone().map(NetworkVoiceSender::Session))?;
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let sender = NetworkVoiceSender::Session(self.voice_sender.clone()?);
+        Some(NetworkVoiceEndpoint {
+            receiver: Arc::new(Mutex::new(self.voice_event_rx.take()?)),
+            sender,
+        })
+    }
+
     pub fn poll_voice_frames(&mut self) -> Vec<clonk_network::VoiceFrame> {
+        self.poll_timed_voice_frames()
+            .into_iter()
+            .map(|received| received.frame)
+            .collect()
+    }
+
+    pub fn poll_timed_voice_frames(&mut self) -> Vec<clonk_network::ReceivedVoiceFrame> {
         let Some(receiver) = self.voice_event_rx.as_mut() else {
             return Vec::new();
         };
         let mut frames = Vec::new();
-        while let Ok(frame) = receiver.try_recv() {
+        while let Ok(frame) = receiver.try_recv_timed() {
             frames.push(frame);
         }
         frames
@@ -5968,7 +6052,7 @@ impl NetworkManager {
         local_client_id: ClientId,
     ) -> (Self, NetworkEventSender, TestVoiceChannels) {
         let (mut manager, events) = Self::test_stub_for_client_id(local_client_id);
-        let (inbound, inbound_rx) = tokio_mpsc::channel(8);
+        let (inbound, inbound_rx) = clonk_network::voice_inbox();
         let (outbound_tx, outbound) = tokio_mpsc::channel(8);
         manager.voice_event_rx = Some(inbound_rx);
         manager.test_voice_outbound = Some(outbound_tx);

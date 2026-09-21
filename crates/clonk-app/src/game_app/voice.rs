@@ -45,12 +45,6 @@ impl GameApp {
         }
     }
 
-    fn authenticated_lobby_voice_client(&self, client_id: i32, player_id: i32) -> bool {
-        self.network_lobby_voice_active()
-            && player_id == crate::voice_chat::LOBBY_VOICE_PLAYER_ID
-            && self.netplay.control_clients.contains(client_id)
-    }
-
     fn voice_activation(&self) -> Option<crate::settings::VoiceActivation> {
         self.sound
             .context
@@ -107,7 +101,11 @@ impl GameApp {
             crate::voice_chat::PushToTalkAction::Ignore => return false,
             crate::voice_chat::PushToTalkAction::Consume => return true,
             crate::voice_chat::PushToTalkAction::Stop => {
-                self.voice_chat.stop_capture();
+                if eligible && self.voice_chat_enabled() {
+                    self.voice_chat.finish_capture_at(Instant::now());
+                } else {
+                    self.voice_chat.stop_capture();
+                }
                 return true;
             }
             crate::voice_chat::PushToTalkAction::Start => {}
@@ -138,46 +136,6 @@ impl GameApp {
         true
     }
 
-    /// Voice activation opens the microphone exactly where push-to-talk is
-    /// allowed to keep one open — the same eligibility, resolved by the caller
-    /// — only without a key to hold. It never opens one on the push-to-talk
-    /// default, and it closes a capture the player stranded by switching back:
-    /// no key owns that capture, so nothing else ever would.
-    fn update_voice_activated_capture(&mut self, voice_activated: bool, now: Instant) {
-        let echo_reference = self.voice_echo_reference();
-        let input_device = self
-            .sound
-            .context
-            .as_ref()
-            .and_then(|audio| audio.borrow().options.voice_input_device.clone());
-        if !voice_activated {
-            if self.voice_chat.voice_activated_capture_requested() {
-                self.voice_chat.stop_capture();
-            } else if let Err(error) =
-                self.voice_chat
-                    .reconcile_capture_device_at(input_device, echo_reference, now)
-            {
-                tracing::warn!(%error, "the selected microphone could not be opened");
-            }
-            return;
-        }
-        if let Err(error) = self.voice_chat.reconcile_capture_device_at(
-            input_device.clone(),
-            echo_reference.clone(),
-            now,
-        ) {
-            tracing::warn!(%error, "the selected microphone could not be opened");
-            return;
-        }
-        if let Err(error) = self.voice_chat.start_voice_activated_capture_on_device_at(
-            echo_reference,
-            input_device,
-            now,
-        ) {
-            tracing::warn!(%error, "voice activation could not open the microphone");
-        }
-    }
-
     pub(crate) fn remove_voice_playback(&self, speakers: impl IntoIterator<Item = (i32, i32)>) {
         let Some(audio) = self.sound.context.as_ref() else {
             return;
@@ -195,157 +153,67 @@ impl GameApp {
     }
 
     pub(crate) fn update_voice_chat_at(&mut self, now: Instant) {
-        let received = self
-            .netplay
-            .manager
-            .as_mut()
-            .map(NetworkManager::poll_voice_frames)
-            .unwrap_or_default();
-        let voice_available = self
-            .netplay
-            .manager
-            .as_ref()
-            .is_some_and(NetworkManager::voice_available);
-        if !self.voice_chat_enabled() || !voice_available {
-            let removed = self.voice_chat.clear();
-            self.remove_voice_playback(removed);
-            return;
-        }
-        let context = self.voice_chat_context();
-        let removed = self.voice_chat.reconcile_context(context);
-        self.remove_voice_playback(removed);
-        let Some(context) = context else {
+        self.update_voice_setup();
+        let Some(audio) = self.sound.context.as_ref() else {
+            self.voice_chat.clear();
             return;
         };
-
-        // Whatever the player has set right now, handed to a capture that may
-        // already be open: the stages are switched, not reopened.
-        if let Some(audio) = self.sound.context.as_ref() {
-            let audio = audio.borrow();
-            self.voice_chat
-                .set_processing(audio.options.voice_processing());
-        }
-
-        let expired = self.voice_chat.expire_playback(now);
-        self.remove_voice_playback(expired);
+        let context = self.voice_chat_context();
         let viewports = self.rendering.graphics.active_viewport_projections();
-        // This is already a gain, not the classic `0..=100` UI value: `1.0`
-        // is unity and `2.0` is the voice-only boost ceiling. The mixer accepts
-        // that same contract, so applying another normalization here would
-        // make the upper half of the slider quieter instead of louder.
-        let voice_volume = self
-            .sound
-            .context
-            .as_ref()
-            .map_or(0.0, |audio| audio.borrow().options.voice_volume);
-
-        for frame in received {
-            let Some(client_id) = i32::try_from(frame.client_id).ok() else {
-                continue;
-            };
-            let accepted = if context == crate::voice_chat::VoiceChatContext::Running {
-                voice_source_position(&self.snapshot, client_id, frame.player_id).and_then(|_| {
-                    self.voice_chat
-                        .accept_remote_frame(&self.snapshot, &frame, now)
+        let voice_volume = audio.borrow().options.voice_volume;
+        let speakers = match context {
+            Some(crate::voice_chat::VoiceChatContext::Running) => self
+                .snapshot
+                .players
+                .iter()
+                .filter_map(|player| {
+                    let client_id = player.at_client.get();
+                    let position = voice_source_position(&self.snapshot, client_id, player.id)?;
+                    let (gain, pan) =
+                        compute_object_positional_mix(position, &self.snapshot, &viewports);
+                    Some(((client_id, player.id), (gain * voice_volume, pan)))
                 })
-            } else if self.authenticated_lobby_voice_client(client_id, frame.player_id) {
-                self.voice_chat.accept_authorized_remote_frame(&frame, now)
-            } else {
-                None
-            };
-            let Some(accepted) = accepted else {
-                continue;
-            };
-            if accepted.reset_stream {
-                if let Some(audio) = self.sound.context.as_ref() {
-                    let audio = audio.borrow();
-                    audio.system.remove_voice_stream(accepted.stream_id);
-                }
-            }
-        }
-
-        let active_streams = self
-            .voice_chat
-            .remote_streams
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        for (client_id, player_id) in active_streams {
-            let mix = if context == crate::voice_chat::VoiceChatContext::Running {
-                voice_source_position(&self.snapshot, client_id, player_id).map(|position| {
-                    compute_object_positional_mix(position, &self.snapshot, &viewports)
+                .collect(),
+            Some(crate::voice_chat::VoiceChatContext::Lobby) => self
+                .netplay
+                .control_clients
+                .snapshot()
+                .into_iter()
+                .map(|client| {
+                    (
+                        (client.client_id, crate::voice_chat::LOBBY_VOICE_PLAYER_ID),
+                        (voice_volume, 0.0),
+                    )
                 })
-            } else {
-                self.authenticated_lobby_voice_client(client_id, player_id)
-                    .then_some((1.0, 0.0))
-            };
-            let Some((audibility, pan)) = mix else {
-                self.voice_chat
-                    .discard_remote_playback(client_id, player_id);
-                self.remove_voice_playback([(client_id, player_id)]);
-                continue;
-            };
-            if let Some(audio) = self.sound.context.as_ref() {
-                let audio = audio.borrow();
-                let stream_id = crate::voice_chat::voice_stream_id(client_id, player_id);
-                let queued_frames = audio.system.voice_stream_stats(stream_id).queued_frames;
-                let maximum_queued_frames =
-                    clonk_audio::DEFAULT_VOICE_BUFFERED_FRAMES.saturating_sub(1);
-                let available_frames = maximum_queued_frames.saturating_sub(queued_frames);
-                for frame in self.voice_chat.drain_remote_playout(
-                    client_id,
-                    player_id,
-                    now,
-                    available_frames,
-                    queued_frames,
-                ) {
-                    audio.system.queue_voice_stream_with_mix(
-                        stream_id,
-                        frame.samples,
-                        audibility * voice_volume,
-                        pan,
-                    );
-                }
-                audio
-                    .system
-                    .update_voice_stream(stream_id, audibility * voice_volume, pan);
-            }
-        }
-
+                .collect(),
+            None => std::collections::BTreeMap::new(),
+        };
         let local_identity = (self.window_active
             && !self.runtime_gui_has_keyboard_focus()
             && !self.runtime_top_default_dialog_is_exclusive())
         .then(|| self.local_voice_identity())
         .flatten();
-        if local_identity.is_none() {
-            self.voice_chat.stop_capture();
+        let audio = audio.borrow();
+        if audio.options.voice_enabled {
+            audio.system.prepare_voice_output();
         }
-        let Some((client_id, player_id)) = local_identity else {
-            return;
+        let policy = crate::voice_media::VoiceMediaPolicy {
+            enabled: audio.options.voice_enabled,
+            context,
+            speakers,
+            local_identity,
+            activation: audio.options.voice_activation(),
+            processing: audio.options.voice_processing(),
+            input_device: audio.options.voice_input_device.clone(),
         };
-        let activation = self.voice_activation();
-        self.update_voice_activated_capture(activation.is_some(), now);
-        for captured in self.voice_chat.drain_captured_frames(activation.as_ref()) {
-            let frame = match clonk_network::VoiceFrame::outbound(
-                player_id,
-                captured.stream_epoch,
-                captured.sequence,
-                captured.payload.to_vec(),
-            ) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    tracing::error!(%error, "captured voice frame violated its wire bound");
-                    continue;
-                }
-            };
-            let sent = self
-                .netplay
-                .manager
-                .as_ref()
-                .is_some_and(|network| network.try_send_voice(frame).is_ok());
-            if sent {
-                self.voice_chat.note_local_frame(client_id, player_id, now);
-            }
+        let audio_worker = audio.system.worker_handle();
+        drop(audio);
+        if let Some(network) = self.netplay.manager.as_mut() {
+            let endpoint = network.take_voice_endpoint();
+            self.voice_chat.update(policy, endpoint, audio_worker, now);
+        } else {
+            let removed = self.voice_chat.clear();
+            self.remove_voice_playback(removed);
         }
     }
 }

@@ -75,7 +75,7 @@ async fn next_host_puncher_event(
 }
 
 async fn next_host_voice_media(
-    events: &mut Option<mpsc::Receiver<crate::udp_session::ReliableUdpVoiceDatagram>>,
+    events: &mut Option<crate::udp_session::UdpVoiceInboxReceiver>,
 ) -> crate::udp_session::ReliableUdpVoiceDatagram {
     if let Some(events) = events.as_mut() {
         if let Some(event) = events.recv().await {
@@ -88,9 +88,6 @@ async fn next_host_voice_media(
 fn host_voice_routes(
     state: &HostState,
 ) -> Vec<(ClientId, SocketAddr, crate::voice::VoiceMediaCipher)> {
-    if !state.config.voice_enabled {
-        return Vec::new();
-    }
     let mut selected = BTreeSet::new();
     state
         .accepted_routes
@@ -114,9 +111,6 @@ fn host_voice_ingress(
     state: &HostState,
     source: SocketAddr,
 ) -> Option<(ClientId, crate::voice::VoiceMediaCipher)> {
-    if !state.config.voice_enabled {
-        return None;
-    }
     let source = crate::canonical_reliable_udp_peer_address(source);
     state.accepted_routes.values().find_map(|route| {
         if !route.voice_auth.is_negotiated() {
@@ -138,7 +132,11 @@ fn send_host_voice_frame(
     frame: crate::VoiceFrame,
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
     state: &HostState,
+    captured_at: Instant,
 ) {
+    if !state.config.voice_enabled {
+        return;
+    }
     let Some(udp_handle) = udp_handle else {
         return;
     };
@@ -148,7 +146,7 @@ fn send_host_voice_frame(
             &cipher,
             &crate::voice::VoicePacket::Relayed(frame.clone()),
         ) {
-            let _ = udp_handle.try_send_voice_media(peer, wire);
+            let _ = udp_handle.try_send_voice_frame_at(peer, HOST_CLIENT_ID, wire, captured_at);
         }
     }
 }
@@ -156,9 +154,10 @@ fn send_host_voice_frame(
 fn handle_host_voice_media(
     media: crate::udp_session::ReliableUdpVoiceDatagram,
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
-    voice_events: &mpsc::Sender<crate::VoiceFrame>,
+    voice_events: &crate::VoiceInboxSender,
     state: &HostState,
     limiter: &mut crate::voice::VoiceIngressLimiter,
+    health: &mut crate::voice_route_health::VoiceRouteHealth,
 ) {
     let Some((source_client_id, receive_cipher)) = host_voice_ingress(state, media.peer) else {
         return;
@@ -172,12 +171,26 @@ fn handle_host_voice_media(
     ) else {
         return;
     };
+    if matches!(
+        packet,
+        crate::voice::VoicePacket::Probe(_) | crate::voice::VoicePacket::ProbeAck(_)
+    ) {
+        if let Some((_, _, send_cipher)) = host_voice_routes(state)
+            .into_iter()
+            .find(|(_, peer, _)| *peer == media.peer)
+        {
+            health.receive_control(media.peer, &send_cipher, packet, udp_handle, Instant::now());
+        }
+        return;
+    }
     let Some((frame, direct_recipients)) =
         crate::voice::authenticate_host_ingress(source_client_id, packet)
     else {
         return;
     };
-    let _ = voice_events.try_send(frame.clone());
+    if state.config.voice_enabled {
+        let _ = voice_events.try_send_at(frame.clone(), media.queued_at);
+    }
     let Some(udp_handle) = udp_handle else {
         return;
     };
@@ -187,7 +200,12 @@ fn handle_host_voice_media(
                 &cipher,
                 &crate::voice::VoicePacket::Relayed(frame.clone()),
             ) {
-                let _ = udp_handle.try_send_voice_media(peer, wire);
+                let _ = udp_handle.try_send_voice_frame_at(
+                    peer,
+                    source_client_id,
+                    wire,
+                    media.queued_at,
+                );
             }
         }
     }
@@ -309,8 +327,8 @@ pub(crate) async fn run_host(
     mut commands: mpsc::Receiver<HostCommand>,
     control_send_time: ControlSendTimeSnapshot,
     event_tx: mpsc::Sender<HostEvent>,
-    mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
-    voice_events: mpsc::Sender<crate::VoiceFrame>,
+    mut voice_commands: crate::VoiceInboxReceiver,
+    voice_events: crate::VoiceInboxSender,
     voice_available: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
@@ -503,6 +521,9 @@ pub(crate) async fn run_host(
     let mut runtime_dynamic_timer = interval(Duration::from_secs(1));
     let mut published_control_send_time_epoch = None;
     let mut voice_ingress_limiter = crate::voice::VoiceIngressLimiter::default();
+    let mut voice_route_health = crate::voice_route_health::VoiceRouteHealth::default();
+    let mut voice_probe_timer = interval(Duration::from_millis(50));
+    voice_probe_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     if let Some(error) = udp_start_error {
         let _ = state
@@ -532,7 +553,10 @@ pub(crate) async fn run_host(
                 .map(|route| route.client_id),
         );
         voice_available.store(
-            !host_voice_routes(&state).is_empty(),
+            state.config.voice_enabled
+                && host_voice_routes(&state).iter().any(|(_, peer, cipher)| {
+                    voice_route_health.confirmed(*peer, cipher.cookie(), Instant::now())
+                }),
             std::sync::atomic::Ordering::Release,
         );
         if published_control_send_time_epoch != Some(state.control_send_time_epoch) {
@@ -557,8 +581,10 @@ pub(crate) async fn run_host(
         // arm. A command racing this check can be delayed by at most one
         // network operation before the next pass observes it.
         let command_pending = !commands.is_empty();
-        let voice_media_ready = state.config.voice_enabled
-            && crate::voice::voice_media_may_run(command_pending, !client_rx.is_empty());
+        // Relay permission is independent of this host's local capture/listen
+        // opt-in. All media still yields to lockstep and admitted control input.
+        let voice_media_ready =
+            crate::voice::voice_media_may_run(command_pending, !client_rx.is_empty());
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
@@ -1119,10 +1145,14 @@ pub(crate) async fn run_host(
                     &voice_events,
                     &state,
                     &mut voice_ingress_limiter,
+                    &mut voice_route_health,
                 );
             }
-            Some(frame) = voice_commands.recv(), if voice_media_ready => {
-                send_host_voice_frame(frame, udp_handle.as_ref(), &state);
+            Some(captured) = voice_commands.recv_timed(), if voice_media_ready => {
+                send_host_voice_frame(captured.frame, udp_handle.as_ref(), &state, captured.received_at);
+            }
+            _ = voice_probe_timer.tick(), if voice_media_ready => {
+                voice_route_health.poll(&host_voice_routes(&state), udp_handle.as_ref(), Instant::now());
             }
             _ = wait_for_chase_target_update(chase_target_update_deadline) => {
                 update_chase_targets(&mut state).await;
@@ -1494,7 +1524,7 @@ pub(crate) async fn handle_client_accepted(
         ));
         return;
     }
-    let voice_auth = if state.config.voice_enabled && protocol == crate::NetworkProtocol::Udp {
+    let voice_auth = if protocol == crate::NetworkProtocol::Udp {
         crate::voice::VoiceRouteAuthentication::new_udp()
     } else {
         crate::voice::VoiceRouteAuthentication::default()

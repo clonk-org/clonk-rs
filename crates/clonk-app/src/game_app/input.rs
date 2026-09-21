@@ -75,6 +75,9 @@ impl GameApp {
     }
 
     pub(crate) fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        if self.voice_setup.is_some() {
+            return Ok(());
+        }
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
         self.note_classic_lobby_non_pointer_input();
@@ -304,6 +307,9 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
+        if self.voice_setup.is_some() {
+            return Ok(());
+        }
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.startup_tooltip.note_pointer_wheel();
@@ -1760,8 +1766,10 @@ impl GameApp {
     }
 
     pub(crate) fn runtime_gui_has_keyboard_focus(&self) -> bool {
-        self.mode == AppMode::Running
-            && (self.running_shared_gui_has_keyboard_focus() || self.game_over_dialog_is_active())
+        self.voice_setup.is_some()
+            || self.mode == AppMode::Running
+                && (self.running_shared_gui_has_keyboard_focus()
+                    || self.game_over_dialog_is_active())
     }
 
     pub(crate) fn release_all_running_pointer_elements(&mut self) {
@@ -3840,7 +3848,7 @@ impl GameApp {
         // `C4Player::InCom`.
         self.input_routing.engine_key_repeated =
             self.input_routing.note_physical_engine_key(key, state);
-        if self.handle_voice_key(key, state) {
+        if self.voice_setup_key(key, state)? || self.handle_voice_key(key, state) {
             self.input_routing.key_event_suppresses_text = true;
             return Ok(());
         }
@@ -6283,6 +6291,9 @@ impl GameApp {
         event: GamepadEvent,
         axis_alias: bool,
     ) -> Result<(), EngineError> {
+        if self.voice_setup.is_some() {
+            return self.voice_setup_gamepad(event);
+        }
         self.guard_classic_global_gui_bootstrap()?;
         self.note_classic_lobby_non_pointer_input();
         self.context_menus.pointer_dismissed_lobby_team_player = None;
@@ -7334,6 +7345,10 @@ impl GameApp {
         let raw_point = gui_point_from_position(position);
         let point = GuiPoint::new(raw_point.x.ceil(), raw_point.y.ceil());
         self.input_routing.live.window_pointer = Some(point);
+        if self.voice_setup.is_some() {
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
         self.input_routing.live.pointer_inside_window = true;
         if self.mode == AppMode::Running {
             // C4GraphicsSystem first offers every new move to C4GUI, then
@@ -9446,6 +9461,9 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        if self.voice_setup.is_some() {
+            return Ok(());
+        }
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.startup_tooltip.note_pointer_button();
@@ -9743,6 +9761,9 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        if self.voice_setup.is_some() {
+            return Ok(());
+        }
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.startup_tooltip.note_pointer_button();
@@ -10859,6 +10880,13 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.input_routing.live.primary_left_down = button_state == ElementState::Pressed;
+        if let Some(point) = self.input_routing.live.window_pointer {
+            if self.voice_setup_pointer(point, button_state == ElementState::Pressed)? {
+                return Ok(());
+            }
+        } else if self.voice_setup.is_some() {
+            return Ok(());
+        }
         self.context_menus.pointer_dismissed_lobby_team_player = None;
         self.context_menus.pointer_dismissed_lobby_option = None;
         self.startup_tooltip.note_pointer_button();
@@ -11772,6 +11800,26 @@ impl GameApp {
         }
         if phase != TouchPhase::Cancelled {
             self.input_routing.live.running_pointer = Some(position);
+        }
+        if self.voice_setup.is_some() {
+            match phase {
+                TouchPhase::Started => {
+                    self.voice_setup_pointer(position, true)?;
+                }
+                TouchPhase::Ended => {
+                    self.voice_setup_pointer(position, false)?;
+                }
+                TouchPhase::Cancelled => {
+                    if let Some(setup) = self.voice_setup.as_mut() {
+                        setup.controller.cancel_interaction();
+                    }
+                }
+                TouchPhase::Moved => {}
+            }
+            return Ok(());
+        }
+        if phase == TouchPhase::Started && self.voice_setup_pointer(position, true)? {
+            return Ok(());
         }
         self.context_menus.pointer_dismissed_lobby_team_player = None;
         self.context_menus.pointer_dismissed_lobby_option = None;
