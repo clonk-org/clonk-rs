@@ -199,7 +199,7 @@ impl GameApp {
             .netplay
             .manager
             .as_mut()
-            .map(NetworkManager::poll_voice_frames)
+            .map(NetworkManager::poll_timed_voice_frames)
             .unwrap_or_default();
         let voice_available = self
             .netplay
@@ -239,17 +239,20 @@ impl GameApp {
             .as_ref()
             .map_or(0.0, |audio| audio.borrow().options.voice_volume);
 
-        for frame in received {
+        for received in received {
+            let frame = received.frame;
+            let received_at = received.received_at;
             let Some(client_id) = i32::try_from(frame.client_id).ok() else {
                 continue;
             };
             let accepted = if context == crate::voice_chat::VoiceChatContext::Running {
                 voice_source_position(&self.snapshot, client_id, frame.player_id).and_then(|_| {
                     self.voice_chat
-                        .accept_remote_frame(&self.snapshot, &frame, now)
+                        .accept_remote_frame(&self.snapshot, &frame, received_at)
                 })
             } else if self.authenticated_lobby_voice_client(client_id, frame.player_id) {
-                self.voice_chat.accept_authorized_remote_frame(&frame, now)
+                self.voice_chat
+                    .accept_authorized_remote_frame(&frame, received_at)
             } else {
                 None
             };

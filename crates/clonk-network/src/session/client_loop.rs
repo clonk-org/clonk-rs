@@ -600,7 +600,7 @@ async fn publish_client_ready(
 }
 
 async fn receive_optional_voice_media(
-    events: &mut Option<mpsc::Receiver<crate::udp_session::ReliableUdpVoiceDatagram>>,
+    events: &mut Option<crate::udp_session::UdpVoiceInboxReceiver>,
 ) -> crate::udp_session::ReliableUdpVoiceDatagram {
     if let Some(events) = events.as_mut() {
         if let Some(event) = events.recv().await {
@@ -684,7 +684,7 @@ fn send_client_voice_frame_to_routes(
 fn handle_client_voice_media(
     media: crate::udp_session::ReliableUdpVoiceDatagram,
     transport: &ClientRouteManager,
-    voice_events: &mpsc::Sender<crate::VoiceFrame>,
+    voice_events: &crate::VoiceInboxSender,
     known_clients: &BTreeMap<i32, clonk_protocol::ClientCoreControlData>,
     limiter: &mut crate::voice::VoiceIngressLimiter,
 ) {
@@ -713,7 +713,7 @@ fn handle_client_voice_media(
     if !limiter.allow(frame.client_id, Instant::now()) {
         return;
     }
-    let _ = voice_events.try_send(frame);
+    let _ = voice_events.try_send_at(frame, media.queued_at);
 }
 
 #[cfg(test)]
@@ -751,8 +751,7 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
         .peer_is_port = true;
     let (_voice_command_tx, voice_commands) =
         mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
-    let (voice_events, _voice_event_rx) =
-        mpsc::channel::<crate::VoiceFrame>(VOICE_APP_CHANNEL_CAPACITY);
+    let (voice_events, _voice_event_rx) = crate::voice_inbox();
     let voice_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
     run_client_loop_with_routes(
         routes,
@@ -802,7 +801,7 @@ pub(crate) async fn run_client_loop_with_routes(
     control_wait_attribution: crate::ControlWaitAttributionSnapshot,
     event_tx: mpsc::Sender<ClientEvent>,
     mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
-    voice_events: mpsc::Sender<crate::VoiceFrame>,
+    voice_events: crate::VoiceInboxSender,
     voice_available: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
     host_peer_addr: Option<SocketAddr>,

@@ -75,7 +75,7 @@ async fn next_host_puncher_event(
 }
 
 async fn next_host_voice_media(
-    events: &mut Option<mpsc::Receiver<crate::udp_session::ReliableUdpVoiceDatagram>>,
+    events: &mut Option<crate::udp_session::UdpVoiceInboxReceiver>,
 ) -> crate::udp_session::ReliableUdpVoiceDatagram {
     if let Some(events) = events.as_mut() {
         if let Some(event) = events.recv().await {
@@ -156,7 +156,7 @@ fn send_host_voice_frame(
 fn handle_host_voice_media(
     media: crate::udp_session::ReliableUdpVoiceDatagram,
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
-    voice_events: &mpsc::Sender<crate::VoiceFrame>,
+    voice_events: &crate::VoiceInboxSender,
     state: &HostState,
     limiter: &mut crate::voice::VoiceIngressLimiter,
 ) {
@@ -177,7 +177,7 @@ fn handle_host_voice_media(
     else {
         return;
     };
-    let _ = voice_events.try_send(frame.clone());
+    let _ = voice_events.try_send_at(frame.clone(), media.queued_at);
     let Some(udp_handle) = udp_handle else {
         return;
     };
@@ -310,7 +310,7 @@ pub(crate) async fn run_host(
     control_send_time: ControlSendTimeSnapshot,
     event_tx: mpsc::Sender<HostEvent>,
     mut voice_commands: mpsc::Receiver<crate::VoiceFrame>,
-    voice_events: mpsc::Sender<crate::VoiceFrame>,
+    voice_events: crate::VoiceInboxSender,
     voice_available: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {

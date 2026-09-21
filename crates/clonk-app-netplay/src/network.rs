@@ -937,7 +937,7 @@ impl NetworkControlClock {
 struct NetworkWorkerReady {
     local_client_id: ClientId,
     voice_sender: clonk_network::VoiceSender,
-    voice_event_rx: tokio_mpsc::Receiver<clonk_network::VoiceFrame>,
+    voice_event_rx: clonk_network::VoiceInboxReceiver,
     control_send_time: clonk_network::ControlSendTimeSnapshot,
     control_wait_attribution: clonk_network::ControlWaitAttributionSnapshot,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
@@ -1670,7 +1670,7 @@ pub struct NetworkManager {
     event_rx: Receiver<NetworkEvent>,
     round_restart_retained_events: Mutex<VecDeque<NetworkEvent>>,
     voice_sender: Option<clonk_network::VoiceSender>,
-    voice_event_rx: Option<tokio_mpsc::Receiver<clonk_network::VoiceFrame>>,
+    voice_event_rx: Option<clonk_network::VoiceInboxReceiver>,
     telemetry_rx: Receiver<NetworkEvent>,
     event_wake: NetworkEventWakeHandle,
     worker: Option<thread::JoinHandle<()>>,
@@ -1698,7 +1698,7 @@ pub struct NetworkManager {
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub struct TestVoiceChannels {
-    inbound: tokio_mpsc::Sender<clonk_network::VoiceFrame>,
+    inbound: clonk_network::VoiceInboxSender,
     outbound: tokio_mpsc::Receiver<clonk_network::VoiceFrame>,
 }
 
@@ -5856,11 +5856,18 @@ impl NetworkManager {
     }
 
     pub fn poll_voice_frames(&mut self) -> Vec<clonk_network::VoiceFrame> {
+        self.poll_timed_voice_frames()
+            .into_iter()
+            .map(|received| received.frame)
+            .collect()
+    }
+
+    pub fn poll_timed_voice_frames(&mut self) -> Vec<clonk_network::ReceivedVoiceFrame> {
         let Some(receiver) = self.voice_event_rx.as_mut() else {
             return Vec::new();
         };
         let mut frames = Vec::new();
-        while let Ok(frame) = receiver.try_recv() {
+        while let Ok(frame) = receiver.try_recv_timed() {
             frames.push(frame);
         }
         frames
@@ -5968,7 +5975,7 @@ impl NetworkManager {
         local_client_id: ClientId,
     ) -> (Self, NetworkEventSender, TestVoiceChannels) {
         let (mut manager, events) = Self::test_stub_for_client_id(local_client_id);
-        let (inbound, inbound_rx) = tokio_mpsc::channel(8);
+        let (inbound, inbound_rx) = clonk_network::voice_inbox();
         let (outbound_tx, outbound) = tokio_mpsc::channel(8);
         manager.voice_event_rx = Some(inbound_rx);
         manager.test_voice_outbound = Some(outbound_tx);

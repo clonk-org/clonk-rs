@@ -19,7 +19,7 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tokio::{
@@ -105,11 +105,23 @@ enum HubCommand {
 pub(crate) struct ReliableUdpVoiceDatagram {
     pub peer: SocketAddr,
     pub payload: Vec<u8>,
+    /// Local enqueue time, retained when receive media crosses the session task.
+    pub queued_at: Instant,
 }
+
+impl crate::voice_inbox::InboxFrame for ReliableUdpVoiceDatagram {
+    type Source = SocketAddr;
+    fn source(&self) -> SocketAddr {
+        self.peer
+    }
+}
+
+pub(crate) type UdpVoiceInboxReceiver =
+    crate::voice_inbox::MediaInboxReceiver<ReliableUdpVoiceDatagram>;
 
 struct HubVoiceMedia {
     outgoing: mpsc::Receiver<ReliableUdpVoiceDatagram>,
-    incoming: mpsc::Sender<ReliableUdpVoiceDatagram>,
+    incoming: crate::voice_inbox::MediaInboxSender<ReliableUdpVoiceDatagram>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1563,6 +1575,7 @@ impl ReliableUdpVoiceMediaPermit<'_> {
         self.permit.send(ReliableUdpVoiceDatagram {
             peer: canonical_reliable_udp_peer_address(peer),
             payload,
+            queued_at: Instant::now(),
         });
     }
 }
@@ -1586,6 +1599,7 @@ impl ReliableUdpSessionHandle {
             .try_send(ReliableUdpVoiceDatagram {
                 peer: canonical_reliable_udp_peer_address(peer),
                 payload,
+                queued_at: Instant::now(),
             })
             .is_ok()
     }
@@ -1696,7 +1710,7 @@ pub struct ReliableUdpSessionHub {
     voice_media: mpsc::Sender<ReliableUdpVoiceDatagram>,
     incoming: mpsc::Receiver<io::Result<ReliableUdpPeerStream>>,
     puncher_events: Option<mpsc::Receiver<NetpuncherIoEvent>>,
-    voice_media_events: Option<mpsc::Receiver<ReliableUdpVoiceDatagram>>,
+    voice_media_events: Option<UdpVoiceInboxReceiver>,
     task: Option<JoinHandle<io::Result<()>>>,
     shutdown_requested: bool,
 }
@@ -1725,7 +1739,7 @@ impl ReliableUdpSessionHub {
         let (incoming_tx, incoming) = mpsc::channel(INCOMING_PEER_CAPACITY);
         let (puncher_event_tx, puncher_events) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
         let (voice_media, voice_media_rx) = mpsc::channel(VOICE_MEDIA_CAPACITY);
-        let (voice_media_event_tx, voice_media_events) = mpsc::channel(VOICE_MEDIA_CAPACITY);
+        let (voice_media_event_tx, voice_media_events) = crate::voice_inbox::media_inbox();
         let outbox = Arc::new(UdpSharedOutbox::default());
         let task_commands = commands.clone();
         let task = runtime.spawn(run_hub(
@@ -1787,7 +1801,7 @@ impl ReliableUdpSessionHub {
             .expect("puncher event receiver already taken")
     }
 
-    pub(crate) fn take_voice_media_receiver(&mut self) -> mpsc::Receiver<ReliableUdpVoiceDatagram> {
+    pub(crate) fn take_voice_media_receiver(&mut self) -> UdpVoiceInboxReceiver {
         self.voice_media_events
             .take()
             .expect("voice media receiver already taken")
@@ -2270,7 +2284,7 @@ async fn run_hub(
                             if authenticated {
                                 let _ = voice_media
                                     .incoming
-                                    .try_send(ReliableUdpVoiceDatagram { peer, payload });
+                                    .try_send(ReliableUdpVoiceDatagram { peer, payload, queued_at: Instant::now() });
                             }
                         }
                         dispatch_events(
@@ -3325,15 +3339,13 @@ mod tests {
         assert!(outgoing_hub
             .handle()
             .try_send_voice_media(incoming_hub.local_addr(), packet.clone()));
-        assert_eq!(
-            timeout(Duration::from_secs(2), voice_media.recv())
-                .await
-                .unwrap(),
-            Some(ReliableUdpVoiceDatagram {
-                peer: outgoing_hub.local_addr(),
-                payload: packet,
-            })
-        );
+        let received = timeout(Duration::from_secs(2), voice_media.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.peer, outgoing_hub.local_addr());
+        assert_eq!(received.payload, packet);
+        assert!(received.queued_at.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

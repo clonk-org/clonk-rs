@@ -960,7 +960,7 @@ pub struct HostHandle {
     pub(crate) control_send_time: ControlSendTimeSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<HostEvent>>,
     pub(crate) voice_sender: crate::VoiceSender,
-    pub(crate) voice_event_rx: Option<mpsc::Receiver<crate::VoiceFrame>>,
+    pub(crate) voice_event_rx: Option<crate::VoiceInboxReceiver>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
     pub(crate) udp_local_addr: Option<SocketAddr>,
@@ -991,7 +991,7 @@ impl HostHandle {
             .ok()
     }
 
-    pub fn take_voice_receiver(&mut self) -> mpsc::Receiver<crate::VoiceFrame> {
+    pub fn take_voice_receiver(&mut self) -> crate::VoiceInboxReceiver {
         self.voice_event_rx
             .take()
             .expect("host voice receiver already taken")
@@ -1855,7 +1855,7 @@ pub struct ClientHandle {
     pub(crate) control_wait_attribution: crate::ControlWaitAttributionSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<ClientEvent>>,
     pub(crate) voice_sender: crate::VoiceSender,
-    pub(crate) voice_event_rx: Option<mpsc::Receiver<crate::VoiceFrame>>,
+    pub(crate) voice_event_rx: Option<crate::VoiceInboxReceiver>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
     pub(crate) client_id: ClientId,
@@ -1887,7 +1887,7 @@ impl ClientHandle {
             .ok()
     }
 
-    pub fn take_voice_receiver(&mut self) -> mpsc::Receiver<crate::VoiceFrame> {
+    pub fn take_voice_receiver(&mut self) -> crate::VoiceInboxReceiver {
         self.voice_event_rx
             .take()
             .expect("client voice receiver already taken")
