@@ -5735,6 +5735,16 @@ impl AcquireState {
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
     ) -> CommandStepResult {
+        self.step_selecting(ctx, |state, ctx| state.find_candidate(ctx))
+    }
+
+    /// C4Command::Acquire with `select` choosing the material to Get
+    /// (C4Command.cpp:2108-2126 for the native choice).
+    fn step_selecting(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        select: impl FnOnce(&Self, &CommandRuntimeContext<'_>) -> Option<ObjectId>,
+    ) -> CommandStepResult {
         if self.definition_id.is_empty() {
             return CommandStepResult::failed(None);
         }
@@ -5795,7 +5805,7 @@ impl AcquireState {
             return CommandStepResult::running(None).with_events(vec![event]);
         }
 
-        let Some(candidate_id) = self.find_candidate(ctx) else {
+        let Some(candidate_id) = select(self, ctx) else {
             self.maybe_reset_buy(ctx.frame);
             self.script_invoked = false;
             let mut result = CommandStepResult::running(None);
