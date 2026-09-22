@@ -2,9 +2,9 @@
 
 The options tabs use `crates/clonk-app/assets/StartupOptionIconsHD.png`, a
 1536×256 RGBA strip containing six 256×256 cells: Program, Graphics, Audio,
-Keyboard, Gamepad, and Network. Each cell is still drawn in its original
-32×32 logical rectangle. The GPU keeps the larger source texture when the UI
-is scaled; the software renderer samples it with bilinear filtering.
+Keyboard, Gamepad, and Network. The options layout determines the logical icon size (up to 32×32). The GPU
+keeps the larger source texture when the UI is scaled; the software renderer
+samples it with bilinear filtering.
 
 `crates/clonk-app/assets/StartupWipfHD.png` is a 256×256 RGBA replacement for
 the full-body Wipf scrollbar thumb. It retains the original 16×16 logical
@@ -42,7 +42,25 @@ The selected generation prompts and source-image hashes are recorded in
 [startup-icon-prompts.json](startup-icon-prompts.json). They describe the
 approved artwork before runtime matting and atlas packing.
 
-Visual review: [before and after textures](startup-icon-comparison.png) and
-[the rendered Audio options screen](startup-icons-in-game.png). The comparison
-enlarges the original pixels without smoothing and displays both sets at the
-same size; the in-game capture uses the Normal profile at 1280×720.
+Visual review: [before and after textures](startup-icon-comparison.png),
+[native GPU before/after details](startup-icons-gpu-comparison.png), and
+[the rendered Audio options screen](startup-icons-in-game.png). The texture
+comparison enlarges original pixels without smoothing and displays both sets
+at the same size. The in-game images come from the live retained GPU renderer
+at 3840×2160 with 3× display scaling, including native fonts. The detail view
+crops those frames at native pixel size. Both frames use identical settings;
+only the replacement artwork is removed for the before frame.
+
+The software `--dump-menu-frame` path renders at logical resolution. Enlarging
+its 1280×720 output cannot demonstrate the GPU's high-resolution artwork.
+Regenerate the native GPU frames on a machine with a supported GPU using:
+
+```sh
+CLONK_HD_OPTIONS_CAPTURE=/tmp/options-audio-gpu.png cargo nextest run -p clonk-app \
+  -E 'test(scaled_options_gpu_frame_keeps_all_seven_high_resolution_sources)'
+```
+
+This writes the updated frame to the requested path and the original-art frame
+to `/tmp/options-audio-gpu.before.png`. Without the environment variable, the
+test verifies that all seven complete 256×256 sources reach the GPU command
+stream without requiring a GPU or producing files.

@@ -2026,6 +2026,141 @@ fn full_body_wipf_is_shared_by_book_scrollbars_in_normal_profile() {
 }
 
 #[test]
+fn scaled_options_gpu_frame_keeps_all_seven_high_resolution_sources() {
+    use clonk_frontend::startup_options_dlg::OptionsSheet;
+
+    let mut app = new_real_menu_app(1280, 720);
+    app.open_options_menu();
+    app.startup
+        .options_dialog
+        .test_mut()
+        .restore_sheet(OptionsSheet::Sound);
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(3.0, false);
+    app.configure_native_startup_fonts(3.0, false);
+    let presentation = GpuPresentation {
+        physical_extent: [3840, 2160],
+        scale: 3.0,
+        crop_top: 0,
+        world_zoom: 1.0,
+    };
+    let frame = app.render_retained_gpu_frame(presentation).test_value();
+    let atlas = app
+        .assets
+        .dialog_image("StartupOptionIconsHD.png")
+        .test_value();
+    let mut sources: Vec<Vec<u8>> = (0..6)
+        .map(|cell| {
+            (0..256)
+                .flat_map(|row| {
+                    let start = ((row * atlas.width() + cell * 256) * 4) as usize;
+                    atlas.pixels()[start..start + 256 * 4].iter().copied()
+                })
+                .collect()
+        })
+        .collect();
+    sources.push(
+        app.assets
+            .dialog_image("StartupWipfHD.png")
+            .test_value()
+            .pixels()
+            .to_vec(),
+    );
+    for source in sources {
+        main_assert!(
+            frame
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.scene.textures)
+                .any(|texture| {
+                    texture.extent == [256, 256] && texture.pixels.as_ref() == source
+                }),
+            "the GPU must receive the full 256px source, not a 32px or 16px software raster"
+        );
+    }
+    if let Some(path) = std::env::var_os("CLONK_HD_OPTIONS_CAPTURE") {
+        let path = Path::new(&path);
+        write_options_gpu_review_capture(&frame, path);
+        let mut original = app.assets.as_ref().clone();
+        original
+            .startup_dialog_images
+            .remove("StartupOptionIconsHD.png");
+        original.startup_dialog_images.remove("StartupWipfHD.png");
+        app.assets = Arc::new(original);
+        app.invalidate_startup_gpu_damage();
+        let before = app.render_retained_gpu_frame(presentation).test_value();
+        write_options_gpu_review_capture(&before, &path.with_extension("before.png"));
+    }
+}
+
+// Opt-in artifact from the same retained renderer the live window uses. The
+// regression above itself needs no GPU; visual review requests the readback.
+fn write_options_gpu_review_capture(frame: &RetainedGpuFrame, path: &Path) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .test_value();
+    let instance = crate::gpu_instance::retained_instance(wgpu::Backends::PRIMARY);
+    let adapter = runtime
+        .block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .test_value();
+    let (device, queue) = runtime
+        .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("startup icon review"),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        }))
+        .test_value();
+    let extent = frame.layers[0].presentation.physical_extent;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("startup icon review"),
+        size: wgpu::Extent3d {
+            width: extent[0],
+            height: extent[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut renderer =
+        gpu_renderer::RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("startup icon review"),
+    });
+    let layers: Vec<_> = frame
+        .layers
+        .iter()
+        .map(|layer| gpu_renderer::GpuSceneLayer::new(&layer.scene, layer.presentation))
+        .collect();
+    let ticket = renderer
+        .render_layers(&device, &queue, &mut encoder, &view, &layers, true)
+        .test_value()
+        .test_value();
+    queue.submit(Some(encoder.finish()));
+    let output = ticket.read(&device).test_value();
+    image::save_buffer(
+        path,
+        &output.rgba,
+        output.extent[0],
+        output.extent[1],
+        image::ColorType::Rgba8,
+    )
+    .test_value();
+}
+
+#[test]
 fn speaking_overlay_maps_authenticated_player_to_selected_cursor() {
     let mut app = new_lightweight_running_sandbox_app();
     let (player_id, selected) = {
