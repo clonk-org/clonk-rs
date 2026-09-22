@@ -60,6 +60,7 @@ mod object;
 pub use clonk_engine_core::math;
 mod message;
 mod native_function_parameters;
+pub mod navigation;
 mod network_game_data;
 pub mod ocf;
 #[cfg(test)]
