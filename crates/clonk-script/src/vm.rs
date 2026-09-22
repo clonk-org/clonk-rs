@@ -5571,6 +5571,16 @@ impl<'a> Vm<'a> {
         let compiled = Arc::new(CompiledFunction::compile(&function).ok_or_else(|| {
             RuntimeError::new("internal error: DirectExec expression did not compile")
         })?);
+        // C4Aul resolves identifiers while it parses, so a name that is
+        // nothing is `unknown identifier` (C4AulParse.cpp:2866), a parse
+        // error, and DirectExec answers a parse error with nil before any of
+        // the expression has run (C4AulExec.cpp:1689-1699).
+        if !compiled
+            .bare_names()
+            .all(|name| self.direct_exec_name_resolves(name, env))
+        {
+            return Ok(Value::Nil);
+        }
         let result =
             compiled.execute(self, env, depth, &function, None, Arc::clone(&compiled), 0)?;
         crate::execution_profile::record_compiled();
@@ -5580,6 +5590,21 @@ impl<'a> Vm<'a> {
             ControlFlow::Return(value) => value.into_value_on_stack(),
             ControlFlow::Normal => Ok(Value::Nil),
         }
+    }
+
+    /// Whether C4Aul's parser would resolve `name` in a DirectExec
+    /// expression: a local of the object or a static (C4AulParse.cpp:
+    /// 2709-2738), `this`, a function, or a global constant (`:2808-2862`).
+    fn direct_exec_name_resolves(&self, name: &str, env: &Environment) -> bool {
+        env.binding(name).is_some()
+            || self.global_variable_cell(name).is_some()
+            || name == "this"
+            || self.global_constant_cell(name).is_some()
+            || self
+                .constants
+                .is_some_and(|constants| constants.contains_key(name))
+            || self.functions.contains_key(name)
+            || !matches!(self.global_call_target(name), RetainedCallTarget::Dynamic)
     }
 
     fn direct_exec_function(expr: Expr, strict_level: Option<u8>) -> Function {
@@ -11002,6 +11027,24 @@ impl CompiledFunction {
         CompiledFunctionBuilder::new(function)?.finish(function)
     }
 
+    /// Every bare identifier the body reads or writes: the slots it binds by
+    /// name and the names it looks up when it runs. Call targets are not
+    /// among them.
+    fn bare_names(&self) -> impl Iterator<Item = &str> {
+        self.slots
+            .iter()
+            .filter(|slot| matches!(slot.kind, CompiledSlotKind::Bare))
+            .map(|slot| slot.name.as_str())
+            .chain(
+                self.instructions
+                    .iter()
+                    .filter_map(|instruction| match instruction {
+                        CompiledInstruction::LoadName(name) => Some(name.as_str()),
+                        _ => None,
+                    }),
+            )
+    }
+
     fn bindings(&self, vm: &Vm<'_>, env: &Environment) -> SmallVec<[Option<Binding>; 16]> {
         let bindings = self
             .slots
@@ -16408,6 +16451,27 @@ mod tests {
                 &[Value::String(
                     c4_string_from_bytes(b"1//comment\r+1").into()
                 )]; expect "a carriage return ends a C++ line comment" => Value::Int(2));
+    }
+
+    /// C4Aul resolves identifiers while it parses, so a name that is nothing
+    /// is `unknown identifier` (`C4AulParse.cpp:2866`), a parse error, and
+    /// `DirectExec` answers a parse error with nil after showing it
+    /// (`C4AulExec.cpp:1689-1699`). The caller of `eval` carries on. Goal
+    /// objects that keep an "array" in numbered locals run off its end this
+    /// way: `eval("createType10 = WTOW")` with locals declared up to 9.
+    #[test]
+    fn eval_of_an_unknown_identifier_answers_nil_and_the_caller_carries_on() {
+        let script = parse_script(
+            "#strict\nlocal slot0;\nfunc Probe() {\n  var stored = eval(\"slot1 = 5\");\n  return [stored, eval(\"slot1\"), eval(\"slot0 = 7\")];\n}",
+            "script parses",
+        );
+        let var_decls = script.var_decls.clone();
+        let functions = function_map(script);
+        let vm = test_vm(&functions, &var_decls).with_this(Value::Object(574));
+        let cells = LocalCells::from_local_vars(&HashMap::new());
+
+        check_eq!(vm.call_with_cells("Probe", &[], &cells)
+                .expect("the caller survives the failed evals") => Value::Array(vec![Value::Nil, Value::Nil, Value::Int(7)]));
     }
 
     #[test]
