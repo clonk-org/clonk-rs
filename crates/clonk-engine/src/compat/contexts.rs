@@ -7798,6 +7798,13 @@ impl EffectHostContext {
     /// authoritative exec-list fold: same category/definition cluster first,
     /// then the category bracket; lines and Unsorted objects append.
     pub(crate) fn preview_object_status_change(&mut self, target: ObjectId, status: ObjectStatus) {
+        let master = self.master_order_with_status(target, status);
+        self.commit_object_status_preview(target, master);
+        self.inactive_order_preview = Some(self.inactive_order_with_status(target, status));
+    }
+
+    /// Game.Objects with `target` moved to where its `status` puts it.
+    fn master_order_with_status(&self, target: ObjectId, status: ObjectStatus) -> Vec<ObjectId> {
         let mut master = self
             .master_order_preview
             .clone()
@@ -7806,8 +7813,12 @@ impl EffectHostContext {
         if status == ObjectStatus::Normal {
             self.insert_object_status_preview(&mut master, target, ObjectStatus::Normal);
         }
-        self.commit_object_status_preview(target, master);
+        master
+    }
 
+    /// Game.Objects.InactiveObjects with `target` moved to where its `status`
+    /// puts it.
+    fn inactive_order_with_status(&self, target: ObjectId, status: ObjectStatus) -> Vec<ObjectId> {
         let mut inactive = self
             .inactive_order_preview
             .clone()
@@ -7816,7 +7827,7 @@ impl EffectHostContext {
         if status == ObjectStatus::Inactive {
             self.insert_object_status_preview(&mut inactive, target, ObjectStatus::Inactive);
         }
-        self.inactive_order_preview = Some(inactive);
+        inactive
     }
 
     pub(crate) fn preview_sort_master_by_category(&mut self) {
