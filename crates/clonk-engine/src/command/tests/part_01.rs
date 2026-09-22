@@ -181,6 +181,7 @@
             shape_height: 20,
             shape: DefinitionRect::new(-8, -10, 16, 20),
             entrance: None,
+            nav_body: crate::navigation::NavBody::default(),
             id: ObjectId::new(id),
             master_list_order: id as usize,
             definition_id: format!("DEF{id}"),

@@ -486,6 +486,7 @@ impl Engine {
                             .unwrap_or(0),
                         shape: self.object_shape_rect(object),
                         entrance: self.object_entrance_area(object),
+                        nav_body: crate::navigation::NavBody::from_vertices(&object.state.vertices),
                         status: object.state.status,
                         destroyed: object.destroyed,
                         category: object.state.category,
@@ -2008,6 +2009,9 @@ impl Engine {
                             .unwrap_or(0),
                         shape: self.object_shape_rect(&self.objects[idx]),
                         entrance: self.object_entrance_area(&self.objects[idx]),
+                        nav_body: crate::navigation::NavBody::from_vertices(
+                            &self.objects[idx].state.vertices,
+                        ),
                         status: self.objects[idx].state.status,
                         destroyed: self.objects[idx].destroyed,
                         category: self.objects[idx].state.category,

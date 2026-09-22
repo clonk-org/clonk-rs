@@ -5791,6 +5791,7 @@ impl EffectHostContext {
                     shape_height,
                     shape,
                     entrance,
+                    nav_body: crate::navigation::NavBody::from_vertices(object.vertices()),
                 };
                 Some((id, snapshot))
             })

@@ -102,6 +102,9 @@ pub struct CommandObjectSnapshot {
     /// C4Command::Exit uses its center/bottom for top-level ejection
     /// (C4Command.cpp:624-645).
     pub entrance: Option<DefinitionRect>,
+    /// Live collision vertices (`C4Shape` VtxX/VtxY/VtxCNAT) for the
+    /// navigation planner.
+    pub nav_body: crate::navigation::NavBody,
 }
 
 impl CommandObjectSnapshot {

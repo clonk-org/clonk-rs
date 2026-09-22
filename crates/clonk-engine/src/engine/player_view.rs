@@ -816,6 +816,7 @@ impl Engine {
                 .unwrap_or(0),
             shape: self.object_shape_rect(object),
             entrance: self.object_entrance_area(object),
+            nav_body: crate::navigation::NavBody::from_vertices(&object.state.vertices),
             status: object.state.status,
             destroyed: object.destroyed,
             category: object.state.category,
