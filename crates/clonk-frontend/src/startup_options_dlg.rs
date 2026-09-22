@@ -5262,6 +5262,7 @@ impl OptionsDlgScreen {
                 assets
                     .voice_icons
                     .as_ref()
+                    .filter(|image| image.width() >= 128 && image.height() >= 320)
                     .map(|image| crop_image(image, 64, 256, 64, 64))
             } else {
                 None
@@ -9295,6 +9296,19 @@ mod tests {
             }
             assert_eq!(visited, VoiceOptionsControl::ALL);
         }
+    }
+
+    #[test]
+    fn voice_tab_falls_back_when_a_graphics_pack_has_no_chat_icon() {
+        let mut assets = options_assets();
+        assets.voice_icons = Some(crop_image(&assets.option_icons, 0, 0, 32, 32));
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.enable_voice_sheet(VoiceOptionsState::default());
+        state.restore_sheet(OptionsSheet::Voice);
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        OptionsDlgScreen::render_state(&mut surface, &assets, &gui, &book, &state, None);
     }
 
     /// The shipped facets. Every other render fixture leaves `control`/`gamepad`
