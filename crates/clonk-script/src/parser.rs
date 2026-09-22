@@ -922,12 +922,16 @@ impl<'a> Parser<'a> {
                 return Ok(true);
             }
         }
-        if !matches!(
-            self.peek()?.kind,
-            TokenKind::Keyword(
-                Keyword::Private | Keyword::Protected | Keyword::Public | Keyword::Global
-            )
-        ) {
+        let TokenKind::Keyword(
+            access @ (Keyword::Private | Keyword::Protected | Keyword::Public | Keyword::Global),
+        ) = self.peek()?.kind
+        else {
+            return Ok(false);
+        };
+        // A declared value of that name is still an expression here: C4Aul
+        // tries values before access directives (`C4AulParse.cpp:1976-2011`
+        // precede `:2168-2171`).
+        if self.names_a_value(access.lexeme()) {
             return Ok(false);
         }
         self.consume()?;
