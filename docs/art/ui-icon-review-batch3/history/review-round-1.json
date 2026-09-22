@@ -1,0 +1,38 @@
+{
+  "MENU-01": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-02": {
+    "decision": "revise",
+    "feedback": "The background and the tower structure are missing from the high-res version"
+  },
+  "MENU-03": {
+    "decision": "revise",
+    "feedback": "The flag doesn't have a pole in the high res version"
+  },
+  "MENU-04": {
+    "decision": "revise",
+    "feedback": "Flatten the swords, make sure we're preserving the Clonk style"
+  },
+  "MENU-05": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-06": {
+    "decision": "revise",
+    "feedback": "Gears aren't meshing"
+  },
+  "MENU-07": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-08": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-09": {
+    "decision": "revise",
+    "feedback": "This is supposed to be a speaker, not an ear"
+  }
+}

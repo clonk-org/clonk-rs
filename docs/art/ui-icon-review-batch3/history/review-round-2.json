@@ -1,0 +1,38 @@
+{
+  "MENU-01": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-02": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-03": {
+    "decision": "pending",
+    "feedback": "This doesn't look like the original. The square edges aren't chamfered, the blue flag and the lightning bolt and the hammer aren't represented well."
+  },
+  "MENU-04": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-05": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-06": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-07": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-08": {
+    "decision": "approve",
+    "feedback": ""
+  },
+  "MENU-09": {
+    "decision": "approve",
+    "feedback": ""
+  }
+}
