@@ -41,6 +41,14 @@ const SEARCH_MARGIN_Y: i32 = 300;
 /// most 35 commands (C4Object.cpp:3909-3913), and the goal MoveTo replans
 /// from wherever the prefix ends.
 pub const MAX_PLAN_WAYPOINTS: usize = 20;
+/// How far a landing may stray from the planned spot and still count; the
+/// executor applies the same tolerance to Jump and Drop waypoints.
+pub const LANDING_TOLERANCE_X: i32 = 8;
+/// Vertical arrival tolerance: WALK cannot correct height.
+pub const ARRIVAL_TOLERANCE_Y: i32 = 10;
+/// A jump is only planned if taking off this many pixels early or late
+/// still lands in the same place: walking to the takeoff is not exact.
+const JUMP_TAKEOFF_SLACK: i32 = 2;
 
 /// The actor's collision vertices (C4Shape::VtxX/VtxY/VtxCNAT relative to its
 /// position), kept in a fixed array so command snapshots stay allocation-free.
@@ -120,6 +128,9 @@ pub struct NavActor {
     /// DFA_SCALE's climbing speed, ValByPhysical(200, Scale).
     pub scale_speed: C4Fixed,
     pub can_scale: bool,
+    /// A flier touching a ceiling hangles instead of falling on
+    /// (C4Object.cpp:4382-4421), which no planned move expects.
+    pub can_hangle: bool,
     pub gravity: C4Fixed,
 }
 
@@ -137,6 +148,7 @@ impl NavActor {
             jump_speed: math::val_by_physical(1000, physical.jump) * con,
             scale_speed: math::val_by_physical(200, physical.scale),
             can_scale: physical.can_scale != 0,
+            can_hangle: physical.can_hangle != 0,
             gravity,
         }
     }
@@ -233,6 +245,27 @@ enum Landing {
         dir: i32,
         frames: i32,
     },
+}
+
+impl Landing {
+    /// Whether two landings end the same planned move.
+    fn matches(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stand { x, y, .. }, Self::Stand { x: ox, y: oy, .. }) => {
+                (x - ox).abs() <= LANDING_TOLERANCE_X && (y - oy).abs() <= ARRIVAL_TOLERANCE_Y
+            }
+            (
+                Self::Wall { x, y, dir, .. },
+                Self::Wall {
+                    x: ox,
+                    y: oy,
+                    dir: odir,
+                    ..
+                },
+            ) => dir == odir && (x - ox).abs() <= 2 && (y - oy).abs() <= 2 * ARRIVAL_TOLERANCE_Y,
+            _ => false,
+        }
+    }
 }
 
 enum WalkStep {
@@ -360,13 +393,19 @@ impl<'a> Search<'a> {
             while ix != tx {
                 let step = (tx - ix).signum();
                 if !self.fits(ix + step, iy) {
-                    if self.actor.can_scale && self.wall_contact(ix, iy, step) {
+                    let side_contact = self.wall_contact(ix, iy, step);
+                    if side_contact && self.actor.can_scale {
                         return Some(Landing::Wall {
                             x: ix,
                             y: iy,
                             dir: step,
                             frames: frame,
                         });
+                    }
+                    if !side_contact {
+                        // A head or foot vertex clipped a corner: the
+                        // contact the engine reacts to is not predictable.
+                        return None;
                     }
                     vx = C4Fixed::ZERO;
                     fx = math::itofix(ix);
@@ -386,6 +425,12 @@ impl<'a> Search<'a> {
                             frames: frame,
                         });
                     }
+                    if self.actor.can_hangle || self.actor.can_scale {
+                        // Touching a ceiling mid-flight turns a hangler into
+                        // HANGLE and a side vertex into SCALE
+                        // (C4Object.cpp:4382-4520); no planned move follows.
+                        return None;
+                    }
                     vy = C4Fixed::ZERO;
                     fy = math::itofix(iy);
                     break;
@@ -397,6 +442,23 @@ impl<'a> Search<'a> {
             }
         }
         None
+    }
+
+    fn jump(&self, x: i32, y: i32, dir: i32) -> Option<Landing> {
+        self.fly(x, y, self.actor.walk_speed * dir, -self.actor.jump_speed)
+    }
+
+    /// The ObjectComJump arc from (x, y), provided taking off a couple of
+    /// pixels early or late ends the same move.
+    fn robust_jump(&self, x: i32, y: i32, dir: i32) -> Option<Landing> {
+        let landing = self.jump(x, y, dir)?;
+        (-JUMP_TAKEOFF_SLACK..=JUMP_TAKEOFF_SLACK)
+            .filter(|&offset| offset != 0 && self.standing(x + offset, y))
+            .all(|offset| {
+                self.jump(x + offset, y, dir)
+                    .is_some_and(|other| landing.matches(&other))
+            })
+            .then_some(landing)
     }
 
     /// Scale up the wall on `dir` from (x, y) until the side vertices lose it,
@@ -472,7 +534,7 @@ impl<'a> Search<'a> {
                 }
             }
             if at_edge || x.rem_euclid(4) == 0 {
-                match self.fly(x, y, self.actor.walk_speed * dir, -self.actor.jump_speed) {
+                match self.robust_jump(x, y, dir) {
                     Some(Landing::Stand {
                         x: lx,
                         y: ly,
