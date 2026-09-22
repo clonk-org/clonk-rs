@@ -5,7 +5,7 @@
   },
   "case_id": "startup-options-scale-decremented-minimum",
   "comparator": {
-    "binary_sha256": "ce8a82f2d785a5e825387e5fe580ef1e700734ad83b442bf8fa10dc2839aa45b",
+    "binary_sha256": "a0db8116d8c5abe9d034e256a4b6a536f9536721d8a67d9ab7fd11a2eb5b6bee",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "pixel",

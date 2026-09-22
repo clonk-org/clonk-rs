@@ -165,6 +165,7 @@ shard_modules!(
     mars_base_order_menu,
     mars_menu_override_drift,
     message_board_queries,
+    mount_vikto_amulet_plans,
     optional_int_strictness,
     scenario_save_fuzz,
     real_tutorial01_virtual_play,
