@@ -909,12 +909,18 @@ pub(in crate::command) fn pathfinder_waypoint_operations(
     data: i32,
 ) -> Vec<CommandOperation> {
     let waypoint_count = path.waypoints.len();
+    // cObj->Command->Data: the Data of the command currently on the stack
+    // front, which starts as the parent MoveTo and becomes each pushed
+    // waypoint in turn. A Transfer is added with AddCommand's default zero
+    // Data (C4Command.cpp:194-206).
+    let mut front_data = data;
     path.waypoints
         .into_iter()
         .skip(1)
         .take(waypoint_count.saturating_sub(2))
         .map(|waypoint| {
             let request = if let Some(transfer_target) = waypoint.transfer_target {
+                front_data = 0;
                 CommandRequest::new(CommandId::Transfer)
                     .with_target(Some(transfer_target))
                     .with_tx(Some(waypoint.x))
@@ -933,7 +939,7 @@ pub(in crate::command) fn pathfinder_waypoint_operations(
                 CommandRequest::new(CommandId::MoveTo)
                     .with_tx(Some(x))
                     .with_ty(Some(y))
-                    .with_data(CommandData::Integer(data))
+                    .with_data(CommandData::Integer(front_data))
                     .with_update_interval(25)
                     .with_evaluated(true)
                     .with_mode(CommandMode::SilentSub)

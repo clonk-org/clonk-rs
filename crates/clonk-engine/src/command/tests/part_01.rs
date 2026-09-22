@@ -1106,6 +1106,69 @@
         }
     }
 
+    fn waypoint(
+        x: i32,
+        y: i32,
+        transfer_target: Option<ObjectId>,
+    ) -> crate::pathfinder::PathWaypoint {
+        crate::pathfinder::PathWaypoint {
+            x,
+            y,
+            transfer_target,
+        }
+    }
+
+    #[test]
+    fn pathfinder_waypoints_take_their_data_from_the_current_stack_front() {
+        // ObjectAddWaypoint passes cObj->Command->Data, the Data of whatever
+        // command is on the stack front at that moment. The first waypoint
+        // inherits the parent MoveTo's flags, but once a Transfer (Data 0) has
+        // been pushed every later MoveTo inherits zero (C4Command.cpp:189-209;
+        // AddCommand's default iData, C4Object.h:221-225).
+        let landscape = crate::Landscape::flat(300, 200);
+        let walker = walking_jumper(Vector2::new(20, 100));
+        let zone_owner = ObjectId::new(77);
+        let path = crate::pathfinder::Path {
+            length: 0,
+            waypoints: vec![
+                waypoint(20, 100, None),
+                waypoint(200, 100, None),
+                waypoint(150, 100, Some(zone_owner)),
+                waypoint(100, 100, None),
+                waypoint(250, 100, None),
+            ],
+        };
+
+        let operations = pathfinder_waypoint_operations(
+            path,
+            &landscape,
+            &walker,
+            COMMAND_FLAG_MOVE_TO_PUSH_TARGET,
+        );
+
+        let pushed = operations
+            .iter()
+            .map(|operation| match operation {
+                CommandOperation::PushFront(request) => {
+                    (request.id, request.tx, request.data.clone())
+                }
+                other => panic!("unexpected operation {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pushed,
+            vec![
+                (
+                    CommandId::MoveTo,
+                    Some(200),
+                    CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET)
+                ),
+                (CommandId::Transfer, Some(150), CommandData::None),
+                (CommandId::MoveTo, Some(100), CommandData::Integer(0)),
+            ]
+        );
+    }
+
     // C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): the first
     // Execute only evaluates (returns true — no movement that frame);
     // AdjustMoveToTarget grounds a mid-air target unless Data carries
