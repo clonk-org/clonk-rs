@@ -4287,10 +4287,16 @@ impl GetState {
             return result;
         }
 
-        let dx = target_snapshot.position.x - ctx.position.x;
-        let dy = target_snapshot.position.y - ctx.position.y;
-        const PICKUP_RANGE: i32 = 12;
-        if dx.abs() <= PICKUP_RANGE && dy.abs() <= PICKUP_RANGE {
+        // "Target in collection range": cObj->At(Target->x, Target->y,
+        // OCF_Normal | OCF_Collection) tests the target position against the
+        // actor's own At rectangle and OCF (C4Command.cpp:1259-1267;
+        // C4Object.cpp:1133-1146).
+        let in_collection_range = ctx.object.has_nonzero_status()
+            && ctx
+                .object
+                .at_point(target_snapshot.position.x, target_snapshot.position.y)
+            && ctx.object.ocf & (ocf::NORMAL | ocf::COLLECTION) != 0;
+        if in_collection_range {
             return self.transfer_to_actor(ctx, target_id, update, true);
         }
 
