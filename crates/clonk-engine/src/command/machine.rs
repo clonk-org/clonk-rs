@@ -5706,29 +5706,43 @@ impl AcquireState {
         true
     }
 
+    /// Every valid candidate within the search box, in C++'s preference
+    /// order: squared distance, then forward Game.Objects order
+    /// (C4Command.cpp:2108-2126).
+    fn ranked_candidates<'a>(
+        &self,
+        ctx: &'a CommandRuntimeContext<'_>,
+    ) -> Vec<&'a CommandObjectSnapshot> {
+        let mut candidates: Vec<(i64, usize, ObjectId, &CommandObjectSnapshot)> = ctx
+            .objects
+            .values()
+            .filter(|snapshot| self.candidate_is_valid(snapshot, ctx))
+            .filter_map(|snapshot| {
+                let dx = i64::from(snapshot.position.x) - i64::from(ctx.position.x);
+                let dy = i64::from(snapshot.position.y) - i64::from(ctx.position.y);
+                (dx.abs() <= i64::from(self.range_x) && dy.abs() <= i64::from(self.range_y))
+                    .then_some((
+                        dx * dx + dy * dy,
+                        snapshot.master_list_order,
+                        snapshot.id,
+                        snapshot,
+                    ))
+            })
+            .collect();
+        candidates.sort_by_key(|&(distance, order, id, _)| (distance, order, id));
+        candidates
+            .into_iter()
+            .map(|(_, _, _, snapshot)| snapshot)
+            .collect()
+    }
+
     pub(in crate::command) fn find_candidate(
         &self,
         ctx: &CommandRuntimeContext<'_>,
     ) -> Option<ObjectId> {
-        let mut best: Option<(ObjectId, i64, usize)> = None;
-        for snapshot in ctx.objects.values() {
-            if !self.candidate_is_valid(snapshot, ctx) {
-                continue;
-            }
-            let dx = i64::from(snapshot.position.x) - i64::from(ctx.position.x);
-            let dy = i64::from(snapshot.position.y) - i64::from(ctx.position.y);
-            if dx.abs() > i64::from(self.range_x) || dy.abs() > i64::from(self.range_y) {
-                continue;
-            }
-            let distance = dx * dx + dy * dy;
-            if best.is_none_or(|(best_id, best_distance, best_order)| {
-                (distance, snapshot.master_list_order, snapshot.id)
-                    < (best_distance, best_order, best_id)
-            }) {
-                best = Some((snapshot.id, distance, snapshot.master_list_order));
-            }
-        }
-        best.map(|(id, _, _)| id)
+        self.ranked_candidates(ctx)
+            .first()
+            .map(|snapshot| snapshot.id)
     }
 
     pub(in crate::command) fn step(
