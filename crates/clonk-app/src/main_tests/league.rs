@@ -5348,6 +5348,59 @@ fn compat_profile_takes_away_the_shared_base_fallback() {
     );
 }
 
+/// Scenario activation builds a fresh engine, so the synchronized profile
+/// switches must be applied to that engine, not only to the startup one the
+/// command line configured: otherwise a `legacy-clonk` round silently runs the
+/// normal profile's divergences.
+#[test]
+fn compat_profile_reaches_the_engine_of_an_activated_scenario() {
+    clonk_logging::init();
+
+    let fixture = tempdir();
+    let user_dir = fixture.path().join("user-data");
+    let scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
+    let scripts_dir = scenario_dir.join("scripts");
+    fs::create_dir_all(&scripts_dir).test_value();
+    fs::write(
+        scenario_dir.join("Scenario.txt"),
+        "[Head]\nTitle=Alpha Mission\n",
+    )
+    .test_value();
+    fs::write(
+        scenario_dir.join("Scenario.json"),
+        r#"
+                {
+                    "name": "Alpha Mission",
+                    "ground_height": 72,
+                    "landscape": { "kind": "flat", "width": 160, "height": 80 },
+                    "definitions": [
+                        { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul" }
+                    ],
+                    "initial_objects": []
+                }
+                "#,
+    )
+    .test_value();
+    fs::write(scripts_dir.join("mover.aul"), walker_script()).test_value();
+    let (_guard, paths) = exact_loader_test_paths(&user_dir, None);
+    let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
+    let parsed = parse_classic_command_line(&[OsString::from("/compatprofile:legacy-clonk")]);
+    app.apply_classic_command_line(&parsed).test_value();
+
+    let scenario = app.scensel.catalog.get("Alpha.c4s").cloned().test_value();
+    app.start_scenario(scenario).test_value();
+    wait_for_running(&mut app);
+
+    main_assert!(
+        matches!(app.mode, AppMode::Running),
+        "mode should be Running"
+    );
+    assert!(
+        !app.engine.shared_bases(),
+        "the activated round must keep the profile's exact FindBase owner match"
+    );
+}
+
 #[test]
 fn a_compatibility_session_withholds_the_content_appendto_divergences() {
     // A content `#appendto` divergence *is* a shipped script, so the profile

@@ -147,6 +147,17 @@ pub fn session_shared_bases(profile: CompatProfile) -> bool {
     }
 }
 
+/// Install every synchronized profile switch on `engine`.
+///
+/// Each switch changes what the simulation computes, so it must be set on the
+/// engine that actually runs the round. Scenario activation constructs a fresh
+/// [`clonk_engine::Engine`] rather than reusing the one the command line
+/// configured, so it has to call this again; a switch set only at startup
+/// would silently revert to the engine default for the round itself.
+pub fn apply_session_profile(engine: &mut clonk_engine::Engine, profile: CompatProfile) {
+    engine.set_shared_bases(session_shared_bases(profile));
+}
+
 /// C++'s in-game application timer: `defaultIngameGameTickDelay`, the literal
 /// 28 ms `C4Game::OpenGame` installs once the startup graphics are freed
 /// (`C4Game.cpp:63,443`).

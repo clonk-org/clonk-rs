@@ -1887,6 +1887,7 @@ impl GameApp {
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
+        crate::settings::apply_session_profile(&mut engine, self.config.compat_profile);
         engine.set_add_new_crew_portraits(
             load_options_graphics_state(self.app_paths.as_ref()).add_new_crew_portraits,
         );
