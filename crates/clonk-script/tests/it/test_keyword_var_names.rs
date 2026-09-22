@@ -23,4 +23,26 @@ run_cases! {
             return func;
         }
     "#, "Test", &[] => Value::String("BuyPack".into());
+
+    // `Parse_Statement` tries parameters, `var`s, locals and statics before it
+    // looks at the access keywords (C4AulParse.cpp:1976-2011, 2168-2171), so a
+    // declared `global` is a variable in statement position too. Modern
+    // Combat's SoundEffects keeps `local ... global` and assigns it in `Set`.
+    local_named_global_is_assigned_in_a_statement: r#"
+        #strict 2
+        local global;
+        func Test(bool fGlobal) {
+            global = fGlobal;
+            return global;
+        }
+    "#, "Test", &[Value::Bool(true)] => Value::Bool(true);
+
+    var_named_global_is_assigned_in_a_statement: r#"
+        #strict 2
+        func Test(int x) {
+            var global;
+            global = x;
+            return global + 1;
+        }
+    "#, "Test", &[Value::Int(4)] => Value::Int(5);
 }
