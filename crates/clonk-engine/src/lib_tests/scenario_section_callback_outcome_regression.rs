@@ -1143,3 +1143,55 @@ global func FxSwitchTimer(target, number, time)
         "the global callback suffix sees the accepted switch and destination object",
     );
 }
+
+/// An object call made after a switch reads its object's locals.
+///
+/// `FxIntScheduleCallTimer` (planet `System.c4g/Helpers.c:153-160`) is a
+/// global effect callback that runs the scheduled object function through
+/// `Call`. MissionsHarkon's story schedules `DoStart`, which keeps itself
+/// inactive across `LoadScenarioSection` and then calls its own
+/// `HideAttackers`. `FnLoadScenarioSection` switches before it returns
+/// (C4Script.cpp:5401-5408) and an inactive object keeps every declared
+/// local, so the call after the switch reads them like any other.
+#[test]
+fn an_object_call_after_an_effect_timer_switch_reads_its_locals() {
+    let mut engine = switching_engine();
+    assert_eq!(
+        engine.install_global_scripts(&[(
+            "System.c4g/KeptSchedule.c".to_string(),
+            "#strict 3\n\
+             static seen;\n\
+             global func FxKeptCallTimer(target, number) { Call(\"Switch\"); return -1; }\n\
+             global func Remember(value) { seen = value; return true; }\n\
+             global func Recalled() { return seen; }\n"
+                .to_string(),
+        )]),
+        1,
+    );
+    engine.register_test_script_definition(
+        "KEEP",
+        "Kept story",
+        "#strict 3\n\
+         local kept;\n\
+         func Arm() { kept = 5; return AddEffect(\"KeptCall\", this(), 1, 1, this()); }\n\
+         func Switch() {\
+             SetObjectStatus(C4OS_INACTIVE, this());\
+             LoadScenarioSection(\"Other\", 0);\
+             SetObjectStatus(C4OS_NORMAL, this());\
+             return Report();\
+         }\n\
+         func Report() { return Remember(kept); }\n",
+    );
+    let story = spawn_fixture!(engine, "KEEP", with_position: Vector2::new(60, 50));
+    let index = engine.test_object_index(story);
+    crate::TestValueExt::test_value(engine.call_object_function(index, "Arm", Vec::new()));
+
+    crate::TestValueExt::test_value(engine.tick_without_snapshot());
+
+    assert_eq!(engine.debug_current_scenario_section(), "Other");
+    assert_eq!(
+        crate::TestValueExt::test_value(engine.call_engine_global_function("Recalled", &[])),
+        Value::Int(5),
+        "Report reads the story's local after the switch",
+    );
+}

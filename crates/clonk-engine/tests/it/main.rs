@@ -157,6 +157,7 @@ shard_modules!(
     wagon_grab_put_get,
     flight_movement,
     goldwipf_activity,
+    harkon_story_section_switch,
     harpoonrace_worldgen,
     hazard_crosshair,
     inexantros_hero_locals,
