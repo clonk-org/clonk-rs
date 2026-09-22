@@ -81,6 +81,10 @@ const CLASSIC_OUTPUT_SAMPLE_RATE: u32 = 44_100;
 const CLASSIC_OUTPUT_CHANNELS: u16 = 2;
 #[cfg(feature = "cpal")]
 const CLASSIC_OUTPUT_BUFFER_FRAMES: u32 = 1_024;
+/// Callback size while voice chat is live, where latency matters more than
+/// the classic SDL buffer.
+#[cfg(feature = "cpal")]
+pub(crate) const VOICE_BUFFER_FRAMES: u32 = 256;
 #[cfg(feature = "cpal")]
 const MAX_CONVERTIBLE_OUTPUT_CHANNELS: u16 = 8;
 #[cfg(feature = "cpal")]
@@ -723,12 +727,22 @@ fn try_cpal_output_candidates<T, E>(
 fn cpal_output_stream_config_candidates(
     config: cpal::SupportedStreamConfig,
 ) -> [cpal::StreamConfig; 2] {
+    cpal_buffer_config_candidates(config, CLASSIC_OUTPUT_BUFFER_FRAMES)
+}
+
+/// `buffer_frames` per callback, clamped to what the device supports, then
+/// the host's own buffer size for a device that rejects it.
+#[cfg(feature = "cpal")]
+pub(crate) fn cpal_buffer_config_candidates(
+    config: cpal::SupportedStreamConfig,
+    buffer_frames: u32,
+) -> [cpal::StreamConfig; 2] {
     let requested_buffer_frames = match *config.buffer_size() {
         cpal::SupportedBufferSize::Range { min, max } if min <= max => {
-            CLASSIC_OUTPUT_BUFFER_FRAMES.clamp(min, max)
+            buffer_frames.clamp(min, max)
         }
         cpal::SupportedBufferSize::Range { .. } | cpal::SupportedBufferSize::Unknown => {
-            CLASSIC_OUTPUT_BUFFER_FRAMES
+            buffer_frames
         }
     };
     let mut requested = config.config();
@@ -736,8 +750,23 @@ fn cpal_output_stream_config_candidates(
     [requested, config.config()]
 }
 
+/// Finds the listed device a saved ID names.
+///
+/// cpal 0.18's ALSA host appends `,DEV=0` to a PCM ID that has no `DEV=`
+/// before looking it up, so it never finds `sysdefault:CARD=C920`, an ID it
+/// lists itself. The listed ID is looked for as-is first.
 #[cfg(feature = "cpal")]
-fn try_cpal_stream_configs<T, E>(
+pub(crate) fn cpal_device_by_id(host: &cpal::Host, id: &cpal::DeviceId) -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    host.devices()
+        .ok()
+        .and_then(|mut devices| devices.find(|device| device.id().ok().as_ref() == Some(id)))
+        .or_else(|| host.device_by_id(id))
+}
+
+#[cfg(feature = "cpal")]
+pub(crate) fn try_cpal_stream_configs<T, E>(
     candidates: impl IntoIterator<Item = cpal::StreamConfig>,
     mut open: impl FnMut(cpal::StreamConfig) -> Result<T, E>,
 ) -> Result<T, E> {

@@ -271,23 +271,17 @@ fn output_stream_configs(
     if !voice {
         return cpal_output_stream_config_candidates(config);
     }
-    let frames = match *config.buffer_size() {
-        cpal::SupportedBufferSize::Range { min, max } if min <= max => 256_u32.clamp(min, max),
-        _ => 256,
-    };
-    let mut requested = config.config();
-    requested.buffer_size = cpal::BufferSize::Fixed(frames);
-    [requested, config.config()]
+    cpal_buffer_config_candidates(config, VOICE_BUFFER_FRAMES)
 }
 
 struct NativeOutputDriver {
-    host: cpal::Host,
+    host: crate::sound_host::SoundHost,
 }
 
 impl NativeOutputDriver {
     fn new() -> Self {
         Self {
-            host: cpal::default_host(),
+            host: crate::sound_host::SoundHost::default(),
         }
     }
 
@@ -365,22 +359,33 @@ impl OutputDriver for NativeOutputDriver {
 
     fn inventory(&mut self) -> Result<OutputInventory, AudioError> {
         use cpal::traits::{DeviceTrait, HostTrait};
-        let default = self
-            .host
-            .default_output_device()
-            .and_then(|device| device.id().ok())
-            .map(|id| id.to_string());
-        let devices = self
-            .host
-            .output_devices()
-            .map_err(|error| AudioError::Stream(error.to_string()))?
-            .filter_map(|device| device.id().ok().zip(device.description().ok()))
-            .map(|(id, description)| AudioOutputDevice {
-                id: id.to_string(),
-                name: description.name().into(),
+        self.host.with(|host| {
+            let default = host
+                .default_output_device()
+                .and_then(|device| device.id().ok())
+                .map(|id| id.to_string());
+            let endpoints = crate::sound_host::host_endpoints(
+                host.output_devices()
+                    .map_err(|error| AudioError::Stream(error.to_string()))?,
+            );
+            let devices = crate::sound_host::offered_outputs(endpoints.clone())
+                .into_iter()
+                .map(|endpoint| AudioOutputDevice {
+                    id: endpoint.id,
+                    name: endpoint.name,
+                })
+                .collect::<Vec<_>>();
+            let unlisted = endpoints
+                .into_iter()
+                .map(|endpoint| endpoint.id)
+                .filter(|id| devices.iter().all(|device| &device.id != id))
+                .collect();
+            Ok(OutputInventory {
+                default,
+                devices,
+                unlisted,
             })
-            .collect();
-        Ok(OutputInventory { default, devices })
+        })
     }
 
     fn open(
@@ -388,12 +393,9 @@ impl OutputDriver for NativeOutputDriver {
         id: &str,
         voice_mode: bool,
     ) -> Result<(Self::Stream, Arc<OutputBuffer>), AudioError> {
-        use cpal::traits::{DeviceTrait, HostTrait};
+        use cpal::traits::DeviceTrait;
         let id = id.parse().map_err(|_| AudioError::NoAudioDevice)?;
-        let device = self
-            .host
-            .device_by_id(&id)
-            .ok_or(AudioError::NoAudioDevice)?;
+        let device = cpal_device_by_id(self.host.get(), &id).ok_or(AudioError::NoAudioDevice)?;
         let supported = device
             .supported_output_configs()
             .map_err(|error| AudioError::Stream(error.to_string()))?;
@@ -538,6 +540,9 @@ const OUTPUT_DEVICE_POLL: Duration = Duration::from_secs(1);
 struct OutputInventory {
     default: Option<String>,
     devices: Vec<AudioOutputDevice>,
+    /// Endpoints the host can open that `devices` does not offer. A saved
+    /// selection of one keeps playing instead of going silent.
+    unlisted: Vec<String>,
 }
 
 struct OutputControl {
@@ -706,7 +711,10 @@ impl<D: OutputDriver> OutputManager<D> {
         let target = state
             .selected
             .as_ref()
-            .filter(|id| state.devices.iter().any(|device| &device.id == *id))
+            .filter(|id| {
+                state.devices.iter().any(|device| &device.id == *id)
+                    || inventory.unlisted.contains(id)
+            })
             .cloned()
             .or_else(|| {
                 state
@@ -784,6 +792,7 @@ mod tests {
                         id: "speakers".into(),
                         name: "Speakers".into(),
                     }],
+                    unlisted: Vec::new(),
                 }
             } else {
                 OutputInventory::default()
@@ -1144,6 +1153,50 @@ mod tests {
             next.samples.len(),
             1,
             "an obsolete callback cannot steal from the new device"
+        );
+    }
+
+    #[test]
+    fn a_saved_output_the_device_list_no_longer_offers_still_opens() {
+        struct UnlistedPcm {
+            opened: Vec<String>,
+        }
+        impl OutputDriver for UnlistedPcm {
+            type Stream = ();
+            fn inventory(&mut self) -> Result<OutputInventory, AudioError> {
+                Ok(OutputInventory {
+                    default: Some("alsa:default".into()),
+                    devices: vec![AudioOutputDevice {
+                        id: "alsa:sysdefault:CARD=Generic_1".into(),
+                        name: "HD-Audio Generic, ALC1220 Analog".into(),
+                    }],
+                    unlisted: vec!["alsa:plughw:CARD=3,DEV=0".into()],
+                })
+            }
+            fn open(&mut self, id: &str, _: bool) -> Result<((), Arc<OutputBuffer>), AudioError> {
+                self.opened.push(id.into());
+                Ok(((), OutputBuffer::new(48_000)))
+            }
+            fn play(&mut self, _: &()) -> Result<(), AudioError> {
+                Ok(())
+            }
+        }
+        let control = OutputControl::new();
+        let mut manager = OutputManager::new(UnlistedPcm { opened: Vec::new() }, control.clone());
+        let backend = CpalBackend {
+            control,
+            input_catalog: None,
+        };
+        backend.select(Some("alsa:plughw:CARD=3,DEV=0".into()));
+        manager.service(Instant::now());
+        assert_eq!(manager.driver.opened, ["alsa:plughw:CARD=3,DEV=0"]);
+        assert_eq!(
+            backend
+                .devices()
+                .iter()
+                .map(|device| device.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alsa:sysdefault:CARD=Generic_1"]
         );
     }
 
