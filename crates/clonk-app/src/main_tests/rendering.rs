@@ -2006,6 +2006,159 @@ fn installed_app_uses_all_approved_ui_icon_sources_without_changing_sheet_geomet
 }
 
 #[test]
+fn installed_app_uses_all_approved_hud_icons_at_their_original_layout_sizes() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(1280, 720, &paths);
+    let hud = app.assets.hud_graphics();
+    for (name, image, size) in [
+        ("Build.png", hud.build.as_ref().test_value(), (64, 64)),
+        ("Captain.png", hud.captain.as_ref().test_value(), (16, 16)),
+        (
+            "Construction.png",
+            hud.construction.as_ref().test_value(),
+            (16, 16),
+        ),
+        ("Energy.png", hud.energy.as_ref().test_value(), (11, 17)),
+        ("Exit.png", hud.exit.as_ref().test_value(), (64, 64)),
+        ("Magic.png", hud.magic.as_ref().test_value(), (25, 35)),
+        ("Player.png", hud.player.as_ref().test_value(), (48, 48)),
+        ("Score.png", hud.score.as_ref().test_value(), (60, 30)),
+        ("Wealth.png", hud.wealth.as_ref().test_value(), (60, 30)),
+    ] {
+        main_assert_eq!((image.width(), image.height()) => size, "{name} layout changed");
+        let art = image
+            .region_replacement([0, 0, size.0, size.1])
+            .test_value();
+        main_assert_eq!((art.width(), art.height()) => (size.0 * 8, size.1 * 8));
+        main_assert!(art.pixels().chunks_exact(4).any(|pixel| pixel[3] == 0));
+        main_assert!(art.pixels().chunks_exact(4).any(|pixel| pixel[3] == 255));
+    }
+    let player = app.assets.dialog_image("Player.png").test_value();
+    main_assert!(player.region_replacement([0, 0, 48, 48]).is_some());
+}
+
+#[test]
+fn active_scenario_upgrades_stock_hud_icons_and_keeps_custom_art() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(320, 200, &paths);
+    main_assert!(crate::hd_hud_icons::is_installed(
+        app.assets.hud_graphics().as_ref()
+    ));
+    let scenario =
+        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+            .test_value();
+    let game = app
+        .loaded_game_graphics_resources(&scenario, None)
+        .test_value();
+    let hud = game.hud_graphics;
+    let mut custom = Vec::new();
+    for (name, image, size) in [
+        ("Build", hud.build.as_ref().test_value(), (64, 64)),
+        ("Captain", hud.captain.as_ref().test_value(), (16, 16)),
+        (
+            "Construction",
+            hud.construction.as_ref().test_value(),
+            (16, 16),
+        ),
+        ("Energy", hud.energy.as_ref().test_value(), (11, 17)),
+        ("Exit", hud.exit.as_ref().test_value(), (64, 64)),
+        ("Magic", hud.magic.as_ref().test_value(), (25, 35)),
+        ("Player", hud.player.as_ref().test_value(), (48, 48)),
+        ("Score", hud.score.as_ref().test_value(), (60, 30)),
+        ("Wealth", hud.wealth.as_ref().test_value(), (60, 30)),
+    ] {
+        let Some(art) = image.region_replacement([0, 0, size.0, size.1]) else {
+            custom.push(name);
+            continue;
+        };
+        main_assert_eq!((art.width(), art.height()) => (size.0 * 8, size.1 * 8));
+    }
+    main_assert_eq!(custom => ["Construction", "Player"]);
+}
+
+#[test]
+fn real_running_hud_retains_full_resolution_approved_score_and_wealth_sources() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
+    app.start_sandbox_scenario_with_definitions(
+        FrontendScenario::fallback(),
+        SandboxDefinitionLoad::InstallCrew(&paths),
+    )
+    .test_value();
+    wait_for_running(&mut app);
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(3.0, false);
+    let presentation = GpuPresentation {
+        physical_extent: [960, 600],
+        scale: 3.0,
+        crop_top: 0,
+        world_zoom: 1.0,
+    };
+    let hud = app.current_hud_graphics();
+    let score = hud.score.as_ref().test_value();
+    let wealth = hud.wealth.as_ref().test_value();
+    let approved = [score, wealth]
+        .into_iter()
+        .map(|image| {
+            image
+                .region_replacement([0, 0, image.width(), image.height()])
+                .test_value()
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let updated = app.render_retained_gpu_frame(presentation).test_value();
+    let extents = updated
+        .layers
+        .iter()
+        .flat_map(|layer| &layer.scene.textures)
+        .map(|texture| texture.extent)
+        .collect::<Vec<_>>();
+    for icon in approved {
+        main_assert!(
+            updated
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.scene.textures)
+                .any(|texture| {
+                    texture.extent == [icon.width(), icon.height()]
+                        && texture.pixels.as_ref() == icon.pixels()
+                }),
+            "running HUD must send its entire approved source to the GPU; textures: {extents:?}"
+        );
+    }
+    if let Some(path) = std::env::var_os("CLONK_HD_HUD_CAPTURE") {
+        let path = PathBuf::from(path);
+        let mut before_app = new_menu_app_with_paths(320, 200, &paths);
+        let mut before_assets = before_app.assets.as_ref().clone();
+        before_assets.hud_graphics = FrontendAssets::load(Some(&paths)).hud_graphics;
+        before_app.assets = Arc::new(before_assets);
+        before_app
+            .start_sandbox_scenario_with_definitions(
+                FrontendScenario::fallback(),
+                SandboxDefinitionLoad::InstallCrew(&paths),
+            )
+            .test_value();
+        wait_for_running(&mut before_app);
+        before_app
+            .rendering
+            .graphics
+            .set_runtime_sprite_filtering(3.0, false);
+        let before = before_app
+            .render_retained_gpu_frame(presentation)
+            .test_value();
+        write_options_gpu_review_capture(&before, &path.with_extension("before.png"));
+        write_options_gpu_review_capture(&updated, &path);
+    }
+}
+
+#[test]
 fn speaking_icon_is_embedded_without_legacy_graphics_resources() {
     let assets = FrontendAssets::load(None);
     let icon = assets.dialog_image("Speaking.png").test_value();

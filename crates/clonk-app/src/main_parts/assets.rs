@@ -3315,6 +3315,7 @@ pub(crate) fn load_game_graphics_resources(
     frontend: &FrontendScenario,
     definition_load: Option<&ScenarioDefinitionLoad>,
 ) -> Result<GameGraphicsResources> {
+    let install_hd_hud = crate::hd_hud_icons::is_installed(fallback.hud_graphics.as_ref());
     let Some(paths) = paths else {
         return Ok(fallback);
     };
@@ -3359,12 +3360,16 @@ pub(crate) fn load_game_graphics_resources(
         return Ok(fallback);
     }
     let graphics = main_graphics_group(paths)?;
-    resolve_game_graphics_resources(
+    let mut resources = resolve_game_graphics_resources(
         &graphics_registrations,
         &graphics,
         Some(Arc::clone(&fallback.cursor_atlas)),
         liquid_animation_enabled,
-    )
+    )?;
+    if install_hd_hud {
+        crate::hd_hud_icons::install_hud(Arc::make_mut(&mut resources.hud_graphics))?;
+    }
+    Ok(resources)
 }
 
 fn load_classic_bitmap_font_image(

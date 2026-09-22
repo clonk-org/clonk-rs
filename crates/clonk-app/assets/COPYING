@@ -22,3 +22,9 @@ AniProGuy). Generated with OpenAI imagegen and approved for Clonk Rust in 2026.
 These adaptations use the same CC BY-NC 4.0 license above. See
 docs/art/ui-icons.md and docs/art/ui-icon-prompts.json for source coordinates,
 prompts, preparation, and the shared checkbox-base construction.
+
+hud-icons/*.png are high-resolution adaptations of the nine matching icons in
+planet/Graphics.c4g by RedWolf Design. Generated with OpenAI imagegen and
+approved for Clonk Rust in 2026, then prepared as transparent sprites at 8x
+the source dimensions. They use the same CC BY-NC 4.0 license above. See
+docs/art/hud-icons.md for the source and in-game comparison.

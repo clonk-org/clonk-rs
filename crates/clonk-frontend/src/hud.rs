@@ -945,7 +945,7 @@ pub(crate) fn clr_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
 fn colorize_by_owner_with(
     image: &ImageData,
     owner: Color,
-    modulate: impl Fn(u8, u8) -> u8,
+    modulate: &dyn Fn(u8, u8) -> u8,
 ) -> ImageData {
     let pixels = image.pixels();
     let mut out = Vec::with_capacity(pixels.len());
@@ -963,7 +963,15 @@ fn colorize_by_owner_with(
             None => out.extend_from_slice(&[r, g, b, a]),
         }
     }
-    ImageData::new(image.width(), image.height(), out)
+    let mut colored = ImageData::new(image.width(), image.height(), out);
+    let full_image = [0, 0, image.width(), image.height()];
+    if let Some(replacement) = image.region_replacement(full_image) {
+        colored = colored.with_region_replacement(
+            full_image,
+            colorize_by_owner_with(replacement, owner, modulate),
+        );
+    }
+    colored
 }
 
 /// `C4FacetExSurface::CreateClrByOwner` followed by normalized texture
@@ -981,7 +989,7 @@ pub fn colorize_by_owner(image: &ImageData, owner: Color) -> ImageData {
         if let Some(image) = images.borrow().get(&key).cloned() {
             return image;
         }
-        let colored = colorize_by_owner_with(image, owner, |channel, gray| {
+        let colored = colorize_by_owner_with(image, owner, &|channel, gray| {
             (u16::from(channel) * u16::from(gray) / 255) as u8
         });
         images.borrow_mut().insert(key, colored.clone());
@@ -994,7 +1002,7 @@ pub fn colorize_by_owner(image: &ImageData, owner: Color) -> ImageData {
 /// `ModulateClr` divides RGB by 256, so even 255×255 becomes 254
 /// (`src/C4Surface.cpp:673-700`, `src/StdColors.h:159-169`).
 pub fn colorize_by_owner_software(image: &ImageData, owner: Color) -> ImageData {
-    colorize_by_owner_with(image, owner, |channel, gray| {
+    colorize_by_owner_with(image, owner, &|channel, gray| {
         ((u16::from(channel) * u16::from(gray)) >> 8) as u8
     })
 }
@@ -2017,6 +2025,25 @@ fn draw_scaled_region(
 ) {
     if src.width == 0 || src.height == 0 || dest.width == 0 || dest.height == 0 {
         return;
+    }
+    if let Some((replacement, source)) = image.resolve_region((
+        src.x as f32,
+        src.y as f32,
+        src.width as f32,
+        src.height as f32,
+    )) {
+        return crate::classic_gui::draw_facet_stretch(
+            surface,
+            replacement,
+            source,
+            (
+                dest.x as f32,
+                dest.y as f32,
+                dest.width as f32,
+                dest.height as f32,
+            ),
+            gamma,
+        );
     }
     if surface.is_gpu_scene_capture_active()
         && src.x >= 0
@@ -4346,6 +4373,30 @@ mod tests {
     }
 
     #[test]
+    fn hud_aspect_draw_uses_full_resolution_region_replacement() {
+        let image = solid_image(2, 2, [0, 0, 255, 255])
+            .with_region_replacement([0, 0, 2, 2], solid_image(8, 8, [255, 0, 0, 255]));
+        let mut surface = Surface::new(2, 2, PixelFormat::Rgba8888);
+        draw_image_aspect(&mut surface, &image, SurfaceRect::new(0, 0, 2, 2), None);
+        check_eq! { surface.get_pixel(0, 0).unwrap() => Color::opaque(255, 0, 0) }
+    }
+
+    #[test]
+    fn hud_command_draw_uses_full_resolution_region_replacement() {
+        let image = solid_image(2, 2, [0, 0, 255, 255])
+            .with_region_replacement([0, 0, 2, 2], solid_image(8, 8, [255, 0, 0, 255]));
+        let mut surface = Surface::new(2, 2, PixelFormat::Rgba8888);
+        draw_scaled_region(
+            &mut surface,
+            &image,
+            SurfaceRect::new(0, 0, 2, 2),
+            SurfaceRect::new(0, 0, 2, 2),
+            None,
+        );
+        check_eq! { surface.get_pixel(0, 0).unwrap() => Color::opaque(255, 0, 0) }
+    }
+
+    #[test]
     fn colorize_by_owner_turns_blue_pixels_into_owner_color() {
         // ClrByOwner detects the pure-blue pixel and modulates the owner
         // color by its gray value (src/C4Surface.cpp:236-287).
@@ -4357,6 +4408,16 @@ mod tests {
         let image = solid_image(1, 1, [200, 30, 30, 255]);
         let colored = colorize_by_owner(&image, Color::opaque(255, 0, 0));
         check_eq! { &colored.pixels()[..4] => &[200, 30, 30, 255] }
+    }
+
+    #[test]
+    fn player_colorization_preserves_and_tints_hd_portrait() {
+        let image = solid_image(2, 2, [0, 0, 255, 255])
+            .with_region_replacement([0, 0, 2, 2], solid_image(8, 8, [0, 0, 255, 255]));
+        let colored = colorize_by_owner(&image, Color::opaque(255, 0, 0));
+        let portrait = colored.region_replacement([0, 0, 2, 2]).unwrap();
+        check_eq! { (portrait.width(), portrait.height()) => (8, 8) }
+        check_eq! { &portrait.pixels()[..4] => &[255, 0, 0, 255] }
     }
 
     #[test]

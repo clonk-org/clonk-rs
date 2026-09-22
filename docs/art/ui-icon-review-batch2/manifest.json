@@ -1,0 +1,238 @@
+{
+  "title": "Clonk HUD icon review \u2014 batch 2",
+  "generator": "OpenAI built-in imagegen; red bolt recolored from the approved blue bolt",
+  "status": "All nine approved; transparent high-resolution assets integrated into the game",
+  "previewBackground": "Opaque generated backdrop; transparent game sprites prepared in crates/clonk-app/assets/hud-icons",
+  "icons": [
+    {
+      "id": "HUD-01",
+      "key": "build",
+      "label": "Build tool",
+      "usage": "Build command symbol",
+      "source": "planet/Graphics.c4g/Build.png",
+      "sourceSize": [
+        64,
+        64
+      ],
+      "sourceSha256": "91eaf6e2bab171b4c7aa801470cfdb1593fba32279833b3c11588c30928d074a",
+      "before": "before/build.png",
+      "candidate": "after/build.png",
+      "candidateSize": [
+        1254,
+        1254
+      ],
+      "candidateSha256": "6d4b25d3914540fa72b3d5c850e438ee7c57bebce6a2b1fa3da38afb8b6d92a4",
+      "previewScale": 1.07,
+      "review": "approved",
+      "roundOneReview": "approved",
+      "revision": null,
+      "priorCandidate": null,
+      "gameReference": null
+    },
+    {
+      "id": "HUD-02",
+      "key": "captain",
+      "label": "Captain star",
+      "usage": "Captain indicator",
+      "source": "planet/Graphics.c4g/Captain.png",
+      "sourceSize": [
+        16,
+        16
+      ],
+      "sourceSha256": "dfa4293d8e78087cd7b99cbc2e096c2b8e93bd00bd6e7de0ad46ede8cb240d38",
+      "before": "before/captain.png",
+      "candidate": "after/captain.png",
+      "candidateSize": [
+        1254,
+        1254
+      ],
+      "candidateSha256": "3bd500c997af5217b5744b1231ccf18ce105208999df9a52673fa32f26a1b529",
+      "previewScale": 1.12,
+      "review": "approved",
+      "roundOneReview": "revise",
+      "revision": "Flatter gold star with a thin offset shadow.",
+      "priorCandidate": "history/captain-round-1.png",
+      "gameReference": null
+    },
+    {
+      "id": "HUD-03",
+      "key": "construction",
+      "label": "Construction hammer",
+      "usage": "Construction indicator",
+      "source": "planet/Graphics.c4g/Construction.png",
+      "sourceSize": [
+        16,
+        16
+      ],
+      "sourceSha256": "f0e2d61e2d0e1694d7e0ffb0fb3905b68b23bde6e236bb4b50d36ff86b6534d9",
+      "before": "before/construction.png",
+      "candidate": "after/construction.png",
+      "candidateSize": [
+        1254,
+        1254
+      ],
+      "candidateSha256": "7280a5d871f9b25c39cee14d60741083d8121f07ff7f8810909ced0d701f80fe",
+      "previewScale": 1.0,
+      "review": "approved",
+      "roundOneReview": "revise",
+      "revision": "A proper two-faced mallet with a centered wooden shaft.",
+      "priorCandidate": "history/construction-round-1.png",
+      "gameReference": "reference/construction-game-mallet.png"
+    },
+    {
+      "id": "HUD-04",
+      "key": "energy",
+      "label": "Red energy bolt",
+      "usage": "Object energy indicator",
+      "source": "planet/Graphics.c4g/Energy.png",
+      "sourceSize": [
+        11,
+        17
+      ],
+      "sourceSha256": "cb0bba9c910de239f97dccba348b2c9bde53dcd7453da5b35003a2ec83397852",
+      "before": "before/energy.png",
+      "candidate": "after/energy.png",
+      "candidateSize": [
+        1254,
+        1254
+      ],
+      "candidateSha256": "d1798c7970b1bcac225fe093142e075030c2c163b27c6ed453843b6ed6c3ac95",
+      "previewScale": 1.0,
+      "review": "approved",
+      "roundOneReview": "revise",
+      "revision": "The approved blue bolt, recolored red without changing its shape.",
+      "priorCandidate": "history/energy-round-1.png",
+      "gameReference": null
+    },
+    {
+      "id": "HUD-05",
+      "key": "exit",
+      "label": "Open door",
+      "usage": "Exit command symbol",
+      "source": "planet/Graphics.c4g/Exit.png",
+      "sourceSize": [
+        64,
+        64
+      ],
+      "sourceSha256": "ae0b108d651b0df8ef7016e10448b5f63cc9924c85aed8700e822ca4dde24ce2",
+      "before": "before/exit.png",
+      "candidate": "after/exit.png",
+      "candidateSize": [
+        1254,
+        1254
+      ],
+      "candidateSha256": "49fc338f67f825f78ac4252bd07c72e457248a914877224237be6995627620e9",
+      "previewScale": 1.04,
+      "review": "approved",
+      "roundOneReview": "approved",
+      "revision": null,
+      "priorCandidate": null,
+      "gameReference": null
+    },
+    {
+      "id": "HUD-06",
+      "key": "magic",
+      "label": "Blue magic bolt",
+      "usage": "Spell menu value",
+      "source": "planet/Graphics.c4g/Magic.png",
+      "sourceSize": [
+        25,
+        35
+      ],
+      "sourceSha256": "100ed4acc3d768d084bee03e9f11316ab235a78256f96eec224547e13b0d8952",
+      "before": "before/magic.png",
+      "candidate": "after/magic.png",
+      "candidateSize": [
+        1254,
+        1254
+      ],
+      "candidateSha256": "4a6da8b3f79b41bafda5e3d68cd4661be7b089356ff6a533de943a9fffb065ec",
+      "previewScale": 1.0,
+      "review": "approved",
+      "roundOneReview": "approved",
+      "revision": null,
+      "priorCandidate": null,
+      "gameReference": null
+    },
+    {
+      "id": "HUD-07",
+      "key": "player",
+      "label": "Player portrait",
+      "usage": "Player information",
+      "source": "planet/Graphics.c4g/Player.png",
+      "sourceSize": [
+        48,
+        48
+      ],
+      "sourceSha256": "916a9b6c4b7cd2ecb642e7f69d270f8b31c7080e6425cdb3355469469d5f08b4",
+      "before": "before/player.png",
+      "candidate": "after/player.png",
+      "candidateSize": [
+        1254,
+        1254
+      ],
+      "candidateSha256": "e9c82d48e0b3b0bf4255f6262e3355a3975ecaa1414d9a7f8eba12b08a70a7ec",
+      "previewScale": 1.0,
+      "review": "approved",
+      "roundOneReview": "revise",
+      "revision": "Rebuilt using the game's portrait of the same Clonk as reference.",
+      "priorCandidate": "history/player-round-1.png",
+      "gameReference": "reference/player-canonical-portrait.png"
+    },
+    {
+      "id": "HUD-08",
+      "key": "score",
+      "label": "Score buildings",
+      "usage": "Score display",
+      "source": "planet/Graphics.c4g/Score.png",
+      "sourceSize": [
+        60,
+        30
+      ],
+      "sourceSha256": "73217a0a00960cb1980fbf6ff73e2dfd3079c0e205df3752770142321ff61908",
+      "before": "before/score.png",
+      "candidate": "after/score.png",
+      "candidateSize": [
+        1774,
+        887
+      ],
+      "candidateSha256": "eecc2b9c29337fd417b50f89962cef78e0b18586790c30ffc489a1e99b34f464",
+      "previewScale": 1.15,
+      "review": "approved",
+      "roundOneReview": "approved",
+      "revision": null,
+      "priorCandidate": null,
+      "gameReference": null
+    },
+    {
+      "id": "HUD-09",
+      "key": "wealth",
+      "label": "Gold pile",
+      "usage": "Wealth display",
+      "source": "planet/Graphics.c4g/Wealth.png",
+      "sourceSize": [
+        60,
+        30
+      ],
+      "sourceSha256": "11763bb10d6bad3cc9896e7b7f72ade268305776d3ff2273fbcdaf064f6efb8e",
+      "before": "before/wealth.png",
+      "candidate": "after/wealth.png",
+      "candidateSize": [
+        1774,
+        887
+      ],
+      "candidateSha256": "6b2925ded50bcec5611c3aaeca46e2f55d5ea8e15586f3d1c549a925311c2c23",
+      "previewScale": 1.55,
+      "review": "approved",
+      "roundOneReview": "approved",
+      "revision": null,
+      "priorCandidate": null,
+      "gameReference": null
+    }
+  ],
+  "otherFindings": [
+    "Flag.png and Crew.png need owner-color treatment",
+    "Liquid.png is an animation texture rather than a pictorial icon",
+    "Menu.png, Options.png, Rank.png, Gamepad.png and StartupScenSelIcons.png are multi-cell sheets for later review"
+  ]
+}
