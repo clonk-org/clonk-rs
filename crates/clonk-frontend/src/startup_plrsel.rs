@@ -551,6 +551,7 @@ fn engine_png_texture(image: &ImageData) -> ImageData {
                 .filter(|texel| texel[3] == 0)
                 .for_each(|texel| texel[..3].fill(0));
             ImageData::new(image.width(), image.height(), pixels)
+                .with_region_replacements_from(image)
         } else {
             image.clone()
         };
@@ -625,10 +626,15 @@ fn split_color_by_owner(image: &ImageData) -> (ImageData, ImageData) {
                 base[offset..offset + 4].copy_from_slice(&[0, 0, 0, 0]);
             }
         }
-        let layer = (
-            ImageData::new(image.width(), image.height(), base),
-            ImageData::new(image.width(), image.height(), overlay),
-        );
+        let mut base = ImageData::new(image.width(), image.height(), base);
+        let mut overlay = ImageData::new(image.width(), image.height(), overlay);
+        let full_image = [0, 0, image.width(), image.height()];
+        if let Some(replacement) = image.region_replacement(full_image) {
+            let (hd_base, hd_overlay) = split_color_by_owner(replacement);
+            base = base.with_region_replacement(full_image, hd_base);
+            overlay = overlay.with_region_replacement(full_image, hd_overlay);
+        }
+        let layer = (base, overlay);
         layers
             .borrow_mut()
             .insert(image.gpu_texture_id(), layer.clone());
@@ -650,6 +656,20 @@ fn draw_image_strip_modulated(
     mod_clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if let Some(replacement) = image.region_replacement([0, 0, image.width(), image.height()]) {
+        return draw_image_bilinear_modulated(
+            surface,
+            &GuiRect::new(
+                dest_x as f32,
+                dest_y as f32,
+                image.width() as f32,
+                image.height() as f32,
+            ),
+            replacement,
+            mod_clr,
+            gamma,
+        );
+    }
     if crate::draw_image_source_modulated_with_active_renderer_config(
         surface,
         &GuiRect::new(
@@ -811,6 +831,9 @@ fn draw_image_bilinear_modulated(
     mod_clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if let Some(replacement) = image.region_replacement([0, 0, image.width(), image.height()]) {
+        return draw_image_bilinear_modulated(surface, rect, replacement, mod_clr, gamma);
+    }
     if crate::draw_image_source_modulated_with_active_renderer_config(
         surface,
         rect,
@@ -4759,6 +4782,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn player_png_normalization_keeps_hd_portrait() {
+        let image = ImageData::new(2, 1, vec![255, 255, 255, 0, 0, 0, 255, 255])
+            .with_region_replacement(
+                [0, 0, 2, 1],
+                ImageData::new(8, 4, [0, 0, 255, 255].repeat(32)),
+            );
+        let normalized = engine_png_texture(&image);
+        assert_eq!(normalized.pixels()[..4], [0, 0, 0, 0]);
+        assert_eq!(
+            normalized
+                .region_replacement([0, 0, 2, 1])
+                .map(ImageData::width),
+            Some(8)
+        );
+    }
+
     // CreateColorByOwner clears base pixels via SetPixDw(0xffffffff)
     // (C4Surface.cpp:311), and SetPixDw squashes fully transparent writes to
     // black (C4Surface.cpp:733) — so punched base texels are transparent
@@ -4778,6 +4818,48 @@ mod tests {
         let (base_again, overlay_again) = split_color_by_owner(&image);
         assert_eq!(base.gpu_texture_id(), base_again.gpu_texture_id());
         assert_eq!(overlay.gpu_texture_id(), overlay_again.gpu_texture_id());
+    }
+
+    #[test]
+    fn default_player_portrait_keeps_hd_art_through_owner_split() {
+        let image = ImageData::new(2, 1, [0, 0, 255, 255].repeat(2)).with_region_replacement(
+            [0, 0, 2, 1],
+            ImageData::new(8, 4, [0, 0, 255, 255].repeat(32)),
+        );
+        let (base, overlay) = split_color_by_owner(&image);
+        let hd_base = base.region_replacement([0, 0, 2, 1]).unwrap();
+        let hd_overlay = overlay.region_replacement([0, 0, 2, 1]).unwrap();
+        assert_eq!((hd_base.width(), hd_base.height()), (8, 4));
+        assert_eq!(hd_base.pixels()[..4], [0, 0, 0, 0]);
+        assert_eq!(hd_overlay.pixels()[..4], [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn default_player_portrait_modulation_draws_hd_source() {
+        let image = ImageData::new(2, 2, [0, 0, 255, 255].repeat(4)).with_region_replacement(
+            [0, 0, 2, 2],
+            ImageData::new(8, 8, [255, 0, 0, 255].repeat(64)),
+        );
+        let mut surface = Surface::new(2, 2, clonk_graphics::PixelFormat::Rgba8888);
+        draw_image_bilinear_modulated(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 2.0, 2.0),
+            &image,
+            0x00ff_ffff,
+            None,
+        );
+        assert_eq!(surface.get_pixel(0, 0).unwrap(), Color::opaque(255, 0, 0));
+    }
+
+    #[test]
+    fn default_player_portrait_exact_modulation_draws_hd_source() {
+        let image = ImageData::new(2, 2, [0, 0, 255, 255].repeat(4)).with_region_replacement(
+            [0, 0, 2, 2],
+            ImageData::new(8, 8, [255, 0, 0, 255].repeat(64)),
+        );
+        let mut surface = Surface::new(2, 2, clonk_graphics::PixelFormat::Rgba8888);
+        draw_image_strip_modulated(&mut surface, 0, 0, &image, 0x00ff_ffff, None);
+        assert_eq!(surface.get_pixel(0, 0).unwrap(), Color::opaque(255, 0, 0));
     }
 
     #[test]

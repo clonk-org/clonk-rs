@@ -1,0 +1,10 @@
+{
+  "batch": "Clonk HUD icon review — batch 2",
+  "approved": ["HUD-01", "HUD-05", "HUD-06", "HUD-08", "HUD-09"],
+  "revisions": {
+    "HUD-02": "Make the star more flat",
+    "HUD-03": "This hammer doesn't look like a proper hammer/mallet",
+    "HUD-04": "This should just be a red version of Blue magic bolt",
+    "HUD-07": "Needs to adhere to how clonks look more, use other imagery to help inform"
+  }
+}

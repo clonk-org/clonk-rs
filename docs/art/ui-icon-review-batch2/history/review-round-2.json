@@ -1,0 +1,15 @@
+{
+  "batch": "Clonk HUD icon review — batch 2",
+  "approved": [
+    "HUD-01",
+    "HUD-02",
+    "HUD-03",
+    "HUD-04",
+    "HUD-05",
+    "HUD-06",
+    "HUD-07",
+    "HUD-08",
+    "HUD-09"
+  ],
+  "revisionsAccepted": ["HUD-02", "HUD-03", "HUD-04", "HUD-07"]
+}

@@ -397,6 +397,20 @@ fn draw_image_bilinear_source_impl(
     blend_mode: BilinearBlend,
     modulation: Option<u32>,
 ) {
+    let (image, source) = image
+        .resolve_region((source.x, source.y, source.width, source.height))
+        .map(|(image, (x, y, width, height))| {
+            (
+                image,
+                FloatSourceRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            )
+        })
+        .unwrap_or((image, source));
     let modulation = modulation.map(|color| if color == 0 { 0xff } else { color });
     if capture_gpu_gui_image(
         surface,
