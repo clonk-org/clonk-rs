@@ -929,12 +929,14 @@ pub(in crate::command) fn pathfinder_waypoint_operations(
                     .with_mode(CommandMode::SilentSub)
             } else {
                 let (mut x, mut y) = (waypoint.x, waypoint.y);
+                // Raw Shape.Wdt/Hgt halves; only the height is ever expanded
+                // in the snapshot's At rectangle (C4Command.cpp:197-198).
                 adjust_solid_offset(
                     landscape,
                     &mut x,
                     &mut y,
                     object.shape.width / 2,
-                    object.shape.height / 2,
+                    object.shape_height / 2,
                 );
                 CommandRequest::new(CommandId::MoveTo)
                     .with_tx(Some(x))

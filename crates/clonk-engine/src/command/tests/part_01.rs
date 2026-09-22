@@ -1169,6 +1169,33 @@
         );
     }
 
+    #[test]
+    fn pathfinder_waypoints_keep_their_raw_half_height_off_solid() {
+        // ObjectAddWaypoint calls AdjustSolidOffset with the raw
+        // cObj->Shape.Hgt / 2. For a ten-pixel actor two pixels above a floor
+        // at 110 that pushes the waypoint up while cnt < 5, from 108 to 105;
+        // the eighteen-pixel At height would keep going to 101
+        // (C4Command.cpp:126-145,197-198).
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut small = walking_jumper(Vector2::new(20, 100));
+        small.shape_top = -5;
+        small.shape_height = 10;
+        small.shape = DefinitionRect::new(12, 87, 16, 18);
+        let path = crate::pathfinder::Path {
+            length: 0,
+            waypoints: vec![
+                waypoint(20, 100, None),
+                waypoint(100, 108, None),
+                waypoint(250, 100, None),
+            ],
+        };
+
+        let operations = pathfinder_waypoint_operations(path, &landscape, &small, 0);
+
+        let move_to = pushed_request(&operations, CommandId::MoveTo);
+        assert_eq!((move_to.tx, move_to.ty), (Some(100), Some(105)));
+    }
+
     // C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): the first
     // Execute only evaluates (returns true — no movement that frame);
     // AdjustMoveToTarget grounds a mid-air target unless Data carries
