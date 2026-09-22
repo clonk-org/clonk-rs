@@ -2151,6 +2151,7 @@ where
             base_buy_enabled: context.world.base_buy_enabled,
             base_sell_enabled: context.world.base_sell_enabled,
             transfer_zones: &transfers,
+            navigation_ai: context.world.navigation_ai,
         };
         let Some(mut result) = context
             .object_scope_mut(actor)
@@ -2371,6 +2372,7 @@ fn preview_build_stop(
             base_buy_enabled: context.world.base_buy_enabled,
             base_sell_enabled: context.world.base_sell_enabled,
             transfer_zones: &transfers,
+            navigation_ai: context.world.navigation_ai,
         };
         let Some(scope) = context.object_scope_mut(actor) else {
             return Vec::new();

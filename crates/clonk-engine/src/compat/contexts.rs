@@ -5884,6 +5884,7 @@ impl EffectHostContext {
             base_buy_enabled: self.world.base_buy_enabled,
             base_sell_enabled: self.world.base_sell_enabled,
             transfer_zones: transfers,
+            navigation_ai: self.world.navigation_ai,
         };
         let gravity = PHYSICS_CONTEXT.with(|cell| {
             cell.borrow()
@@ -5943,6 +5944,7 @@ impl EffectHostContext {
             base_buy_enabled: self.world.base_buy_enabled,
             base_sell_enabled: self.world.base_sell_enabled,
             transfer_zones: transfers,
+            navigation_ai: self.world.navigation_ai,
         };
         let gravity = PHYSICS_CONTEXT.with(|cell| {
             cell.borrow()

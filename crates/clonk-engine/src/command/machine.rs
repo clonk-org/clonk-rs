@@ -6791,6 +6791,9 @@ pub struct CommandRuntimeContext<'a> {
     pub base_buy_enabled: bool,
     pub base_sell_enabled: bool,
     pub transfer_zones: &'a TransferZoneTable,
+    /// The synchronized `Engine::navigation_ai` session switch: false
+    /// reproduces C4Command and C4PathFinder exactly.
+    pub navigation_ai: bool,
 }
 
 impl<'a> CommandRuntimeContext<'a> {

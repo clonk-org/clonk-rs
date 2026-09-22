@@ -1281,6 +1281,18 @@ impl Engine {
         self.shared_bases = enabled;
     }
 
+    /// Whether command AI runs the port's navigation extensions. Default
+    /// off, which reproduces C4Command and C4PathFinder exactly; a
+    /// normal-profile session turns it on. Synchronized: every peer and every
+    /// replay of a round must agree on it.
+    pub fn navigation_ai(&self) -> bool {
+        self.navigation_ai
+    }
+
+    pub fn set_navigation_ai(&mut self, enabled: bool) {
+        self.navigation_ai = enabled;
+    }
+
     pub fn set_team_home_base_rule(&mut self, enabled: bool) {
         if self.team_home_base_rule == enabled {
             return;

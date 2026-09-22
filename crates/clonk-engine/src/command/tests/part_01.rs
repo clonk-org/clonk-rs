@@ -340,6 +340,7 @@
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
+            navigation_ai: false,
         }
     }
 
@@ -1750,13 +1751,9 @@
         );
     }
 
-    #[test]
-    fn move_to_far_vertical_waypoint_stages_max_height_wall_jump() {
-        // Pinned C++ leaves this point-clear 67px vertical waypoint inert:
-        // DFA_WALK assigns only Left/Right and JumpControl accepts at most a
-        // 40px overhead gap (C4Command.cpp:189-208,228-255,319-327,1874-1893).
-        // Deliberately diverge for an intermediate pathfinder waypoint by
-        // staging one native-height wall jump toward the final destination.
+    /// Frontier's clonk-org/clonk-rs#209 U-route: a shaft at x 40..=80 down
+    /// from the y=100 surface into a tunnel that runs east at y 145..=175.
+    fn u_route_landscape() -> crate::Landscape {
         let width = 320usize;
         let height = 220usize;
         let mut bytes = vec![0; width * height];
@@ -1781,6 +1778,17 @@
             vec![None, Some("Earth".to_owned())],
             vec![None; 2],
         ));
+        landscape
+    }
+
+    #[test]
+    fn move_to_far_vertical_waypoint_stages_max_height_wall_jump() {
+        // Pinned C++ leaves this point-clear 67px vertical waypoint inert:
+        // DFA_WALK assigns only Left/Right and JumpControl accepts at most a
+        // 40px overhead gap (C4Command.cpp:189-208,228-255,319-327,1874-1893).
+        // Deliberately diverge for an intermediate pathfinder waypoint by
+        // staging one native-height wall jump toward the final destination.
+        let landscape = u_route_landscape();
 
         let mut walker = walking_jumper(Vector2::new(80, 166));
         walker.physical.can_scale = 1;
