@@ -418,6 +418,50 @@ fn overlong_riff_length_is_capped_to_the_available_bytes() {
     ));
 }
 
+/// `Mix_LoadWAV_RW` (C4AudioSystemSdl.cpp:285) decodes through SDL's WAV
+/// loader, which walks an ADPCM `data` chunk block by block and drops a
+/// partial last block unless `SDL_HINT_WAVE_TRUNCATION` asks for strictness.
+/// The installed SDL decodes War of the Gods' `Crossbow2.wav`, 14 IMA blocks
+/// and 188 trailing bytes, to 14 × 1017 samples, and Clonkparty 2's
+/// `Ding.wav`, 11 MS blocks and 217 trailing bytes, to 11 × 1012
+/// (clonk-org/clonk-rs#1719).
+#[test]
+fn a_partial_trailing_adpcm_block_is_dropped() {
+    for (fmt, block, tail) in [
+        (
+            ms_adpcm_fmt(1, 8, 4),
+            vec![0, 16, 0, 0xe8, 3, 0, 0, 0x11],
+            vec![0, 16, 0, 0, 0],
+        ),
+        (
+            ima_adpcm_fmt(1),
+            vec![0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44],
+            vec![0, 0, 0],
+        ),
+    ] {
+        let whole = decode_audio(&riff_wav(&fmt, None, &block)).expect("one block decodes");
+        let truncated = decode_audio(&riff_wav(&fmt, None, &[block, tail].concat()))
+            .expect("the partial block is dropped");
+
+        assert_eq!(truncated.frames, whole.frames);
+    }
+}
+
+/// With less than one block of data there is nothing to decode, and the
+/// installed SDL loads both of these as empty sounds (0 bytes) rather than
+/// rejecting them.
+#[test]
+fn adpcm_data_shorter_than_one_block_decodes_to_no_frames() {
+    for wav in [
+        riff_wav(&ms_adpcm_fmt(1, 8, 4), None, &[0, 16, 0, 0, 0, 0, 0]),
+        riff_wav(&ima_adpcm_fmt(1), None, &[0, 0, 0, 0, 0x11]),
+    ] {
+        let decoded = decode_audio(&wav).expect("an empty ADPCM sound decodes");
+
+        assert!(decoded.frames.is_empty());
+    }
+}
+
 #[test]
 fn malformed_or_unsupported_wav_encodings_remain_typed_errors() {
     fn assert_invalid(wav: &[u8]) {
@@ -442,13 +486,7 @@ fn malformed_or_unsupported_wav_encodings_remain_typed_errors() {
     let mut bad_predictor = [0x00, 0x10, 0x00, 0xe8, 0x03, 0x00, 0x00, 0x11];
     bad_predictor[0] = 7;
     assert_invalid(&riff_wav(&ms_adpcm_fmt(1, 8, 4), None, &bad_predictor));
-    assert_invalid(&riff_wav(
-        &ms_adpcm_fmt(1, 8, 4),
-        None,
-        &[0, 16, 0, 0, 0, 0, 0],
-    ));
 
-    assert_invalid(&riff_wav(&ima_adpcm_fmt(1), None, &[0, 0, 0, 0, 0x11]));
     assert_invalid(&riff_wav(
         &extensible_fmt(2, 4, 8, 4),
         None,
