@@ -2399,22 +2399,19 @@ fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartup
     match subscreen {
         ClassicStartupSubscreen::Options(target) => {
             app.open_options_menu();
-            let sheets = [
-                clonk_frontend::startup_options_dlg::OptionsSheet::Graphics,
-                clonk_frontend::startup_options_dlg::OptionsSheet::Sound,
-                clonk_frontend::startup_options_dlg::OptionsSheet::Keyboard,
-                clonk_frontend::startup_options_dlg::OptionsSheet::Gamepad,
-                clonk_frontend::startup_options_dlg::OptionsSheet::Network,
-            ];
-            for sheet in sheets {
+            // Normal Options includes the port's Voice chat tab. Navigate to
+            // the named sheet so the native shortcut assertions below apply
+            // to the same surface in both compatibility profiles.
+            for _ in 0..7 {
+                if app.startup.options_dialog.as_ref().unwrap().active_sheet() == target {
+                    return;
+                }
                 app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Pressed)
-                    .unwrap_or_else(|error| panic!("open Options {sheet:?}: {error}"));
+                    .unwrap_or_else(|error| panic!("open Options {target:?}: {error}"));
                 app.handle_key(VirtualKeyCode::ArrowDown, ElementState::Released)
                     .test_value();
-                if sheet == target {
-                    break;
-                }
             }
+            panic!("Options sheet {target:?} is unreachable");
         }
     }
 }

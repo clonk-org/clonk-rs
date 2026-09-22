@@ -1658,7 +1658,7 @@ impl GameApp {
                 let league_signup_open = self.dialogs.league_signup.is_some();
                 // A fading C4GUI::Dialog is inactive even when it retains its
                 // focused control. Reuse the renderer's inactive-focus path.
-                let context_menu_open = self.voice_setup.is_some()
+                let context_menu_open = self.voice_setup_is_modal()
                     || self.context_menus.open.is_some()
                     || self.startup.player_properties_dialog.is_some()
                     || league_signup_open
@@ -1667,7 +1667,7 @@ impl GameApp {
                     || fade_draw_inactive;
                 let options_draw_focus = self.startup_options_dialog_has_focus_owner()
                     && !fade_draw_inactive
-                    && self.voice_setup.is_none();
+                    && !self.voice_setup_is_modal();
                 let base_context_menu = if ordered_native || fade_was_active {
                     None
                 } else {
@@ -2003,7 +2003,7 @@ impl GameApp {
                         .graphics
                         .surface()
                         .is_gpu_scene_capture_active()
-                    && (self.voice_setup.is_some()
+                    && (self.voice_setup_is_modal()
                         || self.voice_setup_launcher().is_some()
                         || fade_was_active
                         || self.startup.player_properties_dialog.is_some()

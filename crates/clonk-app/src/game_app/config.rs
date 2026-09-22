@@ -956,7 +956,15 @@ impl GameApp {
                         }
                     }
                 }
+                OptionsDlgAction::Voice(action) => {
+                    self.process_voice_options_action(action)?;
+                }
                 OptionsDlgAction::SheetChanged(sheet) => {
+                    if sheet == OptionsSheet::Voice {
+                        self.open_voice_setup()?;
+                    } else if self.voice_setup.is_some() && !self.voice_setup_is_modal() {
+                        self.close_voice_setup();
+                    }
                     self.sync_options_gamepad_device();
                     if sheet == OptionsSheet::Sound && self.sound.context.is_none() {
                         return Err(classic_parity_engine_error(report_classic_parity_boundary(
@@ -1684,7 +1692,7 @@ impl GameApp {
     /// The port-only push-to-talk capture modal (clonk-org/clonk-rs#452). It is
     /// the classic `IDS_MSG_DEFINEKEY` dialog with a port-only prompt, so a
     /// player rebinding voice sees the same flow as rebinding a crew control.
-    fn open_options_voice_capture(&mut self) -> Result<(), EngineError> {
+    pub(crate) fn open_options_voice_capture(&mut self) -> Result<(), EngineError> {
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
                 self.runtime_resource_text(
@@ -1929,6 +1937,9 @@ impl GameApp {
         );
         drop(audio);
         dialog.set_labels(self.localized_options_labels());
+        if self.config.compat_profile != crate::settings::CompatProfile::LegacyClonk {
+            dialog.enable_voice_sheet(self.voice_options_state());
+        }
         if let (Some(fonts), Some(book)) = (
             self.assets.clonk_fonts.as_deref(),
             self.assets.options_book_fonts.as_deref(),
@@ -1957,8 +1968,7 @@ impl GameApp {
             if self.config.compat_profile == crate::settings::CompatProfile::LegacyClonk {
                 text("IDS_DLG_SOUND", "Sound")
             } else {
-                // The ordinary port sheet also hosts voice chat and keeps its
-                // port-specific caption (clonk-org/clonk-rs#452).
+                // Keep the ordinary port caption (clonk-org/clonk-rs#452).
                 text("IDS_DLG_AUDIO", "Audio")
             };
         clonk_frontend::startup_options_dlg::OptionsLabels {
@@ -2118,6 +2128,7 @@ impl GameApp {
         &mut self,
         save_result: Option<io::Result<()>>,
     ) -> Result<(), EngineError> {
+        self.close_voice_setup();
         let feedback_result = if let Some(Err(error)) = save_result {
             tracing::warn!(error = %error, "failed to save options dialog settings");
             let error = error.to_string();

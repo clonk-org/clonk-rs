@@ -34,6 +34,7 @@ pub(crate) struct VoiceSetup {
     binding: bool,
     message: String,
     opened_in: AppMode,
+    embedded: bool,
 }
 impl VoiceSetup {
     pub(crate) fn cancel_test(&mut self) {
@@ -51,6 +52,235 @@ impl Drop for VoiceSetup {
 }
 
 impl GameApp {
+    pub(crate) fn voice_options_state(
+        &self,
+    ) -> clonk_frontend::startup_options_dlg::VoiceOptionsState {
+        use clonk_frontend::startup_options_dlg::{VoiceOptionsLabels, VoiceOptionsState};
+        let audio = self.sound.context.as_ref().map(|audio| audio.borrow());
+        let options = audio
+            .as_ref()
+            .map(|audio| audio.options.clone())
+            .unwrap_or_default();
+        let view = self.voice_setup_view();
+        let inventory = audio
+            .as_ref()
+            .map(|audio| audio.system.voice_input_inventory());
+        let default = || self.runtime_resource_text("IDS_VOICE_DEFAULT", "System default");
+        let input = options
+            .voice_input_device
+            .as_ref()
+            .map_or_else(default, |selected| match inventory.as_ref() {
+                Some(VoiceInputDeviceInventory::Ready(devices)) => devices
+                    .iter()
+                    .find(|device| &device.id == selected)
+                    .map(|device| device.name.clone())
+                    .unwrap_or_else(|| "Unavailable microphone".into()),
+                _ => selected.to_string(),
+            });
+        let output = options
+            .voice_output_device
+            .as_ref()
+            .map_or_else(default, |selected| {
+                audio
+                    .as_ref()
+                    .and_then(|audio| {
+                        audio
+                            .system
+                            .output_devices()
+                            .into_iter()
+                            .find(|device| &device.id == selected)
+                    })
+                    .map(|device| device.name)
+                    .unwrap_or_else(|| "Unavailable output".into())
+            });
+        let device_status = match inventory {
+            Some(VoiceInputDeviceInventory::Scanning) => "Finding microphones...".into(),
+            Some(VoiceInputDeviceInventory::Unavailable(error)) => {
+                format!("Microphones unavailable: {error}")
+            }
+            _ => view.status[1].clone(),
+        };
+        let setup = self.voice_setup.as_ref();
+        let message = setup.map(|setup| setup.message.as_str()).unwrap_or("");
+        VoiceOptionsState {
+            labels: VoiceOptionsLabels::localized(|key, fallback| {
+                self.runtime_resource_text(key, fallback)
+            }),
+            enabled: options.voice_enabled,
+            activated: options.voice_activation_mode
+                == crate::settings::VoiceActivationMode::VoiceActivated,
+            key: format_key_label(options.voice_push_to_talk),
+            volume: options.voice_volume_percent().clamp(0, 200) as u8,
+            input,
+            output,
+            echo: options.voice_echo_cancellation,
+            noise: options.voice_noise_suppression,
+            gain: options.voice_automatic_gain_control,
+            testing: setup
+                .and_then(|setup| setup.test.as_ref())
+                .is_some_and(|test| test_running(&test.status())),
+            status: if message.is_empty() {
+                view.status[0].clone()
+            } else {
+                message.to_owned()
+            },
+            device_status,
+            level: view.level,
+        }
+    }
+
+    fn sync_voice_options(&mut self) {
+        if self.voice_options_selected() {
+            let state = self.voice_options_state();
+            if let Some(dialog) = self.startup.options_dialog.as_mut() {
+                dialog.set_voice_state(state);
+            }
+        }
+    }
+
+    pub(crate) fn process_voice_options_action(
+        &mut self,
+        action: clonk_frontend::startup_options_dlg::VoiceOptionsAction,
+    ) -> Result<(), EngineError> {
+        use clonk_frontend::startup_options_dlg::{
+            VoiceOptionsAction, VoiceOptionsControl as Control,
+        };
+        if !self.voice_options_selected() {
+            return Ok(());
+        }
+        if self.voice_setup.is_none() {
+            self.open_voice_setup()?;
+        }
+        match action {
+            VoiceOptionsAction::SetVolume(value) => {
+                if let Some(audio) = self.sound.context.as_ref() {
+                    audio
+                        .borrow_mut()
+                        .options
+                        .set_voice_volume_percent(i32::from(value));
+                }
+                self.save_voice_setup_options();
+            }
+            VoiceOptionsAction::Activate(control @ (Control::Input | Control::Output)) => {
+                self.cancel_voice_setup_test();
+                self.open_voice_options_device_combo(control)?;
+            }
+            VoiceOptionsAction::Activate(Control::PushToTalk) => {
+                self.cancel_voice_setup_test();
+                self.open_options_voice_capture()?;
+            }
+            VoiceOptionsAction::Activate(control) => {
+                let control = match control {
+                    Control::Enabled => VoiceSetupControl::Enabled,
+                    Control::Activation => VoiceSetupControl::Activation,
+                    Control::Echo => VoiceSetupControl::Echo,
+                    Control::Noise => VoiceSetupControl::Noise,
+                    Control::Gain => VoiceSetupControl::Gain,
+                    Control::Test => VoiceSetupControl::Test,
+                    Control::Retry => VoiceSetupControl::Retry,
+                    Control::Input | Control::Output | Control::PushToTalk | Control::Volume => {
+                        return Ok(())
+                    }
+                };
+                self.voice_setup_action(control)?;
+                self.play_ui_sound("Click");
+            }
+        }
+        self.sync_voice_options();
+        Ok(())
+    }
+
+    fn open_voice_options_device_combo(
+        &mut self,
+        control: clonk_frontend::startup_options_dlg::VoiceOptionsControl,
+    ) -> Result<(), EngineError> {
+        use clonk_frontend::startup_options_dlg::VoiceOptionsControl;
+        let Some(rect) = self
+            .startup
+            .options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.voice_control_bounds(control))
+        else {
+            return Ok(());
+        };
+        let mut entries = Vec::new();
+        let default = self.runtime_resource_text("IDS_VOICE_DEFAULT", "System default");
+        if control == VoiceOptionsControl::Input {
+            entries.push(
+                ContextMenuEntry::new(default)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsVoiceInput(None)),
+            );
+            if let Some(audio) = self.sound.context.as_ref() {
+                if let VoiceInputDeviceInventory::Ready(devices) =
+                    audio.borrow().system.voice_input_inventory()
+                {
+                    entries.extend(devices.into_iter().map(|device| {
+                        ContextMenuEntry::new(device.name)
+                            .with_icon(ContextMenuIcon::Empty)
+                            .with_action(AppContextMenuCommand::OptionsVoiceInput(Some(device.id)))
+                    }));
+                }
+            }
+        } else {
+            entries.push(
+                ContextMenuEntry::new(default)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsVoiceOutput(None)),
+            );
+            if let Some(audio) = self.sound.context.as_ref() {
+                entries.extend(
+                    audio
+                        .borrow()
+                        .system
+                        .output_devices()
+                        .into_iter()
+                        .map(|device| {
+                            ContextMenuEntry::new(device.name)
+                                .with_icon(ContextMenuIcon::Empty)
+                                .with_action(AppContextMenuCommand::OptionsVoiceOutput(Some(
+                                    device.id,
+                                )))
+                        }),
+                );
+            }
+        }
+        self.open_context_menu_at(
+            entries,
+            GuiPoint::new(rect.x as f32, (rect.y + rect.h) as f32),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn select_voice_options_input(
+        &mut self,
+        device: Option<clonk_audio::VoiceInputDeviceId>,
+    ) {
+        if !self.voice_options_selected() {
+            return;
+        }
+        self.cancel_voice_setup_test();
+        if let Some(audio) = self.sound.context.as_ref() {
+            audio.borrow_mut().options.voice_input_device = device;
+        }
+        self.save_voice_setup_options();
+        self.sync_voice_options();
+    }
+
+    pub(crate) fn select_voice_options_output(&mut self, device: Option<String>) {
+        if !self.voice_options_selected() {
+            return;
+        }
+        self.cancel_voice_setup_test();
+        if let Some(audio) = self.sound.context.as_ref() {
+            let mut audio = audio.borrow_mut();
+            audio.options.voice_output_device = device.clone();
+            audio.system.select_output_device(device);
+        }
+        self.save_voice_setup_options();
+        self.sync_voice_options();
+    }
+
     pub(crate) fn ingame_options_menu(
         &self,
         flags: &OptionFlags,
@@ -65,7 +295,34 @@ impl GameApp {
         }
     }
 
+    pub(crate) fn voice_setup_is_modal(&self) -> bool {
+        self.voice_setup
+            .as_ref()
+            .is_some_and(|setup| !setup.embedded)
+    }
+
+    fn voice_options_selected(&self) -> bool {
+        self.mode == AppMode::Menu
+            && self.startup.view == StartupView::Options
+            && self.startup.options_dialog.as_ref().is_some_and(|dialog| {
+                dialog.voice().is_some()
+                    && dialog.active_sheet()
+                        == clonk_frontend::startup_options_dlg::OptionsSheet::Voice
+            })
+    }
+
     pub(crate) fn open_voice_setup(&mut self) -> Result<(), EngineError> {
+        if self.mode == AppMode::Menu && self.startup.view == StartupView::Options {
+            if let Some(dialog) = self
+                .startup
+                .options_dialog
+                .as_mut()
+                .filter(|dialog| dialog.voice().is_some())
+            {
+                dialog.restore_sheet(clonk_frontend::startup_options_dlg::OptionsSheet::Voice);
+            }
+        }
+        let embedded = self.voice_options_selected();
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
         if self.mode == AppMode::Running {
@@ -98,7 +355,9 @@ impl GameApp {
             binding: false,
             message: String::new(),
             opened_in: self.mode,
+            embedded,
         });
+        self.sync_voice_options();
         Ok(())
     }
 
@@ -161,6 +420,9 @@ impl GameApp {
             }
             return Ok(true);
         }
+        if !self.voice_setup_is_modal() {
+            return Ok(false);
+        }
         let action = map_key_code(key).and_then(|key| {
             self.voice_setup.as_mut()?.controller.key(
                 key,
@@ -182,7 +444,7 @@ impl GameApp {
         point: GuiPoint,
         down: bool,
     ) -> Result<bool, EngineError> {
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             if !self.window_active {
                 self.cancel_voice_setup_test();
                 return Ok(true);
@@ -374,10 +636,7 @@ impl GameApp {
     pub(crate) fn voice_setup_launcher(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
         (self.config.compat_profile != crate::settings::CompatProfile::LegacyClonk
             && self.mode == AppMode::Menu
-            && matches!(
-                self.startup.view,
-                StartupView::Options | StartupView::NetworkLobby
-            )
+            && matches!(self.startup.view, StartupView::NetworkLobby)
             && self.dialogs.messages.is_empty()
             && self.startup.options_advanced_dialog.is_none()
             && self.context_menus.open.is_none()
@@ -397,7 +656,7 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<bool> {
         let launcher = self.voice_setup_launcher();
-        if launcher.is_none() && self.voice_setup.is_none() {
+        if launcher.is_none() && !self.voice_setup_is_modal() {
             return Ok(false);
         }
         let assets = self.assets.clone();
@@ -414,7 +673,7 @@ impl GameApp {
                 gamma,
             );
         }
-        if let Some(setup) = self.voice_setup.as_ref() {
+        if let Some(setup) = self.voice_setup.as_ref().filter(|setup| !setup.embedded) {
             let view = self.voice_setup_view();
             setup.controller.render(
                 self.rendering.graphics.surface_mut(),
@@ -483,16 +742,15 @@ fn capture_status_text(status: &clonk_audio::VoiceCaptureStatus) -> String {
 
 impl GameApp {
     pub(crate) fn update_voice_setup(&mut self) {
-        if self
-            .voice_setup
-            .as_ref()
-            .is_some_and(|setup| setup.opened_in != self.mode)
-        {
+        if self.voice_setup.as_ref().is_some_and(|setup| {
+            setup.opened_in != self.mode || (setup.embedded && !self.voice_options_selected())
+        }) {
             self.close_voice_setup();
         }
         if !self.window_active {
             self.cancel_voice_setup_test();
         }
+        self.sync_voice_options();
     }
 
     fn voice_setup_view(&self) -> VoiceSetupView {

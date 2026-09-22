@@ -3196,6 +3196,12 @@ impl GameApp {
                             }
                         }
                     }
+                    AppContextMenuCommand::OptionsVoiceInput(device) => {
+                        self.select_voice_options_input(device);
+                    }
+                    AppContextMenuCommand::OptionsVoiceOutput(device) => {
+                        self.select_voice_options_output(device);
+                    }
                     AppContextMenuCommand::OptionsFontFace(face) => {
                         self.apply_options_font_selection(Some(face), None)?;
                     }

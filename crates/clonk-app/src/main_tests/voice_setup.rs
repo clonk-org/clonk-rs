@@ -1,5 +1,139 @@
 // Port-only presentation UI: opening setup must never transmit speech.
 #[test]
+fn voice_options_are_part_of_the_options_book_without_a_floating_launcher() {
+    let mut app = new_classic_running_sandbox_app();
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.mode = AppMode::Menu;
+    app.open_options_menu();
+    assert!(app.voice_setup_launcher().is_none());
+    assert!(app
+        .startup
+        .options_dialog
+        .as_ref()
+        .unwrap()
+        .voice()
+        .is_some());
+}
+
+#[test]
+fn voice_options_use_native_navigation_and_close_the_microphone_on_tab_exit() {
+    use clonk_frontend::startup_options_dlg::{
+        OptionsDlgAction, OptionsSheet, VoiceOptionsAction, VoiceOptionsControl,
+    };
+    let mut app = new_classic_running_sandbox_app();
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.mode = AppMode::Menu;
+    app.open_options_menu();
+    app.open_voice_setup().unwrap();
+    assert_eq!(
+        app.startup.options_dialog.as_ref().unwrap().active_sheet(),
+        OptionsSheet::Voice
+    );
+    assert!(!app.voice_setup_is_modal());
+    assert!(app.voice_setup.as_ref().unwrap().test.is_none());
+    assert!(!app
+        .voice_setup_key(VirtualKeyCode::Tab, ElementState::Pressed)
+        .unwrap());
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    app.voice_setup.as_mut().unwrap().test = Some(Box::new(LocalTestProbe(cancelled.clone())));
+    app.process_voice_options_action(VoiceOptionsAction::Activate(VoiceOptionsControl::Noise))
+        .unwrap();
+    assert!(cancelled.get());
+    assert_eq!(
+        app.startup
+            .options_dialog
+            .as_ref()
+            .unwrap()
+            .voice()
+            .unwrap()
+            .noise,
+        app.test_audio_mut().options.voice_noise_suppression
+    );
+    app.process_voice_options_action(VoiceOptionsAction::SetVolume(173))
+        .unwrap();
+    assert_eq!(app.test_audio_mut().options.voice_volume_percent(), 173);
+    cancelled.set(false);
+    app.voice_setup.as_mut().unwrap().test = Some(Box::new(LocalTestProbe(cancelled.clone())));
+    let actions = app
+        .startup
+        .options_dialog
+        .as_mut()
+        .unwrap()
+        .handle_ctrl_tab(false);
+    assert_eq!(
+        actions,
+        [OptionsDlgAction::SheetChanged(OptionsSheet::Keyboard)]
+    );
+    app.process_options_dialog_actions(actions).unwrap();
+    assert!(cancelled.get());
+    assert!(app.voice_setup.is_none());
+}
+
+#[test]
+fn voice_options_pointer_test_and_key_binding_use_the_native_dialog() {
+    use clonk_frontend::startup_options_dlg::{VoiceOptionsAction, VoiceOptionsControl};
+    let mut app = new_classic_running_sandbox_app();
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.mode = AppMode::Menu;
+    app.resize(800, 600).unwrap();
+    app.open_options_menu();
+    app.open_voice_setup().unwrap();
+    app.startup.dialog_fade = None;
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = cancelled.clone();
+    app.voice_setup.as_mut().unwrap().start_test =
+        Box::new(move |_, _| Ok(Box::new(LocalTestProbe(seen.clone()))));
+    let rect = app
+        .startup
+        .options_dialog
+        .as_ref()
+        .unwrap()
+        .voice_control_bounds(VoiceOptionsControl::Test)
+        .unwrap();
+    app.handle_cursor_moved(PhysicalPosition::new(
+        (rect.x + rect.w / 2) as f64,
+        (rect.y + rect.h / 2) as f64,
+    ))
+    .unwrap();
+    app.handle_mouse_button(ElementState::Pressed).unwrap();
+    app.handle_mouse_button(ElementState::Released).unwrap();
+    assert!(app.voice_setup.as_ref().unwrap().test.is_some());
+    app.process_voice_options_action(VoiceOptionsAction::Activate(
+        VoiceOptionsControl::PushToTalk,
+    ))
+    .unwrap();
+    assert!(cancelled.get());
+    app.handle_key(VirtualKeyCode::KeyB, ElementState::Pressed)
+        .unwrap();
+    app.handle_key(VirtualKeyCode::KeyB, ElementState::Released)
+        .unwrap();
+    assert_eq!(
+        app.test_audio_mut().options.voice_push_to_talk,
+        VirtualKeyCode::KeyB
+    );
+    assert!(app.dialogs.messages.is_empty());
+    app.update_voice_setup();
+    // Closing the key-capture dialog can start a return fade; capture the
+    // settled options page, independently of asset-loading timing.
+    app.startup.dialog_fade = None;
+    let mut frame = vec![0; 800 * 600 * 4];
+    app.render(&mut frame).unwrap();
+    assert!(
+        frame[(400 * 800 + 400) * 4] > 140,
+        "the options paper must be visible"
+    );
+    if let Ok(path) = std::env::var("CLONK_VOICE_OPTIONS_APP_IMAGE") {
+        image::save_buffer(path, &frame, 800, 600, image::ColorType::Rgba8).unwrap();
+    }
+    app.process_voice_options_action(VoiceOptionsAction::Activate(VoiceOptionsControl::Input))
+        .unwrap();
+    assert!(app.context_menus.open.is_some());
+    assert!(!app
+        .voice_setup_key(VirtualKeyCode::Escape, ElementState::Pressed)
+        .unwrap());
+}
+
+#[test]
 fn voice_setup_stops_live_capture_without_leaving_the_game() {
     let (mut app, mut voice) = n2_classic_voice_app(0);
     n2_enable_voice_activation(&mut app);

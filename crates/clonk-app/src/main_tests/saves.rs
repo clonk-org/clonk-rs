@@ -2900,9 +2900,10 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     let checkbox = options_layout.timestamps_check;
     // The port-only voice controls, changed further down through the same real
     // pointer path (clonk-org/clonk-rs#422).
-    let voice_group = options_layout.sound.voice.as_ref().test_value();
-    let activation_check = voice_group.activation_check;
-    let voice_volume_slider = voice_group.volume_slider;
+    use clonk_frontend::startup_options_dlg::VoiceOptionsControl;
+    let dialog = app.startup.options_dialog.as_ref().test_value();
+    let activation_check = dialog.voice_control_bounds(VoiceOptionsControl::Activation).test_value();
+    let voice_volume_slider = dialog.voice_control_bounds(VoiceOptionsControl::Volume).test_value();
     let point = PhysicalPosition::new(
         f64::from(checkbox.x + checkbox.h / 2),
         f64::from(checkbox.y + checkbox.h / 2),
@@ -2944,7 +2945,7 @@ fn options_dialog_saves_log_timestamps_when_closed() {
     app.startup.options_dialog
         .as_mut()
         .test_value()
-        .restore_sheet(clonk_frontend::startup_options_dlg::OptionsSheet::Sound);
+        .restore_sheet(clonk_frontend::startup_options_dlg::OptionsSheet::Voice);
     app.test_cursor(PhysicalPosition::new(
         f64::from(voice_volume_slider.x + voice_volume_slider.w - 24),
         f64::from(voice_volume_slider.y + voice_volume_slider.h / 2),

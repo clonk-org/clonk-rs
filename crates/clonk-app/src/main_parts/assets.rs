@@ -6882,6 +6882,7 @@ impl FrontendAssets {
             paper: self.dialog_image("StartupDlgPaper.png")?,
             tab_clip: self.dialog_image("StartupTabClip.png")?,
             option_icons: self.dialog_image("StartupOptionIcons.png")?,
+            voice_icons: self.dialog_image("GUIIcons2.png"),
             book_scroll: self.dialog_image("StartupBookScroll.png")?,
             context_arrow: self.dialog_image("StartupContext.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,

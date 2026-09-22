@@ -3,13 +3,9 @@
 //! engine's F9 reference capture
 //! (`target/parity-specs/options.md`, `build/Screenshots/ref-options.png`).
 //!
-//! Two deliberate divergences on the third tab (clonk-org/clonk-rs#452): it is
-//! captioned "Audio" through the port-only `IDS_DLG_AUDIO` (see
-//! [`SHEET_TITLES`]), and it carries a port-only voice-chat group in the
-//! vertical slack C++'s own grid leaves unused below the Volume group (see
-//! [`crate::startup_options_voice`]). Every C++ control on the sheet keeps its
-//! exact rect and its exact focus position; the port-only ones are appended
-//! after them.
+//! The normal profile adds a dedicated Voice chat sheet after Audio. Its
+//! responsive tab strip and paper controls live in `voice_sheet`; the six-tab
+//! compatibility layout keeps the C++ geometry and focus order unchanged.
 //!
 //! Geometry mirrors the C++ ctor `C4StartupOptionsDlg.cpp:609-985` in exact
 //! integer math; widget rendering mirrors `C4GuiTabular.cpp` (tab strip),
@@ -37,6 +33,13 @@
 //!    (`C4Surface::ReadPNG` rewrite, C4Surface.cpp:972), not as the PNG's
 //!    hidden RGB; GL-tile padding outside the image is transparent WHITE
 //!    (C4Surface.cpp:1113).
+
+#[path = "startup_options_voice_sheet.rs"]
+mod voice_sheet;
+pub use voice_sheet::{
+    VoiceOptionsAction, VoiceOptionsControl, VoiceOptionsLabels, VoiceOptionsState,
+    VoiceSheetLayout,
+};
 
 use crate::clonk_fonts::{advance_pixels, ClonkFontSet};
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
@@ -677,13 +680,16 @@ pub struct OptionsDlgLayout {
     /// Paper `DrawX` dest (C4GuiTabular.cpp:455).
     pub paper: IntRect,
     /// Tab clip top-left per sheet (C4GuiTabular.cpp:436-441,59).
-    pub tab_clips: [(i32, i32); 6],
+    pub tab_clips: [(i32, i32); 7],
     /// 32x32 icon top-left per sheet (C4GuiTabular.cpp:62-63).
-    pub tab_icons: [(i32, i32); 6],
+    pub tab_icons: [(i32, i32); 7],
     /// Caption text center (ACenter anchor) per sheet (C4GuiTabular.cpp:64).
-    pub tab_captions: [(i32, i32); 6],
+    pub tab_captions: [(i32, i32); 7],
     /// Focus highlight rect on the active tab (C4GuiTabular.cpp:67-72).
     pub focus_highlight: IntRect,
+    pub tab_height: i32,
+    pub tab_icon_size: i32,
+    pub voice: Option<VoiceSheetLayout>,
     /// Sheet client area (tabular margins, C4GuiTabular.h:108-111).
     pub sheet: IntRect,
     /// "Language:" label text position (ALeft anchor, rect top).
@@ -843,9 +849,9 @@ pub fn options_dlg_layout_for(
     let x0 = tabular.x + left_size;
     let paper = IntRect::new(x0, tabular.y, tabular.x + tabular.w - x0, tabular.h);
     let cpt_x = x0 - left_size + 10;
-    let mut tab_clips = [(0, 0); 6];
-    let mut tab_icons = [(0, 0); 6];
-    let mut tab_captions = [(0, 0); 6];
+    let mut tab_clips = [(0, 0); 7];
+    let mut tab_icons = [(0, 0); 7];
+    let mut tab_captions = [(0, 0); 7];
     for i in 0..6 {
         let d = tabular.y + 20 + 72 * i;
         let y = d - 5; // iCptTextY = d + iSheetSpacing/2
@@ -1136,6 +1142,9 @@ pub fn options_dlg_layout_for(
         tab_icons,
         tab_captions,
         focus_highlight,
+        tab_height: 80,
+        tab_icon_size: 32,
+        voice: None,
         sheet,
         language_label,
         language_combo,
@@ -1179,6 +1188,8 @@ pub struct OptionsDlgAssets {
     pub tab_clip: ImageData,
     /// `StartupOptionIcons.png` 192x32 — six 32x32 tab icons.
     pub option_icons: ImageData,
+    /// Existing chat illustration from GUIIcons2, used for the port voice tab.
+    pub voice_icons: Option<ImageData>,
     /// `StartupBookScroll.png` 48x48 — slider bar/arrow/pin facets
     /// (ScrollBarFacets::Set, C4Gui.cpp:109-121).
     pub book_scroll: ImageData,
@@ -1590,6 +1601,8 @@ pub enum OptionsSheet {
     Keyboard,
     Gamepad,
     Network,
+    /// Port-only voice settings, inserted after Audio in the normal profile.
+    Voice,
 }
 
 impl OptionsSheet {
@@ -1610,13 +1623,8 @@ impl OptionsSheet {
             Self::Keyboard => 3,
             Self::Gamepad => 4,
             Self::Network => 5,
+            Self::Voice => 6,
         }
-    }
-
-    fn wrapping_offset(self, delta: isize) -> Self {
-        let len = Self::ALL.len() as isize;
-        let index = (self.index() as isize + delta).rem_euclid(len) as usize;
-        Self::ALL[index]
     }
 }
 
@@ -1653,6 +1661,7 @@ pub enum OptionsDlgAction {
     /// (clonk-org/clonk-rs#452); the app owns the capture, exactly as it does
     /// for [`Self::BeginControlCapture`].
     BeginVoicePushToTalkCapture,
+    Voice(VoiceOptionsAction),
     Graphics(GraphicsSheetAction),
     OpenGraphicsScaleText,
     BeginControlCapture(ControlCaptureTarget),
@@ -1746,6 +1755,7 @@ enum OptionsFocus {
     VoicePushToTalk,
     Control(ControlSheetHit),
     Network(NetworkSheetHit),
+    Voice(VoiceOptionsControl),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1760,6 +1770,7 @@ enum OptionsHit {
     Graphics(GraphicsHitTarget),
     Control(ControlSheetHit),
     Network(NetworkSheetHit),
+    Voice(VoiceOptionsControl),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1803,6 +1814,8 @@ pub struct OptionsDlgState {
     graphics: GraphicsSheetState,
     controls: ControlSheetState,
     network: NetworkSheetState,
+    voice: Option<VoiceOptionsState>,
+    captured_voice_volume: bool,
     active_sheet: OptionsSheet,
     /// The C++ ctor explicitly focuses the tabular after adding all controls
     /// (`C4StartupOptionsDlg.cpp:1039`).
@@ -1868,6 +1881,8 @@ impl OptionsDlgState {
             graphics,
             controls,
             network,
+            voice: None,
+            captured_voice_volume: false,
             active_sheet: OptionsSheet::Program,
             focus: OptionsFocus::Tabular,
             layout: None,
@@ -1906,14 +1921,8 @@ impl OptionsDlgState {
     }
 
     pub fn resize(&mut self, width: i32, height: i32, gui: &ClonkFontSet, book: &BookFonts) {
-        self.layout = Some(options_dlg_layout_for(
-            width.max(1),
-            height.max(1),
-            gui,
-            book,
-            &self.labels,
-            self.controls.visible_sets(ControlDevice::Gamepad),
-        ));
+        self.layout = Some(self.build_layout(width.max(1), height.max(1), gui, book));
+        self.captured_voice_volume = false;
         self.captured_fair_crew_slider = false;
         self.pressed_fair_crew_arrow = None;
         self.pressed_program_button = None;
@@ -2078,6 +2087,11 @@ impl OptionsDlgState {
     /// checkbox caption), and a child with no own tip inherits its nearest
     /// parent window's tip (`C4GUI::Element::GetToolTip`).
     pub fn tooltip_at(&self, point: GuiPoint, book: &BookFonts) -> Option<StartupTooltip> {
+        if self.active_sheet == OptionsSheet::Voice {
+            if let Some(tooltip) = self.voice_tooltip(point) {
+                return Some(tooltip);
+            }
+        }
         let layout = self.layout.as_ref()?;
         options_tooltip_at(
             layout,
@@ -2165,6 +2179,7 @@ impl OptionsDlgState {
     /// silently; the return type matches the other pointer entry points for
     /// callers that route their action vectors uniformly.
     pub fn handle_pointer_left(&mut self) -> Vec<OptionsDlgAction> {
+        self.captured_voice_volume = false;
         self.pointer_position = None;
         self.hovered = None;
         self.pressed_back = false;
@@ -2184,6 +2199,9 @@ impl OptionsDlgState {
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
+        if self.captured_voice_volume {
+            return self.drag_voice_volume(position);
+        }
         if self.back_pointer_owned {
             self.set_pointer_position(Some(position));
             self.pressed_back = self.hovered == Some(OptionsHit::Back);
@@ -2247,6 +2265,35 @@ impl OptionsDlgState {
         self.pressed_voice_push_to_talk = false;
         self.set_pointer_position(Some(position));
         match self.hovered {
+            Some(OptionsHit::Voice(control)) => {
+                self.focus = OptionsFocus::Voice(control);
+                if control == VoiceOptionsControl::Volume {
+                    let Some(rect) = self.voice_control_bounds(control) else {
+                        return Vec::new();
+                    };
+                    let value = self
+                        .voice
+                        .as_ref()
+                        .map_or(100, |voice| i32::from(voice.volume));
+                    if position.x < (rect.x + 16) as f32 {
+                        return self.voice_volume(value - 5);
+                    }
+                    if position.x >= (rect.x + rect.w - 16) as f32 {
+                        return self.voice_volume(value + 5);
+                    }
+                    self.captured_voice_volume = true;
+                    return self.drag_voice_volume(position);
+                }
+                if matches!(
+                    control,
+                    VoiceOptionsControl::Input | VoiceOptionsControl::Output
+                ) {
+                    self.pointer_down = false;
+                    return self.activate_voice_control(control);
+                }
+                self.pressed_release_target = self.hovered;
+                Vec::new()
+            }
             Some(OptionsHit::Back) => {
                 self.back_pointer_owned = true;
                 self.pressed_back = true;
@@ -2347,6 +2394,9 @@ impl OptionsDlgState {
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
         self.pointer_down = false;
+        if std::mem::take(&mut self.captured_voice_volume) {
+            return self.drag_voice_volume(position);
+        }
         if self.captured_fair_crew_slider {
             self.captured_fair_crew_slider = false;
             let mut actions = self.update_fair_crew_slider_from_pointer(position);
@@ -2425,6 +2475,7 @@ impl OptionsDlgState {
         }
         if pressed_release_target == self.hovered {
             match pressed_release_target {
+                Some(OptionsHit::Voice(control)) => return self.activate_voice_control(control),
                 Some(OptionsHit::Graphics(hit)) => return self.activate_graphics_hit(hit),
                 Some(OptionsHit::Control(hit)) => return self.activate_control_hit(hit),
                 Some(OptionsHit::Program(
@@ -2452,15 +2503,40 @@ impl OptionsDlgState {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
+        if let OptionsFocus::Voice(control) = self.focus {
+            if control == VoiceOptionsControl::Volume
+                && matches!(
+                    key,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+                )
+            {
+                let value = self
+                    .voice
+                    .as_ref()
+                    .map_or(100, |voice| i32::from(voice.volume));
+                return self.voice_volume(
+                    value
+                        + if matches!(key, KeyCode::Right | KeyCode::Up) {
+                            5
+                        } else {
+                            -5
+                        },
+                );
+            }
+            if matches!(key, KeyCode::Enter | KeyCode::Space) {
+                self.pressed_release_target = Some(OptionsHit::Voice(control));
+                return Vec::new();
+            }
+        }
         match key {
             // Dedicated options bindings: K_BACK + K_LEFT, plus the dialog's
             // OnEscape override (C4StartupOptionsDlg.cpp:615-620; header:37).
             KeyCode::Escape | KeyCode::Left => vec![OptionsDlgAction::Back],
             KeyCode::Up if self.focus == OptionsFocus::Tabular => {
-                self.select_sheet(self.active_sheet.wrapping_offset(-1))
+                self.select_sheet(self.adjacent_sheet(-1))
             }
             KeyCode::Down if self.focus == OptionsFocus::Tabular => {
-                self.select_sheet(self.active_sheet.wrapping_offset(1))
+                self.select_sheet(self.adjacent_sheet(1))
             }
             KeyCode::Down | KeyCode::Space if matches!(self.focus, OptionsFocus::Program(target) if target.is_combo()) =>
             {
@@ -2592,6 +2668,15 @@ impl OptionsDlgState {
     }
 
     pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
+        if matches!(key, KeyCode::Enter | KeyCode::Space)
+            && matches!(self.pressed_release_target, Some(OptionsHit::Voice(_)))
+        {
+            if let Some(OptionsHit::Voice(control)) = self.pressed_release_target.take() {
+                if self.focus == OptionsFocus::Voice(control) {
+                    return self.activate_voice_control(control);
+                }
+            }
+        }
         if matches!(key, KeyCode::Enter | KeyCode::Space) {
             if let Some(target) = self.pressed_program_button.take() {
                 if self.focus == OptionsFocus::Program(target) {
@@ -2621,6 +2706,11 @@ impl OptionsDlgState {
     fn focus_order(&self) -> Vec<OptionsFocus> {
         let mut order = vec![OptionsFocus::Back, OptionsFocus::Tabular];
         match self.active_sheet {
+            OptionsSheet::Voice => order.extend(
+                VoiceOptionsControl::ALL
+                    .into_iter()
+                    .map(OptionsFocus::Voice),
+            ),
             OptionsSheet::Program => order.extend(
                 OptionsProgramFocusTarget::ALL
                     .into_iter()
@@ -2707,6 +2797,9 @@ impl OptionsDlgState {
 
     fn focus_is_visible(&self, focus: OptionsFocus) -> bool {
         match focus {
+            OptionsFocus::Voice(_) => {
+                self.active_sheet == OptionsSheet::Voice && self.voice.is_some()
+            }
             OptionsFocus::None => false,
             OptionsFocus::Back | OptionsFocus::Tabular => true,
             OptionsFocus::Program(_) => self.active_sheet == OptionsSheet::Program,
@@ -2782,10 +2875,7 @@ impl OptionsDlgState {
     /// `Ctrl+Tab`/`Ctrl+Shift+Tab` changes sheets at control priority and is
     /// independent of which child currently has focus.
     pub fn handle_ctrl_tab(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
-        self.select_sheet(
-            self.active_sheet
-                .wrapping_offset(if backwards { -1 } else { 1 }),
-        )
+        self.select_sheet(self.adjacent_sheet(if backwards { -1 } else { 1 }))
     }
 
     pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
@@ -2797,6 +2887,7 @@ impl OptionsDlgState {
     /// whereas the dialog's lower-priority Enter handler returns false.
     pub fn handle_gamepad_low_down(&mut self) -> Vec<OptionsDlgAction> {
         match self.focus {
+            OptionsFocus::Voice(_) => self.handle_key_down(KeyCode::Enter),
             OptionsFocus::SoundCheckbox(id) => self.toggle_sound_checkbox(id),
             OptionsFocus::Program(target) if target.is_combo() => {
                 self.activate_program_combo(target)
@@ -2836,6 +2927,9 @@ impl OptionsDlgState {
     }
 
     pub fn handle_gamepad_low_up(&mut self) -> Vec<OptionsDlgAction> {
+        if matches!(self.focus, OptionsFocus::Voice(_)) {
+            return self.handle_key_up(KeyCode::Enter);
+        }
         if let Some(target) = self.pressed_program_button.take() {
             if self.focus == OptionsFocus::Program(target) {
                 return self.activate_program_button(target);
@@ -2925,6 +3019,7 @@ impl OptionsDlgState {
     }
 
     fn select_sheet(&mut self, sheet: OptionsSheet) -> Vec<OptionsDlgAction> {
+        self.captured_voice_volume = false;
         if self.active_sheet == sheet {
             return Vec::new();
         }
@@ -2935,6 +3030,7 @@ impl OptionsDlgState {
                 | OptionsFocus::SoundCheckbox(_)
                 | OptionsFocus::Control(_)
                 | OptionsFocus::Network(_)
+                | OptionsFocus::Voice(_)
         ) {
             self.focus = OptionsFocus::None;
         }
@@ -3718,6 +3814,7 @@ fn options_tooltip_at(
     }
 
     match active_sheet {
+        OptionsSheet::Voice => {}
         OptionsSheet::Program => {
             let language_label = left_label_bounds(
                 &book.book,
@@ -3900,6 +3997,15 @@ fn options_hit_test(
     if rect_contains(&layout.back_button, point) {
         return Some(OptionsHit::Back);
     }
+    if active_sheet == OptionsSheet::Voice {
+        if let Some(voice) = layout.voice.as_ref() {
+            for control in VoiceOptionsControl::ALL {
+                if rect_contains(&voice.control(control), point) {
+                    return Some(OptionsHit::Voice(control));
+                }
+            }
+        }
+    }
     if active_sheet == OptionsSheet::Program {
         for (bounds, target) in [
             (
@@ -4026,6 +4132,16 @@ fn options_hit_test(
         if let Some(hit) = network_sheet_hit_test(&layout.network, network, point) {
             return Some(OptionsHit::Network(hit));
         }
+    }
+    if layout.voice.is_some() {
+        return voice_sheet::VOICE_SHEETS
+            .iter()
+            .copied()
+            .find(|sheet| {
+                let (x, y) = layout.tab_clips[sheet.index()];
+                rect_contains(&IntRect::new(x, y, 95, layout.tab_height - 8), point)
+            })
+            .map(OptionsHit::Tab);
     }
     if !rect_contains(&layout.tabular, point) {
         return None;
@@ -4821,14 +4937,7 @@ impl OptionsDlgScreen {
         // Measure with the state's resolved labels and live pad count, exactly
         // as `resize` does — drawing from a default-label layout would disagree
         // with the rects hit testing uses.
-        let layout = options_dlg_layout_for(
-            w,
-            h,
-            gui,
-            book,
-            &state.labels,
-            state.controls.visible_sets(ControlDevice::Gamepad),
-        );
+        let layout = state.build_layout(w, h, gui, book);
 
         // 1. Loader background, stretched fullscreen (C4Gui.cpp:669-682).
         let full = GuiRect::new(0.0, 0.0, w as f32, h as f32);
@@ -4886,7 +4995,8 @@ impl OptionsDlgScreen {
         // caption + focus highlight (Tabular::DrawElement, C4GuiTabular.cpp:
         // 388-458).
         let active_sheet = state.active_sheet().index();
-        for i in 0..state.labels.sheets.len() {
+        for sheet in state.visible_sheets() {
+            let i = sheet.index();
             if i != active_sheet {
                 Self::draw_tab_caption(surface, assets, book, &layout, &state.labels, i, gamma);
             }
@@ -4909,7 +5019,7 @@ impl OptionsDlgScreen {
         );
         if draw_focus && state.tabular_focused() {
             let mut f = layout.focus_highlight;
-            f.y += 72 * active_sheet as i32;
+            f.y += layout.tab_clips[active_sheet].1 - layout.tab_clips[0].1;
             draw_image_bilinear_additive(
                 surface,
                 &GuiRect::new(f.x as f32, f.y as f32, f.w as f32, f.h as f32),
@@ -4920,6 +5030,12 @@ impl OptionsDlgScreen {
 
         // Active sheet only (C4GuiTabular.cpp:258-267).
         match state.active_sheet() {
+            OptionsSheet::Voice => {
+                if let Some(voice) = layout.voice.as_ref() {
+                    Self::draw_voice_sheet(surface, assets, book, voice, state, gamma, draw_focus);
+                }
+                return;
+            }
             OptionsSheet::Sound => {
                 Self::draw_sound_sheet(
                     surface,
@@ -5125,25 +5241,66 @@ impl OptionsDlgScreen {
         gamma: Option<&GammaRamp>,
     ) {
         let (cx, cy) = layout.tab_clips[index];
-        draw_image_strip(surface, cx, cy, &assets.tab_clip, 0, 0, 120, 80, gamma);
+        if layout.voice.is_some() {
+            draw_image_bilinear(
+                surface,
+                &GuiRect::new(cx as f32, cy as f32, 120.0, layout.tab_height as f32),
+                &assets.tab_clip,
+                gamma,
+            );
+        } else {
+            draw_image_strip(surface, cx, cy, &assets.tab_clip, 0, 0, 120, 80, gamma);
+        }
         let (ix, iy) = layout.tab_icons[index];
-        draw_image_strip(
-            surface,
-            ix,
-            iy,
-            &assets.option_icons,
-            32 * index as u32,
-            0,
-            32,
-            32,
-            gamma,
-        );
+        let icon_index = if index == OptionsSheet::Voice.index() {
+            2
+        } else {
+            index
+        };
+        if layout.voice.is_some() {
+            let icon = if index == OptionsSheet::Voice.index() {
+                assets
+                    .voice_icons
+                    .as_ref()
+                    .map(|image| crop_image(image, 64, 256, 64, 64))
+            } else {
+                None
+            }
+            .unwrap_or_else(|| crop_image(&assets.option_icons, 32 * icon_index as u32, 0, 32, 32));
+            draw_image_bilinear(
+                surface,
+                &GuiRect::new(
+                    ix as f32,
+                    iy as f32,
+                    layout.tab_icon_size as f32,
+                    layout.tab_icon_size as f32,
+                ),
+                &icon,
+                gamma,
+            );
+        } else {
+            draw_image_strip(
+                surface,
+                ix,
+                iy,
+                &assets.option_icons,
+                32 * icon_index as u32,
+                0,
+                32,
+                32,
+                gamma,
+            );
+        }
         let (tx, ty) = layout.tab_captions[index];
         book.book_small.draw_with_gamma(
             surface,
             tx,
             ty,
-            &labels.sheets[index],
+            if index == OptionsSheet::Voice.index() {
+                &labels.voice_chat
+            } else {
+                &labels.sheets[index]
+            },
             STARTUP_FONT_RGBA,
             TextAlign::Center,
             true,
@@ -6240,6 +6397,7 @@ mod tests {
             paper: load_graphics_png("StartupDlgPaper.png"),
             tab_clip: load_graphics_png("StartupTabClip.png"),
             option_icons: load_graphics_png("StartupOptionIcons.png"),
+            voice_icons: Some(load_graphics_png("GUIIcons2.png")),
             book_scroll: load_graphics_png("StartupBookScroll.png"),
             context_arrow: load_graphics_png("StartupContext.png"),
             checkbox: load_graphics_png("GUICheckBox.png"),
@@ -9095,6 +9253,48 @@ mod tests {
         standard_gamma().apply_to_surface(&mut surface);
         std::fs::create_dir_all("/tmp/menu-parity-options").expect("mkdir");
         write_ppm(&surface, "/tmp/menu-parity-options/out.ppm");
+    }
+
+    #[test]
+    fn voice_page_renders_with_the_options_book_assets() {
+        let assets = options_assets();
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        for (w, h) in [(640, 480), (800, 600), (1280, 720)] {
+            let mut state = OptionsDlgState::default();
+            state.enable_voice_sheet(VoiceOptionsState {
+                enabled: true,
+                input: "Studio microphone".into(),
+                output: "Built-in speakers".into(),
+                device_status: "Output ready".into(),
+                ..VoiceOptionsState::default()
+            });
+            state.restore_sheet(OptionsSheet::Voice);
+            state.resize(w, h, &gui, &book);
+            let mut surface = Surface::new(w as u32, h as u32, PixelFormat::Rgba8888);
+            OptionsDlgScreen::render_state(
+                &mut surface,
+                &assets,
+                &gui,
+                &book,
+                &state,
+                Some(standard_gamma()),
+            );
+            standard_gamma().apply_to_surface(&mut surface);
+            if let Ok(dir) = std::env::var("CLONK_VOICE_OPTIONS_IMAGES") {
+                std::fs::create_dir_all(&dir).unwrap();
+                write_ppm(&surface, format!("{dir}/{w}x{h}.ppm"));
+            }
+            assert_eq!(state.active_sheet(), OptionsSheet::Voice);
+            let mut visited = Vec::new();
+            for _ in 0..VoiceOptionsControl::ALL.len() {
+                state.handle_tab(false);
+                if let OptionsFocus::Voice(control) = state.focus {
+                    visited.push(control);
+                }
+            }
+            assert_eq!(visited, VoiceOptionsControl::ALL);
+        }
     }
 
     /// The shipped facets. Every other render fixture leaves `control`/`gamepad`

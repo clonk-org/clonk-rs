@@ -3789,6 +3789,8 @@ fn options_ctrl_tab_traverses_all_six_live_sheets_without_a_boundary() {
     use clonk_frontend::startup_options_dlg::OptionsSheet;
 
     let mut app = new_classic_menu_app(640, 480);
+    // This pins the six C++ sheets; Normal adds the port-only Voice chat page.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     app.open_options_menu();
     app.test_modifiers(ModifiersState::CONTROL);
     for expected in [

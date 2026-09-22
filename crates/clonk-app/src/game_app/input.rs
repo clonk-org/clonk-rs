@@ -75,7 +75,7 @@ impl GameApp {
     }
 
     pub(crate) fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -307,7 +307,7 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -1766,7 +1766,7 @@ impl GameApp {
     }
 
     pub(crate) fn runtime_gui_has_keyboard_focus(&self) -> bool {
-        self.voice_setup.is_some()
+        self.voice_setup_is_modal()
             || self.mode == AppMode::Running
                 && (self.running_shared_gui_has_keyboard_focus()
                     || self.game_over_dialog_is_active())
@@ -6291,7 +6291,7 @@ impl GameApp {
         event: GamepadEvent,
         axis_alias: bool,
     ) -> Result<(), EngineError> {
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             return self.voice_setup_gamepad(event);
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -7345,7 +7345,7 @@ impl GameApp {
         let raw_point = gui_point_from_position(position);
         let point = GuiPoint::new(raw_point.x.ceil(), raw_point.y.ceil());
         self.input_routing.live.window_pointer = Some(point);
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -9461,7 +9461,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -9761,7 +9761,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -10884,7 +10884,7 @@ impl GameApp {
             if self.voice_setup_pointer(point, button_state == ElementState::Pressed)? {
                 return Ok(());
             }
-        } else if self.voice_setup.is_some() {
+        } else if self.voice_setup_is_modal() {
             return Ok(());
         }
         self.context_menus.pointer_dismissed_lobby_team_player = None;
@@ -11801,7 +11801,7 @@ impl GameApp {
         if phase != TouchPhase::Cancelled {
             self.input_routing.live.running_pointer = Some(position);
         }
-        if self.voice_setup.is_some() {
+        if self.voice_setup_is_modal() {
             match phase {
                 TouchPhase::Started => {
                     self.voice_setup_pointer(position, true)?;
