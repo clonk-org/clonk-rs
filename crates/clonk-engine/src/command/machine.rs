@@ -818,7 +818,8 @@ impl MoveToState {
         // intermediate MoveTo and a scaler, plan one native-height climb
         // toward the final point. The existing side-run and jump then reach a
         // wall where ordinary contact can enter SCALE. Pinned C++ leaves this
-        // case inert (C4Command.cpp:219-220,1874-1893).
+        // case inert (C4Command.cpp:219-220,1874-1893), so the divergence
+        // runs only under the navigation session switch.
         let live_target_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
             ctx.object.shape.width / 5
         } else if ctx.object.move_to_range > 0 {
@@ -826,7 +827,8 @@ impl MoveToState {
         } else {
             self.tolerance
         };
-        let staged_climb = intermediate_waypoint
+        let staged_climb = ctx.navigation_ai
+            && intermediate_waypoint
             && can_scale
             && inside(cx - tx, -live_target_range, live_target_range)
             && cy - ty > 40;

@@ -257,6 +257,20 @@
       "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-08-25)"
     },
     {
+      "id": "sim-navigation-ai",
+      "area": "simulation",
+      "summary": "Navigation AI for crew and Pathfinder objects. A walking scaler aligned under an intermediate pathfinder MoveTo waypoint more than 40 pixels overhead plans one native-height side run and wall jump toward it (clonk-org/clonk-rs#209), where C++ leaves the waypoint inert because DFA_WALK steers only horizontally and JumpControl's high-angle arm accepts at most a 40-pixel gap. It adds Jump and MoveTo commands C++ never issues, so it changes synchronized command and movement state. The profile reverts it through the navigation_ai session switch, which scenario activation installs on the engine that runs the round.",
+      "cited_in": [
+        "crates/clonk-engine/src/command/machine.rs",
+        "crates/clonk-app-core/src/config.rs"
+      ],
+      "cpp_reference": "C4Command.cpp:219-220,319-327,1874-1893",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-09-22)"
+    },
+    {
       "id": "sim-s2-terminal-params",
       "area": "simulation",
       "summary": "S2 map-generator boundary inputs: C++ turns a negative Mandel alpha into a huge uint32 iteration budget, divides Gradient by a zero width, and takes a remainder by zero at alpha=-2. Rust bounds alpha to ten iterations, substitutes a denominator of one, and returns false from the raw algorithm. These inputs are excluded from the C++ differential runs.",

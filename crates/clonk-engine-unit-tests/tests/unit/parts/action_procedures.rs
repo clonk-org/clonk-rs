@@ -2713,6 +2713,8 @@ fn automatic_construction_returns_collected_material_through_a_climbable_u_route
     .test_value();
 
     let mut engine = Engine::with_seed(0);
+    // The corrected route is a normal-profile divergence.
+    engine.set_navigation_ai(true);
     engine.configure_materials_from_library(&material_library);
     engine.install_global_scripts(&system_scripts);
     scenario.apply(&mut engine).test_value();

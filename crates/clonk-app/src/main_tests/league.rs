@@ -5354,6 +5354,37 @@ fn compat_profile_takes_away_the_shared_base_fallback() {
 /// normal profile's divergences.
 #[test]
 fn compat_profile_reaches_the_engine_of_an_activated_scenario() {
+    use crate::settings::{session_navigation_ai, CompatProfile};
+
+    assert!(session_navigation_ai(CompatProfile::Normal));
+    assert!(!session_navigation_ai(CompatProfile::LegacyClonk));
+    // The engine default reproduces C4Command/C4PathFinder; only a session
+    // that resolves the normal profile opts in.
+    assert!(!clonk_engine::Engine::with_seed(0).navigation_ai());
+
+    let (_fixture, _guard, app) =
+        start_alpha_scenario_with(&[OsString::from("/compatprofile:legacy-clonk")]);
+    assert!(
+        !app.engine.shared_bases(),
+        "the activated round must keep the profile's exact FindBase owner match"
+    );
+    assert!(
+        !app.engine.navigation_ai(),
+        "a legacy-clonk round must run C4Command and C4PathFinder exactly"
+    );
+
+    let (_fixture, _guard, app) = start_alpha_scenario_with(&[]);
+    assert!(app.engine.shared_bases());
+    assert!(
+        app.engine.navigation_ai(),
+        "a normal-profile round runs the navigation AI"
+    );
+}
+
+/// Start the minimal on-disk "Alpha Mission" scenario after applying
+/// `arguments` as the classic command line. The returned fixture and path
+/// guard must outlive the app.
+fn start_alpha_scenario_with(arguments: &[OsString]) -> (tempfile::TempDir, EnvGuard, GameApp) {
     clonk_logging::init();
 
     let fixture = tempdir();
@@ -5382,9 +5413,9 @@ fn compat_profile_reaches_the_engine_of_an_activated_scenario() {
     )
     .test_value();
     fs::write(scripts_dir.join("mover.aul"), walker_script()).test_value();
-    let (_guard, paths) = exact_loader_test_paths(&user_dir, None);
+    let (guard, paths) = exact_loader_test_paths(&user_dir, None);
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
-    let parsed = parse_classic_command_line(&[OsString::from("/compatprofile:legacy-clonk")]);
+    let parsed = parse_classic_command_line(arguments);
     app.apply_classic_command_line(&parsed).test_value();
 
     let scenario = app.scensel.catalog.get("Alpha.c4s").cloned().test_value();
@@ -5395,10 +5426,7 @@ fn compat_profile_reaches_the_engine_of_an_activated_scenario() {
         matches!(app.mode, AppMode::Running),
         "mode should be Running"
     );
-    assert!(
-        !app.engine.shared_bases(),
-        "the activated round must keep the profile's exact FindBase owner match"
-    );
+    (fixture, guard, app)
 }
 
 #[test]

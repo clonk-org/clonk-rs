@@ -311,6 +311,14 @@
         command_context!(empty_command_ctx(walker, 0); landscape: Some(landscape))
     }
 
+    /// [`jump_ctx`] with the normal profile's navigation switch on.
+    fn nav_jump_ctx<'a>(
+        walker: &'a CommandObjectSnapshot,
+        landscape: &'a crate::Landscape,
+    ) -> CommandRuntimeContext<'a> {
+        command_context!(jump_ctx(walker, landscape); navigation_ai: true)
+    }
+
     /// A MoveTo state past its InitEvaluation Execute with the raw Tx/Ty
     /// (the C++ equivalent of an Evaluated command): the movement-control
     /// geometry pins below run against these coordinates directly.
@@ -1782,6 +1790,34 @@
     }
 
     #[test]
+    fn move_to_far_vertical_waypoint_stays_inert_without_navigation_ai() {
+        // The staged wall jump below is a normal-profile divergence. With the
+        // session's navigation switch off, the same intermediate waypoint
+        // stays exactly as pinned C++ leaves it: no Jump, no side MoveTo
+        // (C4Command.cpp:219-220,319-327,1874-1893).
+        let landscape = u_route_landscape();
+        let mut walker = walking_jumper(Vector2::new(80, 166));
+        walker.physical.can_scale = 1;
+        let ctx = jump_ctx(&walker, &landscape);
+        assert!(!ctx.navigation_ai);
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        stack
+            .push_front(
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+
+        stack.step(&ctx).expect("vertical waypoint executes");
+
+        assert_eq!(stack.command_names(), vec!["MoveTo", "MoveTo"]);
+    }
+
+    #[test]
     fn move_to_far_vertical_waypoint_stages_max_height_wall_jump() {
         // Pinned C++ leaves this point-clear 67px vertical waypoint inert:
         // DFA_WALK assigns only Left/Right and JumpControl accepts at most a
@@ -1792,7 +1828,7 @@
 
         let mut walker = walking_jumper(Vector2::new(80, 166));
         walker.physical.can_scale = 1;
-        let ctx = jump_ctx(&walker, &landscape);
+        let ctx = nav_jump_ctx(&walker, &landscape);
         let mut stack = CommandStack::new();
         stack
             .push_back(
@@ -1835,7 +1871,7 @@
         // A qualifying chained scaler still needs a wall beside the staged
         // 40px point; point-clear sky alone must not invent a jump.
         let no_wall = crate::Landscape::flat(200, 180);
-        let no_wall_ctx = jump_ctx(&walker, &no_wall);
+        let no_wall_ctx = nav_jump_ctx(&walker, &no_wall);
         let mut no_wall_stack = CommandStack::new();
         no_wall_stack
             .push_back(
@@ -1855,7 +1891,7 @@
         // An actor that cannot enter SCALE must not be sent into the wall.
         let mut non_scaler = walker.clone();
         non_scaler.physical.can_scale = 0;
-        let non_scaler_ctx = jump_ctx(&non_scaler, &landscape);
+        let non_scaler_ctx = nav_jump_ctx(&non_scaler, &landscape);
         let mut non_scaler_stack = CommandStack::new();
         non_scaler_stack
             .push_back(
@@ -1893,7 +1929,7 @@
             position: Vector2::new(84, 166),
             ..walker.clone()
         };
-        let offset_ctx = jump_ctx(&offset_scaler, &sparse_wall);
+        let offset_ctx = nav_jump_ctx(&offset_scaler, &sparse_wall);
         let mut offset_stack = CommandStack::new();
         offset_stack
             .push_back(
@@ -1942,7 +1978,7 @@
             -3 * JUMP_ANGLE_RANGE,
             3 * JUMP_ANGLE_RANGE,
         ));
-        let wide_range_ctx = jump_ctx(&wide_range_scaler, &sparse_wall);
+        let wide_range_ctx = nav_jump_ctx(&wide_range_scaler, &sparse_wall);
         let mut wide_range_stack = CommandStack::new();
         wide_range_stack
             .push_back(
@@ -1965,7 +2001,7 @@
         let mut deferred_scaler = walker.clone();
         deferred_scaler.physical.can_scale = 0;
         deferred_scaler.physical_deferred = true;
-        let deferred_ctx = jump_ctx(&deferred_scaler, &landscape);
+        let deferred_ctx = nav_jump_ctx(&deferred_scaler, &landscape);
         let mut deferred_stack = CommandStack::new();
         deferred_stack
             .push_back(
@@ -2014,7 +2050,7 @@
             physical_deferred: false,
             ..deferred_scaler
         };
-        let callback_ctx = jump_ctx(&callback_scaler, &landscape);
+        let callback_ctx = nav_jump_ctx(&callback_scaler, &landscape);
         let mut callback_stack = CommandStack::new();
         callback_stack.restore_from_snapshot(&decoded);
         callback_stack

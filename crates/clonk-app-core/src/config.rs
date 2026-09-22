@@ -147,6 +147,19 @@ pub fn session_shared_bases(profile: CompatProfile) -> bool {
     }
 }
 
+/// Resolve whether command AI runs the port's navigation extensions.
+///
+/// Like the Shared Bases switch this is synchronized state: a Clonk that
+/// plans a different route issues different commands, so peers and replays
+/// must agree on it. The compatibility profile takes it away and command AI
+/// reproduces C4Command and C4PathFinder exactly.
+pub fn session_navigation_ai(profile: CompatProfile) -> bool {
+    match profile {
+        CompatProfile::Normal => true,
+        CompatProfile::LegacyClonk => false,
+    }
+}
+
 /// Install every synchronized profile switch on `engine`.
 ///
 /// Each switch changes what the simulation computes, so it must be set on the
@@ -156,6 +169,7 @@ pub fn session_shared_bases(profile: CompatProfile) -> bool {
 /// would silently revert to the engine default for the round itself.
 pub fn apply_session_profile(engine: &mut clonk_engine::Engine, profile: CompatProfile) {
     engine.set_shared_bases(session_shared_bases(profile));
+    engine.set_navigation_ai(session_navigation_ai(profile));
 }
 
 /// C++'s in-game application timer: `defaultIngameGameTickDelay`, the literal
