@@ -254,6 +254,9 @@ pub fn crop_menu_image(
     width: u32,
     height: u32,
 ) -> Option<ImageData> {
+    if let Some(replacement) = image.region_replacement([x, y, width, height]) {
+        return Some(replacement.clone());
+    }
     if width == 0
         || height == 0
         || x.checked_add(width)? > image.width()

@@ -4557,7 +4557,7 @@ fn blacken_transparent(image: &ImageData) -> ImageData {
             }
         })
         .collect();
-    ImageData::new(image.width(), image.height(), pixels)
+    ImageData::new(image.width(), image.height(), pixels).with_region_replacements_from(image)
 }
 
 thread_local! {
@@ -4902,6 +4902,9 @@ fn draw_rotated_vfacet(
 /// facet phase: each 32x32 phase is its own GL texture tile in C++, so a
 /// crop + whole-image stretch reproduces the engine's sampling exactly).
 fn crop_image(image: &ImageData, x: u32, y: u32, w: u32, h: u32) -> ImageData {
+    if let Some(replacement) = image.region_replacement([x, y, w, h]) {
+        return replacement.clone();
+    }
     type CroppedImageCache = HashMap<(clonk_graphics::GpuTextureId, u32, u32, u32, u32), ImageData>;
     thread_local! {
         static CROPPED_IMAGES: RefCell<CroppedImageCache> = RefCell::new(HashMap::new());

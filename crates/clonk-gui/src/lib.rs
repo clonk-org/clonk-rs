@@ -492,12 +492,16 @@ pub enum DrawCommand {
     },
 }
 
+/// Source coordinates in an image, including fractional clipped subregions.
+pub type ImageSourceRect = (f32, f32, f32, f32);
+
 #[derive(Clone, Debug)]
 pub struct ImageData {
     width: u32,
     height: u32,
     pixels: Arc<[u8]>,
     gpu_texture_id: clonk_graphics::GpuTextureId,
+    region_replacements: Option<Arc<HashMap<[u32; 4], ImageData>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -615,7 +619,10 @@ fn intern_image_data(
 
 impl PartialEq for ImageData {
     fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
+        self.width == other.width
+            && self.height == other.height
+            && self.pixels == other.pixels
+            && self.region_replacements == other.region_replacements
     }
 }
 
@@ -628,6 +635,7 @@ impl ImageData {
             height,
             pixels,
             gpu_texture_id,
+            region_replacements: None,
         }
     }
 
@@ -638,6 +646,7 @@ impl ImageData {
             height,
             pixels,
             gpu_texture_id,
+            region_replacements: None,
         }
     }
 
@@ -652,7 +661,73 @@ impl ImageData {
             height,
             pixels,
             gpu_texture_id: clonk_graphics::GpuTextureId::fresh(),
+            region_replacements: None,
         }
+    }
+
+    /// Replaces one logical sheet cell without resizing the sheet or its other
+    /// cells. Renderers resolve the replacement before sampling, retaining its
+    /// full resolution even when the logical destination is much smaller.
+    pub fn with_region_replacement(mut self, source: [u32; 4], image: Self) -> Self {
+        let [x, y, width, height] = source;
+        if width == 0
+            || height == 0
+            || x.checked_add(width).is_none_or(|right| right > self.width)
+            || y.checked_add(height)
+                .is_none_or(|bottom| bottom > self.height)
+            || image.width == 0
+            || image.height == 0
+        {
+            return self;
+        }
+        let replacements = self
+            .region_replacements
+            .get_or_insert_with(|| Arc::new(HashMap::new()));
+        Arc::make_mut(replacements).insert(source, image);
+        // Derived-image caches must distinguish the original sheet from the
+        // same pixels carrying different replacement artwork.
+        self.gpu_texture_id = clonk_graphics::GpuTextureId::fresh();
+        self
+    }
+
+    pub fn region_replacement(&self, source: [u32; 4]) -> Option<&Self> {
+        self.region_replacements.as_ref()?.get(&source)
+    }
+
+    /// Resolves a full cell or clipped part of a cell to replacement texels.
+    pub fn resolve_region(&self, source: ImageSourceRect) -> Option<(&Self, ImageSourceRect)> {
+        let (x, y, width, height) = source;
+        if ![x, y, width, height].into_iter().all(f32::is_finite) || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        self.region_replacements.as_ref()?.iter().find_map(
+            |(&[left, top, cell_width, cell_height], image)| {
+                let (left, top) = (left as f32, top as f32);
+                let (cell_width, cell_height) = (cell_width as f32, cell_height as f32);
+                (x >= left
+                    && y >= top
+                    && x + width <= left + cell_width
+                    && y + height <= top + cell_height)
+                    .then(|| {
+                        let sx = image.width as f32 / cell_width;
+                        let sy = image.height as f32 / cell_height;
+                        (
+                            image,
+                            ((x - left) * sx, (y - top) * sy, width * sx, height * sy),
+                        )
+                    })
+            },
+        )
+    }
+
+    /// Carries cell replacements through normalization of the base sheet's
+    /// transparent RGB. Replacement images already own their prepared pixels.
+    pub fn with_region_replacements_from(mut self, source: &Self) -> Self {
+        if source.region_replacements.is_some() {
+            self.region_replacements = source.region_replacements.clone();
+            self.gpu_texture_id = clonk_graphics::GpuTextureId::fresh();
+        }
+        self
     }
 
     pub fn width(&self) -> u32 {
@@ -1363,6 +1438,25 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.gpu_texture_id(), second.gpu_texture_id());
         assert!(Arc::ptr_eq(&first.pixels, &second.pixels));
+    }
+
+    #[test]
+    fn replacement_regions_keep_sheet_coordinates_and_full_resolution() {
+        let original = ImageData::new(80, 40, vec![0; 80 * 40 * 4]);
+        let icon = ImageData::new(256, 256, vec![255; 256 * 256 * 4]);
+        let sheet = original
+            .clone()
+            .with_region_replacement([40, 0, 40, 40], icon.clone());
+
+        assert_eq!((sheet.width(), sheet.height()), (80, 40));
+        assert_eq!(sheet.pixels(), original.pixels());
+        assert_ne!(sheet.gpu_texture_id(), original.gpu_texture_id());
+        assert_eq!(sheet.region_replacement([40, 0, 40, 40]), Some(&icon));
+        assert!(sheet.region_replacement([0, 0, 40, 40]).is_none());
+        let (resolved, source) = sheet.resolve_region((50.0, 10.0, 20.0, 30.0)).unwrap();
+        assert_eq!(resolved.gpu_texture_id(), icon.gpu_texture_id());
+        assert_eq!(source, (64.0, 64.0, 128.0, 192.0));
+        assert!(sheet.resolve_region((0.0, 0.0, 80.0, 40.0)).is_none());
     }
 
     #[test]

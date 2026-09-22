@@ -369,6 +369,7 @@ pub fn draw_facet_stretch(
     destination: (f32, f32, f32, f32),
     gamma: Option<&GammaRamp>,
 ) {
+    let (image, source) = image.resolve_region(source).unwrap_or((image, source));
     let (source_x, source_y, source_width, source_height) = source;
     let (target_x, target_y, target_width, target_height) = destination;
     if crate::draw_image_source_with_active_renderer_config(
@@ -519,6 +520,25 @@ pub fn draw_facet_nearest(
     destination: clonk_graphics::Rect,
     gamma: Option<&GammaRamp>,
 ) {
+    if let Some((replacement, source)) = image.resolve_region((
+        source.x as f32,
+        source.y as f32,
+        source.width as f32,
+        source.height as f32,
+    )) {
+        return draw_facet_stretch(
+            surface,
+            replacement,
+            source,
+            (
+                destination.x as f32,
+                destination.y as f32,
+                destination.width as f32,
+                destination.height as f32,
+            ),
+            gamma,
+        );
+    }
     if source.width == 0 || source.height == 0 || destination.width == 0 || destination.height == 0
     {
         return;
@@ -971,6 +991,7 @@ pub fn blacken_transparent_pixels(image: &ImageData) -> ImageData {
                 })
                 .collect();
             ImageData::new(image.width(), image.height(), pixels)
+                .with_region_replacements_from(image)
         } else {
             image.clone()
         };
@@ -1062,6 +1083,42 @@ mod tests {
     use super::*;
     use crate::startup_main_menu::draw_bar as previous_draw_button_bar;
     use crate::test_support::{endeavour_font_set, load_graphics_png};
+
+    #[test]
+    fn replaced_icon_facets_keep_native_sources_through_normalization_and_clipping() {
+        let icon = ImageData::new(256, 256, [210, 30, 20, 255].repeat(256 * 256));
+        let sheet = ImageData::new(80, 40, [255, 255, 255, 0].repeat(80 * 40))
+            .with_region_replacement([40, 0, 40, 40], icon.clone());
+        let sheet = blacken_transparent_pixels(&sheet);
+        let mut surface = Surface::new(20, 20, PixelFormat::Rgba8888);
+        draw_facet_stretch(
+            &mut surface,
+            &sheet,
+            (50.0, 10.0, 20.0, 20.0),
+            (0.0, 0.0, 20.0, 20.0),
+            None,
+        );
+        assert_eq!(
+            surface.get_pixel(10, 10).unwrap(),
+            Color::new(210, 30, 20, 255)
+        );
+        surface.begin_gpu_scene_capture();
+        draw_facet_stretch(
+            &mut surface,
+            &sheet,
+            (40.0, 0.0, 40.0, 40.0),
+            (0.0, 0.0, 20.0, 20.0),
+            None,
+        );
+        let scene = surface.take_gpu_scene_capture().unwrap().into_scene(
+            [20, 20],
+            Color::transparent(),
+            &GammaRamp::identity(),
+        );
+        assert!(scene.textures.iter().any(|texture| {
+            texture.extent == [256, 256] && texture.pixels.as_ref() == icon.pixels()
+        }));
+    }
 
     fn column_coded_image(width: u32, height: u32) -> ImageData {
         let pixels = (0..height)

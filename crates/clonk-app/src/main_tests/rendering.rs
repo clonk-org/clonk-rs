@@ -1960,12 +1960,164 @@ fn viewport_overlay_collection_skips_unpresented_remote_players() {
 }
 
 #[test]
+fn installed_app_uses_all_approved_ui_icon_sources_without_changing_sheet_geometry() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(1280, 720, &paths);
+    main_assert_eq!(app.config.compat_profile => crate::settings::CompatProfile::Normal);
+    for (sheet, source) in [
+        ("GUIIcons.png", [40, 0, 40, 40]),
+        ("GUIIcons.png", [160, 40, 40, 40]),
+        ("GUIIcons.png", [200, 40, 40, 40]),
+        ("GUIIcons.png", [40, 80, 40, 40]),
+        ("GUIIcons.png", [0, 120, 40, 40]),
+        ("GUIIcons.png", [160, 200, 40, 40]),
+        ("GUIIcons2.png", [0, 0, 64, 64]),
+        ("GUIIcons2.png", [64, 0, 64, 64]),
+        ("GUIIcons2.png", [192, 128, 64, 64]),
+        ("GUIIcons2.png", [0, 192, 64, 64]),
+        ("GUIIcons2.png", [128, 192, 64, 64]),
+        ("GUIIcons2.png", [0, 256, 64, 64]),
+        ("GUIIcons2.png", [64, 256, 64, 64]),
+        ("GUICheckbox.png", [0, 0, 32, 32]),
+        ("GUICheckbox.png", [32, 0, 32, 32]),
+        ("GUICheckbox.png", [64, 0, 32, 32]),
+        ("GUICheckbox.png", [96, 0, 32, 32]),
+    ] {
+        let sheet = app.assets.dialog_image(sheet).test_value();
+        let icon = sheet.region_replacement(source).test_value();
+        main_assert_eq!((icon.width(), icon.height()) => (256, 256));
+        main_assert!(icon.pixels().chunks_exact(4).any(|p| p[3] == 0));
+        main_assert!(icon.pixels().chunks_exact(4).any(|p| p[3] == 255));
+        main_assert!(icon
+            .pixels()
+            .chunks_exact(4)
+            .any(|p| (1..255).contains(&p[3])));
+    }
+    for (name, expected) in [
+        ("GUIIcons.png", (240, 360)),
+        ("GUIIcons2.png", (256, 320)),
+        ("GUICheckbox.png", (128, 32)),
+    ] {
+        let sheet = app.assets.dialog_image(name).test_value();
+        main_assert_eq!((sheet.width(), sheet.height()) => expected);
+    }
+}
+
+#[test]
 fn speaking_icon_is_embedded_without_legacy_graphics_resources() {
     let assets = FrontendAssets::load(None);
     let icon = assets.dialog_image("Speaking.png").test_value();
     main_assert_eq!((icon.width(), icon.height()) => (320, 320));
     main_assert!(icon.pixels().chunks_exact(4).any(|pixel| pixel[3] == 0));
     main_assert!(icon.pixels().chunks_exact(4).any(|pixel| pixel[3] == 255));
+}
+
+#[test]
+fn approved_ui_icons_reach_scaled_options_and_dialog_gpu_frames() {
+    use clonk_frontend::message_dialog::{MessageDialogIcon, MessageDialogState};
+    use clonk_frontend::startup_options_dlg::{OptionsSheet, SoundSheetState};
+
+    let mut app = new_real_menu_app(1280, 720);
+    let original = app.assets.as_ref().clone();
+    let mut upgraded = original.clone();
+    crate::hd_ui_icons::install(&mut upgraded.startup_dialog_images).test_value();
+    app.assets = Arc::new(upgraded.clone());
+    app.open_options_menu();
+    app.startup.options_dialog.test_mut().set_sound_state(
+        SoundSheetState::new(true, true, false, true, 70, 80).with_voice(
+            true,
+            100,
+            "V".to_string(),
+        ),
+    );
+    app.startup.dialog_fade = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(3.0, false);
+    app.configure_native_startup_fonts(3.0, false);
+    let presentation = GpuPresentation {
+        physical_extent: [3840, 2160],
+        scale: 3.0,
+        crop_top: 0,
+        world_zoom: 1.0,
+    };
+    let captures = std::env::var_os("CLONK_HD_UI_CAPTURE").map(PathBuf::from);
+    if let Some(directory) = &captures {
+        fs::create_dir_all(directory).test_value();
+    }
+    for (name, sheet) in [
+        ("audio", OptionsSheet::Sound),
+        ("voice", OptionsSheet::Voice),
+    ] {
+        app.startup.options_dialog.test_mut().restore_sheet(sheet);
+        for (suffix, assets) in [("before", &original), ("after", &upgraded)] {
+            app.assets = Arc::new(assets.clone());
+            app.invalidate_startup_gpu_damage();
+            let frame = app.render_retained_gpu_frame(presentation).test_value();
+            if suffix == "after" {
+                for (sheet, rect) in [
+                    ("GUIIcons2.png", [64, 256, 64, 64]),
+                    ("GUICheckbox.png", [0, 0, 32, 32]),
+                    ("GUICheckbox.png", [32, 0, 32, 32]),
+                ] {
+                    let source = assets.dialog_image(sheet).test_value();
+                    let icon = source.region_replacement(rect).test_value();
+                    main_assert!(
+                        frame
+                            .layers
+                            .iter()
+                            .flat_map(|layer| &layer.scene.textures)
+                            .any(|texture| {
+                                texture.extent == [256, 256]
+                                    && texture.pixels.as_ref() == icon.pixels()
+                            }),
+                        "the live options frame must retain the complete icon source"
+                    );
+                }
+            }
+            if let Some(directory) = &captures {
+                write_options_gpu_review_capture(
+                    &frame,
+                    &directory.join(format!("{name}-{suffix}.png")),
+                );
+            }
+        }
+    }
+    app.push_message_dialog(
+        MessageDialogState::regular_ok(
+            "Options",
+            "Your settings have been saved.",
+            MessageDialogIcon::NOTIFY,
+        ),
+        MessageDialogContinuation::None,
+    )
+    .test_value();
+    for (suffix, assets) in [("before", &original), ("after", &upgraded)] {
+        app.assets = Arc::new(assets.clone());
+        app.invalidate_startup_gpu_damage();
+        let frame = app.render_retained_gpu_frame(presentation).test_value();
+        if suffix == "after" {
+            for rect in [[40, 0, 40, 40], [160, 200, 40, 40]] {
+                let source = assets.dialog_image("GUIIcons.png").test_value();
+                let icon = source.region_replacement(rect).test_value();
+                main_assert!(frame
+                    .layers
+                    .iter()
+                    .flat_map(|layer| &layer.scene.textures)
+                    .any(|texture| {
+                        texture.extent == [256, 256] && texture.pixels.as_ref() == icon.pixels()
+                    }));
+            }
+        }
+        if let Some(directory) = &captures {
+            write_options_gpu_review_capture(
+                &frame,
+                &directory.join(format!("dialog-{suffix}.png")),
+            );
+        }
+    }
 }
 
 #[test]

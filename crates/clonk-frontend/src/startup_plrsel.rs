@@ -945,6 +945,9 @@ fn draw_image_bilinear_modulated(
 /// 32px tiles), so sampling the standalone copy is bit-identical to sampling
 /// the original tile with GL_CLAMP_TO_EDGE.
 fn extract_region(image: &ImageData, x: u32, y: u32, w: u32, h: u32) -> ImageData {
+    if let Some(replacement) = image.region_replacement([x, y, w, h]) {
+        return replacement.clone();
+    }
     type ExtractedRegionCache =
         HashMap<(clonk_graphics::GpuTextureId, u32, u32, u32, u32), ImageData>;
     thread_local! {
