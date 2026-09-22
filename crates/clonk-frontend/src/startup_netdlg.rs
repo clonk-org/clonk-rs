@@ -5657,6 +5657,13 @@ impl NetDlgScreen {
         let columns = (image.width() / cell).max(1);
         let source_x = phase % columns * cell;
         let source_y = phase / columns * cell;
+        if let Some(replacement) = image.region_replacement([source_x, source_y, cell, cell]) {
+            let modulated = crate::startup_options_dlg::retained_modulated_image(
+                replacement,
+                u32::from(modulation) * 0x010101,
+            );
+            return crate::draw_image_bilinear(surface, &gui_rect(rect), &modulated, gamma);
+        }
         let pixels = (0..cell)
             .flat_map(|y| {
                 (0..cell).flat_map(move |x| {

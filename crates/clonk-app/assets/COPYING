@@ -15,3 +15,10 @@ full-body Wipf artwork in Objects.c4d/Animals.c4d/Wipf.c4d/Graphics.png.
 Generated with OpenAI imagegen for Clonk Rust in 2026, then prepared with
 transparent alpha for the original UI geometry. They use the same CC BY-NC 4.0
 license above. See docs/art/startup-icons.md for the sources and modifications.
+
+ui-icons/*.png are high-resolution adaptations of GUIIcons.png, GUIIcons2.png
+and GUICheckbox.png by RedWolf Design (GUIIcons.png also credits Jonathan Veit,
+AniProGuy). Generated with OpenAI imagegen and approved for Clonk Rust in 2026.
+These adaptations use the same CC BY-NC 4.0 license above. See
+docs/art/ui-icons.md and docs/art/ui-icon-prompts.json for source coordinates,
+prompts, preparation, and the shared checkbox-base construction.

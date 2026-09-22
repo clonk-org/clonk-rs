@@ -2348,6 +2348,17 @@ pub fn draw_image_strip(
     src_h: u32,
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) {
+    if let Some((replacement, source)) =
+        image.resolve_region((src_x as f32, src_y as f32, src_w as f32, src_h as f32))
+    {
+        return crate::classic_gui::draw_facet_stretch(
+            surface,
+            replacement,
+            source,
+            (dest_x as f32, dest_y as f32, src_w as f32, src_h as f32),
+            gamma,
+        );
+    }
     let (iw, ih) = (image.width(), image.height());
     let src_w = src_w.min(iw.saturating_sub(src_x));
     let src_h = src_h.min(ih.saturating_sub(src_y));

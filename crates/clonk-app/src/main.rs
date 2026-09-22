@@ -148,6 +148,7 @@ mod device_loss_probe;
 mod game_message;
 mod gamepad;
 mod gpu_instance;
+mod hd_ui_icons;
 mod headed_surface_smoke;
 mod software_present_smoke;
 use clonk_app_menus::ingame_menu;
@@ -2625,6 +2626,9 @@ impl GameApp {
         // state is constructed. Asset-less test apps install their explicit
         // fixture immediately after construction instead.
         let mut assets = FrontendAssets::load(paths);
+        if compat_profile == crate::settings::CompatProfile::Normal {
+            hd_ui_icons::install(&mut assets.startup_dialog_images)?;
+        }
         if let Some(source) = assets.startup_native_font_source.as_mut() {
             source.snap_to_pixels = presentation_features.snap_text_to_pixels;
         }

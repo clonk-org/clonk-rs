@@ -1,0 +1,558 @@
+{
+  "generator": "OpenAI built-in imagegen",
+  "approval": {
+    "round": 2,
+    "message": "Everything looks good",
+    "date": "2026-09-22"
+  },
+  "icons": [
+    {
+      "id": "UI-01",
+      "name": "Voice chat / comment",
+      "source": "planet/Graphics.c4g/GUIIcons2.png",
+      "sourceSha256": "e8cee1304043282c0dde44d2bbfe3951403f03e028edbbed3a71d333d94a04ae",
+      "sourceRect": [
+        64,
+        256,
+        64,
+        64
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/voice-chat.png",
+      "sha256": "9d2c4b91427c5499d0ffca6bb97de61a96dfd27542a689449eef31a2e01ba853",
+      "approvedPreviewSha256": "1925783c3c120e2319bb0ff0f2e011bfcb57750799b37197d78b4c428e0cfef2",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: a single Clonk game UI icon, faithful super-resolution reconstruction.\nImage 1 is the exact original 64\u00d764 icon and the EDIT TARGET.\nReconstruct this same icon as a smooth high-resolution 1024\u00d71024 RGBA sprite with a genuinely transparent background. The icon is a small tilted framed landscape picture with an off-white speech bubble above it, containing three dark dots and an exclamation mark. Keep the precise shapes and punctuation from the reference.\nPreserve the complete subject, proportions, bounding box relative to the square canvas, perspective, object count, overlaps, silhouette, palette and modest prerendered game-art style. Recover smooth antialiased contours and continuous shading while keeping the original design. Preserve the framed picture's small blue and green details without inventing new objects.\nDo not turn it into a modern flat icon or photorealistic scene. No new text, labels, watermark, decorative border, extra symbols, pixel grid, blocky enlargement, background plate, shadow on a floor, or checkerboard pixels. True transparent alpha around the entire icon. Return only this one complete icon.",
+        "Use case: precise-object-edit. Image 1 is the edit target, a high-resolution reconstruction of a game icon. Preserve every part of the icon exactly: speech bubble, punctuation, framed cactus landscape, silhouettes, colors, proportions and placement. Change ONLY its backdrop: replace ALL of the gray checkerboard, including warped or artifact-filled checkerboard areas, with one perfectly uniform flat opaque warm light beige color #eee8dc. The beige backdrop must cover every background pixel around the icon; no checker pattern, no grain, no texture, no gradients, no artificial transparency visualization. Do not alter or crop any part of the icon, or add objects or text. Keep the same square composition and high resolution. This is an opaque presentation preview for user review, not a transparent asset."
+      ],
+      "placement": {
+        "scale": 1.008892,
+        "left": 0.00813,
+        "top": -0.008067,
+        "sourceBounds": [
+          5,
+          2,
+          62,
+          62
+        ],
+        "candidateBounds": [
+          87,
+          53,
+          1194,
+          1210
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-02",
+      "name": "Game list",
+      "source": "planet/Graphics.c4g/GUIIcons2.png",
+      "sourceSha256": "e8cee1304043282c0dde44d2bbfe3951403f03e028edbbed3a71d333d94a04ae",
+      "sourceRect": [
+        0,
+        256,
+        64,
+        64
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/game-list.png",
+      "sha256": "5cf58b11d3dbfc2d10799721b596d313af359c8879ec8c68fb436788f0d53716",
+      "approvedPreviewSha256": "81df6507f24c5d9c8079f3b1c6fc26eceb97ec1c4f0bfe58e26fb1092daa4044",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 64\u00d764 sprite, the EDIT TARGET.\nSubject: A small framed landscape picture, with blue sky, green terrain and a gold sun; retain its slightly tilted perspective and frame.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.088542,
+        "left": -0.032118,
+        "top": -0.09375,
+        "sourceBounds": [
+          9,
+          3,
+          57,
+          54
+        ],
+        "candidateBounds": [
+          201,
+          162,
+          1061,
+          1080
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-03",
+      "name": "Folder",
+      "source": "planet/Graphics.c4g/GUIIcons.png",
+      "sourceSha256": "a45a3ecd945c2b55b40b97cd9a34b2548213203af884577ca72d47ff387de766",
+      "sourceRect": [
+        160,
+        40,
+        40,
+        40
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/folder.png",
+      "sha256": "afc984ad3d49d0a20c37cf0c193cb2322b42e41b293c4100d623f0b4b9f7b74c",
+      "approvedPreviewSha256": "1638af673796cd0d82e8ba4e50244767038b0927244c7e0595dd0ec35c8f488c",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 40\u00d740 sprite, the EDIT TARGET.\nSubject: A plain yellow file folder with a raised left tab, pale contents peeking out at the top, and the original simple perspective.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.232254,
+        "left": -0.090853,
+        "top": -0.097514,
+        "sourceBounds": [
+          2,
+          4,
+          39,
+          38
+        ],
+        "candidateBounds": [
+          149,
+          201,
+          1079,
+          1066
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-04",
+      "name": "Parent folder",
+      "source": "planet/Graphics.c4g/GUIIcons2.png",
+      "sourceSha256": "e8cee1304043282c0dde44d2bbfe3951403f03e028edbbed3a71d333d94a04ae",
+      "sourceRect": [
+        128,
+        192,
+        64,
+        64
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/parent-folder.png",
+      "sha256": "e5f8f98268165bb4917c9fd1885fd3c668104e9336ece144e2586d2318f4c954",
+      "approvedPreviewSha256": "99838c87ed217fc0cf89d4a405bc106148b0aabe8d48ca4350a13ccd71d78f72",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 64\u00d764 sprite, the EDIT TARGET.\nSubject: A yellow file folder behind a large orange upward arrow; retain the exact overlap, direction, perspective, colors and object count.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.030144,
+        "left": 0.057722,
+        "top": -0.09484,
+        "sourceBounds": [
+          13,
+          3,
+          62,
+          51
+        ],
+        "candidateBounds": [
+          177,
+          190,
+          1109,
+          1068
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-05",
+      "name": "Save",
+      "source": "planet/Graphics.c4g/GUIIcons.png",
+      "sourceSha256": "a45a3ecd945c2b55b40b97cd9a34b2548213203af884577ca72d47ff387de766",
+      "sourceRect": [
+        40,
+        80,
+        40,
+        40
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/save.png",
+      "sha256": "98cc53ae027528d440a1965618524d886a24f36434fefa1556c6b54ea484014a",
+      "approvedPreviewSha256": "2afdf41445aefd32efbc4e768eeee56cbeeeeb02e20596469e1f52cd2c0d203f",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 40\u00d740 sprite, the EDIT TARGET.\nSubject: A blue floppy disk with a silver metal shutter and a pale label area; preserve the original tilted perspective and slot details; add no writing.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 0.971152,
+        "left": 0.013262,
+        "top": 0.005022,
+        "sourceBounds": [
+          4,
+          2,
+          36,
+          37
+        ],
+        "candidateBounds": [
+          112,
+          71,
+          1145,
+          1175
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-06",
+      "name": "Notification",
+      "source": "planet/Graphics.c4g/GUIIcons.png",
+      "sourceSha256": "a45a3ecd945c2b55b40b97cd9a34b2548213203af884577ca72d47ff387de766",
+      "sourceRect": [
+        40,
+        0,
+        40,
+        40
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/notify.png",
+      "sha256": "868e84458551c6f116a5d46c79ab74a0f2e6e469211e9199b12b637c65d1cee7",
+      "approvedPreviewSha256": "0e486ee4eb1c61ebb52e79206e5ee52e6cce7b12a3415a61dc3ab55a1adf04bb",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 40\u00d740 sprite, the EDIT TARGET.\nSubject: A bold glossy red exclamation mark in front of a golden-yellow circular disk. The red exclamation mark has a long slightly tilted upper stroke and a separate red dot at the bottom. This is punctuation, not a shield.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.070622,
+        "left": -0.046103,
+        "top": 0.000241,
+        "sourceBounds": [
+          3,
+          1,
+          36,
+          40
+        ],
+        "candidateBounds": [
+          168,
+          29,
+          1082,
+          1171
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-07",
+      "name": "Error",
+      "source": "planet/Graphics.c4g/GUIIcons.png",
+      "sourceSha256": "a45a3ecd945c2b55b40b97cd9a34b2548213203af884577ca72d47ff387de766",
+      "sourceRect": [
+        200,
+        40,
+        40,
+        40
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/error.png",
+      "sha256": "ecee2cce873a4f33e008ea9b86b890e65683de9640bbf49e9c6c163a40b320b2",
+      "approvedPreviewSha256": "974d7d267b1aecf00ab4e847638694163c2685a011d3838abb00fbb9895ed17f",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 40\u00d740 sprite, the EDIT TARGET.\nSubject: A thick glossy red X in front of a yellow circular disk; preserve both shapes, their exact overlap, and their original orientation.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.121751,
+        "left": -0.059981,
+        "top": -0.050141,
+        "sourceBounds": [
+          1,
+          1,
+          39,
+          39
+        ],
+        "candidateBounds": [
+          95,
+          93,
+          1157,
+          1137
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-08",
+      "name": "Confirmation",
+      "source": "planet/Graphics.c4g/GUIIcons.png",
+      "sourceSha256": "a45a3ecd945c2b55b40b97cd9a34b2548213203af884577ca72d47ff387de766",
+      "sourceRect": [
+        0,
+        120,
+        40,
+        40
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/confirm.png",
+      "sha256": "88f7560a0383f2ee9e3c007dc9e5914b762fd00efff36791c83c2381366810b8",
+      "approvedPreviewSha256": "7cc2c697536f692126e99a2b6b3a716c14aae11436c0a9565bd36453ed3e9468",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 40\u00d740 sprite, the EDIT TARGET.\nSubject: A bold red question mark in front of a yellow circular disk; preserve the distinct curved question mark, separate dot, disk and exact overlap.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.211417,
+        "left": -0.111446,
+        "top": -0.08065,
+        "sourceBounds": [
+          3,
+          1,
+          36,
+          40
+        ],
+        "candidateBounds": [
+          193,
+          120,
+          1047,
+          1108
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-09",
+      "name": "Close",
+      "source": "planet/Graphics.c4g/GUIIcons.png",
+      "sourceSha256": "a45a3ecd945c2b55b40b97cd9a34b2548213203af884577ca72d47ff387de766",
+      "sourceRect": [
+        160,
+        200,
+        40,
+        40
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/close.png",
+      "sha256": "74c5055af9519d16959fdca1730b886bfacebde51dcd3283bf622af4b0a193e1",
+      "approvedPreviewSha256": "8cf570e93c5f6099d72fd4e238a4e419a803ceb1faf58011e564d96e6e540ddc",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 40\u00d740 sprite, the EDIT TARGET.\nSubject: A bold solid red X with modest bevel and shading; retain the original thick diagonal arms and silhouette, no enclosing disk or button.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including its holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.226329,
+        "left": -0.112187,
+        "top": -0.107999,
+        "sourceBounds": [
+          0,
+          1,
+          40,
+          40
+        ],
+        "candidateBounds": [
+          122,
+          136,
+          1130,
+          1133
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-10",
+      "name": "Recording off",
+      "source": "planet/Graphics.c4g/GUIIcons2.png",
+      "sourceSha256": "e8cee1304043282c0dde44d2bbfe3951403f03e028edbbed3a71d333d94a04ae",
+      "sourceRect": [
+        0,
+        0,
+        64,
+        64
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/record-off.png",
+      "sha256": "c36a32450348c748dc0fd75234b23c99907ddd13ab6e1d09ce742a0122255182",
+      "approvedPreviewSha256": "8df282740e22dbccc1dd5f4a7760904bd532236ff7440a9e4c5d6fe615fc4f20",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 64\u00d764 sprite, the EDIT TARGET.\nSubject: A gray metal film reel tilted in perspective with the short curled film strip extending left; preserve the reel holes, hub and complete trailing strip.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview.",
+        "Use case: precise-object-edit.\nAsset type: Clonk Recording off icon, matching state pair.\nImage 1 is the APPROVED Recording on artwork and the EDIT TARGET. Derive its off state directly from this image.\nMake exactly these changes: (1) remove the red checkmark entirely and reconstruct ONLY the small portion of the existing reel that it hid, (2) convert the entire reel and film strip to neutral grayscale, (3) remove the beige background to genuine transparent alpha.\nPreserve the approved reel geometry EXACTLY: same front and rear plates, same six large triangular rounded apertures, same hollow oval central opening (do not add a solid hub), same smooth blue-film-frame layout now gray, same short curling strip extending to the left, same perspective, tilt, thickness, outlines, gradients, bounding size and position on the canvas. Do not introduce perforations along the film strip, alter hole count, add details, or redesign the object. The result should be clearly recognizable as the same approved icon with its off-state changes. Keep the complete icon unclipped on the same square canvas around 1254\u00d71254.\nBackground must be genuinely transparent alpha, including empty regions; no painted checkerboard, backdrop, floor shadow, text, badges or other symbols. Single icon only.",
+        "Use case: precise-object-edit.\nImage 1 is the EDIT TARGET. Preserve the entire grayscale film reel and its film strip pixel-for-pixel in geometry, tone, scale, position, outline, lighting and detail. Change ONLY the checkerboard background: replace every checkerboard pixel outside the object with perfectly uniform flat opaque warm beige #eee8dc, including all empty gaps outside the reel. The checkerboard is unwanted painted background, not part of the icon. This output is an OPAQUE review preview; do not create transparency or a checkerboard. Do not redraw the reel or add any object, symbol, checkmark, text, shadow or frame. Same square canvas and same complete icon."
+      ],
+      "placement": {
+        "scale": 1.034881,
+        "left": -0.019091,
+        "top": -0.016643,
+        "sourceBounds": [
+          2,
+          2,
+          62,
+          63
+        ],
+        "candidateBounds": [
+          61,
+          85,
+          1197,
+          1186
+        ],
+        "note": "Uses approved paired icon placement to preserve shared object scale."
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-11",
+      "name": "Recording on",
+      "source": "planet/Graphics.c4g/GUIIcons2.png",
+      "sourceSha256": "e8cee1304043282c0dde44d2bbfe3951403f03e028edbbed3a71d333d94a04ae",
+      "sourceRect": [
+        64,
+        0,
+        64,
+        64
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/record-on.png",
+      "sha256": "192a584a613ef456b3356b53d7bc777dbbd541d39240f9283f3036770714d904",
+      "approvedPreviewSha256": "aee1e3898a997ee1dd28e2d998c69b1f1cdeeb0615c5c234fa2e38687a222124",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 64\u00d764 sprite, the EDIT TARGET.\nSubject: The tilted gray metal film reel and short film strip, with the large red checkmark over its lower right; preserve every reel hole and the checkmark overlap.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.034881,
+        "left": -0.019091,
+        "top": -0.016643,
+        "sourceBounds": [
+          2,
+          2,
+          62,
+          63
+        ],
+        "candidateBounds": [
+          61,
+          85,
+          1197,
+          1186
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-12",
+      "name": "Password locked",
+      "source": "planet/Graphics.c4g/GUIIcons2.png",
+      "sourceSha256": "e8cee1304043282c0dde44d2bbfe3951403f03e028edbbed3a71d333d94a04ae",
+      "sourceRect": [
+        192,
+        128,
+        64,
+        64
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/locked.png",
+      "sha256": "1788e41664357dba68f12c5cff12dca00479a772231494db25a73adac6fc54a9",
+      "approvedPreviewSha256": "bfbc7296cb0089a5db4f7e80fba297b4b73b4a4d312ea532513f954f90d7ab22",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 64\u00d764 sprite, the EDIT TARGET.\nSubject: The red padlock with a closed silver shackle and silver rivets, plus the red check mark over the lower right; preserve its exact perspective and all separate components.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 0.973958,
+        "left": 0.01695,
+        "top": 0.019668,
+        "sourceBounds": [
+          7,
+          3,
+          58,
+          62
+        ],
+        "candidateBounds": [
+          119,
+          66,
+          1145,
+          1191
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-13",
+      "name": "Password unlocked",
+      "source": "planet/Graphics.c4g/GUIIcons2.png",
+      "sourceSha256": "e8cee1304043282c0dde44d2bbfe3951403f03e028edbbed3a71d333d94a04ae",
+      "sourceRect": [
+        0,
+        192,
+        64,
+        64
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/unlocked.png",
+      "sha256": "9d9ae3e6c41461148eda67544f503d44cf261974449cb5cf67e6799d7efe2410",
+      "approvedPreviewSha256": "a54a2cb3ae71ad7a8119507cbc3ef350c78634f3888c98baafde8f54545002ca",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 64\u00d764 sprite, the EDIT TARGET.\nSubject: The gray metal padlock with its silver shackle visibly open; preserve the exact open gap, keyhole, slight perspective and original silhouette.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview.",
+        "Use case: precise-object-edit.\nAsset type: Clonk Password unlocked icon, matching state pair.\nImage 1 is the APPROVED Password locked artwork and the EDIT TARGET. Derive its unlocked state directly from the exact same padlock.\nMake only these state changes: remove the red checkmark entirely; desaturate the red body to neutral gray; open the silver shackle by raising it slightly so its LEFT end visibly separates from the lock body, keeping its right leg inserted.\nPreserve the exact approved lock body: same softly rounded body edges, identical camera perspective and tilt, same four rounded silver rivets in the same positions, same keyhole shape and size, same top and bottom silver bands, same highlights and subtle material texture. Reconstruct only portions previously hidden by the checkmark. Do not turn the body into a different angular box, change rivets, add facets or engravings, or invent a different lock design. The silhouette change must be limited to the open shackle and removal of the checkmark. Keep the original lock-body size and position; do not enlarge to fill the space left by the checkmark. Whole icon, unclipped, same square canvas around 1254\u00d71254.\nBackground: perfectly uniform flat opaque warm light beige #eee8dc, including the shackle gap. This is a review preview, NOT a transparency request. No checkerboard, text, logos, badges, extra objects or floor shadow."
+      ],
+      "placement": {
+        "scale": 0.973958,
+        "left": 0.01695,
+        "top": 0.019668,
+        "sourceBounds": [
+          7,
+          3,
+          58,
+          62
+        ],
+        "candidateBounds": [
+          119,
+          66,
+          1145,
+          1191
+        ],
+        "note": "Uses approved paired icon placement to preserve shared object scale."
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-14",
+      "name": "Checkbox unchecked",
+      "source": "planet/Graphics.c4g/GUICheckbox.png",
+      "sourceSha256": "b2ae99e65cbf1ddf3f59f7d66bb6ab3299f406a173b9d9f63e1c951e82dd11f7",
+      "sourceRect": [
+        0,
+        0,
+        32,
+        32
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/checkbox-off.png",
+      "sha256": "1f64c6f58ac383d468d0bea20ebbc02663ef4a0230035bf8cd9d831fe3642b18",
+      "approvedPreviewSha256": "143f7fb3fd441554782bd21039ad1b9f78ed7ac6f0c5a958a101dd98c7b41fb2",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 32\u00d732 sprite, the EDIT TARGET.\nSubject: An empty dark gray square checkbox with a beveled metal border, viewed straight on; preserve the dark inset and the original proportions.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
+      ],
+      "placement": {
+        "scale": 1.341017,
+        "left": -0.139259,
+        "top": -0.123099,
+        "sourceBounds": [
+          3,
+          4,
+          31,
+          31
+        ],
+        "candidateBounds": [
+          229,
+          232,
+          1025,
+          1021
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    },
+    {
+      "id": "UI-15",
+      "name": "Checkbox checked",
+      "source": "planet/Graphics.c4g/GUICheckbox.png",
+      "sourceSha256": "b2ae99e65cbf1ddf3f59f7d66bb6ab3299f406a173b9d9f63e1c951e82dd11f7",
+      "sourceRect": [
+        32,
+        0,
+        32,
+        32
+      ],
+      "asset": "crates/clonk-app/assets/ui-icons/checkbox-on.png",
+      "sha256": "c93faf75b48c4efd6d0ff426fdce7369654b2a6d369e5cfbc035155dc46505ea",
+      "approvedPreviewSha256": "2b528e2b47644df34f9563589f40c4d6478f993fcf0e320a12fba94f97c737d3",
+      "prompts": [
+        "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 32\u00d732 sprite, the EDIT TARGET.\nSubject: The dark gray square checkbox with a prominent red check mark extending above and to the right; preserve the checkbox geometry, complete checkmark and overlap.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview.",
+        "Use case: background-extraction.\nAsset type: isolated foreground checkmark layer for a Clonk game checkbox state.\nImage 1 is the EDIT TARGET, the high-resolution checked checkbox preview.\nExtract ONLY its glossy red checkmark, including the dark outline, antialiased edges and all highlights. Remove the gray checkbox and the beige background completely. Do not redraw or change the checkmark: preserve its exact silhouette, red coloring, material, angle, perspective, scale and position relative to the square canvas. Output the complete checkmark alone, same square framing, around 1254 by 1254.\nBackground: genuinely transparent alpha everywhere except the red checkmark and its outline; no painted checkerboard, no white or beige fill, no shadow from the removed checkbox. No additional shapes, text, or framing. This layer will be composited over the exact approved unchecked box."
+      ],
+      "placement": {
+        "scale": 1.341017,
+        "left": -0.139259,
+        "top": -0.123099,
+        "sourceBounds": [
+          3,
+          4,
+          31,
+          31
+        ],
+        "candidateBounds": [
+          229,
+          232,
+          1025,
+          1021
+        ]
+      },
+      "review": "Approved 2026-09-22"
+    }
+  ],
+  "preparation": "Connected beige matte removed; one-source-pixel contraction; Lanczos reduction to 256px. Checkbox checkmark composited over the same prepared unchecked base; disabled state desaturates only the checkmark. Transparent RGB normalized to zero."
+}
