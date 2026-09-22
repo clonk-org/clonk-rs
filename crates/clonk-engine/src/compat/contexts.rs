@@ -4379,18 +4379,20 @@ impl EffectHostContext {
         }
         self.pending_objects.insert(id, preview);
         self.pending_spawns.push(spawn);
+        // C4Game::CreateObject inserts this exact raw object synchronously,
+        // before Construction/Initialize may mutate its category or status
+        // (C4Game.cpp:1121-1138; C4ObjectList.cpp:134-175), so the rest of the
+        // call already finds it there. Record that one chronological insertion
+        // instead of sorting callback-final objects.
         if self.publish_spawn_previews {
-            // C4Game::CreateObject inserts this exact raw object synchronously,
-            // before Construction/Initialize may mutate its category or status
-            // (C4Game.cpp:1121-1138; C4ObjectList.cpp:134-175). Record that one
-            // chronological insertion instead of sorting callback-final objects.
             self.preview_object_status_change(id, status);
-        } else if self.master_order_preview.is_some() {
+        } else {
             // A context outside the creation and effect phases discards its
-            // preview at fold time, so nothing transports the exact order
-            // across deferred materialization. Retain the established
-            // callback-local sorted projection for the rest of this call.
-            self.preview_sort_master_by_category();
+            // preview at fold time, so only this call reads the list, and its
+            // bounded queries still find pending objects without a sector
+            // preview.
+            self.master_order_preview = Some(self.master_order_with_status(id, status));
+            self.inactive_order_preview = Some(self.inactive_order_with_status(id, status));
         }
     }
 
