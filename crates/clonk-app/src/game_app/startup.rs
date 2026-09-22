@@ -4772,6 +4772,7 @@ impl GameApp {
         let gamma = self.startup_fragment_gamma();
         render_startup_frame(
             &mut self.rendering.graphics,
+            self.config.compat_profile,
             self.assets.as_ref(),
             &mut self.main_menu_state,
             &mut self.menu_state,

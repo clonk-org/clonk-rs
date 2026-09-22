@@ -362,6 +362,8 @@ pub struct PlrSelAssets {
     /// `StartupBookScroll.png` — 16px up/track/down/pin facets used by the
     /// auto-hiding player-list scrollbar.
     pub book_scroll: ImageData,
+    /// Optional full-body replacement for the 16x16 Wipf scrollbar thumb.
+    pub book_scroll_pin: Option<ImageData>,
     /// `Player.png` — 48x48 ColorByOwner source used for the default player
     /// icon and portrait (C4GraphicsResource.cpp:265-268,
     /// C4StartupPlrSelDlg.cpp:168-170,230-233).
@@ -2642,6 +2644,7 @@ impl PlrSelScreen {
             button_down: engine_png_texture(&assets.button_down),
             button_highlight: engine_png_texture(&assets.button_highlight),
             book_scroll: engine_png_texture(&assets.book_scroll),
+            book_scroll_pin: assets.book_scroll_pin.clone(),
             player: engine_png_texture(&assets.player),
         };
 
@@ -2973,15 +2976,12 @@ impl PlrSelScreen {
             gamma,
         );
         if PlrSelController::scrollbar_has_pin(layout) {
-            crate::draw_image_strip(
+            crate::startup_options_dlg::draw_book_scroll_pin(
                 surface,
                 bar.x,
                 bar.y + SCROLLBAR_PART + controller.list_scroll_pin,
                 &assets.book_scroll,
-                16,
-                16,
-                16,
-                16,
+                assets.book_scroll_pin.as_ref(),
                 gamma,
             );
         }
@@ -4192,6 +4192,7 @@ mod tests {
             button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
             button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
             book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
+            book_scroll_pin: None,
             player: crate::test_support::load_graphics_png("Player.png"),
         };
         let fonts = crate::test_support::endeavour_font_set();
@@ -4272,6 +4273,7 @@ mod tests {
             button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
             button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
             book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
+            book_scroll_pin: None,
             player: crate::test_support::load_graphics_png("Player.png"),
         };
         let fonts = crate::test_support::endeavour_font_set();
@@ -4585,6 +4587,7 @@ mod tests {
             button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
             button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
             book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
+            book_scroll_pin: None,
             player: crate::test_support::load_graphics_png("Player.png"),
         };
         let fonts = crate::test_support::endeavour_font_set();
@@ -4866,6 +4869,7 @@ mod tests {
             button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
             button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
             book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
+            book_scroll_pin: None,
             player: crate::test_support::load_graphics_png("Player.png"),
         };
         let fonts = crate::test_support::endeavour_font_set();

@@ -935,6 +935,7 @@ pub(crate) fn scenario_list_scrollbar_visible(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_startup_frame(
     graphics: &mut GraphicsSystem,
+    compat_profile: crate::settings::CompatProfile,
     assets: &FrontendAssets,
     main_menu: &mut MainMenuState,
     scenario_menu: &mut MenuState,
@@ -1024,7 +1025,7 @@ pub(crate) fn render_startup_frame(
                 _ => false,
             },
             StartupView::ScenarioBrowser => match (
-                assets.scensel_assets(),
+                assets.scensel_assets(compat_profile),
                 assets.startup_dialog_images.get("GUIButtonDown.png"),
                 assets.clonk_fonts.as_ref(),
                 assets.book_fonts.as_ref(),
@@ -1162,7 +1163,7 @@ pub(crate) fn render_startup_frame(
                 _ => false,
             },
             StartupView::Options => match (
-                assets.options_dlg_assets(),
+                assets.options_dlg_assets(compat_profile),
                 assets.clonk_fonts.as_ref(),
                 assets.options_book_fonts.as_ref(),
                 options_dialog,
@@ -1196,7 +1197,7 @@ pub(crate) fn render_startup_frame(
                 _ => false,
             },
             StartupView::PlayerSelection => match (
-                assets.plrsel_assets(),
+                assets.plrsel_assets(compat_profile),
                 assets.clonk_fonts.as_ref(),
                 assets.plrsel_book_fonts.as_ref(),
                 player_dialog,

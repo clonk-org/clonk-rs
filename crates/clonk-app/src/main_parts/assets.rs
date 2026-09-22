@@ -6533,6 +6533,36 @@ impl FrontendAssets {
         }) {
             startup_dialog_images.insert("Speaking.png".to_string(), icon.clone());
         }
+        // The replacement UI artwork is embedded separately from the pinned
+        // legacy graphics groups used by the presentation oracle.
+        static HD_STARTUP_ICONS: OnceLock<Vec<(&str, ImageData)>> = OnceLock::new();
+        for (name, icon) in HD_STARTUP_ICONS.get_or_init(|| {
+            [
+                (
+                    "StartupOptionIconsHD.png",
+                    include_bytes!("../../assets/StartupOptionIconsHD.png").as_slice(),
+                ),
+                (
+                    "StartupWipfHD.png",
+                    include_bytes!("../../assets/StartupWipfHD.png").as_slice(),
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(name, bytes)| {
+                clonk_resources::load_image_from_memory_with_format(bytes, image::ImageFormat::Png)
+                    .ok()
+                    .map(|image| {
+                        let rgba = image.into_rgba8();
+                        (
+                            name,
+                            ImageData::new(rgba.width(), rgba.height(), rgba.into_raw()),
+                        )
+                    })
+            })
+            .collect()
+        }) {
+            startup_dialog_images.insert((*name).to_string(), icon.clone());
+        }
         let mut startup_bootstrap_image_failures = HashMap::new();
         let mut global_gui_font_failures = HashMap::new();
         let mut global_gui_sheet_failures = HashMap::new();
@@ -6876,14 +6906,19 @@ impl FrontendAssets {
 
     pub(crate) fn options_dlg_assets(
         &self,
+        profile: CompatProfile,
     ) -> Option<clonk_frontend::startup_options_dlg::OptionsDlgAssets> {
         Some(clonk_frontend::startup_options_dlg::OptionsDlgAssets {
             background: self.menu_background()?,
             paper: self.dialog_image("StartupDlgPaper.png")?,
             tab_clip: self.dialog_image("StartupTabClip.png")?,
-            option_icons: self.dialog_image("StartupOptionIcons.png")?,
+            option_icons: (profile == CompatProfile::Normal)
+                .then(|| self.dialog_image("StartupOptionIconsHD.png"))
+                .flatten()
+                .or_else(|| self.dialog_image("StartupOptionIcons.png"))?,
             voice_icons: self.dialog_image("GUIIcons2.png"),
             book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            book_scroll_pin: self.startup_wipf(profile),
             context_arrow: self.dialog_image("StartupContext.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
             // The control facets degrade to text buttons when absent, so these
@@ -6893,6 +6928,12 @@ impl FrontendAssets {
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             button: self.dialog_image("GUIButton.png")?,
         })
+    }
+
+    fn startup_wipf(&self, profile: CompatProfile) -> Option<ImageData> {
+        (profile == CompatProfile::Normal)
+            .then(|| self.dialog_image("StartupWipfHD.png"))
+            .flatten()
     }
 
     pub(crate) fn options_advanced_assets(
@@ -6909,7 +6950,10 @@ impl FrontendAssets {
         )
     }
 
-    pub(crate) fn plrsel_assets(&self) -> Option<clonk_frontend::startup_plrsel::PlrSelAssets> {
+    pub(crate) fn plrsel_assets(
+        &self,
+        profile: CompatProfile,
+    ) -> Option<clonk_frontend::startup_plrsel::PlrSelAssets> {
         Some(clonk_frontend::startup_plrsel::PlrSelAssets {
             background: self.dialog_image("StartupPlrSelBG.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
@@ -6917,6 +6961,7 @@ impl FrontendAssets {
             button_down: self.dialog_image("GUIButtonDown.png")?,
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            book_scroll_pin: self.startup_wipf(profile),
             player: self.dialog_image("Player.png")?,
         })
     }
@@ -7410,10 +7455,14 @@ impl FrontendAssets {
         })
     }
 
-    pub(crate) fn scensel_assets(&self) -> Option<clonk_frontend::startup_scensel::ScenSelAssets> {
+    pub(crate) fn scensel_assets(
+        &self,
+        profile: CompatProfile,
+    ) -> Option<clonk_frontend::startup_scensel::ScenSelAssets> {
         Some(clonk_frontend::startup_scensel::ScenSelAssets {
             background: self.dialog_image("StartupScenSelBG.png")?,
             book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            book_scroll_pin: self.startup_wipf(profile),
             scen_icons: self.dialog_image("StartupScenSelIcons.png")?,
             caption_bar: self.dialog_image("GUICaption.png")?,
             button: self.dialog_image("GUIButton.png")?,

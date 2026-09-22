@@ -1848,7 +1848,10 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
     app.scensel.catalog = build_scenario_catalog(&scenarios);
 
     let render_row_alphas = |app: &mut GameApp| {
-        let assets = app.assets.scensel_assets().test_value();
+        let assets = app
+            .assets
+            .scensel_assets(app.config.compat_profile)
+            .test_value();
         let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
         let fonts = app.assets.clonk_fonts.clone().test_value();
         let book = app.assets.book_fonts.clone().test_value();
@@ -4066,7 +4069,10 @@ fn scale_native_scensel_rows_retain_clipped_book_text() {
     install_classic_test_assets(&mut app);
     app.open_scenario_browser();
 
-    let assets = app.assets.scensel_assets().test_value();
+    let assets = app
+        .assets
+        .scensel_assets(app.config.compat_profile)
+        .test_value();
     let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let book = app.assets.book_fonts.clone().test_value();
