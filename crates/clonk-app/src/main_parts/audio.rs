@@ -6246,6 +6246,8 @@ pub(crate) enum AppContextMenuCommand {
     OptionsLanguage(String),
     OptionsFontFace(String),
     OptionsFontSize(i32),
+    OptionsVoiceInput(Option<clonk_audio::VoiceInputDeviceId>),
+    OptionsVoiceOutput(Option<String>),
     OptionsDisplayMode(clonk_frontend::startup_options_graphics::GraphicsDisplayMode),
     LobbyTeam {
         player_id: i32,

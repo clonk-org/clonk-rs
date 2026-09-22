@@ -149,6 +149,12 @@ regenerates it from landed commit subjects.
 
 ## Pull requests — how work lands
 
+**Include images for visual changes.** Embed screenshots of the implemented UI
+in the pull request description so reviewers can assess the result without
+building it. Include before/after views when useful, plus relevant compact or
+alternate layouts. Use images hosted where GitHub reviewers can see them, not
+local filesystem links, and label mockups or rendered fixtures accurately.
+
 `main` is protected and lands through a **merge queue**. Do not push to `main`.
 Admin bypass makes it possible, which is why this is written down: at ~150
 commits a day from parallel worktree sessions, a direct push can delete work

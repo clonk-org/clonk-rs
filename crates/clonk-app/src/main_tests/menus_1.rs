@@ -3875,6 +3875,9 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
 
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
+    main_assert_eq!(app.startup.options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Voice);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::ArrowDown, ElementState::Released);
     main_assert_eq!(app.startup.options_dialog.as_ref().expect("options state").active_sheet() => clonk_frontend::startup_options_dlg::OptionsSheet::Keyboard);
     app.test_key(VirtualKeyCode::KeyR, ElementState::Pressed);
     main_assert!(app.status_text.is_empty());
