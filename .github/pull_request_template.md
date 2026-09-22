@@ -2,6 +2,15 @@
 
 <!-- What changed, and why? -->
 
+## Visual evidence
+
+<!--
+For visual/UI changes, embed screenshots of the implemented result using
+GitHub-accessible image URLs. Include before/after views when useful and any
+relevant compact or alternate layouts. Label mockups or rendered fixtures.
+For changes with no visual impact, remove this section.
+-->
+
 ## Parity evidence
 
 <!--
