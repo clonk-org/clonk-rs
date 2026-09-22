@@ -26,6 +26,9 @@ use crate::voice_codec::{EncodedVoiceFrame, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RA
 /// IDs obtained from CPAL use `<host>:<device>`. Parsing intentionally preserves
 /// every nonempty string byte-for-byte: a corrupt or foreign persisted ID stays
 /// an exact (unavailable) selection instead of silently becoming the default.
+/// Only an ID of another host on this platform, which
+/// [`saved_device_follows_system_default`](crate::saved_device_follows_system_default)
+/// recognizes, means the default.
 /// This identifies a host endpoint, not necessarily a physical device;
 /// stability and routing are defined by that host.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -66,37 +69,37 @@ pub struct VoiceInputDevice {
     pub name: String,
 }
 
-/// Enumerates the input endpoints currently exposed by CPAL's default host.
+/// Enumerates the microphones CPAL's default host offers a player.
 ///
 /// This queries metadata only; it does not build or start a capture stream.
 pub fn voice_input_devices() -> Result<Vec<VoiceInputDevice>, VoiceCaptureError> {
     #[cfg(feature = "cpal")]
     {
-        use cpal::traits::{DeviceTrait, HostTrait};
-
-        let host = cpal::default_host();
-        let devices = host.input_devices().map_err(cpal_capture_error)?;
-        Ok(devices
-            .filter_map(|device| {
-                let id = device.id().map_err(|error| {
-                    tracing::warn!(%error, "input device disappeared while reading its ID");
-                });
-                let description = device.description().map_err(|error| {
-                    tracing::warn!(%error, "input device disappeared while reading its description");
-                });
-                id.ok()
-                    .zip(description.ok())
-                    .map(|(id, description)| VoiceInputDevice {
-                        id: VoiceInputDeviceId(Box::from(id.to_string())),
-                        name: description.name().to_string(),
-                    })
-            })
-            .collect())
+        offered_voice_input_devices(&cpal::default_host())
     }
     #[cfg(not(feature = "cpal"))]
     {
         Err(VoiceCaptureError::Unavailable)
     }
+}
+
+/// See [`crate::sound_host::offered_inputs`] for what is left out.
+#[cfg(feature = "cpal")]
+pub(crate) fn offered_voice_input_devices(
+    host: &cpal::Host,
+) -> Result<Vec<VoiceInputDevice>, VoiceCaptureError> {
+    use cpal::traits::HostTrait;
+
+    let devices = host.input_devices().map_err(cpal_capture_error)?;
+    Ok(
+        crate::sound_host::offered_inputs(crate::sound_host::host_endpoints(devices))
+            .into_iter()
+            .map(|endpoint| VoiceInputDevice {
+                id: VoiceInputDeviceId(endpoint.id.into_boxed_str()),
+                name: endpoint.name,
+            })
+            .collect(),
+    )
 }
 
 /// One captured frame together with how loud it was, so a voice-activation
@@ -683,7 +686,7 @@ impl VoiceCapture {
     pub fn open(options: VoiceCaptureOptions) -> Result<Self, VoiceCaptureError> {
         #[cfg(feature = "cpal")]
         {
-            Self::open_with_backend(options, || CpalVoiceCaptureBackend)
+            Self::open_with_backend(options, CpalVoiceCaptureBackend::default)
         }
         #[cfg(not(feature = "cpal"))]
         {
@@ -827,7 +830,10 @@ impl Drop for VoiceCapture {
 }
 
 #[cfg(feature = "cpal")]
-struct CpalVoiceCaptureBackend;
+#[derive(Default)]
+struct CpalVoiceCaptureBackend {
+    host: crate::sound_host::SoundHost,
+}
 
 #[cfg(feature = "cpal")]
 impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
@@ -839,33 +845,40 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
     ) -> Result<CaptureDeviceInventory, VoiceCaptureError> {
         use cpal::traits::{DeviceTrait, HostTrait};
 
-        let host = cpal::default_host();
-        let default = if selected.is_none() {
-            host.default_input_device()
-                .map(|device| {
-                    device
-                        .id()
-                        .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
-                        .map_err(cpal_capture_error)
-                })
-                .transpose()?
-        } else {
-            None
-        };
-        let inputs = if selected.is_some() {
-            host.input_devices()
-                .map_err(cpal_capture_error)?
-                .map(|device| {
-                    device
-                        .id()
-                        .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
-                        .map_err(cpal_capture_error)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            Vec::new()
-        };
-        Ok(CaptureDeviceInventory { default, inputs })
+        let inventory = self.host.with(|host| {
+            let default = if selected.is_none() {
+                host.default_input_device()
+                    .map(|device| {
+                        device
+                            .id()
+                            .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
+                            .map_err(cpal_capture_error)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+            let inputs = if selected.is_some() {
+                host.input_devices()
+                    .map_err(cpal_capture_error)?
+                    .map(|device| {
+                        device
+                            .id()
+                            .map(|id| VoiceInputDeviceId(Box::from(id.to_string())))
+                            .map_err(cpal_capture_error)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+            Ok(CaptureDeviceInventory { default, inputs })
+        })?;
+        if inventory.default.is_none() && inventory.inputs.is_empty() {
+            // A sound server that went away reports no default device
+            // rather than an error. Reconnect on the next poll.
+            self.host.reset();
+        }
+        Ok(inventory)
     }
 
     fn open_stream(
@@ -876,7 +889,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
     ) -> Result<Self::Stream, VoiceCaptureError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-        let host = cpal::default_host();
+        let host = self.host.get();
         let device = match target {
             CaptureDeviceTarget::SystemDefault(expected) => {
                 let device = host
@@ -897,7 +910,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
                 .as_str()
                 .parse::<cpal::DeviceId>()
                 .ok()
-                .and_then(|id| crate::mixer::cpal_device_by_id(&host, &id))
+                .and_then(|id| crate::mixer::cpal_device_by_id(host, &id))
                 .ok_or_else(|| VoiceCaptureError::InputDeviceUnavailable(selected.clone()))?,
         };
         let supported = device.default_input_config().map_err(cpal_capture_error)?;

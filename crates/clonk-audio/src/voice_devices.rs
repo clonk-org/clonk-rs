@@ -31,8 +31,10 @@ impl Drop for VoiceInputDeviceCatalog {
 }
 
 impl VoiceInputDeviceCatalog {
+    #[cfg(feature = "cpal")]
     pub(crate) fn new() -> Self {
-        Self::with_enumerator(crate::voice_input_devices)
+        let mut host = crate::sound_host::SoundHost::default();
+        Self::with_enumerator(move || host.with(crate::voice::offered_voice_input_devices))
     }
 
     fn with_enumerator(

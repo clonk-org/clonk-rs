@@ -2,6 +2,8 @@ mod decoder;
 mod fluidsynth;
 mod midi;
 mod mixer;
+#[cfg_attr(not(feature = "cpal"), allow(dead_code))]
+mod sound_host;
 mod tracker;
 mod voice;
 mod voice_capture_control;
@@ -44,6 +46,7 @@ pub use voice_codec::{
 pub use voice_echo::VoiceEchoReference;
 pub use voice_processing::{VoiceProcessingConfig, VoiceProcessingSwitches};
 
+pub use sound_host::saved_device_follows_system_default;
 pub use voice_devices::VoiceInputDeviceInventory;
 
 pub use voice_microphone_test::{

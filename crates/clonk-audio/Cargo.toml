@@ -20,7 +20,7 @@ libloading = "0.9"
 midly = { version = "=0.5.3", default-features = false, features = ["std", "strict"] }
 symphonia-bundle-mp3 = "0.6"
 symphonia-core = "0.6"
-cpal = { version = "0.18.1", optional = true }
+cpal = { version = "0.18.1", optional = true, features = ["pulseaudio"] }
 tracing = "0.1"
 aec3 = "=0.4.0"
 opus = "=0.4.0"

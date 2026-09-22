@@ -250,12 +250,20 @@ impl AudioOptions {
             }
         }
 
+        // A device saved through another sound host can never be listed
+        // again, so it means the system default rather than an unplugged
+        // device (clonk-org/clonk-rs#1707).
         if let Some(raw) = config.get_in(Some("Voice"), "OutputDevice") {
-            self.voice_output_device = (!raw.is_empty()).then(|| raw.to_owned());
+            self.voice_output_device = (!raw.is_empty()
+                && !clonk_audio::saved_device_follows_system_default(raw))
+            .then(|| raw.to_owned());
         }
 
         if let Some(raw) = config.get_in(Some("Voice"), "InputDevice") {
-            self.voice_input_device = raw.parse().ok();
+            self.voice_input_device = raw
+                .parse()
+                .ok()
+                .filter(|_| !clonk_audio::saved_device_follows_system_default(raw));
         }
 
         if let Some(raw) = config.get_in(Some("Voice"), "PushToTalkKey") {
@@ -767,6 +775,33 @@ mod tests {
             Some("corrupt persisted identity"),
             "only an explicitly empty selection may mean system default",
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn devices_saved_from_the_other_linux_sound_host_follow_the_system_default() {
+        // Devices come from PulseAudio while its server runs and from ALSA
+        // otherwise. An ID saved through the other host can never match.
+        let (input, output) = if clonk_audio::saved_device_follows_system_default("alsa:default") {
+            (
+                "alsa:sysdefault:CARD=C920",
+                "alsa:sysdefault:CARD=Generic_1",
+            )
+        } else {
+            (
+                "pulseaudio:alsa_input.usb-046d_HD_Pro_Webcam_C920_8734B79F-02.analog-stereo",
+                "pulseaudio:alsa_output.pci-0000_75_00.6.analog-stereo",
+            )
+        };
+        let mut config = Config::new();
+        config.set_in(Some("Voice"), "InputDevice", input);
+        config.set_in(Some("Voice"), "OutputDevice", output);
+
+        let mut loaded = AudioOptions::default();
+        loaded.apply_config(&config);
+
+        assert_eq!(loaded.voice_input_device, None);
+        assert_eq!(loaded.voice_output_device, None);
     }
 
     #[test]
