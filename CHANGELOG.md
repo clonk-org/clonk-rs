@@ -4,6 +4,37 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-09-22
+
+### Bug fixes
+
+- End a function at an old-style label inside its body and lose only that label (#1697)
+- End a function where the next declaration begins inside its body (#1692)
+- Sharpen the voice chat speaking indicator (#1690)
+- Recover release publication with device loss diagnostics (#1688)
+- Decide whether an old-style function is global from its own declaration (#1675)
+- Preserve completed UDP sends across peer closure (#1676)
+- Let a global func's for-loop vars shadow a declaring script's locals (#1672)
+- Refuse window pointer input in the capture oracle so the real pointer cannot reach a capture (#1670)
+
+### Features
+
+- Harden voice chat and upgrade audio quality (#1691)
+- Hold the reconciled compatibility evidence so the profile may be claimed (#1662)
+
+### Performance
+
+- Reuse catalog metadata during scenario search (#1685)
+- Read and write one element of an effect variable's array in place (#1678)
+
+### Testing
+
+- Send voice frames until one arrives instead of waiting on a single droppable frame (#1695)
+- Choose a configured UDP port again when another process takes it first (#1693)
+- Audit keyboard and gamepad capture pixels (#1680)
+- Separate lobby join timing from coverage checks (#1677)
+- Audit options reset confirmation pixels (#1667)
+
 ## [0.28.0] - 2026-09-20
 
 ### Bug fixes
