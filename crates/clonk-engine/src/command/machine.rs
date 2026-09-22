@@ -227,38 +227,9 @@ impl MoveToState {
                     self.pathfinder_debug_update = Some(finder.debug_snapshot().clone());
                     match path {
                         Some(path) if path.waypoints.len() > 2 => {
-                            let waypoint_count = path.waypoints.len();
-                            let mut operations = Vec::with_capacity(waypoint_count - 2);
-                            for waypoint in
-                                path.waypoints.into_iter().skip(1).take(waypoint_count - 2)
-                            {
-                                let request =
-                                    if let Some(transfer_target) = waypoint.transfer_target {
-                                        CommandRequest::new(CommandId::Transfer)
-                                            .with_target(Some(transfer_target))
-                                            .with_tx(Some(waypoint.x))
-                                            .with_ty(Some(waypoint.y))
-                                            .with_evaluated(true)
-                                            .with_mode(CommandMode::SilentSub)
-                                    } else {
-                                        let (mut x, mut y) = (waypoint.x, waypoint.y);
-                                        adjust_solid_offset(
-                                            landscape,
-                                            &mut x,
-                                            &mut y,
-                                            ctx.object.shape.width / 2,
-                                            ctx.object.shape.height / 2,
-                                        );
-                                        CommandRequest::new(CommandId::MoveTo)
-                                            .with_tx(Some(x))
-                                            .with_ty(Some(y))
-                                            .with_data(CommandData::Integer(self.data))
-                                            .with_update_interval(25)
-                                            .with_evaluated(true)
-                                            .with_mode(CommandMode::SilentSub)
-                                    };
-                                operations.push(CommandOperation::PushFront(request));
-                            }
+                            let operations = pathfinder_waypoint_operations(
+                                path, landscape, ctx.object, self.data,
+                            );
                             return CommandStepResult::running(None).with_operations(operations);
                         }
                         Some(_) => return CommandStepResult::running(None),
@@ -925,6 +896,51 @@ impl MoveToState {
 
         None
     }
+}
+
+/// C4PathFinder::SetCompletePath hands every intermediate waypoint, target
+/// side first, to ObjectAddWaypoint, which pushes each one onto the front of
+/// the stack as a Transfer or MoveTo (C4PathFinder.cpp:383-400;
+/// C4Command.cpp:189-209).
+pub(in crate::command) fn pathfinder_waypoint_operations(
+    path: crate::pathfinder::Path,
+    landscape: &crate::Landscape,
+    object: &CommandObjectSnapshot,
+    data: i32,
+) -> Vec<CommandOperation> {
+    let waypoint_count = path.waypoints.len();
+    path.waypoints
+        .into_iter()
+        .skip(1)
+        .take(waypoint_count.saturating_sub(2))
+        .map(|waypoint| {
+            let request = if let Some(transfer_target) = waypoint.transfer_target {
+                CommandRequest::new(CommandId::Transfer)
+                    .with_target(Some(transfer_target))
+                    .with_tx(Some(waypoint.x))
+                    .with_ty(Some(waypoint.y))
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub)
+            } else {
+                let (mut x, mut y) = (waypoint.x, waypoint.y);
+                adjust_solid_offset(
+                    landscape,
+                    &mut x,
+                    &mut y,
+                    object.shape.width / 2,
+                    object.shape.height / 2,
+                );
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(x))
+                    .with_ty(Some(y))
+                    .with_data(CommandData::Integer(data))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub)
+            };
+            CommandOperation::PushFront(request)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
