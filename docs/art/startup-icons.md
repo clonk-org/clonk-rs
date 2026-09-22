@@ -41,3 +41,8 @@ the game draws its own track behind the transparent sprite.
 The selected generation prompts and source-image hashes are recorded in
 [startup-icon-prompts.json](startup-icon-prompts.json). They describe the
 approved artwork before runtime matting and atlas packing.
+
+Visual review: [before and after textures](startup-icon-comparison.png) and
+[the rendered Audio options screen](startup-icons-in-game.png). The comparison
+enlarges the original pixels without smoothing and displays both sets at the
+same size; the in-game capture uses the Normal profile at 1280×720.
