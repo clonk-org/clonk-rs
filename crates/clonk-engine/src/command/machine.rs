@@ -151,12 +151,14 @@ impl MoveToState {
                     ctx.object.physical.can_fly != 0
                 };
                 let (mut x, mut y) = (tx, ty);
+                // The raw cObj->Shape.Hgt, not the eighteen-pixel At
+                // expansion (C4Command.cpp:1640).
                 adjust_move_to_target(
                     landscape,
                     &mut x,
                     &mut y,
                     free_move,
-                    ctx.object.shape.height,
+                    ctx.object.shape_height,
                 );
                 self.tx = Some(x);
                 self.ty = Some(y);
@@ -654,7 +656,7 @@ impl MoveToState {
                         &mut x,
                         &mut y,
                         physical.can_fly != 0,
-                        ctx.object.shape.height,
+                        ctx.object.shape_height,
                     );
                 }
                 self.tx = Some(x);

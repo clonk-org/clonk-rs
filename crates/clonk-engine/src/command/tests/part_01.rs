@@ -1053,6 +1053,59 @@
         );
     }
 
+    #[test]
+    fn move_to_init_evaluation_lifts_by_the_raw_shape_height() {
+        // InitEvaluation passes the raw cObj->Shape.Hgt to AdjustMoveToTarget,
+        // not the eighteen-pixel At expansion: a ten-pixel actor's grounded
+        // target rises by 10/2 = 5 above the bottom of free space
+        // (C4Command.cpp:94-114,1639-1641; C4Object.h:340).
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut small = walking_jumper(Vector2::new(100, 100));
+        small.shape_top = -5;
+        small.shape_height = 10;
+        // The snapshot's At rectangle keeps the addtop expansion to 18.
+        small.shape = DefinitionRect::new(92, 87, 16, 18);
+        let evaluated_target =
+            |stack: &CommandStack| match &stack.entries.front().expect("MoveTo").state {
+                CommandState::MoveTo(state) => (state.tx, state.ty),
+                other => panic!("expected MoveTo, got {other:?}"),
+            };
+        for physical_deferred in [false, true] {
+            small.physical_deferred = physical_deferred;
+            let mut ctx = empty_command_ctx(&small, 1);
+            ctx.landscape = Some(&landscape);
+            let mut stack = CommandStack::new();
+            stack
+                .push_front(request!(MoveTo, with_tx: Some(100), with_ty: Some(50)))
+                .expect("MoveTo queues");
+
+            let evaluation = stack.execute_front(&ctx).expect("MoveTo evaluates");
+            if physical_deferred {
+                let command_instance_id = match evaluation.events.as_slice() {
+                    [CommandEvent::ResolveCommandPhysical {
+                        command_instance_id,
+                        ..
+                    }] => *command_instance_id,
+                    other => panic!("unexpected evaluation events: {other:?}"),
+                };
+                stack
+                    .execute_pending_physical(
+                        &ctx,
+                        crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                        command_instance_id,
+                        small.physical,
+                    )
+                    .expect("deferred evaluation resumes");
+            }
+
+            assert_eq!(
+                evaluated_target(&stack),
+                (Some(100), Some(104)),
+                "free space bottoms out at 109; lift by raw Shape.Hgt/2 (deferred physical: {physical_deferred})"
+            );
+        }
+    }
+
     // C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): the first
     // Execute only evaluates (returns true — no movement that frame);
     // AdjustMoveToTarget grounds a mid-air target unless Data carries
