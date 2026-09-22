@@ -1,0 +1,285 @@
+{
+  "title": "Clonk in-game menu and options icon review \u2014 batch 3",
+  "status": "All nine previews approved and integrated in the game at 8x; three checked Options variants use the approved high-resolution checkmark",
+  "method": "OpenAI built-in imagegen, except Save game, which reuses approved UI-05 art",
+  "previewBackground": "Hostility and Settings have generated ivory review backdrops; prepare_runtime.sh removes them and fits all approved art to 280x280 transparent sprites.",
+  "icons": [
+    {
+      "id": "MENU-01",
+      "key": "menu-save",
+      "label": "Save game",
+      "source": "planet/Graphics.c4g/Menu.png",
+      "sourceCell": [
+        0,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "d83999b9ecd6a3053837ee1eaf211950d71ba260ba21be305ebb08f8346bf5f4",
+      "before": "before/menu-save.png",
+      "after": "after/menu-save.png",
+      "afterSize": [
+        256,
+        256
+      ],
+      "afterSha256": "98cc53ae027528d440a1965618524d886a24f36434fefa1556c6b54ea484014a",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": "",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": null,
+      "note": "Uses the already-approved UI-05 Save artwork."
+    },
+    {
+      "id": "MENU-02",
+      "key": "menu-goals",
+      "label": "Goals",
+      "source": "planet/Graphics.c4g/Menu.png",
+      "sourceCell": [
+        140,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "d83999b9ecd6a3053837ee1eaf211950d71ba260ba21be305ebb08f8346bf5f4",
+      "before": "before/menu-goals.png",
+      "after": "after/menu-goals.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "0dbeae67578bc5e8c663444ce29413fe714a6b11d384fe3ba4202ae5bc6febd6",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "The background and the tower structure are missing from the high-res version",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": "history/menu-goals-round-1.png",
+      "note": "Restored the brown backdrop and tall gray tower behind the stone building and gold."
+    },
+    {
+      "id": "MENU-03",
+      "key": "menu-rules",
+      "label": "Rules",
+      "source": "planet/Graphics.c4g/Menu.png",
+      "sourceCell": [
+        175,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "d83999b9ecd6a3053837ee1eaf211950d71ba260ba21be305ebb08f8346bf5f4",
+      "before": "before/menu-rules.png",
+      "after": "after/menu-rules.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "8221e60ccea27f074abfb1970f7d90057a2cde842464452f31484c2e0b47d99b",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "The flag doesn't have a pole in the high res version",
+      "roundTwoReview": "pending",
+      "roundTwoFeedback": "This doesn't look like the original. The square edges aren't chamfered, the blue flag and the lightning bolt and the hammer aren't represented well.",
+      "roundThreeReview": "pending",
+      "roundThreeFeedback": "The HD version should NOT have chamfered edges, but the contents inside look correct now",
+      "roundFourReview": "approve",
+      "previousPreview": "history/menu-rules-round-3.png",
+      "note": "Square gold plaque with a blue flag, red lightning bolt, and gray hammer."
+    },
+    {
+      "id": "MENU-04",
+      "key": "menu-hostility",
+      "label": "Hostility",
+      "source": "planet/Graphics.c4g/Menu.png",
+      "sourceCell": [
+        245,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "d83999b9ecd6a3053837ee1eaf211950d71ba260ba21be305ebb08f8346bf5f4",
+      "before": "before/menu-hostility.png",
+      "after": "after/menu-hostility.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "d1faadd4d706d4b382384cd5ac75d4a2be7a8bcc8df91ce29f7e1a3aebce72f7",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "Flatten the swords, make sure we're preserving the Clonk style",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": "history/menu-hostility-round-1.png",
+      "note": "Crossed swords now have broad, flatter Clonk-style blades."
+    },
+    {
+      "id": "MENU-05",
+      "key": "menu-display",
+      "label": "Display",
+      "source": "planet/Graphics.c4g/Menu.png",
+      "sourceCell": [
+        280,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "d83999b9ecd6a3053837ee1eaf211950d71ba260ba21be305ebb08f8346bf5f4",
+      "before": "before/menu-display.png",
+      "after": "after/menu-display.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "ffa8507ddd4eb6143ad29799364d87a258698ce5fd2fbcf70d4d1c52afc81130",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": "",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": null,
+      "note": "Plain CRT monitor; paired with the FPS icon below."
+    },
+    {
+      "id": "MENU-06",
+      "key": "options-settings",
+      "label": "Settings",
+      "source": "planet/Graphics.c4g/Options.png",
+      "sourceCell": [
+        0,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "81e64a37fa09e1f4287a6e2de21d8249bfa52acf43209be5cbf2c76bbeb1e137",
+      "before": "before/options-settings.png",
+      "after": "after/options-settings.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "590f6a65699db317747ee05b7c3852d70908099cf98a92a263324b16c8a6528f",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "Gears aren't meshing",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": "history/options-settings-round-1.png",
+      "note": "The brass gear teeth now engage at their contact point."
+    },
+    {
+      "id": "MENU-07",
+      "key": "options-music",
+      "label": "Music",
+      "source": "planet/Graphics.c4g/Options.png",
+      "sourceCell": [
+        35,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "81e64a37fa09e1f4287a6e2de21d8249bfa52acf43209be5cbf2c76bbeb1e137",
+      "before": "before/options-music.png",
+      "after": "after/options-music.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "369788cb8636be4c3b4781e70edfb43db140dfd71705ba0c0e631b2d59bc1c9e",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": "",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": null,
+      "note": "Two connected golden notes."
+    },
+    {
+      "id": "MENU-08",
+      "key": "options-fps",
+      "label": "FPS display",
+      "source": "planet/Graphics.c4g/Options.png",
+      "sourceCell": [
+        175,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "81e64a37fa09e1f4287a6e2de21d8249bfa52acf43209be5cbf2c76bbeb1e137",
+      "before": "before/options-fps.png",
+      "after": "after/options-fps.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "58084fb6b9867648177377fa56bbb22bbf72c165a3511cfedc005467334e0800",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": "",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": null,
+      "note": "The same CRT monitor as Display, with FPS on its screen."
+    },
+    {
+      "id": "MENU-09",
+      "key": "options-audio",
+      "label": "Audio",
+      "source": "planet/Graphics.c4g/Options.png",
+      "sourceCell": [
+        595,
+        0,
+        35,
+        35
+      ],
+      "sourceSha256": "81e64a37fa09e1f4287a6e2de21d8249bfa52acf43209be5cbf2c76bbeb1e137",
+      "before": "before/options-audio.png",
+      "after": "after/options-audio.png",
+      "afterSize": [
+        1254,
+        1254
+      ],
+      "afterSha256": "701942c786af8f6dd9306dad3c14e07776e9ce8b47c8edac7d32ddff06817189",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "This is supposed to be a speaker, not an ear",
+      "roundTwoReview": "approve",
+      "roundTwoFeedback": "",
+      "roundThreeReview": null,
+      "roundThreeFeedback": null,
+      "roundFourReview": "approve",
+      "previousPreview": "history/options-audio-round-1.png",
+      "note": "A golden speaker cone informed by the game's StartupOptionIconsHD speaker."
+    }
+  ],
+  "otherLowResolutionCandidates": [
+    "Other Options.png cells and toggle pairs (35x35 cells)",
+    "Gamepad.png four 80x36 controller phases",
+    "Hand.png seven 64x64 gesture phases",
+    "Rank.png 24 16x16 symbols",
+    "Flag.png and Crew.png, which require owner-color treatment"
+  ]
+}

@@ -2040,6 +2040,98 @@ fn installed_app_uses_all_approved_hud_icons_at_their_original_layout_sizes() {
 }
 
 #[test]
+fn installed_app_uses_approved_menu_icons_in_original_sheet_cells() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(1280, 720, &paths);
+    let hud_menu = app.assets.hud_graphics().menu.clone().test_value();
+    let dialog_menu = app.assets.dialog_image("Menu.png").test_value();
+    let dialog_options = app.assets.dialog_image("Options.png").test_value();
+
+    for (sheet, phase) in [
+        (&hud_menu, 0),
+        (&hud_menu, 4),
+        (&hud_menu, 5),
+        (&hud_menu, 7),
+        (&hud_menu, 8),
+        (&dialog_menu, 0),
+        (&dialog_menu, 4),
+        (&dialog_menu, 5),
+        (&dialog_menu, 7),
+        (&dialog_menu, 8),
+        (&dialog_options, 0),
+        (&dialog_options, 1),
+        (&dialog_options, 5),
+        (&dialog_options, 17),
+    ] {
+        let icon = sheet
+            .region_replacement([phase * 35, 0, 35, 35])
+            .test_value();
+        main_assert_eq!((icon.width(), icon.height()) => (280, 280));
+        main_assert!(icon.pixels().chunks_exact(4).any(|pixel| pixel[3] == 0));
+        main_assert!(icon.pixels().chunks_exact(4).any(|pixel| pixel[3] == 255));
+    }
+    main_assert_eq!((hud_menu.width(), hud_menu.height()) => (dialog_menu.width(), dialog_menu.height()));
+    main_assert!(dialog_menu.region_replacement([35, 35, 35, 35]).is_none());
+    main_assert!(dialog_options
+        .region_replacement([35 * 3, 0, 35, 35])
+        .is_none());
+}
+
+#[test]
+fn enabled_menu_options_keep_high_resolution_checked_variants() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(1280, 720, &paths);
+    let options = app.assets.dialog_image("Options.png").test_value();
+
+    for (base_phase, checked_phase) in [(1, 2), (5, 6), (17, 18)] {
+        let base = options
+            .region_replacement([base_phase * 35, 0, 35, 35])
+            .test_value();
+        let checked = options
+            .region_replacement([checked_phase * 35, 0, 35, 35])
+            .test_value();
+        main_assert_eq!((checked.width(), checked.height()) => (280, 280));
+        main_assert_ne!(checked.pixels() => base.pixels());
+        main_assert!(checked.pixels().chunks_exact(4).any(|pixel| {
+            pixel[0] > 150 && pixel[0] > pixel[1].saturating_mul(2) && pixel[3] > 200
+        }));
+    }
+}
+
+#[test]
+fn active_scenario_uses_approved_menu_and_checked_options_icons() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(320, 200, &paths);
+    let scenario =
+        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+            .test_value();
+    let game = app
+        .loaded_game_graphics_resources(&scenario, None)
+        .test_value();
+    let menu = game.hud_graphics.menu.as_ref().test_value();
+    let options = game.options.as_ref().test_value();
+
+    for phase in [0, 4, 5, 7, 8] {
+        let icon = menu
+            .region_replacement([phase * 35, 0, 35, 35])
+            .test_value();
+        main_assert_eq!((icon.width(), icon.height()) => (280, 280));
+    }
+    for phase in [0, 1, 2, 5, 6, 17, 18] {
+        let icon = options
+            .region_replacement([phase * 35, 0, 35, 35])
+            .test_value();
+        main_assert_eq!((icon.width(), icon.height()) => (280, 280));
+    }
+}
+
+#[test]
 fn active_scenario_upgrades_stock_hud_icons_and_keeps_custom_art() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);

@@ -28,3 +28,13 @@ planet/Graphics.c4g by RedWolf Design. Generated with OpenAI imagegen and
 approved for Clonk Rust in 2026, then prepared as transparent sprites at 8x
 the source dimensions. They use the same CC BY-NC 4.0 license above. See
 docs/art/hud-icons.md for the source and in-game comparison.
+
+menu-icons/*.png are high-resolution adaptations of selected 35x35 cells in
+planet/Graphics.c4g/Menu.png and Options.png by RedWolf Design. The approved
+previews were generated with OpenAI imagegen for Clonk Rust in 2026 and
+prepared as transparent sprites at 8x the source dimensions. The Music, FPS,
+and Audio checked variants combine their approved base icons with a red mark
+derived from the approved ui-icons/checkbox-on.png artwork. They use the same
+CC BY-NC 4.0 license above. See docs/art/menu-icons.md and
+docs/art/ui-icon-review-batch3/generation-notes.md for the source cells,
+review history, and preparation.
