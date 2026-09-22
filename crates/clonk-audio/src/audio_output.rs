@@ -271,13 +271,7 @@ fn output_stream_configs(
     if !voice {
         return cpal_output_stream_config_candidates(config);
     }
-    let frames = match *config.buffer_size() {
-        cpal::SupportedBufferSize::Range { min, max } if min <= max => 256_u32.clamp(min, max),
-        _ => 256,
-    };
-    let mut requested = config.config();
-    requested.buffer_size = cpal::BufferSize::Fixed(frames);
-    [requested, config.config()]
+    cpal_buffer_config_candidates(config, VOICE_BUFFER_FRAMES)
 }
 
 struct NativeOutputDriver {
