@@ -277,6 +277,8 @@ that.
   a green pull request has passed admission, not the landing gate. If you stop
   before it merges — the queue is jammed, a failure needs a decision that is not
   yours, the session ends — say so, and say exactly what state you left it in.
+- After `state: MERGED`, `cargo clean` the worktree — see [Worktree build
+  cache](#worktree-build-cache).
 
 ## Rust style
 
@@ -344,6 +346,43 @@ The change is done when it has [landed](#pull-requests--how-work-lands).
   concurrent session's uncommitted work. Format only what you wrote:
   `rustfmt --edition 2021 <file>`.
 
+## Worktree build cache
+
+A fresh worktree starts with no `target/`, so its first build recompiles every
+dependency. Seed it from the main checkout before that first build:
+
+```sh
+python3 scripts/seed_worktree_target.py
+```
+
+It reflink-clones the main checkout's `target/` (the first `git worktree list`
+entry, or `--from <dir>`) — copy-on-write, so it takes about a second and no
+disk until the builds diverge — then deletes the fingerprints of this
+workspace's own packages. Cargo reuses every third-party crate and rebuilds the
+workspace from this checkout's source. It refuses, and copies nothing, when the
+filesystem cannot reflink (btrfs and XFS can; ext4 and tmpfs cannot), when
+`target/` already exists, or in the main checkout; a refusal just means build
+normally. A seed is only as warm as the main checkout's `target/`, profile by
+profile: the gates build `target/debug`, which `cargo nextest run --workspace
+--no-run` there warms.
+
+Two shortcuts look equivalent and silently test the wrong code:
+
+- **Never share a target directory** between checkouts, by `CARGO_TARGET_DIR`
+  or a symlinked `target/`. Cargo hashes workspace units relative to the
+  workspace root, so every worktree's crates land on one artifact path, and it
+  judges them fresh by mtime alone: a worktree whose edits predate another
+  worktree's build runs that build's binary without recompiling. Each build
+  also holds the directory's lock, so every session queues behind it.
+- **Never `cp -a` a `target/` by hand** — it keeps the same stale fingerprints.
+  The script's fingerprint step is what makes the copy safe.
+
+Once the pull request is `MERGED`, or the work is abandoned, run `cargo clean`
+in the worktree. Its build is dead weight from then on, and on btrfs every
+snapshot taken while it exists keeps its blocks until that snapshot expires.
+Leave the main checkout's `target/` alone: it seeds every other session, and
+its owner can clean it at any time for the price of one cold build.
+
 ## Architecture notes / gotchas
 
 - **Two scripting paths coexist.** `clonk-engine`'s `Engine` supports a
@@ -367,6 +406,7 @@ The change is done when it has [landed](#pull-requests--how-work-lands).
 ## Useful commands
 
 ```sh
+python3 scripts/seed_worktree_target.py                  # warm a fresh worktree's target/
 cargo dev-check --base origin/main --budget-seconds 60   # fast change-aware loop
 cargo dev-check --base origin/main --plan                # inspect without running
 cargo nextest run -p <crate>                             # focused
