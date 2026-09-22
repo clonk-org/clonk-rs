@@ -9,7 +9,7 @@ use crate::support::real_scenario::{
     object_with_definition,
 };
 use crate::support::EngineTestExt;
-use clonk_engine::{Engine, ObjectId, SpawnConfig};
+use clonk_engine::{Engine, ObjectId, ObjectStatus, SpawnConfig};
 use clonk_script::Value;
 
 fn call(engine: &mut Engine, object: ObjectId, function: &str) -> Value {
@@ -227,4 +227,144 @@ fn a_quaker_player_is_relaunched_after_their_last_bot_dies() {
         relaunched,
         "the victim's replacement bot must wait inside its TIM2 holder"
     );
+}
+
+/// clonk-org/clonk-rs-content#87: DieNeueWelt restores its Storeframework
+/// `#55662` holding three pieces of smoked meat but with `LocalNamed=0`. The
+/// rack makes its `iMeat` and `iTime` arrays in `Initialize`, which a restored
+/// object never runs, so its `CheckMeat` timer indexed nil, an error under the
+/// pinned engine too (C4AulExec.cpp:906-913). The restored object now carries
+/// the arrays, with the meat it holds in its first three slots.
+#[test]
+fn die_neue_welts_meat_rack_checks_the_meat_it_holds() {
+    let mut engine = load_installed_scenario("Collection.c4f/Settling.c4f/DieNeueWelt.c4s", 0);
+    let rack = object_with_definition(&engine, "STFW").expect("the scenario restores a rack");
+
+    call(&mut engine, rack, "CheckMeat");
+}
+
+/// clonk-org/clonk-rs-content#80: Adventure and the twelve playable
+/// MissionsHarkon missions name `MetalMagic.c4f\Misc.c4d`, which the import
+/// keeps only at `Collection.c4f/Knights.c4f/MetalMagic.c4f/Misc.c4d`.
+/// C4GameResList::Load opens each definition name against the data root and
+/// fails the start with IDS_PRC_DEFNOTFOUND when it is not there
+/// (C4GameParameters.cpp:199-207), so none of them could start. They now name
+/// the path the definitions are at.
+#[test]
+fn the_metal_magic_adventures_load_their_misc_definitions() {
+    // The packed Adventure and one unpacked mission from each chapter; all
+    // twelve missions carry the same line.
+    for path in [
+        "Collection.c4f/Adventures.c4f/Adventure.c4s",
+        "Collection.c4f/Adventures.c4f/MissionsHarkon.c4f/Mission1A.c4s",
+        "Collection.c4f/Adventures.c4f/MissionsHarkon.c4f/Mission2G.c4s",
+    ] {
+        let engine = load_installed_scenario(path, 0);
+        // `_BRL`, the barrel, is one of Misc.c4d's definitions.
+        assert!(engine.definition("_BRL").is_some(), "{path} loads Misc.c4d");
+    }
+}
+
+/// Runs one step of the scenario's script counter and answers where the step
+/// left the counter.
+const SCRIPT_STEP_PROBE: &str = r#"#strict
+public func CounterAfter(string step)
+{
+    GameCall(step);
+    return ScriptCounter();
+}
+"#;
+
+/// clonk-org/clonk-rs-content#67: the RufDerWipfeRE tutorial declared
+/// `Script410` twice. C4Aul binds the one declared last (C4Aul.cpp:562-576
+/// finds the function added last first), so the hut the player is told to
+/// build was never checked, and the crew check's wait, `goto(418)`, ran
+/// `Script420` again and let the counter run on to `Script990`, which fulfils
+/// the goal unaided. The crew check is `Script430` now and waits on itself,
+/// as every other check in the file does.
+#[test]
+fn the_rufderwipfe_tutorial_waits_for_the_hut_and_then_for_the_crew() {
+    let mut engine = load_installed_scenario(
+        "Collection.c4f/Settling.c4f/RufDerWipfeRE.c4f/Tutorial.c4s",
+        0,
+    );
+    let _pupil = join_local_player(&mut engine, "Tutorial pupil");
+    engine
+        .register_script_definition("STPR", "Script step probe", SCRIPT_STEP_PROBE)
+        .expect("the probe registers");
+    let probe = engine.spawn_test_object(SpawnConfig::new("STPR"));
+    let index = engine.test_object_index(probe);
+    let mut counter_after = |step: &str| {
+        engine
+            .call_object_function(index, "CounterAfter", vec![step.into()])
+            .unwrap_or_else(|error| panic!("{step} runs: {error}"))
+            .as_c4_int()
+    };
+
+    // No hut is built, so the hut check waits on itself.
+    assert_eq!(counter_after("Script410"), Some(408));
+    // A new player has fewer than three clonks, so the crew check waits too.
+    assert_eq!(counter_after("Script430"), Some(428));
+}
+
+fn knife_packs(engine: &Engine) -> usize {
+    engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "KNFP" && object.status != ObjectStatus::Deleted)
+        .count()
+}
+
+/// clonk-org/clonk-rs-content#59: both Faffnir missions hand the assassin a
+/// knife pack, `KNFP`, and clear the previous kit on each relaunch with
+/// `RemoveAll(KNPF)`. `KNPF` names no definition, which is no error in C4Aul
+/// (an id is just a constant), so every other item was cleared and the knife
+/// packs piled up. The cleanup names `KNFP` now.
+#[test]
+fn a_faffnir_relaunch_leaves_one_knife_pack() {
+    // The assassin is team 1. The second mission relaunches only player 1, so
+    // a Kanderianer (team 7) joins first; it also places a knife pack of its
+    // own, which the cleanup takes too.
+    for (path, teams) in [
+        (
+            "Collection.c4f/Adventures.c4f/Faffnir.c4f/faffnir_1.c4s",
+            &[1][..],
+        ),
+        (
+            "Collection.c4f/Adventures.c4f/Faffnir.c4f/Faffnir_2.c4s",
+            &[7, 1][..],
+        ),
+    ] {
+        let mut engine = load_installed_scenario(path, 0);
+        let players = teams
+            .iter()
+            .map(|&team| join_local_player_on_team(&mut engine, format!("Team {team}"), team))
+            .collect::<Vec<_>>();
+        let assassin = *players.last().expect("a player joined");
+
+        engine
+            .call_scenario_script_function("RelaunchPlayer", vec![Value::Int(assassin), Value::Nil])
+            .unwrap_or_else(|error| panic!("{path} relaunches: {error}"));
+
+        assert_eq!(knife_packs(&engine), 1, "{path}: only the new kit's pack");
+    }
+}
+
+/// clonk-org/clonk-rs-content#59: Der goldene Wipf 2's `RelaunchPlayer` makes
+/// the replacement Wipf, then heals `obj`, a name the function never declares.
+/// Under `#strict` C4Aul refuses that identifier at link time
+/// (C4AulParse.cpp:2866), so every relaunch ended in an error there. It heals
+/// `clnk`, the Wipf it just made, now.
+#[test]
+fn a_golden_wipf_relaunch_runs_to_its_end() {
+    let mut engine = load_installed_scenario(
+        "Collection.c4f/Adventures.c4f/DerGoldeneWipfMutli.c4f/Der goldene Wipf2multi.c4s",
+        0,
+    );
+    let player = join_local_player(&mut engine, "Wipf keeper");
+
+    engine
+        .call_scenario_script_function("RelaunchPlayer", vec![Value::Int(player)])
+        .unwrap_or_else(|error| panic!("the relaunch completes: {error}"));
 }
