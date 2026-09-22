@@ -21,6 +21,17 @@ thinlto_cache=$(cygpath -u "$RUNNER_TEMP")/clonk-msvc-thinlto
 thinlto_cache_native=$(cygpath -m "$thinlto_cache")
 mkdir -p "$thinlto_cache"
 
+# opusic-sys maps Rust's linker-plugin-lto to CMake IPO. With cl.exe that
+# produces MSVC /GL objects, which Rust's LLD cannot consume. Keep native
+# archives as ordinary COFF while retaining Rust's cached ThinLTO. Per-config
+# settings override the dependency's CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON.
+native_toolchain=$(cygpath -u "$RUNNER_TEMP")/clonk-msvc-native.cmake
+cat >"$native_toolchain" <<'CMAKE'
+foreach(configuration DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_${configuration} OFF)
+endforeach()
+CMAKE
+
 # rust-cache hashes every installed rustup toolchain. Hosted runner images can
 # carry different unrelated toolchains, so retain only the compiler that owns
 # this build before the workflow computes its cache identity.
@@ -47,6 +58,7 @@ unset LINK _LINK_
 {
     echo "CARGO_BUILD_TARGET=$cargo_target"
     echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$(cygpath -w "$rust_lld")"
+    echo "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc=$(cygpath -m "$native_toolchain")"
     echo "RUSTFLAGS=$rustflags"
     echo "THINLTO_CACHE_DIR=$thinlto_cache"
     echo 'LINK='
