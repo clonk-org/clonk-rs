@@ -750,6 +750,21 @@ pub(crate) fn cpal_buffer_config_candidates(
     [requested, config.config()]
 }
 
+/// Finds the listed device a saved ID names.
+///
+/// cpal 0.18's ALSA host appends `,DEV=0` to a PCM ID that has no `DEV=`
+/// before looking it up, so it never finds `sysdefault:CARD=C920`, an ID it
+/// lists itself. The listed ID is looked for as-is first.
+#[cfg(feature = "cpal")]
+pub(crate) fn cpal_device_by_id(host: &cpal::Host, id: &cpal::DeviceId) -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    host.devices()
+        .ok()
+        .and_then(|mut devices| devices.find(|device| device.id().ok().as_ref() == Some(id)))
+        .or_else(|| host.device_by_id(id))
+}
+
 #[cfg(feature = "cpal")]
 pub(crate) fn try_cpal_stream_configs<T, E>(
     candidates: impl IntoIterator<Item = cpal::StreamConfig>,

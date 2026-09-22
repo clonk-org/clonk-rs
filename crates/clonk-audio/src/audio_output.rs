@@ -382,12 +382,9 @@ impl OutputDriver for NativeOutputDriver {
         id: &str,
         voice_mode: bool,
     ) -> Result<(Self::Stream, Arc<OutputBuffer>), AudioError> {
-        use cpal::traits::{DeviceTrait, HostTrait};
+        use cpal::traits::DeviceTrait;
         let id = id.parse().map_err(|_| AudioError::NoAudioDevice)?;
-        let device = self
-            .host
-            .device_by_id(&id)
-            .ok_or(AudioError::NoAudioDevice)?;
+        let device = cpal_device_by_id(&self.host, &id).ok_or(AudioError::NoAudioDevice)?;
         let supported = device
             .supported_output_configs()
             .map_err(|error| AudioError::Stream(error.to_string()))?;

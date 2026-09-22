@@ -897,7 +897,7 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
                 .as_str()
                 .parse::<cpal::DeviceId>()
                 .ok()
-                .and_then(|id| host.device_by_id(&id))
+                .and_then(|id| crate::mixer::cpal_device_by_id(&host, &id))
                 .ok_or_else(|| VoiceCaptureError::InputDeviceUnavailable(selected.clone()))?,
         };
         let supported = device.default_input_config().map_err(cpal_capture_error)?;
