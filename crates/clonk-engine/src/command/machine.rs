@@ -167,10 +167,13 @@ impl MoveToState {
         None
     }
 
+    /// One C4Command::MoveTo Execute. `allow_path_phase` false skips the
+    /// C4PathFinder phase and steers directly toward the target.
     pub(in crate::command) fn step_with_waypoint(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
         next_is_move_to: bool,
+        allow_path_phase: bool,
     ) -> CommandStepResult {
         // The initial-evaluation Execute consumes the frame without
         // moving (`if (InitEvaluation()) return;`, C4Command.cpp:1555).
@@ -199,7 +202,8 @@ impl MoveToState {
         // C4Command::MoveTo path phase (C4Command.cpp:225-255): crew and
         // definitions with a nonzero Pathfinder participate; SetLevel
         // clamps the raw DefCore value to [1,10] (C4PathFinder.cpp:557-560).
-        if (ctx.object.ocf & ocf::CREW_MEMBER != 0 || ctx.object.pathfinder != 0)
+        if allow_path_phase
+            && (ctx.object.ocf & ocf::CREW_MEMBER != 0 || ctx.object.pathfinder != 0)
             && !self.path_checked
             && c4_distance(ctx.position.x, ctx.position.y, target.x, target.y) < MAX_PATH_RANGE
             && !(inside(ctx.position.x - target.x, -PATH_RANGE, PATH_RANGE)
@@ -6719,7 +6723,7 @@ impl ActiveCommand {
         let mut result = match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => {
-                let mut result = state.step_with_waypoint(ctx, next_is_move_to);
+                let mut result = state.step_with_waypoint(ctx, next_is_move_to, true);
                 if let Some(snapshot) = state.pathfinder_debug_update.take() {
                     result
                         .events

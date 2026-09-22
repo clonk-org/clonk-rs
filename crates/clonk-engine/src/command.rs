@@ -57,7 +57,7 @@ mod tests {
 
     impl DefaultStateStep for MoveToState {
         fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-            self.step_with_waypoint(ctx, false)
+            self.step_with_waypoint(ctx, false, true)
         }
     }
 
