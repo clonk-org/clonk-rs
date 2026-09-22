@@ -7705,6 +7705,41 @@ impl EffectHostContext {
         self.master_order_preview = Some(ids);
     }
 
+    /// The category, and whether it has `definition_id`, of one link
+    /// `C4ObjectList::Add` walks past, read with the scope precedence of
+    /// `get_world_object` and `contents_sort_key` but without copying the
+    /// object. `None` is a link it skips: one that is gone, whose Status is
+    /// not the list's, or that is Unsorted (C4ObjectList.cpp:155-173).
+    fn sorted_link(
+        &self,
+        id: ObjectId,
+        list_status: ObjectStatus,
+        definition_id: &str,
+    ) -> Option<(i32, bool)> {
+        let snapshot = self
+            .pending_objects
+            .get(&id)
+            .map(|object| MasterLinkFields::of(object, definition_id))
+            .or_else(|| self.world.master_link_fields(id, definition_id))?;
+        let Some(scope) = self.object_scope(id) else {
+            return (snapshot.status == list_status && !snapshot.unsorted)
+                .then_some((snapshot.category, snapshot.same_definition));
+        };
+        let status = if scope.destroy {
+            ObjectStatus::Deleted
+        } else {
+            scope.status
+        };
+        let same_definition = scope
+            .pending_update
+            .change_def
+            .as_ref()
+            .or(scope.definition_id.as_ref())
+            .map_or(snapshot.same_definition, |scoped| scoped == definition_id);
+        (status == list_status && !scope.unsorted)
+            .then_some((scope.current_category, same_definition))
+    }
+
     fn insert_object_status_preview(
         &self,
         ids: &mut Vec<ObjectId>,
@@ -7728,19 +7763,12 @@ impl EffectHostContext {
         let mut found_cluster = false;
         if category & crate::CATEGORY_STATIC_BACK == 0 {
             for (position, other) in ids.iter().copied().enumerate() {
-                let live_sorted = self
-                    .get_world_object(other)
-                    .is_some_and(|object| object.status() == list_status)
-                    && !self.contents_object_unsorted(other);
-                if !live_sorted {
-                    continue;
-                }
-                let Some((other_category, other_definition)) = self.contents_sort_key(other) else {
+                let Some((other_category, same_definition)) =
+                    self.sorted_link(other, list_status, &definition_id)
+                else {
                     continue;
                 };
-                if other_category & CATEGORY_SORT_LIMIT == sort_category
-                    && other_definition == definition_id
-                {
+                if other_category & CATEGORY_SORT_LIMIT == sort_category && same_definition {
                     found_cluster = true;
                     break;
                 }
@@ -7750,14 +7778,9 @@ impl EffectHostContext {
         if !found_cluster {
             predecessor = None;
             for (position, other) in ids.iter().copied().enumerate() {
-                let live_sorted = self
-                    .get_world_object(other)
-                    .is_some_and(|object| object.status() == list_status)
-                    && !self.contents_object_unsorted(other);
-                if !live_sorted {
-                    continue;
-                }
-                let Some((other_category, _)) = self.contents_sort_key(other) else {
+                let Some((other_category, _)) =
+                    self.sorted_link(other, list_status, &definition_id)
+                else {
                     continue;
                 };
                 if other_category & CATEGORY_SORT_LIMIT <= sort_category {

@@ -530,6 +530,32 @@ impl Engine {
         Some(params.matches_engine_object(object))
     }
 
+    /// Read the fields `C4ObjectList::Add` compares for one link it walks
+    /// past, without projecting the object.
+    ///
+    /// # Safety
+    ///
+    /// The `lazy_host_world_object` contract applies. Callback-local seeds
+    /// are resolved before this provider is consulted.
+    unsafe fn lazy_host_world_master_link(
+        source: *const (),
+        id: ObjectId,
+        definition_id: &str,
+    ) -> Option<compat::MasterLinkFields> {
+        let engine = source.cast::<Self>();
+        // SAFETY: object storage is frozen and callback-local seeds prevent
+        // this path from reading an outstanding exclusive object borrow.
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let index = unsafe { Self::lazy_object_index(engine, objects, id) }?;
+        let object = objects.get(index)?;
+        Some(compat::MasterLinkFields {
+            status: object.state.status,
+            unsorted: object.unsorted,
+            category: object.state.category,
+            same_definition: object.definition_id == definition_id,
+        })
+    }
+
     /// Test a scalar C4FindObject criterion tree against the paused engine
     /// object without cloning its callback state.
     ///
@@ -918,6 +944,7 @@ impl Engine {
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
             .with_object_position(Self::lazy_host_world_object_position)
             .with_find_condition(Self::lazy_host_world_find_condition_matches)
+            .with_master_link(Self::lazy_host_world_master_link)
         };
         self.host_world_context_base(provider)
     }
