@@ -4379,18 +4379,20 @@ impl EffectHostContext {
         }
         self.pending_objects.insert(id, preview);
         self.pending_spawns.push(spawn);
+        // C4Game::CreateObject inserts this exact raw object synchronously,
+        // before Construction/Initialize may mutate its category or status
+        // (C4Game.cpp:1121-1138; C4ObjectList.cpp:134-175), so the rest of the
+        // call already finds it there. Record that one chronological insertion
+        // instead of sorting callback-final objects.
         if self.publish_spawn_previews {
-            // C4Game::CreateObject inserts this exact raw object synchronously,
-            // before Construction/Initialize may mutate its category or status
-            // (C4Game.cpp:1121-1138; C4ObjectList.cpp:134-175). Record that one
-            // chronological insertion instead of sorting callback-final objects.
             self.preview_object_status_change(id, status);
-        } else if self.master_order_preview.is_some() {
+        } else {
             // A context outside the creation and effect phases discards its
-            // preview at fold time, so nothing transports the exact order
-            // across deferred materialization. Retain the established
-            // callback-local sorted projection for the rest of this call.
-            self.preview_sort_master_by_category();
+            // preview at fold time, so only this call reads the list, and its
+            // bounded queries still find pending objects without a sector
+            // preview.
+            self.master_order_preview = Some(self.master_order_with_status(id, status));
+            self.inactive_order_preview = Some(self.inactive_order_with_status(id, status));
         }
     }
 
@@ -7705,6 +7707,41 @@ impl EffectHostContext {
         self.master_order_preview = Some(ids);
     }
 
+    /// The category, and whether it has `definition_id`, of one link
+    /// `C4ObjectList::Add` walks past, read with the scope precedence of
+    /// `get_world_object` and `contents_sort_key` but without copying the
+    /// object. `None` is a link it skips: one that is gone, whose Status is
+    /// not the list's, or that is Unsorted (C4ObjectList.cpp:155-173).
+    fn sorted_link(
+        &self,
+        id: ObjectId,
+        list_status: ObjectStatus,
+        definition_id: &str,
+    ) -> Option<(i32, bool)> {
+        let snapshot = self
+            .pending_objects
+            .get(&id)
+            .map(|object| MasterLinkFields::of(object, definition_id))
+            .or_else(|| self.world.master_link_fields(id, definition_id))?;
+        let Some(scope) = self.object_scope(id) else {
+            return (snapshot.status == list_status && !snapshot.unsorted)
+                .then_some((snapshot.category, snapshot.same_definition));
+        };
+        let status = if scope.destroy {
+            ObjectStatus::Deleted
+        } else {
+            scope.status
+        };
+        let same_definition = scope
+            .pending_update
+            .change_def
+            .as_ref()
+            .or(scope.definition_id.as_ref())
+            .map_or(snapshot.same_definition, |scoped| scoped == definition_id);
+        (status == list_status && !scope.unsorted)
+            .then_some((scope.current_category, same_definition))
+    }
+
     fn insert_object_status_preview(
         &self,
         ids: &mut Vec<ObjectId>,
@@ -7728,19 +7765,12 @@ impl EffectHostContext {
         let mut found_cluster = false;
         if category & crate::CATEGORY_STATIC_BACK == 0 {
             for (position, other) in ids.iter().copied().enumerate() {
-                let live_sorted = self
-                    .get_world_object(other)
-                    .is_some_and(|object| object.status() == list_status)
-                    && !self.contents_object_unsorted(other);
-                if !live_sorted {
-                    continue;
-                }
-                let Some((other_category, other_definition)) = self.contents_sort_key(other) else {
+                let Some((other_category, same_definition)) =
+                    self.sorted_link(other, list_status, &definition_id)
+                else {
                     continue;
                 };
-                if other_category & CATEGORY_SORT_LIMIT == sort_category
-                    && other_definition == definition_id
-                {
+                if other_category & CATEGORY_SORT_LIMIT == sort_category && same_definition {
                     found_cluster = true;
                     break;
                 }
@@ -7750,14 +7780,9 @@ impl EffectHostContext {
         if !found_cluster {
             predecessor = None;
             for (position, other) in ids.iter().copied().enumerate() {
-                let live_sorted = self
-                    .get_world_object(other)
-                    .is_some_and(|object| object.status() == list_status)
-                    && !self.contents_object_unsorted(other);
-                if !live_sorted {
-                    continue;
-                }
-                let Some((other_category, _)) = self.contents_sort_key(other) else {
+                let Some((other_category, _)) =
+                    self.sorted_link(other, list_status, &definition_id)
+                else {
                     continue;
                 };
                 if other_category & CATEGORY_SORT_LIMIT <= sort_category {
@@ -7775,6 +7800,13 @@ impl EffectHostContext {
     /// authoritative exec-list fold: same category/definition cluster first,
     /// then the category bracket; lines and Unsorted objects append.
     pub(crate) fn preview_object_status_change(&mut self, target: ObjectId, status: ObjectStatus) {
+        let master = self.master_order_with_status(target, status);
+        self.commit_object_status_preview(target, master);
+        self.inactive_order_preview = Some(self.inactive_order_with_status(target, status));
+    }
+
+    /// Game.Objects with `target` moved to where its `status` puts it.
+    fn master_order_with_status(&self, target: ObjectId, status: ObjectStatus) -> Vec<ObjectId> {
         let mut master = self
             .master_order_preview
             .clone()
@@ -7783,8 +7815,12 @@ impl EffectHostContext {
         if status == ObjectStatus::Normal {
             self.insert_object_status_preview(&mut master, target, ObjectStatus::Normal);
         }
-        self.commit_object_status_preview(target, master);
+        master
+    }
 
+    /// Game.Objects.InactiveObjects with `target` moved to where its `status`
+    /// puts it.
+    fn inactive_order_with_status(&self, target: ObjectId, status: ObjectStatus) -> Vec<ObjectId> {
         let mut inactive = self
             .inactive_order_preview
             .clone()
@@ -7793,7 +7829,7 @@ impl EffectHostContext {
         if status == ObjectStatus::Inactive {
             self.insert_object_status_preview(&mut inactive, target, ObjectStatus::Inactive);
         }
-        self.inactive_order_preview = Some(inactive);
+        inactive
     }
 
     pub(crate) fn preview_sort_master_by_category(&mut self) {

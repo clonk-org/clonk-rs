@@ -567,7 +567,10 @@
         // first object at exactly that distance is returned outright; before
         // it, only strictly farther objects accumulate. Skipping ties instead
         // ends the walk early, which costs the spell selector its targets
-        // (MagiClonk.c4d/Selector.c4d/Script.c FindTargets).
+        // (MagiClonk.c4d/Selector.c4d/Script.c FindTargets). Each new object
+        // is linked in front of the objects of its kind already there
+        // (C4GameObjects.cpp:54-71; C4ObjectList.cpp:155-175), so the walk
+        // meets far, b, a in that order and b is the first minimum.
         let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
@@ -587,9 +590,9 @@
              local iFirst; local iSecond; local iThird; local iFourth;\n\
              public func Probe(pA, pB, pFar) {\n\
                  var first = FindObject(GOOD, 0, 0, -1, -1);\n\
-                 if (first == pA) iFirst = 1;\n\
+                 if (first == pB) iFirst = 1;\n\
                  var second = FindObject(GOOD, 0, 0, -1, -1, 0, 0, 0, 0, first);\n\
-                 if (second == pB) iSecond = 1;\n\
+                 if (second == pA) iSecond = 1;\n\
                  var third = FindObject(GOOD, 0, 0, -1, -1, 0, 0, 0, 0, second);\n\
                  if (third == pFar) iThird = 1;\n\
                  if (!FindObject(GOOD, 0, 0, -1, -1, 0, 0, 0, 0, third)) iFourth = 1;\n\
@@ -636,16 +639,19 @@
         // simply no filter (C4Value::getObj() yields nil), never an error.
         // GoldRush's cannon Initialize chain depends on this layout
         // (Cannon.c4d/Script.c:31 passes NoContainer() as 9th argument).
+        // Each new object is linked in front of the objects of its kind
+        // already there (C4GameObjects.cpp:54-71; C4ObjectList.cpp:155-163),
+        // so creating the caller last puts it first: a, b, c.
         let dir = test_tempdir();
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             Some(("BOXD", "// box\n")),
             "global func Initialize() {\n\
-                 var a = CreateObject(GOOD, 50, 50, -1);\n\
-                 var b = CreateObject(GOOD, 55, 52, -1);\n\
                  var box = CreateObject(BOXD, 90, 90, -1);\n\
                  var c = CreateObject(GOOD, 90, 90, -1);\n\
                  c->Enter(box);\n\
+                 var b = CreateObject(GOOD, 55, 52, -1);\n\
+                 var a = CreateObject(GOOD, 50, 50, -1);\n\
                  a->Probe(b, c);\n\
                  return 1;\n\
              }\n",
@@ -671,7 +677,7 @@
             .objects
             .iter()
             .filter(|object| object.definition_id == "GOOD")
-            .min_by_key(|object| object.id).test_value();
+            .max_by_key(|object| object.id).test_value();
         let flag = |name: &str| prober.local_vars.get(name).cloned();
         assert_eq!(
             flag("iExcluded"),

@@ -224,3 +224,52 @@ fn unchanged_layer_and_base_overlays_keep_shared_object_state() {
     });
     result.test_value();
 }
+
+#[test]
+fn a_spawn_links_into_the_master_list_without_copying_the_objects_it_walks_past() {
+    // C4ObjectList::Add reads only the Status, Unsorted, Category and id of
+    // each link it passes before the insertion point (C4ObjectList.cpp:
+    // 155-173). A StaticBack object walks past every higher category.
+    let copies_walking_past = |walked: usize| {
+        let mut engine = crate::Engine::new();
+        let mut back = test_definition("BACK", "Static back", "");
+        back.set_category(crate::CATEGORY_STATIC_BACK);
+        engine.register_test_definition(back);
+        let mut item = test_definition("ITEM", "Item", "");
+        item.set_category(crate::CATEGORY_OBJECT);
+        engine.register_test_definition(item);
+        engine.register_test_definition(test_definition(
+            "TEST",
+            "Test",
+            "func Probe() { return 0; }",
+        ));
+        let caller_id = engine.spawn_test_object(crate::SpawnConfig::new("TEST"));
+        for _ in 0..walked {
+            engine.spawn_test_object(crate::SpawnConfig::new("ITEM"));
+        }
+        let world = engine.host_world_context_for_object(0);
+        let caller = HostObjectContext {
+            id: caller_id,
+            ..idle_object_context()
+        };
+        let next_object_id = walked as u64 + 2;
+        let (result, _) = with_effect_context_with_state_and_spawn_previews(
+            Some(caller),
+            &[],
+            world,
+            next_object_id,
+            false,
+            || {
+                crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(|count| count.set(0));
+                crate::HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+                create_object(&[v_id("BACK".into())])?;
+                Ok::<_, RuntimeError>(
+                    crate::HOST_WORLD_OBJECT_GET_DEEP_CLONES.with(Cell::get)
+                        + crate::HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+                )
+            },
+        );
+        result.test_value()
+    };
+    assert_eq!(copies_walking_past(40), copies_walking_past(0));
+}

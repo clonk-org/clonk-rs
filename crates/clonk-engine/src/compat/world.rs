@@ -1941,6 +1941,29 @@ pub(crate) struct LazyHostWorldProvider {
     legacy_find_object: Option<unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>>,
     object_position: Option<unsafe fn(*const (), ObjectId) -> Option<Vector2>>,
     find_condition: Option<unsafe fn(*const (), ObjectId, &FindCondition) -> Option<bool>>,
+    master_link: Option<unsafe fn(*const (), ObjectId, &str) -> Option<MasterLinkFields>>,
+}
+
+/// What `C4ObjectList::Add` reads from a link it walks past: its Status,
+/// Unsorted flag, Category and whether it has the inserted object's id
+/// (oracle-src-pinned src/C4ObjectList.cpp:155-173).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MasterLinkFields {
+    pub(crate) status: ObjectStatus,
+    pub(crate) unsorted: bool,
+    pub(crate) category: i32,
+    pub(crate) same_definition: bool,
+}
+
+impl MasterLinkFields {
+    pub(crate) fn of(object: &HostWorldObject, definition_id: &str) -> Self {
+        Self {
+            status: object.status,
+            unsorted: object.unsorted,
+            category: object.category,
+            same_definition: object.definition_id == definition_id,
+        }
+    }
 }
 
 impl LazyHostWorldProvider {
@@ -1980,6 +2003,7 @@ impl LazyHostWorldProvider {
             legacy_find_object: None,
             object_position: None,
             find_condition: None,
+            master_link: None,
         }
     }
 
@@ -2176,6 +2200,14 @@ impl LazyHostWorldProvider {
         find_condition: unsafe fn(*const (), ObjectId, &FindCondition) -> Option<bool>,
     ) -> Self {
         self.find_condition = Some(find_condition);
+        self
+    }
+
+    pub(crate) fn with_master_link(
+        mut self,
+        master_link: unsafe fn(*const (), ObjectId, &str) -> Option<MasterLinkFields>,
+    ) -> Self {
+        self.master_link = Some(master_link);
         self
     }
 
@@ -4208,6 +4240,37 @@ impl HostWorldContext {
         // contract as `LazyHostWorldProvider::object` applies. This callback
         // only reads the scalar fields C4Game::FindObject itself inspects.
         unsafe { matches(provider.source, id, params) }
+    }
+
+    /// The fields `C4ObjectList::Add` compares for one callback-entry link,
+    /// read without copying or materializing the object.
+    pub(crate) fn master_link_fields(
+        &self,
+        id: ObjectId,
+        definition_id: &str,
+    ) -> Option<MasterLinkFields> {
+        {
+            let store = self.object_store.borrow();
+            if store.removed.contains(&id) {
+                return None;
+            }
+            if let Some(object) = store.objects.get(&id) {
+                return Some(MasterLinkFields::of(object, definition_id));
+            }
+            if store.complete {
+                return None;
+            }
+        }
+        let Some(read) = self.lazy_world.and_then(|provider| provider.master_link) else {
+            return self
+                .get_shared(id)
+                .map(|object| MasterLinkFields::of(&object, definition_id));
+        };
+        let provider = self.lazy_world?;
+        // SAFETY: the same synchronous source-lifetime and object-storage
+        // contract as `LazyHostWorldProvider::object` applies. This callback
+        // only reads the four scalar fields C4ObjectList::Add inspects.
+        unsafe { read(provider.source, id, definition_id) }
     }
 
     pub(crate) fn matches_find_condition_candidate(

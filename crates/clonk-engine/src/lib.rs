@@ -14705,6 +14705,10 @@ mod native_effect_damage_live_walk;
 mod creation_phase_object_chronology_regression;
 
 #[cfg(test)]
+#[path = "lib_tests/same_call_creation_master_order.rs"]
+mod same_call_creation_master_order;
+
+#[cfg(test)]
 #[path = "lib_tests/goal_rule_activate_families.rs"]
 mod goal_rule_activate_families;
 
