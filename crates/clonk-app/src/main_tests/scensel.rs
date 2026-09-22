@@ -242,7 +242,10 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
 
     // The dynamic renderer must pass CanOpen to ScenListItem: only the
     // label alpha changes; icons and row activation remain intact.
-    let assets = app.assets.scensel_assets().test_value();
+    let assets = app
+        .assets
+        .scensel_assets(app.config.compat_profile)
+        .test_value();
     let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let book = app.assets.book_fonts.clone().test_value();
@@ -620,7 +623,10 @@ fn scensel_cached_chrome_leaves_game_option_bounds_empty_in_both_modes() {
     let user_data = tempdir();
     let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
     let app = new_menu_app_with_paths(800, 600, &paths);
-    let assets = app.assets.scensel_assets().test_value();
+    let assets = app
+        .assets
+        .scensel_assets(app.config.compat_profile)
+        .test_value();
     let fonts = app.assets.clonk_fonts.as_deref().test_value();
     let layout = clonk_frontend::startup_scensel::scen_sel_layout(800, 600, fonts);
     let bounds = layout.game_option_bounds();
@@ -2489,7 +2495,10 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
     main_assert_eq!((empty.panels[0].bounds.w, empty.panels[0].bounds.h) => (40, 7));
     app.close_context_menu_silently();
 
-    let assets = app.assets.scensel_assets().test_value();
+    let assets = app
+        .assets
+        .scensel_assets(app.config.compat_profile)
+        .test_value();
     let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
     let book = app.assets.book_fonts.clone().test_value();
     app.menu_state.set_search_text("caret");

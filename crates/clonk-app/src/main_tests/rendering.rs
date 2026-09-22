@@ -1969,6 +1969,63 @@ fn speaking_icon_is_embedded_without_legacy_graphics_resources() {
 }
 
 #[test]
+fn options_icons_are_embedded_as_transparent_high_resolution_sources() {
+    let assets = FrontendAssets::load(None);
+    for (name, cells) in [("StartupOptionIconsHD.png", 6), ("StartupWipfHD.png", 1)] {
+        let image = assets.dialog_image(name).test_value();
+        main_assert_eq!((image.width(), image.height()) => (cells * 256, 256));
+        let width = image.width();
+        for cell in 0..cells {
+            let alpha: Vec<_> = (0..256)
+                .flat_map(|y| {
+                    (cell * 256..(cell + 1) * 256).map(move |x| (y * width + x) as usize * 4 + 3)
+                })
+                .map(|index| image.pixels()[index])
+                .collect();
+            main_assert!(alpha.contains(&0), "each icon needs a transparent surround");
+            main_assert!(alpha.contains(&255), "each icon needs an opaque body");
+            main_assert!(
+                alpha.iter().any(|alpha| (1..255).contains(alpha)),
+                "edges must retain antialiasing"
+            );
+        }
+    }
+}
+
+#[test]
+fn startup_icon_resolution_follows_compatibility_profile() {
+    use crate::settings::CompatProfile;
+    let assets = FrontendAssets::load(Some(&test_app_paths()));
+    for (profile, resolution) in [
+        (CompatProfile::LegacyClonk, 32),
+        (CompatProfile::Normal, 256),
+    ] {
+        let options = assets.options_dlg_assets(profile).test_value();
+        main_assert_eq!((options.option_icons.width(), options.option_icons.height()) => (resolution * 6, resolution));
+        main_assert_eq!(options.book_scroll_pin.is_some() => profile == CompatProfile::Normal);
+    }
+}
+
+#[test]
+fn full_body_wipf_is_shared_by_book_scrollbars_in_normal_profile() {
+    use crate::settings::CompatProfile;
+    let assets = FrontendAssets::load(Some(&test_app_paths()));
+    for profile in [CompatProfile::Normal, CompatProfile::LegacyClonk] {
+        let options = assets.options_dlg_assets(profile).test_value();
+        let players = assets.plrsel_assets(profile).test_value();
+        let scenarios = assets.scensel_assets(profile).test_value();
+        for pin in [
+            options.book_scroll_pin,
+            players.book_scroll_pin,
+            scenarios.book_scroll_pin,
+        ] {
+            main_assert_eq!(pin.as_ref().map(ImageData::gpu_texture_id) =>
+                (profile == CompatProfile::Normal).then(|| assets.dialog_image("StartupWipfHD.png").test_value().gpu_texture_id()));
+        }
+    }
+}
+
+#[test]
 fn speaking_overlay_maps_authenticated_player_to_selected_cursor() {
     let mut app = new_lightweight_running_sandbox_app();
     let (player_id, selected) = {

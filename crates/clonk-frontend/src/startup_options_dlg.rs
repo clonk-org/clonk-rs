@@ -7,6 +7,9 @@
 //! responsive tab strip and paper controls live in `voice_sheet`; the six-tab
 //! compatibility layout keeps the C++ geometry and focus order unchanged.
 //!
+//! Optional higher-resolution tab and Wipf textures retain the logical bounds.
+//! Supplying the original sheets preserves the C++ drawing path.
+//!
 //! Geometry mirrors the C++ ctor `C4StartupOptionsDlg.cpp:609-985` in exact
 //! integer math; widget rendering mirrors `C4GuiTabular.cpp` (tab strip),
 //! `C4GuiComboBox.cpp:138-185`, `C4GuiCheckBox.cpp:110-137`,
@@ -1186,13 +1189,16 @@ pub struct OptionsDlgAssets {
     pub paper: ImageData,
     /// `StartupTabClip.png` 120x80 — tab background, drawn 1:1.
     pub tab_clip: ImageData,
-    /// `StartupOptionIcons.png` 192x32 — six 32x32 tab icons.
+    /// Six square tab icons in a horizontal strip, drawn at 32x32 logical pixels.
+    /// The classic `StartupOptionIcons.png` is 192x32; larger cells are filtered.
     pub option_icons: ImageData,
     /// Existing chat illustration from GUIIcons2, used for the port voice tab.
     pub voice_icons: Option<ImageData>,
     /// `StartupBookScroll.png` 48x48 — slider bar/arrow/pin facets
     /// (ScrollBarFacets::Set, C4Gui.cpp:109-121).
     pub book_scroll: ImageData,
+    /// Optional full-body replacement for the 16x16 Wipf slider thumb.
+    pub book_scroll_pin: Option<ImageData>,
     /// `StartupContext.png` 32x16 — combo side arrow, phase 0 = 16x16
     /// (C4Startup.cpp:64-65).
     pub context_arrow: ImageData,
@@ -4746,6 +4752,7 @@ fn draw_image_bilinear_white_pad(
 pub(crate) fn draw_horizontal_book_scrollbar(
     surface: &mut Surface,
     book_scroll: &ImageData,
+    book_scroll_pin: Option<&ImageData>,
     rect: &IntRect,
     scroll_pos: i32,
     decrement_pressed: bool,
@@ -4779,17 +4786,49 @@ pub(crate) fn draw_horizontal_book_scrollbar(
         rect.y,
         gamma,
     );
-    draw_image_strip(
-        surface,
-        rect.x + 16 + scroll_pos,
-        rect.y,
-        book_scroll,
-        pin_src.0,
-        pin_src.1,
-        16,
-        16,
-        gamma,
-    );
+    if pin_src == (16, 16) {
+        draw_book_scroll_pin(
+            surface,
+            rect.x + 16 + scroll_pos,
+            rect.y,
+            book_scroll,
+            book_scroll_pin,
+            gamma,
+        );
+    } else {
+        draw_image_strip(
+            surface,
+            rect.x + 16 + scroll_pos,
+            rect.y,
+            book_scroll,
+            pin_src.0,
+            pin_src.1,
+            16,
+            16,
+            gamma,
+        );
+    }
+}
+
+/// Replaces only the Wipf artwork; the classic pin bounds and hit area stay 16x16.
+pub(crate) fn draw_book_scroll_pin(
+    surface: &mut Surface,
+    x: i32,
+    y: i32,
+    book_scroll: &ImageData,
+    pin: Option<&ImageData>,
+    gamma: Option<&GammaRamp>,
+) {
+    if let Some(pin) = pin {
+        draw_image_bilinear(
+            surface,
+            &GuiRect::new(x as f32, y as f32, 16.0, 16.0),
+            pin,
+            gamma,
+        );
+    } else {
+        draw_image_strip(surface, x, y, book_scroll, 16, 16, 16, 16, gamma);
+    }
 }
 
 /// One vertical-gfx facet of `DrawHBarByVGfx` (C4Gui.cpp:347-361): the 16px
@@ -5257,7 +5296,10 @@ impl OptionsDlgScreen {
         } else {
             index
         };
-        if layout.voice.is_some() {
+        let cell = assets.option_icons.height();
+        let high_resolution = cell > 32 && assets.option_icons.width() / cell >= 6;
+        let cell = if high_resolution { cell } else { 32 };
+        if layout.voice.is_some() || high_resolution {
             let icon = if index == OptionsSheet::Voice.index() {
                 assets
                     .voice_icons
@@ -5267,7 +5309,15 @@ impl OptionsDlgScreen {
             } else {
                 None
             }
-            .unwrap_or_else(|| crop_image(&assets.option_icons, 32 * icon_index as u32, 0, 32, 32));
+            .unwrap_or_else(|| {
+                crop_image(
+                    &assets.option_icons,
+                    cell * icon_index as u32,
+                    0,
+                    cell,
+                    cell,
+                )
+            });
             draw_image_bilinear(
                 surface,
                 &GuiRect::new(
@@ -6189,6 +6239,7 @@ impl OptionsDlgScreen {
         draw_horizontal_book_scrollbar(
             surface,
             &assets.book_scroll,
+            assets.book_scroll_pin.as_ref(),
             rect,
             scroll_pos,
             decrement_pressed,
@@ -6400,12 +6451,109 @@ mod tests {
             option_icons: load_graphics_png("StartupOptionIcons.png"),
             voice_icons: Some(load_graphics_png("GUIIcons2.png")),
             book_scroll: load_graphics_png("StartupBookScroll.png"),
+            book_scroll_pin: None,
             context_arrow: load_graphics_png("StartupContext.png"),
             checkbox: load_graphics_png("GUICheckBox.png"),
             button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             button: load_graphics_png("GUIButton.png"),
             control: None,
             gamepad: None,
+        }
+    }
+
+    #[test]
+    fn high_resolution_tab_icons_draw_complete_cells_at_original_size() {
+        // Keep the 32x32 destination from C4GuiTabular.cpp:59-64 while
+        // allowing the port's replacement artwork to use larger source cells.
+        let mut assets = options_assets();
+        let colors = [
+            [231_u8, 71, 193, 255],
+            [41, 193, 71, 255],
+            [71, 41, 193, 255],
+            [193, 231, 41, 255],
+        ];
+        let pixels = (0..64)
+            .flat_map(|y| {
+                (0..384).flat_map(move |x| {
+                    let mut color = colors[(y / 32) * 2 + (x % 64) / 32];
+                    color[0] += (x / 64) as u8;
+                    color
+                })
+            })
+            .collect();
+        assets.option_icons = ImageData::new(384, 64, pixels);
+        let book = book_fonts();
+        let gui = endeavour_font_set();
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+        for index in 0..6 {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            OptionsDlgScreen::draw_tab_caption(
+                &mut surface,
+                &assets,
+                &book,
+                &layout,
+                &OptionsLabels::default(),
+                index,
+                None,
+            );
+            for mut color in colors {
+                color[0] += index as u8;
+                assert_eq!(
+                    surface.pixels().chunks_exact(4).filter(|pixel| *pixel == color).count(),
+                    16 * 16,
+                    "tab {index}: each source quadrant must occupy exactly 16x16 destination pixels"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn high_resolution_slider_pin_draws_whole_body_at_each_travel_endpoint() {
+        // C4GuiContainers.cpp:446-479 keeps the pin at 16x16 and offsets it
+        // by the 16px arrow plus the current scroll position.
+        let mut assets = options_assets();
+        assets.book_scroll = ImageData::new(48, 48, vec![0; 48 * 48 * 4]);
+        let colors = [
+            [231_u8, 71, 193, 255],
+            [41, 193, 71, 255],
+            [71, 41, 193, 255],
+            [193, 231, 41, 255],
+        ];
+        let pixels = (0..64)
+            .flat_map(|y| (0..64).flat_map(move |x| colors[(y / 32) * 2 + x / 32]))
+            .collect();
+        assets.book_scroll_pin = Some(ImageData::new(64, 64, pixels));
+        let rect = IntRect::new(10, 12, 148, 16);
+        for scroll_pos in [0, 50, 100] {
+            let mut surface = Surface::new(180, 40, PixelFormat::Rgba8888);
+            OptionsDlgScreen::draw_book_scrollbar(
+                &mut surface,
+                &assets,
+                &rect,
+                scroll_pos,
+                false,
+                false,
+                None,
+            );
+            for (quadrant, color) in colors.into_iter().enumerate() {
+                assert_eq!(
+                    surface.get_pixel(
+                        (rect.x + 16 + scroll_pos + 4 + (quadrant % 2) as i32 * 8) as u32,
+                        (rect.y + 4 + (quadrant / 2) as i32 * 8) as u32,
+                    ),
+                    Some(Color::new(color[0], color[1], color[2], color[3])),
+                    "the complete pin must follow scroll position {scroll_pos}"
+                );
+                assert_eq!(
+                    surface
+                        .pixels()
+                        .chunks_exact(4)
+                        .filter(|pixel| *pixel == color)
+                        .count(),
+                    8 * 8,
+                    "the 64px source must stay inside its 16px destination"
+                );
+            }
         }
     }
 

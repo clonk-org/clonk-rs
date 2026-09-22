@@ -1680,6 +1680,7 @@ impl GameApp {
                 let network_lobby = self.lobby.session.as_mut();
                 render_startup_frame(
                     &mut self.rendering.graphics,
+                    self.config.compat_profile,
                     self.assets.as_ref(),
                     &mut self.main_menu_state,
                     &mut self.menu_state,

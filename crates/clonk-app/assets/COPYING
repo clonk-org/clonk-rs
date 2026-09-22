@@ -8,3 +8,10 @@ This artwork is licensed under Creative Commons Attribution-NonCommercial 4.0
 Original source: planet/Graphics.c4g/GUIIcons.png, sound icon at (200, 120),
 40x40 pixels. See planet/Graphics.c4g/COPYING for the original attribution
 and docs/art/speaking-icon.md for the generation and refinement prompts.
+
+StartupOptionIconsHD.png and StartupWipfHD.png are high-resolution adaptations
+of RedWolf Design's StartupOptionIcons.png, StartupBookScroll.png, and the
+full-body Wipf artwork in Objects.c4d/Animals.c4d/Wipf.c4d/Graphics.png.
+Generated with OpenAI imagegen for Clonk Rust in 2026, then prepared with
+transparent alpha for the original UI geometry. They use the same CC BY-NC 4.0
+license above. See docs/art/startup-icons.md for the sources and modifications.

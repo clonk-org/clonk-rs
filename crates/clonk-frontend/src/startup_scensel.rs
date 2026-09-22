@@ -31,6 +31,8 @@ pub struct ScenSelAssets {
     /// `StartupBookScroll.png` (48x48, 16px cells) — book-style scrollbar
     /// facets (C4Gui.cpp:109-121).
     pub book_scroll: ImageData,
+    /// Optional full-body replacement for the 16x16 Wipf scrollbar thumb.
+    pub book_scroll_pin: Option<ImageData>,
     /// `StartupScenSelIcons.png` (1248x24, 52 icons of 24x24) — list-entry
     /// icons (C4Startup.cpp:67-69).
     pub scen_icons: ImageData,
@@ -2084,15 +2086,12 @@ pub fn draw_selection_info_scrolled(
         );
         let max_pin_travel = (client.h - 48).max(0);
         let pin_y = client.y + 16 + max_pin_travel * scroll_y / metrics.max_scroll;
-        draw_image_strip(
+        crate::startup_options_dlg::draw_book_scroll_pin(
             surface,
             bar_x,
             pin_y,
             &assets.book_scroll,
-            16,
-            16,
-            16,
-            16,
+            assets.book_scroll_pin.as_ref(),
             gamma,
         );
     }
@@ -2143,6 +2142,7 @@ mod tests {
         ScenSelAssets {
             background: load("StartupScenSelBG.png"),
             book_scroll: load("StartupBookScroll.png"),
+            book_scroll_pin: None,
             scen_icons: load("StartupScenSelIcons.png"),
             caption_bar: load("GUICaption.png"),
             button: load("GUIButton.png"),

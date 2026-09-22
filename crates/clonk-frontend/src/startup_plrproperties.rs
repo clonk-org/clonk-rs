@@ -1562,6 +1562,7 @@ impl PlayerPropertiesScreen {
             crate::startup_options_dlg::draw_horizontal_book_scrollbar(
                 surface,
                 &assets.book_scroll,
+                None,
                 &slider,
                 PlayerPropertiesLayout::slider_pin_offset(slider, value),
                 false,
