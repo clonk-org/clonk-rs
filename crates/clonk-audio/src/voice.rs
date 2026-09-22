@@ -903,35 +903,57 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
         let supported = device.default_input_config().map_err(cpal_capture_error)?;
         validate_capture_config(supported.sample_rate(), supported.channels())?;
 
-        let stream_config = supported.config();
-        let processing = options.clone();
-        macro_rules! input_stream {
-            ($sample:ty) => {
-                build_voice_input_stream::<$sample>(&device, stream_config, callbacks, processing)?
-            };
-        }
-        let stream = match supported.sample_format() {
-            cpal::SampleFormat::I8 => input_stream!(i8),
-            cpal::SampleFormat::I16 => input_stream!(i16),
-            cpal::SampleFormat::I24 => input_stream!(cpal::I24),
-            cpal::SampleFormat::I32 => input_stream!(i32),
-            cpal::SampleFormat::I64 => input_stream!(i64),
-            cpal::SampleFormat::U8 => input_stream!(u8),
-            cpal::SampleFormat::U16 => input_stream!(u16),
-            cpal::SampleFormat::U24 => input_stream!(cpal::U24),
-            cpal::SampleFormat::U32 => input_stream!(u32),
-            cpal::SampleFormat::U64 => input_stream!(u64),
-            cpal::SampleFormat::F32 => input_stream!(f32),
-            cpal::SampleFormat::F64 => input_stream!(f64),
-            _ => {
-                return Err(VoiceCaptureError::Stream(
-                    "unsupported non-PCM microphone sample format".to_string(),
-                ));
-            }
-        };
-        stream.play().map_err(cpal_capture_error)?;
-        Ok(stream)
+        let sample_format = supported.sample_format();
+        // Like output, candidate selection includes play: a driver may accept
+        // a buffer size when the stream is built and reject it on start.
+        crate::mixer::try_cpal_stream_configs(
+            voice_capture_stream_configs(supported),
+            |stream_config| {
+                let callbacks = callbacks.clone();
+                let processing = options.clone();
+                macro_rules! input_stream {
+                    ($sample:ty) => {
+                        build_voice_input_stream::<$sample>(
+                            &device,
+                            stream_config,
+                            callbacks,
+                            processing,
+                        )?
+                    };
+                }
+                let stream = match sample_format {
+                    cpal::SampleFormat::I8 => input_stream!(i8),
+                    cpal::SampleFormat::I16 => input_stream!(i16),
+                    cpal::SampleFormat::I24 => input_stream!(cpal::I24),
+                    cpal::SampleFormat::I32 => input_stream!(i32),
+                    cpal::SampleFormat::I64 => input_stream!(i64),
+                    cpal::SampleFormat::U8 => input_stream!(u8),
+                    cpal::SampleFormat::U16 => input_stream!(u16),
+                    cpal::SampleFormat::U24 => input_stream!(cpal::U24),
+                    cpal::SampleFormat::U32 => input_stream!(u32),
+                    cpal::SampleFormat::U64 => input_stream!(u64),
+                    cpal::SampleFormat::F32 => input_stream!(f32),
+                    cpal::SampleFormat::F64 => input_stream!(f64),
+                    _ => {
+                        return Err(VoiceCaptureError::Stream(
+                            "unsupported non-PCM microphone sample format".to_string(),
+                        ));
+                    }
+                };
+                stream.play().map_err(cpal_capture_error)?;
+                Ok(stream)
+            },
+        )
     }
+}
+
+/// A host's own capture buffer can hold far more than a voice frame:
+/// pipewire-pulse delivers 16384-frame chunks two seconds late, older than
+/// [`MAX_CAPTURE_AGE`] on arrival. Capture asks for the short callback voice
+/// playback uses, and takes the host's buffer only if the device refuses it.
+#[cfg(feature = "cpal")]
+fn voice_capture_stream_configs(config: cpal::SupportedStreamConfig) -> [cpal::StreamConfig; 2] {
+    crate::mixer::cpal_buffer_config_candidates(config, crate::mixer::VOICE_BUFFER_FRAMES)
 }
 
 #[cfg(any(feature = "cpal", test))]
@@ -2737,6 +2759,24 @@ mod tests {
             .unwrap()
             .decode(&loud.payload, false)
             .is_ok());
+    }
+
+    #[cfg(feature = "cpal")]
+    #[test]
+    fn capture_asks_for_a_short_callback_before_the_hosts_own_buffer() {
+        // What cpal's PulseAudio host reports for a C920 behind pipewire-pulse.
+        let config = cpal::SupportedStreamConfig::new(
+            2,
+            32_000,
+            cpal::SupportedBufferSize::Range {
+                min: 1,
+                max: 16_384,
+            },
+            cpal::SampleFormat::I16,
+        );
+        let [requested, fallback] = voice_capture_stream_configs(config);
+        assert_eq!(requested.buffer_size, cpal::BufferSize::Fixed(256));
+        assert_eq!(fallback.buffer_size, cpal::BufferSize::Default);
     }
 
     #[test]

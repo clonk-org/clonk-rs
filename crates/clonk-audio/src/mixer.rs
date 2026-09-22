@@ -84,7 +84,7 @@ const CLASSIC_OUTPUT_BUFFER_FRAMES: u32 = 1_024;
 /// Callback size while voice chat is live, where latency matters more than
 /// the classic SDL buffer.
 #[cfg(feature = "cpal")]
-const VOICE_BUFFER_FRAMES: u32 = 256;
+pub(crate) const VOICE_BUFFER_FRAMES: u32 = 256;
 #[cfg(feature = "cpal")]
 const MAX_CONVERTIBLE_OUTPUT_CHANNELS: u16 = 8;
 #[cfg(feature = "cpal")]
@@ -733,7 +733,7 @@ fn cpal_output_stream_config_candidates(
 /// `buffer_frames` per callback, clamped to what the device supports, then
 /// the host's own buffer size for a device that rejects it.
 #[cfg(feature = "cpal")]
-fn cpal_buffer_config_candidates(
+pub(crate) fn cpal_buffer_config_candidates(
     config: cpal::SupportedStreamConfig,
     buffer_frames: u32,
 ) -> [cpal::StreamConfig; 2] {
@@ -751,7 +751,7 @@ fn cpal_buffer_config_candidates(
 }
 
 #[cfg(feature = "cpal")]
-fn try_cpal_stream_configs<T, E>(
+pub(crate) fn try_cpal_stream_configs<T, E>(
     candidates: impl IntoIterator<Item = cpal::StreamConfig>,
     mut open: impl FnMut(cpal::StreamConfig) -> Result<T, E>,
 ) -> Result<T, E> {
