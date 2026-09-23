@@ -1634,6 +1634,11 @@ impl<'a> Parser<'a> {
                 delta: -1,
             }),
             Expr::ArrayAppend(base) => Ok(AssignmentTarget::ArrayAppend(base)),
+            short_circuit @ Expr::Binary(
+                _,
+                BinaryOp::And | BinaryOp::Or | BinaryOp::NilCoalescing,
+                _,
+            ) => Ok(AssignmentTarget::ShortCircuit(Box::new(short_circuit))),
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
             // Local() and Var() without arguments default to slot 0
             Expr::Call {

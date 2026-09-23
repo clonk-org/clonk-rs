@@ -597,6 +597,12 @@ pub enum AssignmentTarget {
         target: Box<AssignmentTarget>,
         delta: i32,
     },
+    /// `a || b`, `a && b` or `a ?? b` before `=`. The operator drops the left
+    /// operand's reference, and its jump leaves whichever operand it selects,
+    /// so only the right operand can be assigned through
+    /// (C4AulParse.cpp:2998-3027; C4AulExec.cpp:999-1021, 1032-1042). Below
+    /// #strict 2, `||` and `&&` leave a plain bool instead.
+    ShortCircuit(Box<Expr>),
     /// `expression[]`: AB_ARRAY_APPEND operates on the current stack value.
     /// A referenced array yields its new last-slot reference; a self-owned
     /// temporary loses that reference with its container and collapses to nil.

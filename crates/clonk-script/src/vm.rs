@@ -10356,6 +10356,9 @@ impl CompiledFunctionBuilder {
                 self.compile_reference_expression(base)?;
                 self.instructions.push(CompiledInstruction::AppendReference);
             }
+            AssignmentTarget::ShortCircuit(expression) => {
+                self.compile_reference_expression(expression)?;
+            }
             AssignmentTarget::Index(base, index) => {
                 self.compile_assignment_target(base)?;
                 let (embedded, operands) = match index {
