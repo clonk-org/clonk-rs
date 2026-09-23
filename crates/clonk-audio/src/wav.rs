@@ -338,7 +338,7 @@ fn parsed_wav_stream(data: SharedAudioData) -> Result<WavDecoder, AudioDecodeErr
                 ));
             }
             let (samples_per_block, coefficients) = parse_ms_adpcm_format(&parsed)?;
-            validate_adpcm_data(
+            let complete = complete_adpcm_blocks(
                 parsed.data_end - parsed.data_start,
                 parsed.block_align,
                 7 * parsed.channels,
@@ -347,7 +347,7 @@ fn parsed_wav_stream(data: SharedAudioData) -> Result<WavDecoder, AudioDecodeErr
             Ok(WavDecoder::Adpcm(AdpcmWavStream {
                 data,
                 position: parsed.data_start,
-                end: parsed.data_end,
+                end: parsed.data_start + complete,
                 sample_rate: parsed.sample_rate,
                 channels: parsed.channels,
                 block_align: parsed.block_align,
@@ -363,7 +363,7 @@ fn parsed_wav_stream(data: SharedAudioData) -> Result<WavDecoder, AudioDecodeErr
             let samples_per_block = parse_ima_adpcm_format(&parsed)?;
             let header_len = 4 * parsed.channels;
             let group_len = 4 * parsed.channels;
-            validate_adpcm_data(
+            let complete = complete_adpcm_blocks(
                 parsed.data_end - parsed.data_start,
                 parsed.block_align,
                 header_len,
@@ -372,7 +372,7 @@ fn parsed_wav_stream(data: SharedAudioData) -> Result<WavDecoder, AudioDecodeErr
             Ok(WavDecoder::Adpcm(AdpcmWavStream {
                 data,
                 position: parsed.data_start,
-                end: parsed.data_end,
+                end: parsed.data_start + complete,
                 sample_rate: parsed.sample_rate,
                 channels: parsed.channels,
                 block_align: parsed.block_align,
@@ -614,26 +614,21 @@ fn parse_ima_adpcm_format(parsed: &ParsedWave) -> Result<usize, AudioDecodeError
     Ok(samples_per_block)
 }
 
-fn validate_adpcm_data(
+/// The byte length of the complete blocks an ADPCM `data` chunk starts with.
+/// SDL's WAV loader decodes block by block and drops a partial last block
+/// unless `SDL_HINT_WAVE_TRUNCATION` asks for strictness, which C4 never sets
+/// (clonk-org/clonk-rs#1719).
+fn complete_adpcm_blocks(
     data_len: usize,
     block_align: usize,
     header_len: usize,
     valid_payload: impl Fn(usize) -> bool,
-) -> Result<(), AudioDecodeError> {
-    if !data_len.is_multiple_of(block_align) {
-        return Err(AudioDecodeError::InvalidData(
-            "partial trailing WAV ADPCM block",
-        ));
+) -> Result<usize, AudioDecodeError> {
+    let complete = data_len - data_len % block_align;
+    if complete > 0 && (block_align < header_len || !valid_payload(block_align - header_len)) {
+        return Err(AudioDecodeError::InvalidData("invalid WAV ADPCM block"));
     }
-    let mut position = 0;
-    while position < data_len {
-        let block_len = (data_len - position).min(block_align);
-        if block_len < header_len || !valid_payload(block_len - header_len) {
-            return Err(AudioDecodeError::InvalidData("invalid WAV ADPCM block"));
-        }
-        position += block_len;
-    }
-    Ok(())
+    Ok(complete)
 }
 
 fn decode_ms_adpcm_block(
