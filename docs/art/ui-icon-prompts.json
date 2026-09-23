@@ -492,7 +492,9 @@
         32
       ],
       "asset": "crates/clonk-app/assets/ui-icons/checkbox-off.png",
-      "sha256": "1f64c6f58ac383d468d0bea20ebbc02663ef4a0230035bf8cd9d831fe3642b18",
+      "sha256": "048b03321a8477301547c9ce3375e29380f060c89e008821d8056906e9d30359",
+      "approvedRuntime": "docs/art/ui-checkbox/approved/checkbox-off.png",
+      "approvedRuntimeSha256": "1f64c6f58ac383d468d0bea20ebbc02663ef4a0230035bf8cd9d831fe3642b18",
       "approvedPreviewSha256": "143f7fb3fd441554782bd21039ad1b9f78ed7ac6f0c5a958a101dd98c7b41fb2",
       "prompts": [
         "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 32\u00d732 sprite, the EDIT TARGET.\nSubject: An empty dark gray square checkbox with a beveled metal border, viewed straight on; preserve the dark inset and the original proportions.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview."
@@ -514,7 +516,10 @@
           1021
         ]
       },
-      "review": "Approved 2026-09-22"
+      "review": "Approved 2026-09-22",
+      "revisions": [
+        "2026-09-23: box fitted to the classic box bounds at 8x by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1734)"
+      ]
     },
     {
       "id": "UI-15",
@@ -528,7 +533,9 @@
         32
       ],
       "asset": "crates/clonk-app/assets/ui-icons/checkbox-on.png",
-      "sha256": "c93faf75b48c4efd6d0ff426fdce7369654b2a6d369e5cfbc035155dc46505ea",
+      "sha256": "a620921ad145a428c9f848faadddc2bae55669fff96952c4660f5445d0e11ba1",
+      "approvedRuntime": "docs/art/ui-checkbox/approved/checkbox-on.png",
+      "approvedRuntimeSha256": "c93faf75b48c4efd6d0ff426fdce7369654b2a6d369e5cfbc035155dc46505ea",
       "approvedPreviewSha256": "2b528e2b47644df34f9563589f40c4d6478f993fcf0e320a12fba94f97c737d3",
       "prompts": [
         "Use case: precise-object-edit.\nAsset type: one Clonk game UI icon, faithful super-resolution reconstruction for user review.\nImage 1 is the exact original 32\u00d732 sprite, the EDIT TARGET.\nSubject: The dark gray square checkbox with a prominent red check mark extending above and to the right; preserve the checkbox geometry, complete checkmark and overlap.\nReconstruct ONLY this same complete icon as smooth high-resolution game artwork on a square canvas, around 1024\u00d71024. Preserve all original objects, silhouette, orientation, perspective, overlaps, proportions, colors, highlights and shading. Keep the subject's bounding box and placement relative to the full square reference. Recover continuous smooth contours, small edges and tonal gradients; no visible square pixel grid, jagged stairs or blur. Match the original modest prerendered Clonk aesthetic; do not redesign it. Keep holes, functional state indicators and any attached checkmark distinct and accurate.\nBackground: perfectly uniform, flat, opaque warm light beige #eee8dc around the sprite, including holes. This is a presentation preview, not a transparency request. No checkerboard or fake transparency.\nDo not add text, labels, logos, symbols, ornamentation, a modern flat style, photorealistic materials, an enclosing badge not present in the reference, floor shadow, extra objects or a comparison layout. Preserve only the artwork already present in the source. Return a single square icon preview.",
@@ -551,8 +558,11 @@
           1021
         ]
       },
-      "review": "Approved 2026-09-22"
+      "review": "Approved 2026-09-22",
+      "revisions": [
+        "2026-09-23: approved checkmark recovered from the approved pair and composited over the base fitted to the classic box bounds by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1734)"
+      ]
     }
   ],
-  "preparation": "Connected beige matte removed; one-source-pixel contraction; Lanczos reduction to 256px. Checkbox checkmark composited over the same prepared unchecked base; disabled state desaturates only the checkmark. Transparent RGB normalized to zero."
+  "preparation": "Connected beige matte removed; one-source-pixel contraction; Lanczos reduction to 256px. Checkbox checkmark composited over the same prepared unchecked base; disabled state desaturates only the checkmark. Transparent RGB normalized to zero. The checkbox sprites are then prepared by docs/art/ui-checkbox/prepare_runtime.py, which fits the base to the classic box bounds."
 }
