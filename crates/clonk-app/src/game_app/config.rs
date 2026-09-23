@@ -1420,6 +1420,11 @@ impl GameApp {
             ("General", "Record"),
             ("General", "NoCrew"),
             ("Graphics", "MsgBoard"),
+            ("General", "ShowLogTimestamps"),
+            ("Chat", "Enhanced"),
+            ("Chat", "TextSize"),
+            ("Chat", "Opacity"),
+            ("Chat", "Duration"),
             ("Startup", "HideMsgStartDedicated"),
             ("Startup", "HideMsgPlrNoTakeOver"),
         ] {
@@ -1432,6 +1437,7 @@ impl GameApp {
         self.rendering.display_flags.is_fullscreen = is_fullscreen;
         self.lobby.white_chat = load_white_lobby_chat(paths);
         self.chat.show_log_timestamps = load_show_log_timestamps(paths);
+        self.chat.enhanced_preferences = settings::load_enhanced_chat_preferences(paths);
         self.config.show_folder_maps = load_show_folder_maps(paths);
         self.lobby.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
         let native_config = load_native_config_bytes(paths);
@@ -2565,6 +2571,9 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        if self.handle_enhanced_chat_pointer(button_state) {
+            return Ok(());
+        }
         let point = self.dialogs.game_option_input_pointer_position;
         let layout = self.game_option_input_layout();
         let fonts = self.assets.clonk_fonts.clone();
@@ -2691,6 +2700,10 @@ impl GameApp {
                     self.open_context_menu_at(entries, request.anchor)?;
                 }
                 InputDialogAction::Accepted(text) => {
+                    if self.enhanced_chat_active() {
+                        self.submit_running_chat_text(text)?;
+                        break;
+                    }
                     let Some(pending) = self.dialogs.game_option_input.take() else {
                         continue;
                     };
@@ -2764,6 +2777,10 @@ impl GameApp {
                     break;
                 }
                 InputDialogAction::Cancelled => {
+                    if self.enhanced_chat_active() {
+                        self.close_running_chat()?;
+                        break;
+                    }
                     let Some(pending) = self.dialogs.game_option_input.take() else {
                         continue;
                     };

@@ -398,6 +398,16 @@ impl GameApp {
                 }
             }
             match shared_target {
+                Some(RunningDialogStackEntry::Chat) if self.enhanced_chat_active() => {
+                    let amount = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                        MouseScrollDelta::PixelDelta(position) => position.y,
+                    };
+                    if amount != 0.0 {
+                        self.scroll_enhanced_chat(amount > 0.0);
+                    }
+                    return Ok(());
+                }
                 Some(RunningDialogStackEntry::RuntimeClientList) => {
                     let native_delta = match delta {
                         MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
@@ -3880,6 +3890,9 @@ impl GameApp {
             return Err(error);
         }
         if self.running_chat_keyboard_active() && self.context_menus.open.is_none() {
+            if self.handle_enhanced_chat_key(key, state) {
+                return Ok(());
+            }
             let modifiers = self.input_routing.live.modifiers
                 & (ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SHIFT);
             let replacement_mode = self
@@ -5269,6 +5282,9 @@ impl GameApp {
     }
 
     pub(crate) fn store_message_input_history(&mut self, text: &str) {
+        if self.enhanced_chat_active() {
+            self.chat.enhanced.remember_sent(text);
+        }
         if text.is_empty() {
             return;
         }

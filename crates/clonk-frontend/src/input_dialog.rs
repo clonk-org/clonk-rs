@@ -418,6 +418,8 @@ pub struct InputDialogController {
     edit_drag_anchor: Option<usize>,
     title_drag: Option<TitleDrag>,
     chat_layout: bool,
+    enhanced_font: Option<std::sync::Arc<ClonkFont>>,
+    enhanced_notice: String,
     last_edit_input: Instant,
     sound_events: Vec<InputDialogSound>,
 }
@@ -454,6 +456,8 @@ impl InputDialogController {
             edit_drag_anchor: None,
             title_drag: None,
             chat_layout: false,
+            enhanced_font: None,
+            enhanced_notice: String::new(),
             last_edit_input: Instant::now(),
             sound_events: Vec::new(),
         }
@@ -490,6 +494,21 @@ impl InputDialogController {
     pub fn with_chat_tooltip(mut self, tooltip: impl Into<String>) -> Self {
         self.chat_tooltip = tooltip.into();
         self
+    }
+
+    /// The optional chat composer shares the proven edit/IME implementation.
+    /// Font metrics are also used by caret, selection and pointer hit testing.
+    pub fn with_enhanced_chat_font(mut self, font: std::sync::Arc<ClonkFont>) -> Self {
+        self.enhanced_font = Some(font);
+        self
+    }
+
+    pub fn set_enhanced_chat_font(&mut self, font: std::sync::Arc<ClonkFont>) {
+        self.enhanced_font = Some(font);
+    }
+
+    pub fn enhanced_notice(&self) -> &str {
+        &self.enhanced_notice
     }
 
     /// Mirrors `Edit::SetMaxText`. The C++ value includes room for the
@@ -571,6 +590,8 @@ impl InputDialogController {
     /// list appears under the character actually being composed rather than at
     /// the window origin.
     pub fn caret_area(&self, layout: &InputDialogLayout, font: &ClonkFont) -> IntRect {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let client = edit_client(layout.edit);
         let displayed = self.displayed_text();
         let caret_x = client.x + font.measure(&displayed[..self.displayed_caret()], false).0
@@ -628,7 +649,26 @@ impl InputDialogController {
     /// Replaces text through the focused Edit input path, which scrolls the
     /// new end caret into view before selecting the replacement.
     pub fn replace_edit_text(&mut self, text: &str, layout: &InputDialogLayout, font: &ClonkFont) {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.set_input_text(text);
+        self.ensure_cursor_in_view(layout, font);
+    }
+
+    pub fn replace_completion(
+        &mut self,
+        text: &str,
+        caret: usize,
+        layout: &InputDialogLayout,
+        font: &ClonkFont,
+    ) {
+        if text.len() > self.payload_limit() || !text.is_char_boundary(caret) {
+            self.enhanced_notice = "Completion is too long.".into();
+            return;
+        }
+        self.set_input_text(text);
+        self.caret = caret;
+        self.selection = None;
         self.ensure_cursor_in_view(layout, font);
     }
 
@@ -647,6 +687,29 @@ impl InputDialogController {
         screen_height: i32,
         font: &ClonkFont,
     ) -> InputDialogLayout {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
+        if self.enhanced_font.is_some() {
+            let panel = crate::enhanced_chat_view::ChatLayout::new(
+                screen_width,
+                screen_height,
+                font.line_height,
+                true,
+            );
+            let empty = IntRect::new(0, 0, 0, 0);
+            return InputDialogLayout {
+                bounds: panel.bounds,
+                caption: None,
+                client: panel.bounds,
+                close_button: None,
+                icon: empty,
+                message: panel.audience,
+                message_text: self.message.clone(),
+                edit: panel.edit,
+                ok_button: empty,
+                cancel_button: empty,
+            };
+        }
         if self.chat_layout {
             let edit_height = (font.line_height + 3).max(MIN_WOOD_BAR_HEIGHT);
             let width = screen_width * 4 / 5;
@@ -776,6 +839,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> InputDialogInputOutcome {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let focus = self.focus;
         let captured = match key {
             KeyCode::Escape | KeyCode::Tab | KeyCode::Enter => true,
@@ -805,6 +870,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.pointer_active = false;
         match key {
             KeyCode::Escape => vec![InputDialogAction::Cancelled],
@@ -885,6 +952,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.pointer_active = false;
         if self.focus != InputDialogControl::Edit {
             return Vec::new();
@@ -960,6 +1029,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.pointer_active = false;
         if self.focus != InputDialogControl::Edit {
             return Vec::new();
@@ -1066,6 +1137,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> InputDialogInputOutcome {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.pointer_active = false;
         if self.focus != InputDialogControl::Edit {
             return InputDialogInputOutcome::passed();
@@ -1091,6 +1164,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         match command {
             InputDialogContextCommand::Copy => self
                 .selected_text()
@@ -1138,6 +1213,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> InputDialogInputOutcome {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.note_pointer_input(point, true);
         if hit_target(layout, point) != HitTarget::Edit {
             return InputDialogInputOutcome::passed();
@@ -1165,6 +1242,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.handle_key_down(KeyCode::Enter, false, layout, font)
     }
 
@@ -1173,6 +1252,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> InputDialogInputOutcome {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.route_key_down(KeyCode::Enter, false, layout, font)
     }
 
@@ -1199,6 +1280,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let was_down = self.pointer_button_is_down();
         self.note_pointer_input(point, false);
         if let Some(drag) = self.title_drag {
@@ -1227,6 +1310,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.note_pointer_input(point, true);
         let hit = hit_target(layout, point);
         self.hovered = hit.button();
@@ -1263,6 +1348,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.stop_pointer_drag_at(point, layout, font);
         let released = hit_target(layout, point).button();
         self.hovered = released;
@@ -1284,6 +1371,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.note_pointer_input(point, true);
         if let Some(drag) = self.title_drag {
             self.dialog_offset = (
@@ -1307,6 +1396,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.note_pointer_input(point, true);
         if hit_target(layout, point) != HitTarget::Edit || self.text.is_empty() {
             return Vec::new();
@@ -1343,6 +1434,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.handle_pointer_down(point, layout, font)
     }
 
@@ -1352,6 +1445,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.handle_pointer_move(point, layout, font)
     }
 
@@ -1361,6 +1456,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         self.handle_pointer_up(point, layout, font)
     }
 
@@ -1582,6 +1679,17 @@ impl InputDialogController {
             surface.height() as i32,
             &resources.fonts.text,
         );
+        if let Some(font) = self.enhanced_font.as_deref() {
+            self.render_edit(
+                surface,
+                layout.edit,
+                font,
+                keyboard_active,
+                cursor_visible,
+                gamma,
+            );
+            return Ok(());
+        }
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         if self.chat_layout {
             resources.skin.draw_caption(
@@ -1710,6 +1818,8 @@ impl InputDialogController {
         cursor_visible: bool,
         gamma: Option<&GammaRamp>,
     ) {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let client = edit_client(rect);
         draw_engine_box(
             surface,
@@ -1815,6 +1925,8 @@ impl InputDialogController {
     }
 
     fn caption_scroll_offset_at(&self, now: Instant, font: &ClonkFont) -> i32 {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         if self.caption.is_empty() {
             return 0;
         }
@@ -1873,7 +1985,25 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let transformed = clipboard.replace('|', "\u{a6}");
+        if self.enhanced_font.is_some() {
+            let normalized = transformed.replace("\r\n", "\n").replace('\r', "\n");
+            let joined = normalized.lines().collect::<Vec<_>>().join(" ");
+            let joined: String = joined.chars().filter(|c| !c.is_control()).collect();
+            let replaced = self.selected_range().map_or(0, |(start, end)| end - start);
+            if self.text.len() - replaced + joined.len() > self.payload_limit() {
+                self.enhanced_notice = "Paste is too long. Shorten it before sending.".into();
+                return Vec::new();
+            }
+            self.enhanced_notice = if transformed.contains(['\r', '\n']) {
+                "Pasted lines joined. Review before sending.".into()
+            } else {
+                String::new()
+            };
+            return self.handle_text_input(&joined, layout, font);
+        }
         if self.chat_layout {
             return self.paste_chat_text(&transformed, layout, font);
         }
@@ -1915,6 +2045,8 @@ impl InputDialogController {
         layout: &InputDialogLayout,
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let mut actions = Vec::new();
         let mut rest = clipboard;
         while let Some(line_break) = rest.find(['\r', '\n']) {
@@ -1982,6 +2114,8 @@ impl InputDialogController {
     }
 
     fn ensure_cursor_in_view(&mut self, layout: &InputDialogLayout, font: &ClonkFont) {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let client_width = edit_client(layout.edit).w;
         if client_width < 5 {
             return;
@@ -2002,6 +2136,8 @@ impl InputDialogController {
     }
 
     fn character_at(&self, pointer_x: f32, layout: &InputDialogLayout, font: &ClonkFont) -> usize {
+        let enhanced_font = self.enhanced_font.clone();
+        let font = enhanced_font.as_deref().unwrap_or(font);
         let control_x =
             pointer_x.floor() as i32 - edit_client(layout.edit).x + self.horizontal_scroll;
         let mut previous_width = 0;
@@ -2457,6 +2593,53 @@ mod tests {
             ClassicButtonState::default(),
             "pointer activity alone must not paint keyboard focus or presses"
         );
+    }
+
+    #[test]
+    fn enhanced_chat_completion_keeps_the_suffix_when_typing_continues() {
+        let fonts = endeavour_font_set();
+        let mut state = InputDialogController::new_chat("Everyone", "Ad, help")
+            .with_enhanced_chat_font(std::sync::Arc::new(fonts.caption.clone()));
+        let layout = state.layout(640, 480, &fonts.text);
+        state.replace_completion("Ada, help", 3, &layout, &fonts.text);
+        state.handle_text_input("!", &layout, &fonts.text);
+        assert_eq!(state.text(), "Ada!, help");
+    }
+
+    #[test]
+    fn enhanced_chat_paste_requires_send_and_rejects_truncation() {
+        let fonts = endeavour_font_set();
+        let mut state = InputDialogController::new_chat("Everyone", "")
+            .with_enhanced_chat_font(std::sync::Arc::new(fonts.text.clone()));
+        let layout = state.layout(640, 480, &fonts.text);
+        let actions = state.apply_context_command(
+            InputDialogContextCommand::Paste,
+            Some("hello\r\n/kick Ada\n"),
+            &layout,
+            &fonts.text,
+        );
+        assert_eq!(state.text(), "hello /kick Ada");
+        assert!(actions
+            .iter()
+            .all(|action| matches!(action, InputDialogAction::TextChanged(_))));
+        assert!(!state.enhanced_notice().is_empty());
+        state.set_input_text("");
+        state.apply_context_command(
+            InputDialogContextCommand::Paste,
+            Some("hello\r/kick Ada\r"),
+            &layout,
+            &fonts.text,
+        );
+        assert_eq!(state.text(), "hello /kick Ada");
+        let before = state.text().to_string();
+        state.apply_context_command(
+            InputDialogContextCommand::Paste,
+            Some(&"x".repeat(300)),
+            &layout,
+            &fonts.text,
+        );
+        assert_eq!(state.text(), before);
+        assert!(state.enhanced_notice().contains("too long"));
     }
 
     #[test]

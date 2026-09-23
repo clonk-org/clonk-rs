@@ -428,11 +428,21 @@ impl GameApp {
     }
 
     pub(crate) fn start_running_chat(&mut self, mode: RunningChatMode) {
-        let text = match mode {
+        let mut text = match mode {
             RunningChatMode::All => String::new(),
             RunningChatMode::Allies => "/team ".to_string(),
             RunningChatMode::Say => "\"".to_string(),
         };
+        if self.chat.enhanced_preferences.enabled {
+            use clonk_frontend::enhanced_chat::ChatAudience;
+            self.chat.enhanced.audience = match mode {
+                RunningChatMode::All => self.chat.enhanced.audience.clone(),
+                RunningChatMode::Allies => ChatAudience::Allies,
+                RunningChatMode::Say => ChatAudience::Say,
+            };
+            self.chat.enhanced.reset_history();
+            text = self.chat.enhanced.draft();
+        }
         let raw_label = self.runtime_resource_text("IDS_CTL_CHAT", "Cha&t:");
         let label = raw_label.replace('&', "");
         let tooltip = self.runtime_resource_text(
@@ -452,6 +462,14 @@ impl GameApp {
             purpose: PendingInputDialogPurpose::RunningChat,
             controller: InputDialogController::new_chat(label, &text).with_chat_tooltip(tooltip),
         });
+        if self.chat.enhanced_preferences.enabled {
+            if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
+                let font = Arc::new(self.chat.enhanced_preferences.font(fonts).clone());
+                if let Some(dialog) = self.dialogs.game_option_input.as_mut() {
+                    dialog.controller.set_enhanced_chat_font(font);
+                }
+            }
+        }
         self.dialogs.game_option_input_consumed_keys.clear();
         self.dialogs.game_option_input_pointer_capture = None;
         self.dialogs.game_option_input_pointer_position = self.input_routing.live.running_pointer;
@@ -618,7 +636,21 @@ impl GameApp {
         }
     }
 
+    pub(crate) fn enhanced_chat_active(&self) -> bool {
+        self.chat.enhanced_preferences.enabled
+            && self
+                .chat
+                .running
+                .as_ref()
+                .is_some_and(|chat| matches!(chat.kind, RunningChatKind::Ordinary))
+    }
+
     pub(crate) fn close_running_chat(&mut self) -> Result<(), EngineError> {
+        if self.enhanced_chat_active() {
+            let text = self.running_chat_text().unwrap_or_default().to_string();
+            self.chat.enhanced.save_draft(&text);
+            self.chat.audience_picker = false;
+        }
         let input = self
             .chat
             .running
@@ -636,7 +668,7 @@ impl GameApp {
         finalize_result
     }
 
-    fn finalize_running_chat_input(&mut self) -> Result<(), EngineError> {
+    pub(crate) fn finalize_running_chat_input(&mut self) -> Result<(), EngineError> {
         let was_active = self.running_chat_active();
         if was_active {
             self.release_message_dialog_pointer_elements();
@@ -678,6 +710,13 @@ impl GameApp {
     }
 
     pub(crate) fn browse_running_chat_history(&mut self, older: bool) {
+        if self.enhanced_chat_active() {
+            let text = self.running_chat_text().unwrap_or_default().to_string();
+            let history = self.chat.enhanced.sent_history();
+            let replacement = self.chat.enhanced.browse_history(older, &text, &history);
+            self.replace_enhanced_chat_text(&replacement);
+            return;
+        }
         let Some(chat) = self.chat.running.as_mut() else {
             return;
         };
@@ -796,6 +835,9 @@ impl GameApp {
     }
 
     pub(crate) fn submit_running_chat_text(&mut self, text: String) -> Result<(), EngineError> {
+        if self.enhanced_chat_active() {
+            return self.submit_enhanced_chat_text(text);
+        }
         let kind = self
             .chat
             .running
@@ -1374,6 +1416,9 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
         ordered_native: bool,
     ) -> Result<()> {
+        if self.enhanced_chat_active() {
+            self.render_enhanced_chat(true, gamma);
+        }
         let Some(controller) = self.dialogs.game_option_input.as_ref().and_then(|dialog| {
             (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
         }) else {
@@ -1447,6 +1492,20 @@ impl GameApp {
     }
 
     pub(crate) fn enqueue_control_message_board_line(&mut self, line: String) {
+        if self.chat.enhanced_preferences.enabled {
+            use clonk_frontend::enhanced_chat::{ChatChannel, ChatMessage};
+            let mut message = self.chat.pending_chat_message.take().unwrap_or_else(|| {
+                let raw = line
+                    .strip_prefix("<c 909090>")
+                    .and_then(|rest| rest.split_once("</c> "))
+                    .map_or(line.as_str(), |(_, body)| body);
+                let mut text = raw.to_string();
+                Markup::strip_markup(&mut text);
+                ChatMessage::conversation("", ChatChannel::Log, &text)
+            });
+            message.timestamp = clonk_core::chrono_util::current_timestamp(false);
+            self.chat.enhanced.push(message);
+        }
         let game_time_seconds = self.game_time_seconds();
         self.rendering.graphics.set_upper_board_mode(
             frontend_upper_board_mode(self.rendering.display_flags.upper_board),
@@ -1483,10 +1542,15 @@ impl GameApp {
     }
 
     pub(crate) fn scroll_message_board(&mut self, older: bool) {
+        if self.enhanced_chat_active() {
+            self.scroll_enhanced_chat(older);
+            return;
+        }
         self.chat.message_board.scroll(older);
     }
 
     pub(crate) fn clear_message_board_log(&mut self) {
+        self.chat.enhanced.clear_messages();
         self.chat.message_board.clear_log();
     }
 

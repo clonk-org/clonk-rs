@@ -9,6 +9,35 @@ use winit::keyboard::KeyCode as VirtualKeyCode;
 
 pub(crate) const MAX_VOICE_VOLUME_PERCENT: i32 = 200;
 
+pub(crate) fn load_enhanced_chat_preferences(
+    paths: Option<&AppPaths>,
+) -> clonk_frontend::enhanced_chat_view::ChatPreferences {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .map(|config| enhanced_chat_preferences(&config))
+        .unwrap_or_default()
+}
+
+pub(crate) fn enhanced_chat_preferences(
+    config: &Config,
+) -> clonk_frontend::enhanced_chat_view::ChatPreferences {
+    let integer = |key, default, low, high| {
+        config
+            .get_in(Some("Chat"), key)
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .unwrap_or(default)
+            .clamp(low, high)
+    };
+    clonk_frontend::enhanced_chat_view::ChatPreferences {
+        enabled: config
+            .get_in(Some("Chat"), "Enhanced")
+            .is_some_and(|value| matches!(value.trim(), "1" | "true")),
+        text_size: integer("TextSize", 1, 0, 2) as u8,
+        opacity: integer("Opacity", 85, 40, 100) as u8,
+        duration_seconds: integer("Duration", 12, 3, 60) as u32,
+    }
+}
+
 const DEFAULT_MAX_CHANNELS: usize = 1024;
 const MAX_CHANNELS_LIMIT: usize = 1024;
 // C++ resolution defaults (C4Config.cpp:440-441).
@@ -525,6 +554,30 @@ impl DisplayMode {
     any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5",),
 ))]
 mod tests {
+    #[test]
+    fn enhanced_chat_settings_are_opt_in_and_bound_display_values() {
+        let mut config = clonk_core::std_config::Config::new();
+        assert_eq!(
+            super::enhanced_chat_preferences(&config),
+            clonk_frontend::enhanced_chat_view::ChatPreferences::default()
+        );
+        config.set_in(Some("Chat"), "Enhanced", "1");
+        config.set_in(Some("Chat"), "TextSize", "9");
+        config.set_in(Some("Chat"), "Opacity", "-10");
+        config.set_in(Some("Chat"), "Duration", "900");
+        let settings = super::enhanced_chat_preferences(&config);
+        assert!(settings.enabled);
+        assert_eq!(
+            (
+                settings.text_size,
+                settings.opacity,
+                settings.duration_seconds
+            ),
+            (2, 40, 60)
+        );
+        let defaults = crate::advanced_config::default_config();
+        assert_eq!(defaults.get_in(Some("Chat"), "Enhanced"), Some("0"));
+    }
     use super::*;
 
     #[test]
