@@ -1014,7 +1014,7 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
         is_editable: false,
         is_playable: true,
         mission_access: None,
-        selector_metadata: None,
+        selector_snapshot: SelectorSnapshot::default(),
         path: Some(scenario_dir.clone()),
         source_paths: Vec::new(),
         root_label: None,

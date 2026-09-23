@@ -2867,10 +2867,14 @@ impl GameApp {
 
         let scenarios = match frontend_scenarios {
             Some(scenarios) => scenarios,
-            None => scenario_discovery
-                .expect("scenario discovery starts without preloaded scenarios")
-                .join()
-                .map_err(|_| anyhow!("scenario discovery thread panicked"))?,
+            None => {
+                let scenarios = scenario_discovery
+                    .expect("scenario discovery starts without preloaded scenarios")
+                    .join()
+                    .map_err(|_| anyhow!("scenario discovery thread panicked"))?;
+                warm_scenario_selector_snapshots(&scenarios);
+                scenarios
+            }
         };
         let button_textures = assets.button_textures();
         let menu_entries = build_menu_entries(&scenarios, false);

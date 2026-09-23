@@ -1203,7 +1203,7 @@ fn saved_scenario_round_trips_basic_metadata() {
         is_editable: true,
         is_playable: true,
         mission_access: None,
-        selector_metadata: None,
+        selector_snapshot: SelectorSnapshot::default(),
         path: Some(PathBuf::from("/tmp/test.c4s")),
         source_paths: Vec::new(),
         root_label: Some("Scenarios".into()),

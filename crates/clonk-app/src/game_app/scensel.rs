@@ -891,6 +891,7 @@ impl GameApp {
                 true
             });
             if let Some(entries) = entries {
+                warm_scenario_selector_snapshots(&entries);
                 let _ = sender.send(ScenarioSelectorDiscoveryEvent::Finished(entries));
             }
         });

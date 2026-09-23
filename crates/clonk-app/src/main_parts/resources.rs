@@ -42,51 +42,125 @@ impl ScenarioSelectorMetadata {
     }
 }
 
-pub(crate) fn prepare_scenario_selector_metadata(
+/// A scenario's selector snapshot, read the first time something needs it and
+/// kept until rediscovery; every clone of the entry shares it.
+/// C4ScenarioListLoader reads the C4S when it loads the entry's folder
+/// (C4StartupScenSelDlg.cpp:689-719), not for the whole tree at once.
+#[derive(Clone, Default)]
+pub(crate) struct SelectorSnapshot(Arc<SelectorSnapshotState>);
+
+#[derive(Default)]
+struct SelectorSnapshotState {
+    source: Option<SelectorSnapshotSource>,
+    metadata: std::sync::OnceLock<Option<ScenarioSelectorMetadata>>,
+}
+
+struct SelectorSnapshotSource {
+    path: PathBuf,
+    languages: Arc<Result<Vec<String>, String>>,
+    language_packs: Arc<LanguagePacks>,
+}
+
+impl SelectorSnapshot {
+    pub(crate) fn get(&self) -> Option<&ScenarioSelectorMetadata> {
+        self.0
+            .metadata
+            .get_or_init(|| self.0.source.as_ref().map(read_selector_metadata))
+            .as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_taken(&self) -> bool {
+        self.0.metadata.get().is_some()
+    }
+}
+
+impl std::fmt::Debug for SelectorSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SelectorSnapshot")
+            .field("path", &self.0.source.as_ref().map(|source| &source.path))
+            .field("taken", &self.0.metadata.get().is_some())
+            .finish()
+    }
+}
+
+fn read_selector_metadata(source: &SelectorSnapshotSource) -> ScenarioSelectorMetadata {
+    // One open serves both the loader head and the fair-crew rule.
+    let group = Group::open(&source.path).map_err(|error| error.to_string());
+    let head = source
+        .languages
+        .as_ref()
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|languages| {
+            let group = group.as_ref().map_err(Clone::clone)?;
+            ScenarioLoaderHead::load_from_group_with_languages_and_packs(
+                group,
+                languages,
+                &source.language_packs,
+            )
+            .map_err(|error| error.to_string())
+        });
+    let fair_crew = group
+        .as_ref()
+        .map_or(FairCrewConstraint::Free, group_fair_crew_constraint);
+    ScenarioSelectorMetadata { head, fair_crew }
+}
+
+/// Gives every scenario in `entries` a snapshot that reads its core on first
+/// use. Nothing is read here.
+pub(crate) fn attach_scenario_selector_snapshots(
     entries: &mut [FrontendScenario],
-    languages: &Result<Vec<String>, String>,
-    language_packs: &LanguagePacks,
-    keep_loading: &mut impl FnMut() -> bool,
-) -> bool {
+    languages: &Arc<Result<Vec<String>, String>>,
+    language_packs: &Arc<LanguagePacks>,
+) {
     for entry in entries {
-        if !keep_loading() {
-            return false;
-        }
-        entry.selector_metadata = None;
-        if let Some(path) = entry
+        entry.selector_snapshot = entry
             .path
-            .as_deref()
+            .clone()
             .filter(|_| entry.kind == ScenarioKind::Scenario)
-        {
-            // One open serves both the loader head and the fair-crew rule.
-            let group = Group::open(path).map_err(|error| error.to_string());
-            let head = languages
-                .as_ref()
-                .map_err(Clone::clone)
-                .and_then(|languages| {
-                    let group = group.as_ref().map_err(Clone::clone)?;
-                    ScenarioLoaderHead::load_from_group_with_languages_and_packs(
-                        group,
-                        languages,
-                        language_packs,
-                    )
-                    .map_err(|error| error.to_string())
-                });
-            let fair_crew = group
-                .as_ref()
-                .map_or(FairCrewConstraint::Free, group_fair_crew_constraint);
-            entry.selector_metadata = Some(Arc::new(ScenarioSelectorMetadata { head, fair_crew }));
-        }
-        if !prepare_scenario_selector_metadata(
-            &mut entry.children,
-            languages,
-            language_packs,
-            keep_loading,
-        ) {
-            return false;
+            .map_or_else(SelectorSnapshot::default, |path| {
+                SelectorSnapshot(Arc::new(SelectorSnapshotState {
+                    source: Some(SelectorSnapshotSource {
+                        path,
+                        languages: Arc::clone(languages),
+                        language_packs: Arc::clone(language_packs),
+                    }),
+                    metadata: std::sync::OnceLock::new(),
+                }))
+            });
+        attach_scenario_selector_snapshots(&mut entry.children, languages, language_packs);
+    }
+}
+
+/// Takes the snapshots of `entries` on a background thread, so the first
+/// search finds them taken. The thread holds them weakly and skips the ones
+/// that a newer discovery has already replaced.
+pub(crate) fn warm_scenario_selector_snapshots(entries: &[FrontendScenario]) {
+    fn collect(
+        entries: &[FrontendScenario],
+        snapshots: &mut Vec<std::sync::Weak<SelectorSnapshotState>>,
+    ) {
+        for entry in entries {
+            if entry.selector_snapshot.0.source.is_some() {
+                snapshots.push(Arc::downgrade(&entry.selector_snapshot.0));
+            }
+            collect(&entry.children, snapshots);
         }
     }
-    true
+    let mut snapshots = Vec::new();
+    collect(entries, &mut snapshots);
+    if snapshots.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for snapshot in snapshots {
+            if let Some(state) = snapshot.upgrade() {
+                SelectorSnapshot(state).get();
+            }
+        }
+    });
 }
 
 impl FrontendScenario {
@@ -105,7 +179,7 @@ impl FrontendScenario {
             is_editable: false,
             is_playable: true,
             mission_access: None,
-            selector_metadata: None,
+            selector_snapshot: SelectorSnapshot::default(),
             path: Some(path.to_path_buf()),
             source_paths: vec![path.to_path_buf()],
             root_label: None,
@@ -152,9 +226,9 @@ impl FrontendScenario {
         self.extended.version()
     }
 
-    /// The scenario's selector snapshot.
+    /// The scenario's selector snapshot, taken on first use.
     pub(crate) fn selector_metadata(&self) -> Option<&ScenarioSelectorMetadata> {
-        self.selector_metadata.as_deref()
+        self.selector_snapshot.get()
     }
 
     pub(crate) fn from_resource(entry: resource_scenario::ScenarioEntry, root_label: &str) -> Self {
@@ -197,7 +271,7 @@ impl FrontendScenario {
             is_editable,
             is_playable,
             mission_access,
-            selector_metadata: None,
+            selector_snapshot: SelectorSnapshot::default(),
             path: Some(path),
             extended: ExtendedEntry::from_sources(source_paths.clone()),
             source_paths,
@@ -257,7 +331,7 @@ impl FrontendScenario {
             is_editable: true,
             is_playable: true,
             mission_access: None,
-            selector_metadata: None,
+            selector_snapshot: SelectorSnapshot::default(),
             path: None,
             source_paths: Vec::new(),
             root_label: None,
@@ -1137,7 +1211,7 @@ impl SavedScenarioInfo {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             mission_access: None,
-            selector_metadata: None,
+            selector_snapshot: SelectorSnapshot::default(),
             path: self.path.clone(),
             source_paths: Vec::new(),
             root_label: self.root_label.clone(),

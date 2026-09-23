@@ -202,7 +202,7 @@ fn next_mission_lookup_normalizes_cpp_backslashes_and_case() {
         is_editable: false,
         is_playable: true,
         mission_access: None,
-        selector_metadata: None,
+        selector_snapshot: SelectorSnapshot::default(),
         path: None,
         source_paths: Vec::new(),
         root_label: None,

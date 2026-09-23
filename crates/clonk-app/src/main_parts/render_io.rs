@@ -3697,17 +3697,12 @@ where
             .collect(),
         alphabetical_sorting,
     );
-    // Discovery already runs off the UI thread. Retain the scenario cores
-    // here so even the first search needs no scenario or archive reads.
+    // Each scenario reads its core when something first needs it; the
+    // discovery callers warm the rest in the background.
     let loader_languages =
-        classic_loader_language_sequence(paths).map_err(|error| error.to_string());
-    prepare_scenario_selector_metadata(
-        &mut entries,
-        &loader_languages,
-        &language_packs,
-        &mut || report_progress(100),
-    )
-    .then_some(entries)
+        Arc::new(classic_loader_language_sequence(paths).map_err(|error| error.to_string()));
+    attach_scenario_selector_snapshots(&mut entries, &loader_languages, &Arc::new(language_packs));
+    Some(entries)
 }
 
 /// Resolves the physical C4Group file and child path represented by a
