@@ -4,6 +4,28 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-09-23
+
+### Bug fixes
+
+- Resume a nested object call that switched sections on the object's own script (#1720)
+- Read a declared global or public at the start of a statement as a variable (#1712)
+- Find an object created earlier in the same call where C4Game::NewObject linked it (#1705)
+- Answer nil from eval of an unknown identifier as C4Aul's parser does (#1704)
+
+### Documentation
+
+- Seed worktree build caches from the main checkout (#1710)
+
+### Features
+
+- Add approved high-resolution in-game menu icons (#1721)
+- List the microphones and outputs the desktop sound server offers (#1715)
+- Render approved HUD icons at high resolution (#1714)
+- Replace shared UI icons with high-resolution artwork (#1706)
+- Replace startup icons with high-resolution artwork (#1702)
+- Integrate voice setup into the options book (#1701)
+
 ## [0.29.0] - 2026-09-22
 
 ### Bug fixes
