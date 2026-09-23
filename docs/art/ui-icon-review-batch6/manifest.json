@@ -1,0 +1,183 @@
+{
+  "title": "Clonk navigation-arrow icon review \u2014 batch 6",
+  "status": "All eight approved and installed as high-resolution cell replacements",
+  "revision": "Color and shading consistency pass",
+  "method": "OpenAI built-in imagegen with foreground extraction and original-cell placement",
+  "icons": [
+    {
+      "id": "ARROW-01",
+      "label": "Up",
+      "source": "planet/Graphics.c4g/Arrow.png",
+      "sourceCell": [
+        0,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "d77715cfb1358ad7ca9179d5aafa1b96389c88ff57680a41058b22dce0650dd2",
+      "before": "before/red-arrow-0.png",
+      "after": "after/red-arrow-0.png",
+      "gameSize": "game-size/red-arrow-0.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "d4792475016887bfa6800e50c98cffaf88f40e5e3081747a7462a86178104c19",
+      "review": "approved"
+    },
+    {
+      "id": "ARROW-02",
+      "label": "Down",
+      "source": "planet/Graphics.c4g/Arrow.png",
+      "sourceCell": [
+        64,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "d77715cfb1358ad7ca9179d5aafa1b96389c88ff57680a41058b22dce0650dd2",
+      "before": "before/red-arrow-1.png",
+      "after": "after/red-arrow-1.png",
+      "gameSize": "game-size/red-arrow-1.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "3c9dde4f95e199d869606809653527ccad45e8d3f73e9b7e3a8505d8dadb6ee7",
+      "review": "approved"
+    },
+    {
+      "id": "ARROW-03",
+      "label": "Left",
+      "source": "planet/Graphics.c4g/Arrow.png",
+      "sourceCell": [
+        128,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "d77715cfb1358ad7ca9179d5aafa1b96389c88ff57680a41058b22dce0650dd2",
+      "before": "before/red-arrow-2.png",
+      "after": "after/red-arrow-2.png",
+      "gameSize": "game-size/red-arrow-2.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "6b3d7e791c764aec73bda008911882d1dd67e36d6c85c7765d2704deb3b5ea59",
+      "review": "approved"
+    },
+    {
+      "id": "ARROW-04",
+      "label": "Right",
+      "source": "planet/Graphics.c4g/Arrow.png",
+      "sourceCell": [
+        192,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "d77715cfb1358ad7ca9179d5aafa1b96389c88ff57680a41058b22dce0650dd2",
+      "before": "before/red-arrow-3.png",
+      "after": "after/red-arrow-3.png",
+      "gameSize": "game-size/red-arrow-3.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "213d691f4b0379cc14360825926cea213520a1949a55a085657838d2694c455c",
+      "review": "approved"
+    },
+    {
+      "id": "WOOD-01",
+      "label": "Player selection left",
+      "source": "planet/Graphics.c4g/GUIBigArrows.png",
+      "sourceCell": [
+        0,
+        0,
+        19,
+        40
+      ],
+      "sourceSha256": "9296ae0fccd466263d64bd9bd77bc266095f786e5c1d02ed3587afe7ab126c8e",
+      "before": "before/wood-arrow-0.png",
+      "after": "after/wood-arrow-0.png",
+      "gameSize": "game-size/wood-arrow-0.png",
+      "afterSize": [
+        152,
+        320
+      ],
+      "afterSha256": "9c06cf5e92bf41396973e2351805c49afb6310f2b12cf938d77acc2893823d37",
+      "review": "approved"
+    },
+    {
+      "id": "WOOD-02",
+      "label": "Player selection right",
+      "source": "planet/Graphics.c4g/GUIBigArrows.png",
+      "sourceCell": [
+        19,
+        0,
+        19,
+        40
+      ],
+      "sourceSha256": "9296ae0fccd466263d64bd9bd77bc266095f786e5c1d02ed3587afe7ab126c8e",
+      "before": "before/wood-arrow-1.png",
+      "after": "after/wood-arrow-1.png",
+      "gameSize": "game-size/wood-arrow-1.png",
+      "afterSize": [
+        152,
+        320
+      ],
+      "afterSha256": "fc8629ce6f9e591385dbad9cd36b36d0f7dbdba1f7473dfbd2b2eb2a30a294e8",
+      "review": "approved"
+    },
+    {
+      "id": "WOOD-03",
+      "label": "Player selection left pressed",
+      "source": "planet/Graphics.c4g/GUIBigArrows.png",
+      "sourceCell": [
+        38,
+        0,
+        19,
+        40
+      ],
+      "sourceSha256": "9296ae0fccd466263d64bd9bd77bc266095f786e5c1d02ed3587afe7ab126c8e",
+      "before": "before/wood-arrow-2.png",
+      "after": "after/wood-arrow-2.png",
+      "gameSize": "game-size/wood-arrow-2.png",
+      "afterSize": [
+        152,
+        320
+      ],
+      "afterSha256": "ec4863880e49ecb7d262610cc1b71f0129e3791c5c016f2a5df9913fc8bc5d37",
+      "review": "approved"
+    },
+    {
+      "id": "WOOD-04",
+      "label": "Player selection right pressed",
+      "source": "planet/Graphics.c4g/GUIBigArrows.png",
+      "sourceCell": [
+        57,
+        0,
+        19,
+        40
+      ],
+      "sourceSha256": "9296ae0fccd466263d64bd9bd77bc266095f786e5c1d02ed3587afe7ab126c8e",
+      "before": "before/wood-arrow-3.png",
+      "after": "after/wood-arrow-3.png",
+      "gameSize": "game-size/wood-arrow-3.png",
+      "afterSize": [
+        152,
+        320
+      ],
+      "afterSha256": "f647e8f7effbb556e1cc5c10f84f541e3ca9cec2b6f7c7838db1eca943b3c32a",
+      "review": "approved"
+    }
+  ],
+  "otherLowResolutionCandidates": [
+    "Rank.png: twenty-four 16x16 rank badges",
+    "Options.png: sixteen remaining 35x35 cells",
+    "Control.png: mixed-size keyboard and command facets",
+    "GUIContext.png and GUISubmenu.png: tiny wooden menu controls",
+    "Flag.png and Crew.png: owner-colored art requiring color-mask preservation"
+  ]
+}
