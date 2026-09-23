@@ -9,7 +9,7 @@ use crate::debugger::DebuggerHooks;
 use crate::error::{ParseError, RuntimeError, ScriptError};
 use crate::parser::Parser;
 use crate::value::{C4StringValue, C4StringValueInner, C4VType, Value};
-use crate::vm::{HostCallArg, ValueReference, Vm};
+use crate::vm::{HostCallArg, ReferenceCallResult, Vm};
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
 
@@ -152,11 +152,9 @@ fn empty_host_registration_snapshot() -> &'static HostRegistrationSnapshot {
 }
 
 /// Cross-object `func &` dispatch. Kept separate from [`HostFunction`] so an
-/// lvalue call result is never flattened to a copied [`Value`]. `Ok(None)`
-/// reports a fail-safe call that found no function, where AB_CALLFS leaves a
-/// plain nil in place of the result (C4AulExec.cpp:1262-1266).
+/// lvalue call result is never flattened to a copied [`Value`].
 pub type MethodReferenceDispatch =
-    std::rc::Rc<dyn Fn(&[Value]) -> Result<Option<ValueReference>, RuntimeError>>;
+    std::rc::Rc<dyn Fn(&[Value]) -> Result<ReferenceCallResult, RuntimeError>>;
 
 /// Cross-object dispatch for an arrow call whose callee declares `&`
 /// parameters. C++ hands the callee `C4V_pC4Value` slots pointing straight at
@@ -2894,16 +2892,18 @@ impl Engine {
         Ok((result, finals))
     }
 
-    /// Calls a `func &` against shared object-local cells without
-    /// dereferencing its result. Engine method dispatch uses this to carry an
-    /// arrow-call lvalue back to the suspended caller.
+    /// Calls a function against shared object-local cells without
+    /// dereferencing a `func &` result. Engine method dispatch uses this to
+    /// carry an arrow-call lvalue back to the suspended caller. Any other
+    /// callee's plain value comes back as one, for AB_Set to reject after its
+    /// right side (C4AulExec.cpp:858-865).
     pub fn call_reference_with_cells_and_this(
         &self,
         name: &str,
         args: &[Value],
         cells: &crate::vm::LocalCells,
         this: Value,
-    ) -> Result<ValueReference, ScriptError> {
+    ) -> Result<ReferenceCallResult, ScriptError> {
         let vm = self.vm().with_this(this);
         vm.call_reference_with_cells(name, args, cells)
             .map_err(ScriptError::from)
@@ -2918,7 +2918,7 @@ impl Engine {
         args: &[Value],
         cells: &crate::vm::LocalCells,
         this: Value,
-    ) -> Result<ValueReference, ScriptError> {
+    ) -> Result<ReferenceCallResult, ScriptError> {
         let vm = self.vm().with_this(this);
         vm.call_reference_with_cells_preserving_caller(name, args, cells)
             .map_err(ScriptError::from)

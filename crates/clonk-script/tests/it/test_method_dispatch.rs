@@ -183,6 +183,39 @@ fn globally_unresolved_failsafe_arrow_assignment_runs_its_value_before_failing()
 }
 
 #[test]
+fn an_arrow_assignment_to_a_plain_return_runs_its_value_before_failing() {
+    // A callee that is no `func &` leaves a plain value where AB_Set expects
+    // a reference. AB_Set evaluates its right side first and only then
+    // rejects the value (C4AulExec.cpp:266-275, 858-865).
+    let source = r#"
+        #strict
+        func Plain() { return 3; }
+        func Probe(target) { target->Plain() = RightSide(); }
+    "#;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::new();
+    crate::support::load_script(&mut engine, source);
+    {
+        let calls = Arc::clone(&calls);
+        engine.register_host_function("RightSide", move |_| {
+            calls.lock().unwrap().push("RightSide");
+            Ok(Value::Int(42))
+        });
+    }
+
+    let error = engine
+        .call("Probe", &[Value::Object(7)])
+        .expect_err("a plain value is no reference to assign through");
+    assert!(
+        error
+            .to_string()
+            .contains(r#"operator "=" left side: got "int", but expected "&"!"#),
+        "got: {error}"
+    );
+    assert_eq!(*calls.lock().unwrap(), ["RightSide"]);
+}
+
+#[test]
 fn removal_during_arguments_stops_before_bare_local_method_dispatch() {
     // Parse_Params evaluates Clear first, then AB_CALL observes that
     // AssignRemoval cleared its retained receiver and errors before Method
@@ -325,9 +358,9 @@ fn arrow_func_ref_result_writes_through_the_dispatch_reference() {
             assert_eq!(args[0], Value::Object(9));
             assert_eq!(args[1], Value::String("SacrificeMade".into()));
             assert_eq!(args[2], Value::Bool(false));
-            Ok(Some(clonk_script::ValueReference::from_cell(Rc::clone(
-                &slot,
-            ))))
+            Ok(clonk_script::ReferenceCallResult::Reference(
+                clonk_script::ValueReference::from_cell(Rc::clone(&slot)),
+            ))
         }));
     }
 
@@ -365,11 +398,15 @@ fn precreated_dispatch_reference_joins_the_active_removal_index() {
         let slot = Rc::clone(&slot);
         let observed_during_sweep = Rc::clone(&observed_during_sweep);
         engine.register_method_reference_dispatch(Rc::new(move |args| match &args[1] {
-            Value::String(name) if name.as_ref() == "RetainedSlot" => Ok(Some(reference.clone())),
+            Value::String(name) if name.as_ref() == "RetainedSlot" => Ok(
+                clonk_script::ReferenceCallResult::Reference(reference.clone()),
+            ),
             Value::String(name) if name.as_ref() == "SweepSlot" => {
                 clear_active_object_references(7);
                 *observed_during_sweep.borrow_mut() = Some(slot.borrow().clone());
-                Ok(Some(increment_reference.clone()))
+                Ok(clonk_script::ReferenceCallResult::Reference(
+                    increment_reference.clone(),
+                ))
             }
             method => panic!("unexpected method reference dispatch: {method:?}"),
         }));

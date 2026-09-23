@@ -813,11 +813,11 @@ pub(crate) fn arrow_method_ref_args_dispatch(
 /// C++ passes the call-target stack cell as `pReturn`; a `func &` therefore
 /// leaves a C4V_pC4Value in the suspended caller instead of a copied value
 /// (C4AulExec.cpp:1290-1299, 1054-1067). A fail-safe call that finds no
-/// function answers `None`: AB_CALLFS leaves a plain nil instead
+/// function answers the plain nil AB_CALLFS leaves instead
 /// (C4AulExec.cpp:1262-1266).
 pub(crate) fn arrow_method_reference_dispatch(
     args: &[Value],
-) -> Result<Option<clonk_script::ValueReference>, RuntimeError> {
+) -> Result<clonk_script::ReferenceCallResult, RuntimeError> {
     let target_value = args.first().cloned().unwrap_or(Value::Nil);
     let Some(Value::String(name)) = args.get(1) else {
         return Err(RuntimeError::new(
@@ -839,8 +839,8 @@ pub(crate) fn arrow_method_reference_dispatch(
             )));
         };
         return match call_scoped_script_reference(script, Some(def_id), name, &pars) {
-            Some(result) => result.map(Some),
-            None if failsafe => Ok(None),
+            Some(result) => result,
+            None if failsafe => Ok(clonk_script::ReferenceCallResult::Value(Value::Nil)),
             None => Err(RuntimeError::new(format!(
                 "Definition call: No function \"{name}\" in definition \"{}\"!",
                 clonk_script::c4_id_text(stored_id)
@@ -872,16 +872,16 @@ pub(crate) fn arrow_method_reference_dispatch(
             )));
         }
         return match call_world_object_reference_from_arrow(target, function, &pars) {
-            Some(result) => result.map(Some),
-            None if failsafe => Ok(None),
+            Some(result) => result,
+            None if failsafe => Ok(clonk_script::ReferenceCallResult::Value(Value::Nil)),
             None => Err(RuntimeError::new(format!(
                 "Object call: No function \"{function}\" in object {target}!"
             ))),
         };
     }
     match call_world_object_reference_from_arrow(target, name, &pars) {
-        Some(result) => result.map(Some),
-        None if failsafe => Ok(None),
+        Some(result) => result,
+        None if failsafe => Ok(clonk_script::ReferenceCallResult::Value(Value::Nil)),
         None => Err(RuntimeError::new(format!(
             "Object call: No function \"{name}\" in object {target}!"
         ))),
@@ -1096,7 +1096,7 @@ fn call_scoped_script_reference(
     definition_override: Option<DefinitionId>,
     function: &str,
     args: &[Value],
-) -> Option<Result<clonk_script::ValueReference, RuntimeError>> {
+) -> Option<Result<clonk_script::ReferenceCallResult, RuntimeError>> {
     let resolution = script.resolve_function(function, true)?;
     let (previous_script_object, previous_script_definition, previous_definition) = HOST_CONTEXT
         .with(|cell| {
@@ -3044,7 +3044,7 @@ fn call_world_object_reference_from_arrow(
     target: ObjectId,
     function: &str,
     args: &[Value],
-) -> Option<Result<clonk_script::ValueReference, RuntimeError>> {
+) -> Option<Result<clonk_script::ReferenceCallResult, RuntimeError>> {
     call_world_object_reference_with(target, function, args, true, None, true)
 }
 
@@ -3067,7 +3067,7 @@ fn call_world_object_reference_with(
     include_globals: bool,
     script_override: Option<Arc<ScriptEngine>>,
     preserve_caller: bool,
-) -> Option<Result<clonk_script::ValueReference, RuntimeError>> {
+) -> Option<Result<clonk_script::ReferenceCallResult, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
             context.prepare_nested_call(

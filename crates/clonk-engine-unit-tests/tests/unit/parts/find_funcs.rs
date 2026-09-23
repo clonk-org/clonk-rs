@@ -2069,6 +2069,37 @@ fn a_failsafe_arrow_reference_call_that_misses_on_the_target_leaves_nil() {
 }
 
 #[test]
+fn an_arrow_assignment_to_a_plain_return_on_the_target_runs_its_right_side_first() {
+    // PROB's Plain is no `func &`, so the call leaves a plain value where
+    // AB_Set expects a reference. AB_Set evaluates its right side first and
+    // only then rejects that value (C4AulExec.cpp:266-275, 858-865).
+    let caller_script = r#"#strict
+        local right_side_calls;
+        public func RightSide() { right_side_calls = 1; return 5; }
+        public func AssignPlain(target) { target->Plain() = RightSide(); return 1; }
+        "#;
+
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CLLR", "Caller", caller_script);
+    engine.register_test_script_definition("PROB", "Probe", "#strict\npublic func Plain() { return 3; }\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CLLR"));
+    let probe = engine.spawn_test_object(SpawnConfig::new("PROB"));
+    engine.tick_without_snapshot().test_value();
+    let caller_idx = engine.test_object_index(caller);
+
+    let error = engine
+        .call_object_function(caller_idx, "AssignPlain", vec![Value::Object(probe.as_u64())])
+        .expect_err("a plain value is no reference to assign through");
+    let EngineError::Script { source, .. } = error else {
+        panic!("the assignment failed outside the script: {error:?}");
+    };
+    let message = source.to_string();
+    unit_assert!(message.contains(r#"operator "=" left side: got "int", but expected "&"!"#), "{message}");
+    let caller_idx = engine.test_object_index(caller);
+    unit_assert_eq!(engine.objects[caller_idx].state.local_vars.get("right_side_calls") => Some(&Value::Int(1)), "the right side ran before the assignment failed");
+}
+
+#[test]
 fn removing_an_arrow_target_reports_zero_instead_of_a_missing_engine_function() {
     // The parameter C4Value predates AssignRemoval and is nil by the time the
     // following AB_CALL runs. It therefore fails at the target-zero check,

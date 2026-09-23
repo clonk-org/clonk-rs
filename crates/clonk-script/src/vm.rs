@@ -2650,6 +2650,30 @@ impl ValueReference {
     }
 }
 
+/// What a call made for its reference leaves on the caller's stack: the live
+/// C4Value a `func &` returns, or a plain value. A fail-safe call that finds
+/// no function leaves a plain nil (C4AulExec.cpp:1262-1266).
+pub enum ReferenceCallResult {
+    Reference(ValueReference),
+    Value(Value),
+}
+
+impl ReferenceCallResult {
+    fn from_return_value(result: ReturnValue) -> Self {
+        match result {
+            ReturnValue::Reference(reference) => Self::Reference(ValueReference(reference)),
+            ReturnValue::Value(tracked) => Self::Value(tracked.value),
+        }
+    }
+
+    fn into_return_value(self) -> ReturnValue {
+        match self {
+            Self::Reference(reference) => ReturnValue::Reference(reference.into_lvalue()),
+            Self::Value(value) => ReturnValue::Value(TrackedValue::runtime(value)),
+        }
+    }
+}
+
 impl LValueRef {
     fn ensure_active_object_reference_cell_registered(&self) {
         match self {
@@ -5315,16 +5339,18 @@ impl<'a> Vm<'a> {
         )
     }
 
-    /// Reference-returning counterpart to [`Vm::call_with_cells`].
+    /// Reference-returning counterpart to [`Vm::call_with_cells`]. A callee
+    /// that is no `func &` dereferences its result at AB_RETURN
+    /// (C4AulExec.cpp:1055-1057), so its plain value comes back as one.
     pub(crate) fn call_reference_with_cells(
         &self,
         name: &str,
         args: &[Value],
         cells: &LocalCells,
-    ) -> Result<ValueReference, RuntimeError> {
+    ) -> Result<ReferenceCallResult, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::external).collect();
-        self.invoke_reference(name, args, 0, cells.state.clone(), None)
-            .map(ValueReference)
+        self.invoke_raw(name, args, 0, cells.state.clone(), None)
+            .map(ReferenceCallResult::from_return_value)
     }
 
     /// Reference-returning counterpart to
@@ -5334,15 +5360,15 @@ impl<'a> Vm<'a> {
         name: &str,
         args: &[Value],
         cells: &LocalCells,
-    ) -> Result<ValueReference, RuntimeError> {
+    ) -> Result<ReferenceCallResult, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::runtime).collect();
         let mut caller = current_caller_context();
         if let Some(caller) = &mut caller {
             caller.definition_context |= self.definition_context;
         }
         let _parameter_override = CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
-        self.invoke_reference(name, args, 0, cells.state.clone(), caller)
-            .map(ValueReference)
+        self.invoke_raw(name, args, 0, cells.state.clone(), caller)
+            .map(ReferenceCallResult::from_return_value)
     }
 
     /// Call a function with per-object local variable context
@@ -5946,22 +5972,6 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         self.invoke_resolved_script_raw(name, target, args, depth, object_state, caller)?
             .into_value_on_stack()
-    }
-
-    fn invoke_reference(
-        &self,
-        name: &str,
-        args: CallArgs,
-        depth: usize,
-        object_state: ObjectState,
-        caller: Option<ScriptCallerContext>,
-    ) -> Result<LValueRef, RuntimeError> {
-        match self.invoke_raw(name, args, depth, object_state, caller)? {
-            ReturnValue::Reference(reference) => Ok(reference),
-            ReturnValue::Value(_) => Err(RuntimeError::new(format!(
-                "function '{name}' does not return a reference"
-            ))),
-        }
     }
 
     fn invoke_raw(
@@ -8102,26 +8112,22 @@ impl<'a> Vm<'a> {
             }
             let _guard = CallerContextGuard::enter(Some(env.caller_context()));
             let _parameter_override = CallParameterOverrideGuard::enter(0);
-            return dispatch(&dispatch_args).map(|found| {
-                found.map_or_else(
-                    || ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
-                    |reference| ReturnValue::Reference(reference.into_lvalue()),
-                )
-            });
+            return dispatch(&dispatch_args).map(ReferenceCallResult::into_return_value);
         }
 
         // Without a host method bridge, an arrow call can still select a
         // script `func &` from the executing object context. The continuation
         // call-result task owns the target and ten parameter slots already.
+        // A plain return stays a value, which AB_Set rejects after its right
+        // side (C4AulExec.cpp:266-275, 858-865).
         let _parameter_override = CallParameterOverrideGuard::enter(0);
-        self.invoke_reference(
+        self.invoke_raw(
             name,
             evaluated_args,
             depth + 1,
             env.object_state.clone(),
             Some(env.caller_context()),
         )
-        .map(ReturnValue::Reference)
     }
 
     /// Object-call entry for the continuation executor. Its argument task has
