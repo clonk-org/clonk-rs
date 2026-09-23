@@ -1684,18 +1684,17 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
-                // AB_CALL leaves a reference return intact for AB_Set. Any
-                // non-failsafe arrow call is therefore a syntactic lvalue
-                // candidate; the runtime validates that its callee is `func &`.
-                else if let Expr::Property(ref object, ref method) = *callee {
-                    if !is_optional {
-                        return Ok(AssignmentTarget::MethodSlot {
-                            object: object.clone(),
-                            method: method.clone(),
-                            args,
-                            is_arrow: true,
-                        });
-                    }
+                // AB_CALL and AB_CALLFS leave a reference return intact for
+                // AB_Set (C4AulExec.cpp:1217-1265). Any arrow call is therefore
+                // a syntactic lvalue candidate; the runtime validates that its
+                // callee is `func &`.
+                else if let Expr::Property(object, method) = *callee {
+                    return Ok(AssignmentTarget::MethodSlot {
+                        object,
+                        method,
+                        args,
+                        is_arrow: true,
+                    });
                 }
                 Err(ParseError::new(
                     "invalid assignment target",

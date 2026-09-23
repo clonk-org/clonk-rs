@@ -330,6 +330,35 @@ fn arrow_form_numbered_local_read_resolves_the_target_object_slot() {
 }
 
 #[test]
+fn a_failsafe_arrow_local_assignment_writes_the_target_objects_slot() {
+    // `->~` compiles to AB_CALLFS (C4AulParse.cpp:3194-3243), whose lookup
+    // falls back to the engine's global Local for any object
+    // (C4Aul.cpp:130-148). The call leaves Local's reference for AB_Set to
+    // write through (C4AulExec.cpp:858-865; C4Value.cpp:67-75). Der goldene
+    // Wipf 2's Monster aims its gas this way:
+    // `CreateObject(GAS_,12*dir3,-4,-1)->~Local(0)=dir3;`.
+    let (mut engine, cells) = engine_with_stub_hook();
+    crate::support::load_script(
+        &mut engine,
+        "public func Aim(target) { target->~Local(0) = 3; return 1; }",
+    );
+    assert_eq!(
+        engine
+            .call("Aim", &[Value::Object(8)])
+            .expect("call succeeds"),
+        Value::Int(1)
+    );
+    assert_eq!(
+        cells
+            .borrow()
+            .get(&(8, "__local_0".to_string()))
+            .map(|cell| cell.borrow().clone()),
+        Some(Value::Int(3)),
+        "the write went through the target's numbered local slot"
+    );
+}
+
+#[test]
 fn falsy_target_falls_back_to_the_executing_object() {
     // FnLocalN: `if (!pObj) pObj = cthr->Obj` (C4Script.cpp:4593-4596) —
     // a nil/0 target means the executing object, NOT the hook.
