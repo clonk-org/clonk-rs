@@ -1209,6 +1209,7 @@ fn saved_scenario_round_trips_basic_metadata() {
         root_label: Some("Scenarios".into()),
         extended: ExtendedEntry::default(),
         children: Vec::new(),
+        contents_loaded: true,
         folder_index: None,
         icon_index: None,
         difficulty: None,

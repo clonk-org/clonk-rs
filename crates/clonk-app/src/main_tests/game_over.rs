@@ -208,6 +208,7 @@ fn next_mission_lookup_normalizes_cpp_backslashes_and_case() {
         root_label: None,
         extended: ExtendedEntry::default(),
         children: Vec::new(),
+        contents_loaded: true,
         folder_index: None,
         icon_index: None,
         difficulty: None,

@@ -185,6 +185,7 @@ impl FrontendScenario {
             root_label: None,
             extended: ExtendedEntry::default(),
             children: Vec::new(),
+            contents_loaded: true,
             folder_index: None,
             icon_index: None,
             difficulty: None,
@@ -242,7 +243,7 @@ impl FrontendScenario {
             is_playable,
             mission_access,
             children,
-            contents_loaded: _,
+            contents_loaded,
             folder_index,
             icon_index,
             difficulty,
@@ -278,6 +279,7 @@ impl FrontendScenario {
             source_paths,
             root_label: Some(root_label.to_string()),
             children,
+            contents_loaded,
             folder_index,
             icon_index,
             difficulty,
@@ -341,6 +343,7 @@ impl FrontendScenario {
                 FALLBACK_SCENARIO_TITLE,
             ))),
             children: Vec::new(),
+            contents_loaded: true,
             folder_index: None,
             icon_index: None,
             difficulty: None,
@@ -434,6 +437,8 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
     }
     existing.is_editable |= incoming.is_editable;
     existing.is_playable |= incoming.is_playable;
+    // A merged folder is loaded only once every root's contents are.
+    existing.contents_loaded &= incoming.contents_loaded;
     if existing.folder_index.is_none() {
         existing.folder_index = incoming.folder_index;
     }
@@ -1221,6 +1226,7 @@ impl SavedScenarioInfo {
                 &self.title,
             ))),
             children: Vec::new(),
+            contents_loaded: true,
             folder_index: None,
             icon_index: None,
             difficulty: None,

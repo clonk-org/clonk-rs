@@ -10322,6 +10322,10 @@ pub(crate) struct FrontendScenario {
     /// The list preview, title picture and version, read when first shown.
     pub(crate) extended: ExtendedEntry,
     pub(crate) children: Vec<FrontendScenario>,
+    /// Whether `children` lists the folder's entries
+    /// (`C4ScenarioListLoader::Folder::fContentsLoaded`,
+    /// C4StartupScenSelDlg.cpp:901-904). Always set for scenarios.
+    pub(crate) contents_loaded: bool,
     pub(crate) folder_index: Option<i32>,
     pub(crate) icon_index: Option<i32>,
     pub(crate) difficulty: Option<i32>,

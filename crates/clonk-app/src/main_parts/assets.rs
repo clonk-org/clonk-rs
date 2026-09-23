@@ -8735,6 +8735,7 @@ pub(crate) fn run_integration_test(
         root_label: None,
         extended: ExtendedEntry::default(),
         children: Vec::new(),
+        contents_loaded: true,
         folder_index: None,
         icon_index: None,
         difficulty: None,
