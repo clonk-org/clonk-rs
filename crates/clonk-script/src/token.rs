@@ -11,6 +11,10 @@ pub struct Token {
     /// static-constant preparser accepts hexadecimal integers directly, but
     /// its special signed-integer scan never enters hexadecimal mode.
     number_is_hex: bool,
+    /// C4Aul's read position at the token's first byte and at the byte after
+    /// it. The lexer stamps both.
+    read_start: DiagnosticPosition,
+    read_end: DiagnosticPosition,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,7 +149,58 @@ pub enum Symbol {
     RightShiftEqual,
 }
 
+/// Where C4AulParseError points: `SGetLine` and `SLineGetCharacters` at a read
+/// position in the loaded script (C4AulParse.cpp:268-294). That is the count of
+/// newlines before the position, and the bytes since the last newline with
+/// the newline itself counted (C4Strings.cpp:380-403).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DiagnosticPosition {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+}
+
+impl DiagnosticPosition {
+    /// The position after `character`, counted in the C4 string bytes C4Aul
+    /// reads.
+    pub(crate) fn advanced_past(self, character: char) -> Self {
+        if character == '\n' {
+            return Self {
+                line: self.line + 1,
+                column: 1,
+            };
+        }
+        let bytes = crate::value::c4_string_byte_len(character.encode_utf8(&mut [0; 4]));
+        self.after_bytes(bytes)
+    }
+
+    /// The position `count` bytes further along the same line.
+    pub(crate) fn after_bytes(self, count: usize) -> Self {
+        Self {
+            column: self.column + count,
+            ..self
+        }
+    }
+}
+
 impl Token {
+    /// C4Aul reports an error about its current token once it has read past
+    /// it, so the position is the one after the token.
+    pub(crate) fn diagnostic_position(&self) -> DiagnosticPosition {
+        self.read_end
+    }
+
+    pub(crate) fn read_start(&self) -> DiagnosticPosition {
+        self.read_start
+    }
+
+    pub(crate) fn with_read_span(self, start: DiagnosticPosition, end: DiagnosticPosition) -> Self {
+        Self {
+            read_start: start,
+            read_end: end,
+            ..self
+        }
+    }
+
     pub fn new(kind: TokenKind, line: usize, column: usize) -> Self {
         Self {
             kind,
@@ -153,6 +208,8 @@ impl Token {
             column,
             raw_number: None,
             number_is_hex: false,
+            read_start: DiagnosticPosition::default(),
+            read_end: DiagnosticPosition::default(),
         }
     }
 
@@ -164,11 +221,9 @@ impl Token {
         column: usize,
     ) -> Self {
         Self {
-            kind: TokenKind::Number(value),
-            line,
-            column,
             raw_number: Some(raw_number),
             number_is_hex,
+            ..Self::new(TokenKind::Number(value), line, column)
         }
     }
 

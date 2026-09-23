@@ -1286,8 +1286,10 @@ pub struct UnresolvedInherited {
     pub function: String,
     /// Declaring script, when the host knows one.
     pub script_name: Option<String>,
-    /// One-based source line of the `inherited` call.
+    /// Where C4Aul reports the call: its line and column once it has read
+    /// the token after `inherited`.
     pub line: usize,
+    pub column: usize,
 }
 
 impl std::fmt::Display for UnresolvedInherited {
@@ -1302,7 +1304,7 @@ impl std::fmt::Display for UnresolvedInherited {
         if let Some(script_name) = &self.script_name {
             write!(formatter, ", {script_name}")?;
         }
-        write!(formatter, ":{})", self.line)
+        write!(formatter, ":{}:{})", self.line, self.column)
     }
 }
 
@@ -1875,8 +1877,7 @@ impl Engine {
         for diagnostic in &diagnostics {
             let message = diagnostic.to_string();
             if let Some(function) = self.functions.get_mut(&diagnostic.function) {
-                let column = function.hard_inherited_column.unwrap_or(1);
-                function.truncate_at_link_error(&message, diagnostic.line, column);
+                function.truncate_at_link_error(&message, diagnostic.line, diagnostic.column);
             }
         }
         diagnostics
@@ -1888,6 +1889,7 @@ impl Engine {
             .values()
             .filter_map(|function| {
                 let line = function.hard_inherited_line?;
+                let column = function.hard_inherited_column.unwrap_or_default();
                 let resolved = function.owner_overloaded().is_some()
                     || self.inherited_engine_hop_exists(function)
                     || self.host_functions.contains_key(&function.name)
@@ -1899,6 +1901,7 @@ impl Engine {
                         .clone()
                         .or_else(|| self.script_name.clone()),
                     line,
+                    column,
                 })
             })
             .collect::<Vec<_>>();
@@ -4085,7 +4088,9 @@ mod tests {
         let diagnostics = orphan.unresolved_inherited_diagnostics();
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].function, "Orphan");
-        assert_eq!(diagnostics[0].line, 2);
+        // C4Aul throws once it has read the '(' after `inherited`. With no
+        // LoadAppend newline in front, that is line 1.
+        assert_eq!((diagnostics[0].line, diagnostics[0].column), (1, 34));
 
         // The failsafe spelling is silent — C4Aul only raises for the hard
         // one, and discards the parameters instead (C4AulParse.cpp:2801-2806).

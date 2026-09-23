@@ -7131,6 +7131,29 @@ Category=C4D_Object
     }
 
     #[test]
+    fn definition_script_diagnostics_report_the_positions_c4aul_prints() {
+        // LoadAppend puts a newline before the script (C4ComponentHost.cpp:
+        // 207). C4AulParseError prints SGetLine and SLineGetCharacters at the
+        // parser's read position, which stands after the offending `345`
+        // (C4AulParse.cpp:268-294; C4Strings.cpp:380-403). The pinned oracle
+        // logs this definition's error at `Probe.c4d/Script.c:10:16`.
+        definition_fixture_dir! { temp, def_dir => "Probe.c4d" };
+        write_fixture! { def_dir.join("DefCore.txt") => b"[DefCore]\r\nid=PRBD\r\nName=Probe\r\nCategory=1\r\n" };
+        write_fixture! { def_dir.join("Script.c") => b"#strict\r\n\r\nfunc Pair(a, b)\r\n{\r\n  return a;\r\n}\r\n\r\nfunc Probe()\r\n{\r\n  Pair(1, 2 345);\r\n}\r\n" };
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("load definition");
+        let script = clonk_script::Script::compile_c4_string(definition.script.combined())
+            .expect("a function body error is quarantined");
+        let positions = script
+            .parse_diagnostics()
+            .iter()
+            .map(|diagnostic| (diagnostic.line(), diagnostic.column()))
+            .collect::<Vec<_>>();
+        check_eq! { positions => vec![(10, 16)] }
+    }
+
+    #[test]
     fn definition_script_selects_fixed_components_in_cpp_order() {
         let temp = tempdir().unwrap();
         let def_dir = temp.path().join("Scripts.ocd");
