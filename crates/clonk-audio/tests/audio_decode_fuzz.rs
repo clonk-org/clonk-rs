@@ -232,7 +232,7 @@ fn every_audio_seed_decodes_or_reports_a_typed_error() {
 #[test]
 fn concurrent_midi_decodes_complete_without_backend_liveness_failure() {
     use std::sync::{mpsc, Arc, Barrier};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let corpus = seeds();
     // FluidSynth and its SoundFont are optional runtime dependencies. Keep
@@ -262,11 +262,17 @@ fn concurrent_midi_decodes_complete_without_backend_liveness_failure() {
     }
     drop(sender);
 
+    // A hung backend never finishes, so the deadline only has to turn a hang
+    // into a failure. It is generous because the decodes share the machine
+    // with the rest of the suite: at a load average of 20-25 they took over
+    // 30 s, against about 6 s on an idle machine (clonk-org/clonk-rs#1751).
+    let deadline = Instant::now() + Duration::from_secs(120);
     for _ in 0..workers {
+        let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
             receiver
-                .recv_timeout(Duration::from_secs(15))
-                .expect("concurrent MIDI decode must complete within 15 seconds"),
+                .recv_timeout(remaining)
+                .expect("concurrent MIDI decodes must complete within 120 seconds"),
             "concurrent MIDI decode must return a successful decode"
         );
     }
