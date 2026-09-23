@@ -11,11 +11,14 @@ pub(crate) const MAX_VOICE_VOLUME_PERCENT: i32 = 200;
 
 pub(crate) fn load_enhanced_chat_preferences(
     paths: Option<&AppPaths>,
+    profile: CompatProfile,
 ) -> clonk_frontend::enhanced_chat_view::ChatPreferences {
-    paths
+    let mut preferences = paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
         .map(|config| enhanced_chat_preferences(&config))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    preferences.enabled &= profile == CompatProfile::Normal;
+    preferences
 }
 
 pub(crate) fn enhanced_chat_preferences(
@@ -31,7 +34,7 @@ pub(crate) fn enhanced_chat_preferences(
     clonk_frontend::enhanced_chat_view::ChatPreferences {
         enabled: config
             .get_in(Some("Chat"), "Enhanced")
-            .is_some_and(|value| matches!(value.trim(), "1" | "true")),
+            .is_none_or(|value| matches!(value.trim(), "1" | "true")),
         text_size: integer("TextSize", 1, 0, 2) as u8,
         opacity: integer("Opacity", 85, 40, 100) as u8,
         duration_seconds: integer("Duration", 12, 3, 60) as u32,
@@ -556,7 +559,20 @@ impl DisplayMode {
 ))]
 mod tests {
     #[test]
-    fn enhanced_chat_settings_are_opt_in_and_bound_display_values() {
+    fn enhanced_chat_is_the_default_without_saved_preferences() {
+        assert!(clonk_frontend::enhanced_chat_view::ChatPreferences::default().enabled);
+        assert!(super::load_enhanced_chat_preferences(None, super::CompatProfile::Normal).enabled);
+        let mut config = clonk_core::std_config::Config::new();
+        config.set_in(Some("General"), "Name", "Existing player");
+        assert!(super::enhanced_chat_preferences(&config).enabled);
+        assert_eq!(
+            crate::advanced_config::default_config().get_in(Some("Chat"), "Enhanced"),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn enhanced_chat_settings_default_on_and_bound_display_values() {
         let mut config = clonk_core::std_config::Config::new();
         assert_eq!(
             super::enhanced_chat_preferences(&config),
@@ -577,7 +593,9 @@ mod tests {
             (2, 40, 60)
         );
         let defaults = crate::advanced_config::default_config();
-        assert_eq!(defaults.get_in(Some("Chat"), "Enhanced"), Some("0"));
+        assert_eq!(defaults.get_in(Some("Chat"), "Enhanced"), Some("1"));
+        config.set_in(Some("Chat"), "Enhanced", "0");
+        assert!(!super::enhanced_chat_preferences(&config).enabled);
     }
     use super::*;
 

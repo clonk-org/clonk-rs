@@ -3116,7 +3116,10 @@ impl GameApp {
             main_menu_state,
             startup_tooltip: ClassicTooltipTracker::new(),
             chat: ChatState {
-                enhanced_preferences: settings::load_enhanced_chat_preferences(paths),
+                enhanced_preferences: settings::load_enhanced_chat_preferences(
+                    paths,
+                    compat_profile,
+                ),
                 show_log_timestamps: load_show_log_timestamps(paths),
                 message_board: ClassicMessageBoardState::default(),
                 input_history: VecDeque::new(),
@@ -3548,6 +3551,8 @@ impl GameApp {
         self.incoming_update = classic.incoming_update.clone();
         self.update_check_requested = classic.update_requested;
         self.config.compat_profile = compat_profile;
+        self.chat.enhanced_preferences =
+            settings::load_enhanced_chat_preferences(self.app_paths.as_ref(), compat_profile);
         // Synchronized, so it is resolved once here rather than read from
         // configuration mid-round (clonk-org/clonk-rs#1132). Scenario
         // activation re-applies it to the engine it constructs.

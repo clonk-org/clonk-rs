@@ -5582,6 +5582,8 @@ fn lobby_paste_submits_each_line_and_retains_the_tail() {
 #[test]
 fn running_paste_obeys_finish_result_and_crlf_more_flag() {
     let mut app = new_running_sandbox_app();
+    // C4GUI::Edit's multiline auto-submit belongs to the classic composer.
+    app.chat.enhanced_preferences.enabled = false;
     let (_events, mut commands) = install_client_network_commands(&mut app, 0);
     let paste = |app: &mut GameApp, text: &str| {
         let layout = app.game_option_input_layout().test_value();

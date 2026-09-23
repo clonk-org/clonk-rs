@@ -147,7 +147,12 @@ fn non_left_runtime_dialog_hits_swallow_without_raising() {
 }
 
 #[test]
-fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
+fn classic_running_chat_global_bindings_open_above_lower_messages_and_contexts() {
+    let classic_chat = || {
+        let mut app = boxed_running_sandbox_app();
+        app.chat.enhanced_preferences.enabled = false;
+        app
+    };
     let notice = || {
         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
             "Lower notice",
@@ -156,7 +161,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         )
     };
 
-    let mut f2 = boxed_running_sandbox_app();
+    let mut f2 = classic_chat();
     f2.push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
     let layout = f2.top_message_dialog_layout().test_value();
@@ -176,7 +181,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert!(f2.dialogs.messages.is_empty());
     main_assert!(f2.running_chat_active());
 
-    let mut focus_loss = boxed_running_sandbox_app();
+    let mut focus_loss = classic_chat();
     focus_loss
         .push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
@@ -199,7 +204,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         (ModifiersState::SHIFT, "/team "),
         (ModifiersState::ALT, "\""),
     ] {
-        let mut app = boxed_running_sandbox_app();
+        let mut app = classic_chat();
         app.push_message_dialog(notice(), MessageDialogContinuation::None)
             .test_value();
         app.test_modifiers(modifiers);
@@ -208,7 +213,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         main_assert_eq!(app.dialogs.messages.len() => 1);
     }
 
-    let mut bare_return = boxed_running_sandbox_app();
+    let mut bare_return = classic_chat();
     bare_return
         .push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
@@ -240,7 +245,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     bare_return.test_text_input('x');
     main_assert_eq!(bare_return.running_chat_text() => Some("x"));
 
-    let mut inactive_return = boxed_running_sandbox_app();
+    let mut inactive_return = classic_chat();
     inactive_return.start_running_chat(RunningChatMode::All);
     inactive_return
         .push_message_dialog(notice(), MessageDialogContinuation::None)
@@ -259,7 +264,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert!(inactive_return.dialogs.messages.is_empty());
     main_assert!(inactive_return.running_chat_active());
 
-    let mut held_drag = boxed_running_sandbox_app();
+    let mut held_drag = classic_chat();
     held_drag.start_running_chat(RunningChatMode::All);
     held_drag
         .push_message_dialog(notice(), MessageDialogContinuation::None)
@@ -285,7 +290,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     held_drag.test_left_button(ElementState::Released);
     main_assert_eq!(held_drag.dialogs.messages.len() => 1);
 
-    let mut label_drag = boxed_running_sandbox_app();
+    let mut label_drag = classic_chat();
     label_drag.start_running_chat(RunningChatMode::All);
     label_drag
         .push_message_dialog(notice(), MessageDialogContinuation::None)
@@ -310,7 +315,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     label_drag.test_left_button(ElementState::Released);
     main_assert!(!label_drag.input_routing.live.primary_left_down);
 
-    let mut touch_lower = boxed_running_sandbox_app();
+    let mut touch_lower = classic_chat();
     touch_lower.start_running_chat(RunningChatMode::All);
     touch_lower
         .push_message_dialog(notice(), MessageDialogContinuation::None)
@@ -325,7 +330,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(touch_lower.active_message_dialog_index() => Some(0));
     touch_lower.test_touch(TouchPhase::Ended, lower_touch);
 
-    let mut release_hit = boxed_running_sandbox_app();
+    let mut release_hit = classic_chat();
     release_hit.start_running_chat(RunningChatMode::All);
     release_hit
         .push_message_dialog(
@@ -352,7 +357,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(release_hit.dialogs.game_option_input_pointer_capture => None);
     main_assert_eq!(release_hit.dialogs.messages[0].state.checkbox_checked() => Some(true),);
 
-    let mut close_active_chat = boxed_running_sandbox_app();
+    let mut close_active_chat = classic_chat();
     close_active_chat.start_running_chat(RunningChatMode::All);
     close_active_chat
         .push_message_dialog(notice(), MessageDialogContinuation::None)
@@ -376,7 +381,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(close_active_chat.dialogs.message_pointer_capture_index => None);
     main_assert!(!close_active_chat.dialogs.messages[0].state.has_pointer_capture());
 
-    let mut stacked_active = boxed_running_sandbox_app();
+    let mut stacked_active = classic_chat();
     stacked_active.start_running_chat(RunningChatMode::All);
     stacked_active
         .push_message_dialog(notice(), MessageDialogContinuation::None)
@@ -430,7 +435,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert!(matches!(stacked_active.dialogs.messages[0].continuation, MessageDialogContinuation::LeagueSurrender));
     main_assert!(stacked_active.running_chat_active());
 
-    let mut stacked_capture = boxed_running_sandbox_app();
+    let mut stacked_capture = classic_chat();
     stacked_capture.start_running_chat(RunningChatMode::All);
     stacked_capture
         .push_message_dialog(notice(), MessageDialogContinuation::None)
@@ -463,7 +468,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(stacked_capture.dialogs.message_pointer_capture_index => None);
     main_assert!(stacked_capture.dialogs.messages.iter().all(|dialog| !dialog.state.has_pointer_capture()));
 
-    let mut exposed_lower = boxed_running_sandbox_app();
+    let mut exposed_lower = classic_chat();
     exposed_lower
         .push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
@@ -496,7 +501,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(exposed_lower.dialogs.messages.len() => 2);
     main_assert_eq!(exposed_lower.dialogs.message_pointer_capture_index => None);
 
-    let mut inserted_capture = boxed_running_sandbox_app();
+    let mut inserted_capture = classic_chat();
     inserted_capture
         .push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
@@ -552,7 +557,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(stacked_capture.dialogs.message_pointer_capture_index => None);
     main_assert!(stacked_capture.dialogs.messages.iter().all(|dialog| !dialog.state.has_pointer_capture()));
 
-    let mut vote_pointer = boxed_running_sandbox_app();
+    let mut vote_pointer = classic_chat();
     vote_pointer
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
@@ -561,7 +566,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert!(!vote_pointer.handle_message_dialog_pointer_button(ElementState::Pressed).expect("outside vote hit-test falls through to shared Screen scanning"));
     main_assert!(!vote_pointer.handle_message_dialog_pointer_button(ElementState::Released).expect("outside vote release falls through to shared Screen scanning"));
 
-    let mut vote_return = boxed_running_sandbox_app();
+    let mut vote_return = classic_chat();
     vote_return
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
@@ -582,7 +587,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
             ModifiersState::CONTROL | ModifiersState::ALT,
         ),
     ] {
-        let mut app = boxed_running_sandbox_app();
+        let mut app = classic_chat();
         app.push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
             .test_value();
         app.test_modifiers(modifiers);
@@ -602,7 +607,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     unmatched_vote_hotkey.test_key(VirtualKeyCode::KeyC, ElementState::Released);
     main_assert_eq!(unmatched_vote_hotkey.dialogs.messages.len() => 1);
 
-    let mut handled_message_hotkey = boxed_running_sandbox_app();
+    let mut handled_message_hotkey = classic_chat();
     handled_message_hotkey
         .push_message_dialog(
             vote().with_checkbox("&Don't display again", false),
@@ -617,7 +622,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         .handle_message_dialog_key(VirtualKeyCode::KeyD, ElementState::Released)
         .expect("mnemonic release is not owned by the dialog"));
 
-    let mut changed_release = boxed_running_sandbox_app();
+    let mut changed_release = classic_chat();
     changed_release
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
@@ -627,7 +632,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert_eq!(changed_release.dialogs.messages.len() => 1);
     main_assert!(changed_release.chat.running.is_none());
 
-    let mut exclusive_top_scope = boxed_running_sandbox_app();
+    let mut exclusive_top_scope = classic_chat();
     exclusive_top_scope
         .push_message_dialog(notice(), MessageDialogContinuation::None)
         .test_value();
@@ -649,7 +654,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
     main_assert!(matches!(exclusive_top_scope.dialogs.messages[0].continuation, MessageDialogContinuation::LeagueSurrender));
     main_assert!(exclusive_top_scope.chat.running.is_none());
 
-    let mut nonexclusive_top_scope = boxed_running_sandbox_app();
+    let mut nonexclusive_top_scope = classic_chat();
     nonexclusive_top_scope
         .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
         .test_value();
@@ -676,7 +681,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         (VirtualKeyCode::Enter, ModifiersState::SHIFT, "/team "),
         (VirtualKeyCode::Enter, ModifiersState::ALT, "\""),
     ] {
-        let mut app = boxed_running_sandbox_app();
+        let mut app = classic_chat();
         app.push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
             .test_value();
         app.test_modifiers(modifiers);
@@ -690,7 +695,7 @@ fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
         (VirtualKeyCode::Enter, ModifiersState::SHIFT, "/team "),
         (VirtualKeyCode::Enter, ModifiersState::ALT, "\""),
     ] {
-        let mut app = boxed_running_sandbox_app();
+        let mut app = classic_chat();
         app.open_context_menu_at(
             vec![ContextMenuEntry::<AppContextMenuCommand>::new("Unrelated")],
             GuiPoint::new(20.0, 20.0),

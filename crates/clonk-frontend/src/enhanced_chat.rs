@@ -1,4 +1,4 @@
-//! Optional local presentation for game chat. No simulation or routing state.
+//! Local presentation for game chat. No simulation or routing state.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
@@ -73,10 +73,14 @@ struct Completion {
 
 impl EnhancedChat {
     pub fn remember_sent(&mut self, text: &str) {
+        self.remember_sent_for(self.audience.clone(), text);
+    }
+
+    pub fn remember_sent_for(&mut self, audience: ChatAudience, text: &str) {
         if text.is_empty() {
             return;
         }
-        let history = self.sent.entry(self.audience.clone()).or_default();
+        let history = self.sent.entry(audience).or_default();
         history.retain(|previous| previous != text);
         history.push_front(text.into());
         history.truncate(20);

@@ -181,6 +181,11 @@ software renderer with the one-byte cross-driver tolerance documented in
 `docs/RENDERING_PARITY.md`. Every opt-in presentation divergence is forced off
 and every first-run configuration default equals the C++ default.
 
+Normal games use enhanced chat by default. This profile selects the classic
+message board and composer, including after a settings reload, without changing
+the saved chat preference. Both interfaces use the existing message controls
+and recipient visibility rules.
+
 Whole-screen equality is promised **as pixels only where every pixel is
 oracle-authored**. A screen that renders the port's own branding or its
 super-resolved startup art is promised the same *layout* — the same ordered

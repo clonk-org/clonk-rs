@@ -1,9 +1,13 @@
 # Enhanced in-game chat
 
-Enable **Chat → Enhanced** in **Options → Advanced**. The setting is off by
-default so the classic chat interface remains available. These preferences
-change local presentation and input only; messages use the existing game
-controls and recipient visibility rules.
+Enhanced chat is the default for normal games, including existing installations
+without a saved chat preference. These preferences change local presentation
+and input only; messages use the existing game controls and recipient visibility
+rules.
+
+The LegacyClonk compatibility profile uses classic chat. In normal games,
+**Options → Advanced → Chat → Enhanced** also allows an explicit choice of the
+classic interface; that saved choice is respected on later launches.
 
 Press **Enter** or **F2** to open chat. Recent messages appear in a compact panel
 during play; opening chat expands the transcript and composer. **Shift+Enter**

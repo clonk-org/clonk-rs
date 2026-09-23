@@ -2506,7 +2506,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     );
     main_assert!(matches!(controller.value("General", "Name"), Some(AdvancedConfigValue::Text(value)) if value == "Old # keep this note"));
     main_assert_eq!(controller.value("General", "FPS") => Some(&AdvancedConfigValue::Bool(false)));
-    main_assert_eq!(controller.value("Chat", "Enhanced") => Some(&AdvancedConfigValue::Bool(false)));
+    main_assert_eq!(controller.value("Chat", "Enhanced") => Some(&AdvancedConfigValue::Bool(true)));
     main_assert!(matches!(controller.value("Graphics", "SmokeLevel"), Some(AdvancedConfigValue::Integer { value: 200, .. })));
     main_assert!(matches!(controller.value("General", "Version"), Some(AdvancedConfigValue::ReadOnly(value)) if value == "347"));
     main_assert_eq!(controller.layout().bounds => clonk_frontend::classic_gui::IntRect::new(160, 90, 960, 540));
