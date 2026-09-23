@@ -1,44 +1,42 @@
-//! InExantros' second act opens `func Initialize() {` at line 43 of its
-//! scenario script and never closes it; `RelaunchPlayer:` follows at line 387,
-//! then `InitializePlayer:`, `Saving:`, `Win:`, `Horn:`, `Quake:`, `NewNight:`,
-//! `NewDay:` and more. In C4Aul a bare old-style label in statement position
-//! ends the function (C4AulParse.cpp:2216-2238). Its preparser has shifted past
-//! the label's name by then, so that one function is never declared, and
-//! everything declared after it is. The port used to skip to the unclosed
-//! function's closing brace, which here is the end of the file, and lost every
-//! callback of the act (clonk-org/clonk-rs#1696).
+//! InExantros' second act opened `func Initialize() {` at line 43 of its
+//! scenario script and never closed it. In C4Aul the bare `RelaunchPlayer:`
+//! label that followed ended the function, and that one label declared
+//! nothing (C4AulParse.cpp:2216-2238; pinned on a synthetic script in
+//! `clonk-script`'s `test_old_style_functions`), so a hero who died was never
+//! relaunched under either engine. clonk-org/clonk-rs-content#81 closed
+//! `Initialize`.
 
 use crate::support::real_scenario::load_installed_scenario;
 use crate::support::EngineTestExt;
 use clonk_engine::SpawnConfig;
+use clonk_script::Value;
 
-/// `GameCall` answers nil for a scenario function that does not exist.
-const CALLBACK_PROBE: &str = r#"#strict
-public func Has(string callback)
+/// Relaunches a hero the way its death does and answers the experience it
+/// keeps.
+const RELAUNCH_PROBE: &str = r#"#strict
+public func Relaunch(object hero)
 {
-    return GameCall(callback);
+    LocalN("pExp", hero) = 100;
+    GameCall("RelaunchPlayer", hero);
+    return LocalN("pExp", hero);
 }
 "#;
 
 #[test]
-fn the_second_act_keeps_the_callbacks_after_its_unclosed_initialize() {
+fn the_second_act_relaunches_a_fallen_hero() {
     let mut engine =
         load_installed_scenario("Collection.c4f/Adventures.c4f/InExantros.c4f/2.Akt.c4s", 0);
+    let hero = engine.spawn_test_object(SpawnConfig::new("KNIG"));
     engine
-        .register_script_definition("IXPR", "Callback probe", CALLBACK_PROBE)
+        .register_script_definition("IXPR", "Relaunch probe", RELAUNCH_PROBE)
         .expect("the probe registers");
     let probe = engine.spawn_test_object(SpawnConfig::new("IXPR"));
     let index = engine.test_object_index(probe);
-    let mut answer = |callback: &str| {
-        engine
-            .call_object_function(index, "Has", vec![callback.into()])
-            .unwrap_or_else(|error| panic!("GameCall({callback}) runs: {error}"))
-            .as_c4_int()
-    };
 
-    // `NewNight:` is nothing but `return(1);`, thirteen labels after the
-    // unclosed function.
-    assert_eq!(answer("NewNight"), Some(1));
-    // The label that ended `Initialize` is the one function C4Aul loses too.
-    assert_eq!(answer("RelaunchPlayer").unwrap_or(0), 0);
+    let experience = engine
+        .call_object_function(index, "Relaunch", vec![Value::Object(hero.as_u64())])
+        .expect("the relaunch runs");
+    // `RelaunchPlayer` takes `60 + gGrad*6` experience, and `Initialize` sets
+    // `gGrad` to 1 (`2.Akt.c4s/Script.c:56,388-403`).
+    assert_eq!(experience.as_c4_int(), Some(100 - 66));
 }
