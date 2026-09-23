@@ -229,7 +229,7 @@ impl GameApp {
             audio.system.prepare_voice_output();
         }
         let policy = crate::voice_media::VoiceMediaPolicy {
-            enabled: audio.options.voice_enabled,
+            microphone_enabled: audio.options.voice_enabled,
             context,
             speakers,
             local_identity,

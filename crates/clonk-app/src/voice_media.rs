@@ -11,7 +11,7 @@ use crate::voice_chat::{voice_stream_id, VoiceChatContext, VoiceChatState};
 
 #[derive(Clone)]
 pub(crate) struct VoiceMediaPolicy {
-    pub(crate) enabled: bool,
+    pub(crate) microphone_enabled: bool,
     pub(crate) context: Option<VoiceChatContext>,
     pub(crate) speakers: BTreeMap<(i32, i32), (f32, f32)>,
     pub(crate) local_identity: Option<(i32, i32)>,
@@ -51,7 +51,7 @@ pub(crate) fn service_voice_media(
             audio.remove_voice_stream(voice_stream_id(client, player));
         }
     };
-    if !policy.enabled || !transport.available() {
+    if !transport.available() {
         remove(state.clear());
         return;
     }
@@ -95,7 +95,12 @@ pub(crate) fn service_voice_media(
         }
         audio.update_voice_stream(stream_id, volume, pan);
     }
-    let Some((client_id, player_id)) = policy.local_identity else {
+    // `Voice.Enabled` opts in the microphone and nothing else: a player who
+    // never took it still hears the players who did. This is the one gate
+    // every capture below passes, so a disabled player's microphone stays
+    // closed.
+    let Some((client_id, player_id)) = policy.local_identity.filter(|_| policy.microphone_enabled)
+    else {
         state.stop_capture();
         return;
     };
