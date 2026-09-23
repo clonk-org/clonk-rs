@@ -150,6 +150,10 @@ impl SaveState {
 #[derive(Default)]
 pub(crate) struct ScenarioSelectorState {
     pub(crate) mode: ScenarioSelectorMode,
+    /// Every listed entry by identifier. A discovery lists the roots only, and
+    /// each folder adds its entries once it is entered or looked up
+    /// (`GameApp::load_scenario_folder`); lookups that may name an entry in a
+    /// folder not listed yet go through `GameApp::scenario_catalog_entry`.
     pub(crate) catalog: HashMap<String, FrontendScenario>,
     /// Interactive scenario refreshes run outside the UI thread. The old
     /// menu tree remains live but hidden until this worker supplies the
@@ -9221,6 +9225,57 @@ impl MenuState {
         self.refresh_menu_entries();
     }
 
+    /// The entry named `identifier` anywhere in the listed tree.
+    /// The folders that are open, outermost first.
+    pub(crate) fn open_folder_identifiers(&self) -> Vec<String> {
+        self.stack
+            .iter()
+            .filter_map(|layer| layer.folder.as_ref())
+            .map(|folder| folder.identifier.clone())
+            .collect()
+    }
+
+    /// The first folder in the listed tree whose entries are not listed yet.
+    pub(crate) fn first_unloaded_folder(&self) -> Option<String> {
+        fn find(entries: &[FrontendScenario]) -> Option<String> {
+            entries.iter().find_map(|entry| {
+                if matches!(entry.kind, ScenarioKind::Folder) && !entry.contents_loaded {
+                    Some(entry.identifier.clone())
+                } else {
+                    find(&entry.children)
+                }
+            })
+        }
+        find(self.stack.first()?.entries.as_slice())
+    }
+
+    pub(crate) fn find_scenario_entry(&self, identifier: &str) -> Option<&FrontendScenario> {
+        find_frontend_entry(self.stack.first()?.entries.as_slice(), identifier)
+    }
+
+    /// Lists `children` as the entries of the folder `identifier`: in the
+    /// root tree, in every layer's copy of it, and in its own layer if it is
+    /// open.
+    pub(crate) fn install_folder_contents(
+        &mut self,
+        identifier: &str,
+        children: &[FrontendScenario],
+    ) {
+        for layer in &mut self.stack {
+            install_folder_contents_into(&mut layer.entries, identifier, children);
+            if let Some(folder) = layer.folder.as_mut() {
+                if folder.identifier == identifier {
+                    folder.children = children.to_vec();
+                    folder.contents_loaded = true;
+                    layer.entries = children.to_vec();
+                } else {
+                    install_folder_contents_into(&mut folder.children, identifier, children);
+                }
+            }
+        }
+        self.enhanced_search_index = None;
+    }
+
     pub(crate) fn leave_folder(&mut self) {
         if self.stack.len() <= 1 {
             return;
@@ -9517,6 +9572,30 @@ fn find_frontend_entry_path(
         }
     }
     None
+}
+
+fn find_frontend_entry<'a>(
+    entries: &'a [FrontendScenario],
+    identifier: &str,
+) -> Option<&'a FrontendScenario> {
+    entries.iter().find_map(|entry| {
+        if entry.identifier == identifier {
+            Some(entry)
+        } else {
+            find_frontend_entry(&entry.children, identifier)
+        }
+    })
+}
+
+fn install_folder_contents_into(
+    entries: &mut [FrontendScenario],
+    identifier: &str,
+    children: &[FrontendScenario],
+) {
+    if let Some(folder) = find_frontend_scenario_mut(entries, identifier) {
+        folder.children = children.to_vec();
+        folder.contents_loaded = true;
+    }
 }
 
 #[derive(Debug, Default)]

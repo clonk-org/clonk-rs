@@ -3910,7 +3910,7 @@ fn real_legacy_worker_updates_live_loader_through_activation() {
     .test_value();
     wait_for_menu(&mut app);
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "Tutorial.c4f/Tutorial01.c4s")
+        app.next_mission_scenario("Tutorial.c4f/Tutorial01.c4s")
             .test_value();
     main_assert!(scenario
         .path

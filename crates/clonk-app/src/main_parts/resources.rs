@@ -462,7 +462,7 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
     }
 }
 
-fn merge_children(
+pub(crate) fn merge_children(
     existing_children: &mut Vec<FrontendScenario>,
     incoming_children: Vec<FrontendScenario>,
     alphabetical_sorting: bool,

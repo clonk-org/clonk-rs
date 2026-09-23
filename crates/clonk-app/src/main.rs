@@ -2750,7 +2750,7 @@ impl GameApp {
         let scenario_discovery = frontend_scenarios.is_none().then(|| {
             let paths = paths.cloned();
             std::thread::spawn(move || match paths {
-                Some(paths) => load_frontend_scenarios_from_paths(&paths),
+                Some(paths) => load_frontend_root_scenarios_from_paths(&paths),
                 None => load_frontend_scenarios(),
             })
         });
@@ -8274,8 +8274,7 @@ impl GameApp {
                 // C4GameOverDlg preserves restart infos only for Restart;
                 // actual Next Mission clears them as soon as it closes.
                 self.players.restart_restore_infos = RestartRestoreInfos::default();
-                let Some(scenario) = resolve_next_mission_scenario(&self.scensel.catalog, &path)
-                else {
+                let Some(scenario) = self.next_mission_scenario(&path) else {
                     self.status_text = format!("Next scenario is unavailable: {path}");
                     return Ok(());
                 };

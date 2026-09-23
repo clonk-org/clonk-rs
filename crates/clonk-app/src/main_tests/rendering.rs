@@ -2044,7 +2044,7 @@ fn installed_app_uses_approved_gamepad_phases_in_all_three_views() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
     persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
-    let app = new_menu_app_with_paths(1280, 720, &paths);
+    let mut app = new_menu_app_with_paths(1280, 720, &paths);
     let dialog = app.assets.dialog_image("Gamepad.png").test_value();
     let hud = app.assets.hud_graphics();
     let hud = hud.gamepad.as_ref().test_value();
@@ -2071,7 +2071,7 @@ fn installed_app_uses_approved_gamepad_phases_in_all_three_views() {
         main_assert!(image.region_replacement([160, 0, 80, 36]).is_some());
     }
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
             .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
@@ -2153,9 +2153,9 @@ fn active_scenario_uses_approved_menu_and_checked_options_icons() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
     persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
-    let app = new_menu_app_with_paths(320, 200, &paths);
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
             .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
@@ -2182,12 +2182,12 @@ fn active_scenario_upgrades_stock_hud_icons_and_keeps_custom_art() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
     persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
-    let app = new_menu_app_with_paths(320, 200, &paths);
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
     main_assert!(crate::hd_hud_icons::is_installed(
         app.assets.hud_graphics().as_ref()
     ));
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
             .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
@@ -2223,7 +2223,7 @@ fn approved_hand_gestures_reach_startup_and_loaded_game_hud() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
     persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
-    let app = new_menu_app_with_paths(320, 200, &paths);
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
     let startup = app.assets.hud_graphics();
     let startup_hand = startup.hand.as_ref().test_value();
     for phase in 0..7 {
@@ -2234,7 +2234,7 @@ fn approved_hand_gestures_reach_startup_and_loaded_game_hud() {
     }
 
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
             .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)

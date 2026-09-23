@@ -3012,7 +3012,7 @@ pub(crate) fn build_scenario_catalog(
     catalog
 }
 
-fn normalized_scenario_identifier(identifier: &str) -> String {
+pub(crate) fn normalized_scenario_identifier(identifier: &str) -> String {
     identifier
         .replace('\\', "/")
         .split('/')
@@ -3628,9 +3628,39 @@ pub(crate) fn load_frontend_scenarios_from_paths(paths: &AppPaths) -> Vec<Fronte
     load_frontend_scenarios_from_paths_with_progress(paths, |_| true).unwrap_or_default()
 }
 
+/// [`load_frontend_root_scenarios_with_progress`] without progress reports.
+pub(crate) fn load_frontend_root_scenarios_from_paths(paths: &AppPaths) -> Vec<FrontendScenario> {
+    load_frontend_root_scenarios_with_progress(paths, |_| true).unwrap_or_default()
+}
+
+/// Every scenario root with the entries of every folder in it.
 pub(crate) fn load_frontend_scenarios_from_paths_with_progress<F>(
     paths: &AppPaths,
+    report_progress: F,
+) -> Option<Vec<FrontendScenario>>
+where
+    F: FnMut(u8) -> bool,
+{
+    load_frontend_scenario_roots(paths, report_progress, false)
+}
+
+/// The scenario roots as `C4ScenarioListLoader::Load` lists them when the
+/// selector is shown: a folder's entries wait until it is entered
+/// (C4StartupScenSelDlg.cpp:1150-1159, 1431-1437).
+pub(crate) fn load_frontend_root_scenarios_with_progress<F>(
+    paths: &AppPaths,
+    report_progress: F,
+) -> Option<Vec<FrontendScenario>>
+where
+    F: FnMut(u8) -> bool,
+{
+    load_frontend_scenario_roots(paths, report_progress, true)
+}
+
+fn load_frontend_scenario_roots<F>(
+    paths: &AppPaths,
     mut report_progress: F,
+    shallow: bool,
 ) -> Option<Vec<FrontendScenario>>
 where
     F: FnMut(u8) -> bool,
@@ -3660,21 +3690,35 @@ where
                 OpsControlFlow::Break(())
             }
         };
-        let result = if root.include_container {
-            resource_scenario::discover_entry_with_languages_and_packs_with_progress(
+        let result = match (root.include_container, shallow) {
+            (true, false) => {
+                resource_scenario::discover_entry_with_languages_and_packs_with_progress(
+                    &root.path,
+                    &languages,
+                    &language_packs,
+                    &mut report_root_progress,
+                )
+                .map(|entry| entry.into_iter().collect())
+            }
+            (true, true) => resource_scenario::discover_entry_shallow_with_progress(
                 &root.path,
                 &languages,
                 &language_packs,
                 &mut report_root_progress,
             )
-            .map(|entry| entry.into_iter().collect())
-        } else {
-            resource_scenario::discover_with_languages_and_packs_with_progress(
+            .map(|entry| entry.into_iter().collect()),
+            (false, false) => resource_scenario::discover_with_languages_and_packs_with_progress(
                 &root.path,
                 &languages,
                 &language_packs,
                 &mut report_root_progress,
-            )
+            ),
+            (false, true) => resource_scenario::discover_many_shallow_with_progress(
+                [&root.path],
+                &languages,
+                &language_packs,
+                &mut report_root_progress,
+            ),
         };
         match result {
             Ok(entries) => combined_entries
@@ -3703,6 +3747,98 @@ where
         Arc::new(classic_loader_language_sequence(paths).map_err(|error| error.to_string()));
     attach_scenario_selector_snapshots(&mut entries, &loader_languages, &Arc::new(language_packs));
     Some(entries)
+}
+
+/// The entries of `folder`, listed when it is entered the way
+/// `C4ScenarioListLoader::Folder::LoadContents` lists them
+/// (C4StartupScenSelDlg.cpp:901-914, 1161-1171). A folder merged from several
+/// roots lists each of them, and the entries merge as nested entries always
+/// have.
+pub(crate) fn load_frontend_folder_contents(
+    paths: &AppPaths,
+    folder: &FrontendScenario,
+) -> Vec<FrontendScenario> {
+    let alphabetical_sorting = load_startup_alphabetical_sorting(Some(paths));
+    let languages = startup_language_sequence(Some(paths));
+    let language_packs = classic_language_packs(paths);
+    let roots = scenario_roots(paths);
+    let sources = if folder.source_paths.is_empty() {
+        folder.path.iter().cloned().collect()
+    } else {
+        folder.source_paths.clone()
+    };
+    let mut children = Vec::new();
+    for source in &sources {
+        let label = roots
+            .iter()
+            .find(|root| source.starts_with(&root.path))
+            .map(|root| root.label.clone())
+            .or_else(|| folder.root_label.clone())
+            .unwrap_or_default();
+        match resource_scenario::discover_folder_contents_with_progress(
+            source,
+            &folder.identifier,
+            &languages,
+            &language_packs,
+            |_| OpsControlFlow::Continue(()),
+        ) {
+            Ok(entries) => merge_children(
+                &mut children,
+                entries
+                    .into_iter()
+                    .map(|entry| FrontendScenario::from_resource(entry, &label))
+                    .collect(),
+                alphabetical_sorting,
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                path = %source.display(),
+                "failed to list a scenario folder"
+            ),
+        }
+    }
+    sort_frontend_entries(&mut children, alphabetical_sorting);
+    let loader_languages =
+        Arc::new(classic_loader_language_sequence(paths).map_err(|error| error.to_string()));
+    attach_scenario_selector_snapshots(&mut children, &loader_languages, &Arc::new(language_packs));
+    children
+}
+
+/// Lists the entries of each folder in `folders`, outermost first, inside
+/// `entries`, so a rebuilt tree can reopen the folders that were open.
+pub(crate) fn load_frontend_folder_path(
+    paths: &AppPaths,
+    entries: &mut [FrontendScenario],
+    folders: &[String],
+) {
+    for identifier in folders {
+        let Some(folder) = find_frontend_scenario_mut(entries, identifier) else {
+            return;
+        };
+        if !folder.contents_loaded {
+            folder.children = load_frontend_folder_contents(paths, folder);
+            folder.contents_loaded = true;
+        }
+    }
+}
+
+/// The entry named `identifier` anywhere in `entries`.
+pub(crate) fn find_frontend_scenario_mut<'a>(
+    entries: &'a mut [FrontendScenario],
+    identifier: &str,
+) -> Option<&'a mut FrontendScenario> {
+    for entry in entries {
+        if entry.identifier == identifier {
+            return Some(entry);
+        }
+        let inside = identifier
+            .strip_prefix(entry.identifier.as_str())
+            .is_some_and(|rest| rest.starts_with('/'));
+        if inside {
+            return find_frontend_scenario_mut(&mut entry.children, identifier);
+        }
+    }
+    None
 }
 
 /// Resolves the physical C4Group file and child path represented by a

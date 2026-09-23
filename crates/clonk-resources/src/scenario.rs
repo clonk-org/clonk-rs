@@ -287,8 +287,33 @@ where
     F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
 {
     let mut context = DiscoveryContext::new(&mut progress);
+    discover_entry_in(path.as_ref(), languages, language_packs, &mut context)
+}
+
+/// [`discover_entry_with_languages_and_packs_with_progress`] for a root that
+/// the selector lists as one entry: a folder keeps its own entries unlisted
+/// until it is entered (C4StartupScenSelDlg.cpp:1150-1159).
+pub fn discover_entry_shallow_with_progress<F>(
+    path: impl AsRef<Path>,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    mut progress: F,
+) -> Result<Option<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+{
+    let mut context = DiscoveryContext::shallow(&mut progress);
+    discover_entry_in(path.as_ref(), languages, language_packs, &mut context)
+}
+
+fn discover_entry_in(
+    path: &Path,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
+) -> Result<Option<ScenarioEntry>, ScenarioDiscoveryError> {
     context.add_work(1)?;
-    let entry = collect_group_entry(path.as_ref(), "", languages, language_packs, &mut context)?;
+    let entry = collect_group_entry(path, "", languages, language_packs, context)?;
     context.complete_work()?;
     context.finish()?;
     Ok(entry)

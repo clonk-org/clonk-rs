@@ -4880,10 +4880,9 @@ fn scenario_selector_reopen_discovers_savegame_created_during_session() {
     app.open_scenario_browser();
     wait_for_scenario_selector_discovery(&mut app);
 
-    main_assert!(app
-        .scensel.catalog
-        .values()
-        .any(|entry| entry.path.as_deref() == Some(saved_scenario.as_path())));
+    // The save's folders are listed from the reopened tree when it is looked up.
+    let found = app.scenario_catalog_entry("Savegames.c4f/Missions.c4f/Missions1.c4s");
+    main_assert_eq!(found.and_then(|entry| entry.path) => Some(saved_scenario.clone()));
     reset_cached_app_paths();
 }
 

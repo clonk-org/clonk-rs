@@ -3310,7 +3310,7 @@ fn real_mars_full_size_highlight_reaches_host_gui_resources() {
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(320, 200, &paths);
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
             .test_value();
     let setup = build_scenario_loader(
         &scenario,
@@ -3359,9 +3359,9 @@ fn real_mars_upper_board_keeps_the_product_logo() {
     let _lock = env_lock().lock();
     let user_data = tempdir();
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-    let app = new_menu_app_with_paths(320, 200, &paths);
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
             .test_value();
     let product = app.assets.hud_graphics().logo.clone().test_value();
     let mars = app
@@ -3383,7 +3383,7 @@ fn legacy_compat_runtime_keeps_the_product_logo() {
     let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
     let mut app = new_menu_app_with_paths(320, 200, &paths);
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "Tutorial.c4f/Tutorial01.c4s")
+        app.next_mission_scenario("Tutorial.c4f/Tutorial01.c4s")
             .test_value();
     let product = app.assets.hud_graphics().logo.clone().test_value();
 

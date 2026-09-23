@@ -33,7 +33,7 @@ fn real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running() {
         .get("GUIScroll.png")
         .test_value()
         .clone();
-    let scenario = resolve_next_mission_scenario(&app.scensel.catalog, "Hazard.c4f/Tutorial.c4s")
+    let scenario = app.next_mission_scenario("Hazard.c4f/Tutorial.c4s")
         .test_value();
 
     // The user repro: starting any Hazard map used to refuse during
@@ -3295,9 +3295,9 @@ fn app_virtual_keyboard_completes_real_tutorial03_route() {
         app.engine.next_mission().path =>
         r"Tutorial.c4f\Tutorial04.c4s"
     );
+    let next_mission = app.engine.next_mission().path.clone();
     main_assert!(
-        resolve_next_mission_scenario(&app.scensel.catalog, &app.engine.next_mission().path,)
-            .is_some(),
+        app.next_mission_scenario(&next_mission).is_some(),
         "the focused real-scenario catalog retains Tutorial04 navigation"
     );
     // The typed C4GameMessage guard has a dedicated regression.
