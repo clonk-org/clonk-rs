@@ -1027,8 +1027,7 @@ impl GameApp {
                 let inspection = if !scenario.has_mission_access(&self.config.mission_access) {
                     Ok(false)
                 } else if let Some(metadata) = scenario
-                    .selector_metadata
-                    .as_deref()
+                    .selector_metadata()
                     .filter(|_| self.app_paths.is_some())
                 {
                     metadata.can_open(selector_mode, &self.config.mission_access, &participant_count)

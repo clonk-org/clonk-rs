@@ -152,6 +152,11 @@ impl FrontendScenario {
         self.extended.version()
     }
 
+    /// The scenario's selector snapshot.
+    pub(crate) fn selector_metadata(&self) -> Option<&ScenarioSelectorMetadata> {
+        self.selector_metadata.as_deref()
+    }
+
     pub(crate) fn from_resource(entry: resource_scenario::ScenarioEntry, root_label: &str) -> Self {
         let resource_scenario::ScenarioEntry {
             identifier,
@@ -4884,7 +4889,7 @@ pub(crate) fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> Game
 pub(crate) fn scenario_fair_crew_constraint(
     scenario: Option<&FrontendScenario>,
 ) -> FairCrewConstraint {
-    if let Some(metadata) = scenario.and_then(|scenario| scenario.selector_metadata.as_deref()) {
+    if let Some(metadata) = scenario.and_then(FrontendScenario::selector_metadata) {
         return metadata.fair_crew;
     }
     scenario

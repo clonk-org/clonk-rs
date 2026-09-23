@@ -4086,7 +4086,7 @@ fn scensel_cached_rows_match_live_start_rules_in_both_modes() {
                 app.submit_scenario_search().test_value();
                 main_assert_eq!(app.menu_state.visible_entries().len() => 4);
                 for entry in app.menu_state.visible_entries() {
-                    main_assert!(entry.selector_metadata.is_some());
+                    main_assert!(entry.selector_metadata().is_some());
                     let live = app
                         .scenario_selector_open_error(entry, mode)
                         .test_value()
