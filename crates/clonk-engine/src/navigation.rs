@@ -637,31 +637,33 @@ impl<'a> Search<'a> {
         edges.reverse();
 
         let mut waypoints: Vec<NavWaypoint> = Vec::new();
-        let mut walk_frames = 0;
+        // A walk run's cost is summed before it becomes frames: one pixel
+        // costs less than a frame, so converting per edge would truncate.
+        let mut walk_cost = 0;
         let mut walking_to: Option<(i32, i32)> = None;
         let flush_walk = |waypoints: &mut Vec<NavWaypoint>,
                           walking_to: &mut Option<(i32, i32)>,
-                          frames: &mut i32| {
+                          walk_cost: &mut i32| {
             if let Some((x, y)) = walking_to.take() {
                 waypoints.push(NavWaypoint {
                     x,
                     y,
                     movement: NavMove::Walk,
                     right: false,
-                    frames: *frames,
+                    frames: (*walk_cost + COST_PER_FRAME - 1) / COST_PER_FRAME,
                 });
             }
-            *frames = 0;
+            *walk_cost = 0;
         };
         for (from, to, edge, cost) in edges {
             let frames = cost / COST_PER_FRAME;
             match edge {
                 Edge::Walk => {
                     walking_to = Some(to);
-                    walk_frames += frames;
+                    walk_cost += cost;
                 }
                 Edge::Drop => {
-                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_frames);
+                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
                     waypoints.push(NavWaypoint {
                         x: to.0,
                         y: to.1,
@@ -671,7 +673,7 @@ impl<'a> Search<'a> {
                     });
                 }
                 Edge::Jump { right } => {
-                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_frames);
+                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
                     waypoints.push(NavWaypoint {
                         x: to.0,
                         y: to.1,
@@ -681,7 +683,7 @@ impl<'a> Search<'a> {
                     });
                 }
                 Edge::Climb { right } => {
-                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_frames);
+                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
                     waypoints.push(NavWaypoint {
                         x: to.0,
                         y: to.1,
@@ -691,7 +693,7 @@ impl<'a> Search<'a> {
                     });
                 }
                 Edge::JumpClimb { right, grab } => {
-                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_frames);
+                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
                     waypoints.push(NavWaypoint {
                         x: grab.0,
                         y: grab.1,
@@ -709,7 +711,7 @@ impl<'a> Search<'a> {
                 }
             }
         }
-        flush_walk(&mut waypoints, &mut walking_to, &mut walk_frames);
+        flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
         NavPlan { waypoints, cost }
     }
 }
@@ -826,6 +828,13 @@ mod tests {
         assert_eq!(moves(&plan), vec![NavMove::Walk]);
         let last = plan.waypoints.last().expect("one waypoint");
         assert!((last.x - 300).abs() <= 3 && last.y == G - 10, "{last:?}");
+        // About 200px at 1.96 px/frame: the executor's lifetime is built on
+        // this, so per-pixel rounding must not truncate it away.
+        assert!(
+            (95..=110).contains(&last.frames),
+            "walk duration {} frames",
+            last.frames
+        );
     }
 
     #[test]
