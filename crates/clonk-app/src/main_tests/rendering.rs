@@ -2253,7 +2253,7 @@ fn approved_navigation_arrows_reach_startup_and_loaded_game() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
     persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
-    let app = new_menu_app_with_paths(320, 200, &paths);
+    let mut app = new_menu_app_with_paths(320, 200, &paths);
     let startup_hud = app.assets.hud_graphics();
     let startup_arrow = startup_hud.arrow.as_ref().test_value();
     main_assert_eq!((startup_arrow.width(), startup_arrow.height()) => (256, 64));
@@ -2275,7 +2275,7 @@ fn approved_navigation_arrows_reach_startup_and_loaded_game() {
     }
 
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+        app.next_mission_scenario("ClonkMars.c4f/01_Fossae.c4s")
             .test_value();
     let game = app
         .loaded_game_graphics_resources(&scenario, None)
