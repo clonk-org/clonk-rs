@@ -2896,6 +2896,70 @@ struct NestedNativeContinuation {
     target_available: bool,
 }
 
+/// The rest of a native whose result is its nested call's result (`Call`,
+/// `ObjectCall` and the like): nothing runs after the child.
+struct NestedCallResult;
+
+impl clonk_script::NativeContinuation for NestedCallResult {
+    fn resume(
+        self: Box<Self>,
+        child_result: Result<Value, RuntimeError>,
+    ) -> Result<clonk_script::NativeCallOutcome, RuntimeError> {
+        child_result.map(clonk_script::NativeCallOutcome::Complete)
+    }
+
+    fn resume_child(
+        &mut self,
+        _child: clonk_script::ScriptSuspension,
+        _value: Value,
+    ) -> Result<clonk_script::ScriptCallOutcome, RuntimeError> {
+        Err(RuntimeError::new(
+            "a nested call's result suffix does not own a child frame",
+        ))
+    }
+}
+
+/// The allocation token and effective definition a parked nested call needs
+/// to bind its later slices back to `target`.
+fn nested_call_identity(target: ObjectId) -> Option<(u64, DefinitionId)> {
+    with_host_context(None, |context| {
+        context
+            .object_instance_token(target)
+            .zip(context.object_effective_definition_id(target))
+            .map(|(token, definition)| (token, DefinitionId::from(definition)))
+    })
+}
+
+/// Parks a nested object call that yielded, such as a `LoadScenarioSection`
+/// inside a function run by `Call`, behind [`NestedNativeContinuation`], so
+/// each later slice of the child runs on the child's own script. Left to the
+/// VM that called the native, the child's next calls would bind their
+/// object locals against that VM's declarations, not the object's.
+fn park_nested_call(
+    target: ObjectId,
+    function: &str,
+    (target_instance_token, definition): (u64, DefinitionId),
+    script: Arc<ScriptEngine>,
+    cells: clonk_script::LocalCells,
+    child: clonk_script::ScriptSuspension,
+) -> RuntimeError {
+    clonk_script::lift_native_continuation(
+        clonk_script::ScriptCallOutcome::Suspended(child),
+        Box::new(NestedNativeContinuation {
+            target,
+            target_instance_token,
+            function: function.to_owned(),
+            definition,
+            script,
+            cells,
+            suffix: Box::new(NestedCallResult),
+            target_available: true,
+        }),
+    )
+    .err()
+    .unwrap_or_else(|| RuntimeError::new("a parked nested call completed without its child"))
+}
+
 impl clonk_script::NativeContinuation for NestedNativeContinuation {
     fn resume(
         self: Box<Self>,
@@ -3699,6 +3763,7 @@ fn call_world_object_function_with_options(
         });
     let this = object_reference_value(target);
     let unchanged_finals = || args.to_vec();
+    let identity = nested_call_identity(target);
     let call = if ref_args {
         debug_assert!(preserve_caller && pinned_resolution.is_none());
         debug_assert_eq!(
@@ -3735,6 +3800,28 @@ fn call_world_object_function_with_options(
         script
             .call_with_cells_and_this_preserving_caller(function, args, &cells, this)
             .map(|value| (value, unchanged_finals()))
+    } else if let Some(identity) = identity {
+        let call =
+            if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
+                script.call_with_cells_and_this_with_continuation_for_effect_callback(
+                    function, args, &cells, this,
+                )
+            } else {
+                script.call_with_cells_and_this_with_continuation(function, args, &cells, this)
+            };
+        call.and_then(|outcome| match outcome {
+            clonk_script::ScriptCallOutcome::Complete(value) => Ok((value, unchanged_finals())),
+            clonk_script::ScriptCallOutcome::Suspended(child) => {
+                Err(clonk_script::ScriptError::Runtime(park_nested_call(
+                    target,
+                    function,
+                    identity,
+                    script.clone(),
+                    cells.clone(),
+                    child,
+                )))
+            }
+        })
     } else {
         let call =
             if parameter_conversion == EffectCallbackParameterConversionPolicy::WarnForNonStrict3 {
