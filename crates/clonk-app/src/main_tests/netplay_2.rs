@@ -705,6 +705,88 @@ fn network_lobby_voice_plays_authenticated_clients_non_positionally() {
     main_assert_eq!(app.test_audio_ref().system.voice_stream_stats(stream_id).queued_frames => 4, "a fresh capture epoch may speak after the retained transition",);
 }
 
+/// Sends a few lobby-scoped voice frames from `client_id` into the stub route.
+fn n2_send_lobby_speech(voice: &network::TestVoiceChannels, client_id: i32) {
+    for sequence in 0..4 {
+        n2_send_voice(
+            voice,
+            n2_voice_frame(client_id, crate::voice_chat::LOBBY_VOICE_PLAYER_ID, 3, sequence, 2_000),
+        );
+    }
+}
+
+#[test]
+fn a_host_lobby_marks_the_client_whose_voice_is_live() {
+    let mut app = new_menu_app(320, 200);
+    install_test_classic_host_lobby(&mut app);
+    app.test_audio_mut().system = clonk_audio::AudioSystem::new_manual_with_resampling(
+        8,
+        clonk_audio::ResamplingMode::Linear,
+    );
+    app.test_audio_mut().options.voice_enabled = true;
+    let (manager, _events, voice) = NetworkManager::test_stub_with_voice_for_client_id(0);
+    app.netplay.manager = Some(manager);
+    let remote_client = 7;
+    app.netplay
+        .control_clients
+        .register(remote_client, false, true);
+    let speaking = |app: &GameApp| {
+        app.lobby
+            .classic_host
+            .as_ref()
+            .test_value()
+            .controller
+            .speaking_clients()
+            .clone()
+    };
+    let spoke_at = Instant::now();
+    n2_send_lobby_speech(&voice, remote_client);
+
+    app.update_voice_chat_at(spoke_at);
+    main_assert_eq!(speaking(&app) => std::collections::BTreeSet::from([remote_client]));
+
+    // The voice layer holds a speaker active for 250 ms after its last frame.
+    app.update_voice_chat_at(spoke_at + Duration::from_millis(300));
+    main_assert_eq!(speaking(&app) => std::collections::BTreeSet::new());
+}
+
+#[test]
+fn a_joined_lobby_marks_the_client_whose_voice_is_live() {
+    let mut app = new_menu_app(320, 200);
+    app.startup.view = StartupView::NetworkLobby;
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+    app.test_audio_mut().system = clonk_audio::AudioSystem::new_manual_with_resampling(
+        8,
+        clonk_audio::ResamplingMode::Linear,
+    );
+    app.test_audio_mut().options.voice_enabled = true;
+    let (manager, _events, voice) = NetworkManager::test_stub_with_voice_for_client_id(7);
+    app.netplay.manager = Some(manager);
+    let host = 0;
+    app.netplay.control_clients.register(host, true, false);
+    app.netplay.control_clients.register(7, true, false);
+    n2_send_lobby_speech(&voice, host);
+
+    app.update_voice_chat_at(Instant::now());
+
+    main_assert_eq!(
+        app.lobby.session.as_ref().test_value().controller.speaking_clients() =>
+        &std::collections::BTreeSet::from([host])
+    );
+}
+
+#[test]
+fn the_lobby_draws_speakers_with_the_voice_chat_sprite() {
+    let app = new_real_menu_app(320, 200);
+    let sprite = app.assets.dialog_image("Speaking.png").test_value();
+
+    let resources = app.assets.game_lobby_resources().test_value();
+
+    main_assert!(resources
+        .speaking_icon()
+        .is_some_and(|icon| icon.pixels() == sprite.pixels()));
+}
+
 #[test]
 fn network_lobby_voice_rejects_unknown_clients_and_non_lobby_scopes() {
     let mut app = new_menu_app(320, 200);

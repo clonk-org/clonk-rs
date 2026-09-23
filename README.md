@@ -55,9 +55,10 @@ save-game slots.
 Network games between Clonk Rust clients support voice in the network lobby and
 proximity voice during play. It is off by default: open **Options → Audio** and
 tick **Enable voice chat**. Nothing opens the microphone until you do, whatever
-the rest of this section says. In a running game, a speaker icon appears above
-the Clonk each participant currently has selected. Enable voice before hosting
-or joining; transport negotiation is fixed for that network connection.
+the rest of this section says. While a participant is speaking, a speaker icon
+appears after their name in the network lobby, and in a running game above the
+Clonk they currently have selected. Enable voice before hosting or joining;
+transport negotiation is fixed for that network connection.
 
 The Audio sheet carries the settings you are likely to change — the opt-in,
 the playback volume, the push-to-talk key, and **Open mic (voice activated)**.

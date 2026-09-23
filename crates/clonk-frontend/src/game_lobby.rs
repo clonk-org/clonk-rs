@@ -1546,6 +1546,10 @@ impl<'a> LobbyResources<'a> {
         self
     }
 
+    pub fn speaking_icon(&self) -> Option<&'a ImageData> {
+        self.speaking
+    }
+
     fn validate(&self) -> Result<()> {
         validate_exact(
             "GUICaption.png",

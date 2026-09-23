@@ -155,6 +155,33 @@ impl GameApp {
     pub(crate) fn update_voice_chat_at(&mut self, now: Instant) {
         self.update_voice_setup();
         self.service_voice_media_at(now);
+        self.show_lobby_speakers(now);
+    }
+
+    /// Marks the lobby row of each client whose voice is live, from the same
+    /// activity the in-game speaking overlay reads. Lobby voice is client
+    /// scoped, so a client row carries it rather than a player row.
+    fn show_lobby_speakers(&mut self, now: Instant) {
+        let speaking: std::collections::BTreeSet<i32> = self
+            .voice_chat
+            .active_speakers(now)
+            .into_iter()
+            .filter(|&(_, player)| player == crate::voice_chat::LOBBY_VOICE_PLAYER_ID)
+            .map(|(client, _)| client)
+            .collect();
+        [
+            self.lobby
+                .classic_host
+                .as_mut()
+                .map(|lobby| &mut lobby.controller),
+            self.lobby
+                .session
+                .as_mut()
+                .map(|lobby| &mut lobby.controller),
+        ]
+        .into_iter()
+        .flatten()
+        .for_each(|controller| controller.set_speaking_clients(speaking.clone()));
     }
 
     fn service_voice_media_at(&mut self, now: Instant) {

@@ -7406,6 +7406,11 @@ impl FrontendAssets {
             image("GUIScroll.png")?,
             image("GUIContext.png")?,
         )
+        .map(|resources| {
+            // The lobby's voice-chat speakers use the app's own sprite, as
+            // the in-game speaking overlay does.
+            resources.with_speaking_icon(self.startup_dialog_images.get("Speaking.png"))
+        })
     }
 
     pub(crate) fn input_dialog_resources(
