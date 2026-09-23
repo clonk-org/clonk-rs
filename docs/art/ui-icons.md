@@ -7,10 +7,10 @@ file-browser, lobby, Voice-tab, and checkbox artwork. Each runtime source is
 The recording-off and unlocked states were revised from their approved active
 counterparts. Recording off is grayscale with no checkmark. The unlocked lock
 uses the same rounded body, metal bands and rivets, with an open shackle.
-Both checkbox states use the exact same prepared unchecked base and a separate
-red checkmark. The disabled checked state desaturates only the checkmark;
-uncovered base pixels remain identical. The base is the classic box rebuilt
-at 8×; see [Checkbox box](#checkbox-box).
+Both checkbox states use the exact same approved smooth unchecked base and a
+separate red checkmark. The disabled checked state desaturates only the
+checkmark; uncovered base pixels remain identical. See
+[Checkbox box](#checkbox-box).
 
 `ImageData` attaches replacements to cells in the original sheets. Facet draws
 resolve those cells, including clipped subrectangles, before sampling or GPU
@@ -73,28 +73,20 @@ priority, stable texture identities, and shared checkbox pixels.
 
 ## Checkbox box
 
-The checkbox box is the flat classic box of `GUICheckbox.png`, rebuilt at 8×.
-It keeps the classic box bounds: x 4–26 and y 5–27 of the classic 32-pixel
-cell, x 32–208 and y 40–216 of the 256-pixel one. The approved checkmark spans
-the classic checkmark's extent, so it overhangs the box on every side and sits
-centred on it, as the classic checkmark does.
+The checkbox box keeps the flat classic box bounds: x 4–26 and y 5–27 of the
+classic 32-pixel cell, x 32–208 and y 40–216 of the 256-pixel one. Its smooth
+face and restrained lower-right shadow were approved with the complete icon.
+The red checkmark spans the classic checkmark's extent, so it overhangs the box
+on every side and sits centred on it, as the classic checkmark does.
 
-[`ui-checkbox/prepare_runtime.py`](ui-checkbox/prepare_runtime.py) prepares the
-three checkbox sprites:
-
-- It recovers the approved checkmark layer from the approved pair kept in
-  `ui-checkbox/approved/`. The layer's coverage is exact wherever the base is
-  not opaque. Where the checkmark's antialiased rim covers the opaque base,
-  its coverage is solved from the colour of the nearest solidly covered
-  checkmark pixel.
-- It rebuilds the classic unchecked box at 8×. The classic cell is a box over
-  a pure black drop shadow. The script fits the shadow as a blurred, offset
-  box, which gives the box's own coverage and colour. Each edge band keeps its
-  colour along the edge, relative to the face, and the face mottling is
-  upsampled smoothly. Averaged back over each classic pixel, the rebuilt box
-  is within two levels of the classic cell on average.
-- It composites the checkmark over the box for the checked state, and the
-  checkmark's Rec. 709 luma for the disabled checked state.
+[`ui-checkbox/prepare_runtime.py`](ui-checkbox/prepare_runtime.py) validates
+the approved 256×256 RGBA layers and states, then installs the three runtime
+sprites. It checks that the checked state is the exact alpha composite of the
+unchecked box and complete mark, and that the disabled state uses Rec. 709
+luma on the same mark. The approved states and separate mark are retained in
+`ui-checkbox/approved/`. The smooth box differs from the classic source by
+7.4 levels per pixel when averaged back to 32×32; the previous raised bezel
+differed by 33.9.
 
 ### Checkbox revisions
 
@@ -110,6 +102,14 @@ three checkbox sprites:
    rebuilt from the classic cell.
 
    ![Classic, fitted and flat checkboxes in the Audio options](ui-checkbox/flat-box.png)
+
+3. **Complete smooth icon**. The flat box and complete red checkmark were
+   reviewed together. The original 32×32 checked icon controlled the full
+   silhouette; enlarged crops controlled the blunt left tip and boxy right
+   arm. [The generation and preparation notes](ui-checkbox/full-icon-revision.md)
+   include the selected imagegen prompt and source artwork.
+
+   ![Classic, previous and approved complete checkboxes in the Audio options](ui-checkbox/full-icon-comparison.png)
 
 Both are unscaled crops of the Audio options, captured as above. Each Classic
 row is the capture's classic side; each Before row is the same capture on the
