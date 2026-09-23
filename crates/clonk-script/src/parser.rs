@@ -5,7 +5,7 @@ use crate::ast::{
 };
 use crate::error::ParseError;
 use crate::lexer::Lexer;
-use crate::token::{Keyword, Symbol, Token, TokenKind};
+use crate::token::{DiagnosticPosition, Keyword, Symbol, Token, TokenKind};
 use crate::value::Literal;
 
 /// `C4AUL_MAX_Par`: a new-style function declaration has ten syntactic
@@ -208,8 +208,7 @@ impl<'a> Parser<'a> {
                 if let Some(directive) = self.try_parse_directive()? {
                     self.parse_script_directive(
                         &directive,
-                        declaration_token.line,
-                        declaration_token.column,
+                        declaration_token.diagnostic_position(),
                         &mut includes,
                         &mut appends,
                         &mut strict_level,
@@ -304,11 +303,10 @@ impl<'a> Parser<'a> {
         // compiles its body in legacy mode (C4AulParse.cpp:1698-1704).
         let legacy_body = self.strict_level < 2 && !self.check_symbol(Symbol::LBrace)?;
         if legacy_body {
-            let (line, column) = self.peek().map(|token| (token.line, token.column))?;
-            self.non_fatal_diagnostics.push(ParseError::new(
+            let position = self.peek()?.diagnostic_position();
+            self.non_fatal_diagnostics.push(ParseError::at(
                 "'func': expecting opening block ('{') after func declaration",
-                line,
-                column,
+                position,
             ));
         } else {
             self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
@@ -338,18 +336,19 @@ impl<'a> Parser<'a> {
                         // and goes on; the parser pass never runs that match
                         // (`C4AulParse.cpp:1706-1709,1400-1427`), so the
                         // function keeps every statement and no error chunk.
-                        let (found, line, column) =
-                            self.peek().map_or(("identifier", 0, 0), |token| {
+                        let (found, position) = self.peek().map_or(
+                            ("identifier", DiagnosticPosition::default()),
+                            |token| {
                                 let found = match token.kind {
                                     TokenKind::Symbol(Symbol::Colon) => "':'",
                                     _ => "identifier",
                                 };
-                                (found, token.line, token.column)
-                            });
-                        self.non_fatal_diagnostics.push(ParseError::new(
+                                (found, token.diagnostic_position())
+                            },
+                        );
+                        self.non_fatal_diagnostics.push(ParseError::at(
                             format!("'}}' expected, but found {found}"),
-                            line,
-                            column,
+                            position,
                         ));
                         None
                     }
@@ -361,10 +360,9 @@ impl<'a> Parser<'a> {
                     None if legacy_body && self.check_symbol(Symbol::RBrace)? => {
                         let brace = self.consume()?;
                         ended_at_stray_brace = true;
-                        Some(ParseError::new(
+                        Some(ParseError::at(
                             "no '{' found for '}'",
-                            brace.line,
-                            brace.column,
+                            brace.diagnostic_position(),
                         ))
                     }
                     // At the end of the script Parse_Function stops without an
@@ -372,11 +370,10 @@ impl<'a> Parser<'a> {
                     // the preparser's Match(ATT_BLCLOSE) fails
                     // (C4AulParse.cpp:1886-1890, 1712).
                     None if legacy_body => {
-                        let (line, column) = self.peek().map(|token| (token.line, token.column))?;
-                        self.non_fatal_diagnostics.push(ParseError::new(
+                        let position = self.peek()?.diagnostic_position();
+                        self.non_fatal_diagnostics.push(ParseError::at(
                             "'}' expected, but found end of file",
-                            line,
-                            column,
+                            position,
                         ));
                         None
                     }
@@ -454,10 +451,9 @@ impl<'a> Parser<'a> {
     ) -> Result<(Function, Option<ParseError>), ParseError> {
         let (name, name_token) = self.expect_identifier("expected function declaration")?;
         if self.strict_level >= 2 {
-            return Err(ParseError::new(
+            return Err(ParseError::at(
                 format!("declaration expected, but found identifier '{name}'"),
-                name_token.line,
-                name_token.column,
+                name_token.diagnostic_position(),
             ));
         }
         self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
@@ -595,10 +591,9 @@ impl<'a> Parser<'a> {
             // the rejected eleventh iteration.
             if syntactic_parameter_count >= MAX_FUNCTION_PARAMETERS {
                 let token = self.peek()?.clone();
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     "'func' parameter list: too many parameters (max 10)",
-                    token.line,
-                    token.column,
+                    token.diagnostic_position(),
                 ));
             }
 
@@ -612,10 +607,9 @@ impl<'a> Parser<'a> {
             // type.
             let parameter_start = self.peek()?.clone();
             if matches!(parameter_start.kind, TokenKind::Keyword(Keyword::Nil)) {
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     "expected parameter name",
-                    parameter_start.line,
-                    parameter_start.column,
+                    parameter_start.diagnostic_position(),
                 ));
             }
 
@@ -666,17 +660,15 @@ impl<'a> Parser<'a> {
                     }
                     _ => {
                         let Some(annotation) = type_annotation else {
-                            return Err(ParseError::new(
+                            return Err(ParseError::at(
                                 "expected parameter name",
-                                next_token.line,
-                                next_token.column,
+                                next_token.diagnostic_position(),
                             ));
                         };
                         let param_name = annotation.to_string();
-                        let diagnostic = ParseError::new(
+                        let diagnostic = ParseError::at(
                             format!("parameter has the same name as type {param_name}"),
-                            next_token.line,
-                            next_token.column,
+                            next_token.diagnostic_position(),
                         );
                         if self.strict_level >= 2 {
                             return Err(diagnostic);
@@ -755,10 +747,9 @@ impl<'a> Parser<'a> {
             return Ok(());
         };
         self.consume()?;
-        Err(ParseError::new(
+        Err(ParseError::at(
             format!("unexpected character '{invalid}' found"),
-            token.line,
-            token.column,
+            token.diagnostic_position(),
         ))
     }
 
@@ -1036,10 +1027,9 @@ impl<'a> Parser<'a> {
         }
         if let Some(token) = self.consume_if_keyword(Keyword::Local)? {
             if self.global_script && self.parsing_old_style_function {
-                self.non_fatal_diagnostics.push(ParseError::new(
+                self.non_fatal_diagnostics.push(ParseError::at(
                     "'local' variable declaration in global script",
-                    token.line,
-                    token.column,
+                    token.diagnostic_position(),
                 ));
                 // C++ reports this in the PREPARSER, then recovery retries
                 // the same token as a top-level declaration and registers
@@ -1060,10 +1050,9 @@ impl<'a> Parser<'a> {
         }
         if let Some(token) = self.consume_if_keyword(Keyword::Break)? {
             if self.loop_depth == 0 {
-                let error = ParseError::new(
+                let error = ParseError::at(
                     "'break' is only allowed inside loops",
-                    token.line,
-                    token.column,
+                    token.diagnostic_position(),
                 );
                 if self.strict_level >= 2 {
                     return Err(error);
@@ -1077,10 +1066,9 @@ impl<'a> Parser<'a> {
         }
         if let Some(token) = self.consume_if_keyword(Keyword::Continue)? {
             if self.loop_depth == 0 {
-                let error = ParseError::new(
+                let error = ParseError::at(
                     "'continue' is only allowed inside loops",
-                    token.line,
-                    token.column,
+                    token.diagnostic_position(),
                 );
                 if self.strict_level >= 2 {
                     return Err(error);
@@ -1394,13 +1382,12 @@ impl<'a> Parser<'a> {
         let (args, forward_rest) = self.parse_argument_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after condition parameters")?;
         if args.len() > 1 {
-            self.non_fatal_diagnostics.push(ParseError::new(
+            self.non_fatal_diagnostics.push(ParseError::at(
                 format!(
                     "{statement}: passing {} parameters, but only 1 are used",
                     args.len()
                 ),
-                opening.line,
-                opening.column,
+                opening.diagnostic_position(),
             ));
         }
         Ok(Expr::LegacyParameterList { args, forward_rest })
@@ -1713,10 +1700,9 @@ impl<'a> Parser<'a> {
                         failsafe: is_optional,
                     });
                 }
-                Err(ParseError::new(
+                Err(ParseError::at(
                     "invalid assignment target",
-                    eq_token.line,
-                    eq_token.column,
+                    eq_token.diagnostic_position(),
                 ))
             }
             Expr::GlobalCall {
@@ -1730,10 +1716,9 @@ impl<'a> Parser<'a> {
                 failsafe,
                 forward_rest,
             }),
-            _ => Err(ParseError::new(
+            _ => Err(ParseError::at(
                 "invalid assignment target",
-                eq_token.line,
-                eq_token.column,
+                eq_token.diagnostic_position(),
             )),
         }
     }
@@ -1752,13 +1737,12 @@ impl<'a> Parser<'a> {
         // This is the single entry every nested expression passes through, so
         // one counter here bounds the whole recursive-descent chain.
         if self.expression_depth >= MAX_EXPRESSION_DEPTH {
-            let (line, column) = self
+            let position = self
                 .peek()
-                .map_or((0, 0), |token| (token.line, token.column));
-            return Err(ParseError::new(
+                .map_or(DiagnosticPosition::default(), Token::diagnostic_position);
+            return Err(ParseError::at(
                 format!("expression nested deeper than {MAX_EXPRESSION_DEPTH} levels"),
-                line,
-                column,
+                position,
             ));
         }
         self.expression_depth += 1;
@@ -1796,10 +1780,9 @@ impl<'a> Parser<'a> {
         if is_assign {
             let op_token = self.consume()?;
             let op_symbol = op_symbol.ok_or_else(|| {
-                ParseError::new(
+                ParseError::at(
                     "missing assignment operator",
-                    op_token.line,
-                    op_token.column,
+                    op_token.diagnostic_position(),
                 )
             })?;
             let operator = match op_symbol {
@@ -1818,10 +1801,9 @@ impl<'a> Parser<'a> {
                 Symbol::ConcatEqual => "..=",
                 Symbol::QuestionQuestionEqual => "??=",
                 _ => {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         format!("unknown assignment operator {op_symbol:?}"),
-                        op_token.line,
-                        op_token.column,
+                        op_token.diagnostic_position(),
                     ))
                 }
             };
@@ -1870,10 +1852,9 @@ impl<'a> Parser<'a> {
                 Symbol::LeftShiftEqual => Some(BinaryOp::LeftShift),
                 Symbol::RightShiftEqual => Some(BinaryOp::RightShift),
                 _ => {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         format!("unknown assignment operator {op_symbol:?}"),
-                        op_token.line,
-                        op_token.column,
+                        op_token.diagnostic_position(),
                     ))
                 }
             };
@@ -2182,10 +2163,9 @@ impl<'a> Parser<'a> {
         question: &Token,
     ) -> Result<Vec<SafeNavigationStep>, ParseError> {
         if self.strict_level < 3 {
-            return Err(ParseError::new(
+            return Err(ParseError::at(
                 "unexpected '?'".to_string(),
-                question.line,
-                question.column,
+                question.diagnostic_position(),
             ));
         }
 
@@ -2195,10 +2175,9 @@ impl<'a> Parser<'a> {
             let Some(operation) = self.parse_navigation_operation()? else {
                 if steps.is_empty() || nil_guard {
                     let token = self.peek()?;
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         "navigation operator (->, [], .) expected".to_string(),
-                        token.line,
-                        token.column,
+                        token.diagnostic_position(),
                     ));
                 }
                 break;
@@ -2215,10 +2194,9 @@ impl<'a> Parser<'a> {
     fn parse_navigation_operation(&mut self) -> Result<Option<NavigationOperation>, ParseError> {
         if let Some(bracket) = self.consume_if_symbol(Symbol::LBracket)? {
             if self.strict_level == 0 {
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     "unexpected '['".to_string(),
-                    bracket.line,
-                    bracket.column,
+                    bracket.diagnostic_position(),
                 ));
             }
             if self.check_symbol(Symbol::RBracket)? {
@@ -2238,10 +2216,9 @@ impl<'a> Parser<'a> {
         }
         if let Some(dot) = self.consume_if_symbol(Symbol::Dot)? {
             if self.strict_level < 3 {
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     "unexpected '.'".to_string(),
-                    dot.line,
-                    dot.column,
+                    dot.diagnostic_position(),
                 ));
             }
             let (name, _) = self.expect_identifier("expected property name after '.'")?;
@@ -2269,10 +2246,9 @@ impl<'a> Parser<'a> {
                 }));
             }
             if is_optional {
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     "'~' requires a method call: expected '(' after method name".to_string(),
-                    token.line,
-                    token.column,
+                    token.diagnostic_position(),
                 ));
             }
             self.record_synthesized_string_operand(name.clone());
@@ -2314,10 +2290,9 @@ impl<'a> Parser<'a> {
                 forward_rest = true;
                 // Ellipsis must be the last argument
                 if self.consume_if_symbol(Symbol::Comma)?.is_some() {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         "ellipsis (...) must be the last argument in a function call",
-                        ellipsis_token.line,
-                        ellipsis_token.column,
+                        ellipsis_token.diagnostic_position(),
                     ));
                 }
                 break;
@@ -2344,6 +2319,7 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let token = self.consume()?;
+        let position = token.diagnostic_position();
         match token.kind {
             TokenKind::Number(value) => Ok(Expr::Literal(Literal::Int(value))),
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value))),
@@ -2377,10 +2353,9 @@ impl<'a> Parser<'a> {
                 // (C4AulParse.cpp:2775-2798). Arrow and `global->` calls take
                 // separate parser paths and remain ordinary named calls.
                 if self.strict_level == 0 && matches!(name.as_str(), "inherited" | "_inherited") {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         "inherited disabled; use #strict syntax!",
-                        token.line,
-                        token.column,
+                        position,
                     ));
                 }
                 // Record the hard spelling's site for the link-time check that
@@ -2417,29 +2392,17 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Symbol(Symbol::LBracket) => {
                 if self.strict_level == 0 {
-                    return Err(ParseError::new(
-                        "unexpected '['".to_string(),
-                        token.line,
-                        token.column,
-                    ));
+                    return Err(ParseError::at("unexpected '['".to_string(), position));
                 }
                 self.parse_array_literal()
             }
             TokenKind::Symbol(Symbol::LBrace) => {
                 if self.strict_level < 3 {
-                    return Err(ParseError::new(
-                        "unexpected '{'".to_string(),
-                        token.line,
-                        token.column,
-                    ));
+                    return Err(ParseError::at("unexpected '{'".to_string(), position));
                 }
                 self.parse_proplist_literal()
             }
-            _ => Err(ParseError::new(
-                "unexpected token in expression",
-                token.line,
-                token.column,
-            )),
+            _ => Err(ParseError::at("unexpected token in expression", position)),
         }
     }
 
@@ -2519,10 +2482,9 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Literal(Literal::String(name)))
             }
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value))),
-            _ => Err(ParseError::new(
+            _ => Err(ParseError::at(
                 "expected identifier, string, or computed key for map key",
-                token.line,
-                token.column,
+                token.diagnostic_position(),
             )),
         }
     }
@@ -2578,10 +2540,9 @@ impl<'a> Parser<'a> {
             self.consume()?;
             return Ok(());
         }
-        Err(ParseError::new(
+        Err(ParseError::at(
             message.to_string(),
-            token.line,
-            token.column,
+            token.diagnostic_position(),
         ))
     }
 
@@ -2614,10 +2575,9 @@ impl<'a> Parser<'a> {
                 self.consume()?;
                 Ok(())
             }
-            _ => Err(ParseError::new(
+            _ => Err(ParseError::at(
                 message.to_string(),
-                token.line,
-                token.column,
+                token.diagnostic_position(),
             )),
         }
     }
@@ -2629,10 +2589,9 @@ impl<'a> Parser<'a> {
                 self.consume()?;
                 Ok(())
             }
-            _ => Err(ParseError::new(
+            _ => Err(ParseError::at(
                 message.to_string(),
-                token.line,
-                token.column,
+                token.diagnostic_position(),
             )),
         }
     }
@@ -2647,10 +2606,9 @@ impl<'a> Parser<'a> {
             // remains the reserved ATT_NIL token.
             TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => keyword.lexeme().to_string(),
             _ => {
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     message.to_string(),
-                    token.line,
-                    token.column,
+                    token.diagnostic_position(),
                 ))
             }
         };
@@ -2664,10 +2622,9 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(name) | TokenKind::C4Id(name) => name.clone(),
             TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => keyword.lexeme().to_string(),
             _ => {
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     message.to_string(),
-                    token.line,
-                    token.column,
+                    token.diagnostic_position(),
                 ))
             }
         };
@@ -2760,8 +2717,7 @@ impl<'a> Parser<'a> {
     fn parse_script_directive(
         &mut self,
         directive: &str,
-        directive_line: usize,
-        directive_column: usize,
+        directive_position: DiagnosticPosition,
         includes: &mut Vec<String>,
         appends: &mut Vec<AppendTo>,
         strict_level: &mut Option<u8>,
@@ -2769,8 +2725,7 @@ impl<'a> Parser<'a> {
         match directive {
             "#include" => {
                 let id = self.peek()?.clone();
-                let line = id.line;
-                let column = id.column;
+                let position = id.diagnostic_position();
                 match id.kind {
                     TokenKind::C4Id(id) => {
                         self.next()?;
@@ -2778,10 +2733,9 @@ impl<'a> Parser<'a> {
                         includes.push(id);
                     }
                     _ => {
-                        return Err(ParseError::new(
+                        return Err(ParseError::at(
                             "expected definition ID after #include",
-                            line,
-                            column,
+                            position,
                         ));
                     }
                 }
@@ -2789,8 +2743,7 @@ impl<'a> Parser<'a> {
             "#appendto" => {
                 self.lexer.split_next_leading_star();
                 let target = self.peek()?.clone();
-                let line = target.line;
-                let column = target.column;
+                let position = target.diagnostic_position();
                 match target.kind {
                     TokenKind::C4Id(id) => {
                         self.next()?;
@@ -2811,10 +2764,9 @@ impl<'a> Parser<'a> {
                         appends.push(AppendTo::Wildcard);
                     }
                     _ => {
-                        return Err(ParseError::new(
+                        return Err(ParseError::at(
                             "expected definition ID or '*' after #appendto",
-                            line,
-                            column,
+                            position,
                         ));
                     }
                 }
@@ -2830,10 +2782,9 @@ impl<'a> Parser<'a> {
                 if let TokenKind::Number(level) = token.kind {
                     let raw_level = token.raw_number().unwrap_or(level as u64);
                     if raw_level != 2 && raw_level != 3 {
-                        return Err(ParseError::new(
+                        return Err(ParseError::at(
                             "unknown strict level",
-                            token.line,
-                            token.column,
+                            token.diagnostic_position(),
                         ));
                     }
                     let level = raw_level as u8;
@@ -2845,10 +2796,9 @@ impl<'a> Parser<'a> {
                 }
             }
             _ => {
-                return Err(ParseError::new(
+                return Err(ParseError::at(
                     format!("unknown directive: {directive}"),
-                    directive_line,
-                    directive_column,
+                    directive_position,
                 ));
             }
         }
@@ -2897,13 +2847,13 @@ impl<'a> Parser<'a> {
                 let number = self.consume()?;
                 let number_line = number.line;
                 let number_column = number.column;
+                let number_position = number.diagnostic_position();
                 let number_is_hex = number.number_is_hex();
                 let raw_number = number.raw_number();
                 let TokenKind::Number(value) = number.kind else {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         "expected integer after static constant sign",
-                        number_line,
-                        number_column,
+                        number_position,
                     ));
                 };
                 // With Shift(..., false), native C4Aul scans a negative
@@ -2944,10 +2894,9 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Literal(Literal::Int(value)))
                 }
             }
-            _ => Err(ParseError::new(
+            _ => Err(ParseError::at(
                 "expected static constant value",
-                token.line,
-                token.column,
+                token.diagnostic_position(),
             )),
         }
     }
@@ -2967,10 +2916,9 @@ impl<'a> Parser<'a> {
                 if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                     Some(self.parse_static_const_initializer()?)
                 } else {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         "static const declaration requires an initializer",
-                        name_token.line,
-                        name_token.column,
+                        name_token.diagnostic_position(),
                     ));
                 }
             } else {
@@ -2984,10 +2932,9 @@ impl<'a> Parser<'a> {
                     starts_declaration_group,
                 });
                 if let Some(equal) = self.consume_if_symbol(Symbol::Equal)? {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         "expected ',' or ';' after variable declaration",
-                        equal.line,
-                        equal.column,
+                        equal.diagnostic_position(),
                     ));
                 }
                 None

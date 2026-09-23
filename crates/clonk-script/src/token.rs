@@ -145,7 +145,21 @@ pub enum Symbol {
     RightShiftEqual,
 }
 
+/// The line and column a diagnostic about a token reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DiagnosticPosition {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+}
+
 impl Token {
+    pub(crate) fn diagnostic_position(&self) -> DiagnosticPosition {
+        DiagnosticPosition {
+            line: self.line,
+            column: self.column,
+        }
+    }
+
     pub fn new(kind: TokenKind, line: usize, column: usize) -> Self {
         Self {
             kind,

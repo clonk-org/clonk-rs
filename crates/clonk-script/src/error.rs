@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
+use crate::token::DiagnosticPosition;
 use crate::vm::ScriptHostIdentity;
 
 #[derive(Debug, Error)]
@@ -298,6 +299,10 @@ impl ParseError {
             line,
             column,
         }
+    }
+
+    pub(crate) fn at(message: impl Into<String>, position: DiagnosticPosition) -> Self {
+        Self::new(message, position.line, position.column)
     }
 
     pub fn message(&self) -> &str {
