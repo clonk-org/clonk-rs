@@ -25,6 +25,7 @@ mod test_compound_assignment_lvalues;
 mod test_concat_operator;
 mod test_context_annotation;
 mod test_cowb_issue;
+mod test_diagnostic_positions;
 mod test_direct_exec_continuation;
 mod test_division_by_zero;
 mod test_effect_check_parameter_conversion;

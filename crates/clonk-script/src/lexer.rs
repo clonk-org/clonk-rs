@@ -1,5 +1,5 @@
 use crate::error::ParseError;
-use crate::token::{Keyword, Symbol, Token, TokenKind};
+use crate::token::{DiagnosticPosition, Keyword, Symbol, Token, TokenKind};
 use crate::value::{
     c4_string_byte_len, c4_string_bytes, c4_string_from_bytes, c4_string_from_literal,
 };
@@ -18,6 +18,8 @@ pub(crate) struct LexerCheckpoint<'a> {
     peeked: Option<(usize, char, usize, usize)>,
     line: usize,
     column: usize,
+    read_position: DiagnosticPosition,
+    peeked_read_position: DiagnosticPosition,
     just_saw_cr: bool,
     strict_level: u8,
     string_literals_len: usize,
@@ -30,6 +32,13 @@ pub struct Lexer<'a> {
     peeked: Option<(usize, char, usize, usize)>, // (byte_idx, char, line, column)
     line: usize,
     column: usize,
+    /// C4Aul's read position after every character taken from `chars`,
+    /// a peeked one included.
+    read_position: DiagnosticPosition,
+    /// The read position before the peeked character.
+    peeked_read_position: DiagnosticPosition,
+    /// The read position before the token being lexed.
+    token_read_start: DiagnosticPosition,
     just_saw_cr: bool,
     strict_level: u8,
     diagnostics: Vec<ParseError>,
@@ -55,6 +64,9 @@ impl<'a> Lexer<'a> {
             peeked: None,
             line: 1,
             column: 1,
+            read_position: DiagnosticPosition::default(),
+            peeked_read_position: DiagnosticPosition::default(),
+            token_read_start: DiagnosticPosition::default(),
             just_saw_cr: false,
             strict_level: 0,
             diagnostics: Vec::new(),
@@ -85,6 +97,8 @@ impl<'a> Lexer<'a> {
             peeked: self.peeked,
             line: self.line,
             column: self.column,
+            read_position: self.read_position,
+            peeked_read_position: self.peeked_read_position,
             just_saw_cr: self.just_saw_cr,
             strict_level: self.strict_level,
             string_literals_len: self.string_literals.len(),
@@ -97,6 +111,8 @@ impl<'a> Lexer<'a> {
         self.peeked = checkpoint.peeked;
         self.line = checkpoint.line;
         self.column = checkpoint.column;
+        self.read_position = checkpoint.read_position;
+        self.peeked_read_position = checkpoint.peeked_read_position;
         self.just_saw_cr = checkpoint.just_saw_cr;
         self.strict_level = checkpoint.strict_level;
         self.string_literals
@@ -157,7 +173,23 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Token, ParseError> {
+        let token = self.lex_token()?;
+        Ok(token.with_read_span(self.token_read_start, self.next_read_position()))
+    }
+
+    /// Where C4Aul's read position stands: before the peeked character, if
+    /// one is peeked.
+    fn next_read_position(&self) -> DiagnosticPosition {
+        if self.peeked.is_some() {
+            self.peeked_read_position
+        } else {
+            self.read_position
+        }
+    }
+
+    fn lex_token(&mut self) -> Result<Token, ParseError> {
         loop {
+            self.token_read_start = self.next_read_position();
             let (idx, ch, line, column) = match self.bump_char() {
                 Some(info) => info,
                 None => {
@@ -514,11 +546,12 @@ impl<'a> Lexer<'a> {
                 '$' => {
                     return self.lex_locale_key(idx, line, column);
                 }
+                // C4Aul steps past the character before it throws
+                // (C4AulParse.cpp:629-662).
                 _ => {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         format!("unexpected character '{ch}'"),
-                        line,
-                        column,
+                        self.next_read_position(),
                     ));
                 }
             }
@@ -528,11 +561,7 @@ impl<'a> Lexer<'a> {
     /// Skip the remainder of a function-description block after its opening
     /// bracket has already been tokenized. C++ treats this as raw text and
     /// balances only `[`/`]` (C4AulParse.cpp:1825-1853).
-    pub(crate) fn skip_function_description(
-        &mut self,
-        opening_line: usize,
-        opening_column: usize,
-    ) -> Result<String, ParseError> {
+    pub(crate) fn skip_function_description(&mut self) -> Result<String, ParseError> {
         let mut brackets_open = 1usize;
         let mut description = String::new();
         while let Some((_, ch, _, _)) = self.bump_char() {
@@ -552,10 +581,11 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        Err(ParseError::new(
+        // Parse_Desc throws with its read position at the terminating NUL
+        // (C4AulParse.cpp:1842-1845).
+        Err(ParseError::at(
             "function desc not closed",
-            opening_line,
-            opening_column,
+            self.next_read_position(),
         ))
     }
 
@@ -578,6 +608,7 @@ impl<'a> Lexer<'a> {
             let (idx, ch) = self.chars.next()?;
             let line = self.line;
             let column = self.column;
+            self.peeked_read_position = self.read_position;
             self.advance_position(ch);
             self.peeked = Some((idx, ch, line, column));
         }
@@ -601,6 +632,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn advance_position(&mut self, ch: char) {
+        self.read_position = self.read_position.advanced_past(ch);
         match ch {
             '\r' => {
                 self.line += 1;
@@ -754,7 +786,12 @@ impl<'a> Lexer<'a> {
         line: usize,
         column: usize,
     ) -> Result<Token, ParseError> {
-        let error = ParseError::new(format!("stupid func label: {lexeme}"), line, column);
+        // C4Aul warns with its read position on the '(' or ':' after the ID
+        // (C4AulParse.cpp:754-759).
+        let error = ParseError::at(
+            format!("stupid func label: {lexeme}"),
+            self.next_read_position(),
+        );
         if self.strict_level >= 2 {
             Err(error)
         } else {
@@ -889,10 +926,9 @@ impl<'a> Lexer<'a> {
                     column,
                 ));
             }
-            return Err(ParseError::new(
+            return Err(ParseError::at(
                 format!("invalid C4ID literal: {lexeme}"),
-                line,
-                column,
+                self.next_read_position(),
             ));
         }
 
@@ -927,7 +963,13 @@ impl<'a> Lexer<'a> {
         let mut value = String::new();
         let mut value_is_canonical_bytes = false;
         let mut warned_too_long = false;
-        while let Some((_, ch, char_line, char_column)) = self.bump_char() {
+        // C4Aul's string diagnostics point at the character being read
+        // (C4AulParse.cpp:785-806).
+        loop {
+            let char_position = self.next_read_position();
+            let Some((_, ch, _, _)) = self.bump_char() else {
+                break;
+            };
             match ch {
                 '"' => {
                     let value = if value_is_canonical_bytes || self.input_is_c4_bytes {
@@ -944,14 +986,14 @@ impl<'a> Lexer<'a> {
                     value.len()
                 }) >= C4AUL_MAX_STRING =>
                 {
-                    self.handle_string_overflow(&mut warned_too_long, char_line, char_column)?;
+                    self.handle_string_overflow(&mut warned_too_long, char_position)?;
                 }
                 '\r' | '\n' => {
                     // Leave recovery after the dangling closing quote. If it
                     // were tokenized as a new opener, it could swallow this
                     // function's brace and the next top-level declaration.
                     self.skip_string_remainder();
-                    return Err(ParseError::new("string not closed", char_line, char_column));
+                    return Err(ParseError::at("string not closed", char_position));
                 }
                 '\\' => {
                     match self.peek_char() {
@@ -965,17 +1007,15 @@ impl<'a> Lexer<'a> {
                             // warns, and leaves the following character for
                             // the ordinary next tokenizer iteration.
                             value.push('\\');
-                            self.diagnostics.push(ParseError::new(
+                            self.diagnostics.push(ParseError::at(
                                 format!("unknown escape: {escaped}"),
-                                char_line,
-                                char_column,
+                                char_position,
                             ));
                         }
                         None => {
-                            return Err(ParseError::new(
+                            return Err(ParseError::at(
                                 "unterminated string literal",
-                                line,
-                                column,
+                                self.next_read_position(),
                             ))
                         }
                     }
@@ -1016,20 +1056,22 @@ impl<'a> Lexer<'a> {
                         };
                         value.push_str(&c4_string_from_bytes(&bytes[..remaining]));
                     }
-                    self.handle_string_overflow(&mut warned_too_long, char_line, char_column)?;
+                    self.handle_string_overflow(&mut warned_too_long, char_position)?;
                 }
             }
         }
-        Err(ParseError::new("unterminated string literal", line, column))
+        Err(ParseError::at(
+            "unterminated string literal",
+            self.next_read_position(),
+        ))
     }
 
     fn handle_string_overflow(
         &mut self,
         warned: &mut bool,
-        line: usize,
-        column: usize,
+        position: DiagnosticPosition,
     ) -> Result<(), ParseError> {
-        let error = ParseError::new("string too long", line, column);
+        let error = ParseError::at("string too long", position);
         if self.strict_level >= 3 {
             // Once the C++ buffer is full, escape handling is bypassed: the
             // first following quote closes the token even after a backslash.
@@ -1058,7 +1100,11 @@ impl<'a> Lexer<'a> {
         column: usize,
     ) -> Result<Token, ParseError> {
         // We've already consumed the opening '$'
-        while let Some((idx, ch, _, _)) = self.bump_char() {
+        loop {
+            let char_position = self.next_read_position();
+            let Some((idx, ch, _, _)) = self.bump_char() else {
+                break;
+            };
             match ch {
                 '$' => {
                     // Found closing '$', extract the key without the $ delimiters
@@ -1070,20 +1116,18 @@ impl<'a> Lexer<'a> {
                     ));
                 }
                 '\n' | '\r' => {
-                    return Err(ParseError::new(
+                    return Err(ParseError::at(
                         "unterminated localization key (missing closing '$')",
-                        line,
-                        column,
+                        char_position,
                     ));
                 }
                 _ => {}
             }
         }
 
-        Err(ParseError::new(
+        Err(ParseError::at(
             "unterminated localization key (missing closing '$')",
-            line,
-            column,
+            self.next_read_position(),
         ))
     }
 }

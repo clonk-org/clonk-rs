@@ -189,7 +189,7 @@ pub struct Function {
     pub(crate) hard_inherited_column: Option<usize>,
     pub(crate) hard_inherited_stmt_index: Option<usize>,
     /// Identifiers this body reads or writes that could name one of the
-    /// declaring script's `local`s, with the one-based line of each first use.
+    /// declaring script's `local`s, with where C4Aul reports each first use.
     ///
     /// C4Aul rejects a named `local` inside a `global func` outright — in both
     /// the lvalue and the rvalue path — because the function is owned by the
@@ -201,7 +201,7 @@ pub struct Function {
     ///
     /// Only collected for `global func` bodies: nothing else can trip the rule,
     /// and every other function would pay for the bookkeeping.
-    pub(crate) global_local_candidates: Vec<(String, usize)>,
+    pub(crate) global_local_candidates: Vec<(String, crate::token::DiagnosticPosition)>,
     /// The declaring script's `local` this `global func` names, if it names
     /// one. Set after the whole script is parsed; a function carrying it fails
     /// to link and raises on every call.

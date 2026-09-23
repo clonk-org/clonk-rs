@@ -91,7 +91,7 @@ pub struct Parser<'a> {
     /// against the script's `local` declarations once the whole script is
     /// parsed, because a `local` may be declared below the function that names
     /// it and C4Aul's preparser has already registered every one.
-    global_local_candidates: Vec<(String, usize)>,
+    global_local_candidates: Vec<(String, DiagnosticPosition)>,
     /// Names that reach C4Aul's identifier chain before `LocalNamed` and so
     /// shadow the rule: the function's own parameters and every `var` it has
     /// declared *so far* (`C4AulParse.cpp:2702-2730`). Built as parsing
@@ -725,10 +725,12 @@ impl<'a> Parser<'a> {
             return Ok(());
         };
         self.consume()?;
-        Err(ParseError::new(
+        // With operators disabled C4Aul reads these bytes one at a time and
+        // throws once it has stepped past the invalid one
+        // (C4AulParse.cpp:629-662).
+        Err(ParseError::at(
             format!("unexpected character '{invalid}' found"),
-            token.line,
-            token.column + column_offset,
+            token.read_start().after_bytes(column_offset + 1),
         ))
     }
 
@@ -749,7 +751,7 @@ impl<'a> Parser<'a> {
         self.consume()?;
         Err(ParseError::at(
             format!("unexpected character '{invalid}' found"),
-            token.diagnostic_position(),
+            token.read_start().after_bytes(1),
         ))
     }
 
@@ -887,10 +889,8 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
 
-        let opening = self.consume()?;
-        self.lexer
-            .skip_function_description(opening.line, opening.column)
-            .map(Some)
+        self.consume()?;
+        self.lexer.skip_function_description().map(Some)
     }
 
     fn parse_stmt_or_block_vec(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -911,7 +911,7 @@ impl<'a> Parser<'a> {
     /// parameter/rvalue path at `:2731-2737` — so one record per name covers
     /// them both. Only the first use is kept: C4Aul throws at the first one and
     /// never reaches a second.
-    fn note_global_local_candidate(&mut self, name: &str, line: usize) {
+    fn note_global_local_candidate(&mut self, name: &str, position: DiagnosticPosition) {
         if !self.parsing_global_function
             || self.global_function_shadowing_names.contains(name)
             || self
@@ -921,7 +921,8 @@ impl<'a> Parser<'a> {
         {
             return;
         }
-        self.global_local_candidates.push((name.to_string(), line));
+        self.global_local_candidates
+            .push((name.to_string(), position));
     }
 
     /// Note a `var` the function declared. `AddVar` registers the name before
@@ -1048,11 +1049,13 @@ impl<'a> Parser<'a> {
         if self.consume_if_keyword(Keyword::Return)?.is_some() {
             return self.parse_return();
         }
-        if let Some(token) = self.consume_if_keyword(Keyword::Break)? {
+        if self.consume_if_keyword(Keyword::Break)?.is_some() {
             if self.loop_depth == 0 {
+                // C4Aul has shifted past the keyword when it checks for a loop
+                // (C4AulParse.cpp:2109-2140).
                 let error = ParseError::at(
                     "'break' is only allowed inside loops",
-                    token.diagnostic_position(),
+                    self.peek()?.diagnostic_position(),
                 );
                 if self.strict_level >= 2 {
                     return Err(error);
@@ -1064,11 +1067,13 @@ impl<'a> Parser<'a> {
             self.expect_symbol(Symbol::Semicolon, "expected ';' after break")?;
             return Ok(Stmt::Break);
         }
-        if let Some(token) = self.consume_if_keyword(Keyword::Continue)? {
+        if self.consume_if_keyword(Keyword::Continue)?.is_some() {
             if self.loop_depth == 0 {
+                // C4Aul has shifted past the keyword when it checks for a loop
+                // (C4AulParse.cpp:2109-2140).
                 let error = ParseError::at(
                     "'continue' is only allowed inside loops",
-                    token.diagnostic_position(),
+                    self.peek()?.diagnostic_position(),
                 );
                 if self.strict_level >= 2 {
                     return Err(error);
@@ -1370,7 +1375,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_condition_parameters(&mut self, statement: &str) -> Result<Expr, ParseError> {
-        let opening = self.peek()?.clone();
         self.expect_symbol(Symbol::LParen, &format!("expected '(' after '{statement}'"))?;
 
         if self.strict_level >= 2 {
@@ -1382,12 +1386,15 @@ impl<'a> Parser<'a> {
         let (args, forward_rest) = self.parse_argument_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after condition parameters")?;
         if args.len() > 1 {
+            // Parse_Params warns once it has shifted past the ')', so the
+            // position follows the token after it (C4AulParse.cpp:2326-2341).
+            let position = self.peek()?.diagnostic_position();
             self.non_fatal_diagnostics.push(ParseError::at(
                 format!(
                     "{statement}: passing {} parameters, but only 1 are used",
                     args.len()
                 ),
-                opening.diagnostic_position(),
+                position,
             ));
         }
         Ok(Expr::LegacyParameterList { args, forward_rest })
@@ -2352,10 +2359,12 @@ impl<'a> Parser<'a> {
                 // least STRICT1 before either form can be parsed
                 // (C4AulParse.cpp:2775-2798). Arrow and `global->` calls take
                 // separate parser paths and remain ordinary named calls.
+                // Both inherited errors are raised once C4Aul has shifted past
+                // the name (C4AulParse.cpp:2775-2790).
                 if self.strict_level == 0 && matches!(name.as_str(), "inherited" | "_inherited") {
                     return Err(ParseError::at(
                         "inherited disabled; use #strict syntax!",
-                        position,
+                        self.peek()?.diagnostic_position(),
                     ));
                 }
                 // Record the hard spelling's site for the link-time check that
@@ -2363,11 +2372,12 @@ impl<'a> Parser<'a> {
                 // only in the inherited-call form (`:2785` shifts straight into
                 // Parse_Params), so identifier position is the call site.
                 if name == "inherited" && self.hard_inherited_line.is_none() {
-                    self.hard_inherited_line = Some(token.line);
-                    self.hard_inherited_column = Some(token.column);
+                    let after = self.peek()?.diagnostic_position();
+                    self.hard_inherited_line = Some(after.line);
+                    self.hard_inherited_column = Some(after.column);
                     self.hard_inherited_stmt_index = Some(self.current_body_stmt_index);
                 }
-                self.note_global_local_candidate(&name, token.line);
+                self.note_global_local_candidate(&name, position);
                 Ok(Expr::Variable(name))
             }
             // Contextual keywords: declaration words carry no expression
@@ -2848,6 +2858,7 @@ impl<'a> Parser<'a> {
                 let number_line = number.line;
                 let number_column = number.column;
                 let number_position = number.diagnostic_position();
+                let number_read_start = number.read_start();
                 let number_is_hex = number.number_is_hex();
                 let raw_number = number.raw_number();
                 let TokenKind::Number(value) = number.kind else {
@@ -2881,7 +2892,8 @@ impl<'a> Parser<'a> {
                             TokenKind::Identifier("x".to_owned()),
                             number_line,
                             number_column.saturating_add(1),
-                        ),
+                        )
+                        .with_read_span(number_read_start.after_bytes(1), number_position),
                     );
                     return Ok(Expr::Literal(Literal::Int(0)));
                 }
@@ -3003,18 +3015,19 @@ fn resolve_global_local_references(
     }
     for function in functions {
         let candidates = std::mem::take(&mut function.global_local_candidates);
-        let Some((name, line)) = candidates
+        let Some((name, position)) = candidates
             .into_iter()
             .find(|(name, _)| named_locals.contains(name.as_str()))
         else {
             continue;
         };
-        diagnostics.push(ParseError::new(
+        // C4Aul throws before it shifts past the name (C4AulParse.cpp:
+        // 2000-2004, 2723-2727).
+        diagnostics.push(ParseError::at(
             "using local variable in global function!",
-            line,
-            0,
+            position,
         ));
-        function.global_local_reference = Some((name, line));
+        function.global_local_reference = Some((name, position.line));
     }
 }
 
@@ -3680,16 +3693,18 @@ func Ok() { return 1; }
 
     #[test]
     fn bang_preserves_a_later_lexer_error_location() {
-        // C4AulParse.cpp:616-634 reports an invalid strict-2 character at
-        // its source position; the preceding wide integer remains an ATT_INT
-        // from C4AulParse.cpp:704-743 rather than masking that diagnostic.
+        // C4AulParse.cpp:616-662 reports an invalid strict-2 character once
+        // it has stepped past it; the preceding wide integer remains an
+        // ATT_INT from C4AulParse.cpp:704-743 rather than masking that
+        // diagnostic. C4Aul counts the newline before the line as its first
+        // column (C4Strings.cpp:392-403).
         let source = "#strict 2\nfunc Test() { return !Foo(99999999999999999999999 @); }";
         let error = parse_script(source).expect_err("the invalid @ must be reported");
         assert_eq!(error.message(), "unexpected character '@'");
-        assert_eq!(error.line(), 2);
+        assert_eq!(error.line(), 1);
         assert_eq!(
             error.column(),
-            source.lines().nth(1).unwrap().find('@').unwrap() + 1
+            source.lines().nth(1).unwrap().find('@').unwrap() + 2
         );
     }
 
