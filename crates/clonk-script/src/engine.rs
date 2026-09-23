@@ -2892,9 +2892,11 @@ impl Engine {
         Ok((result, finals))
     }
 
-    /// Calls a `func &` against shared object-local cells without
-    /// dereferencing its result. Engine method dispatch uses this to carry an
-    /// arrow-call lvalue back to the suspended caller.
+    /// Calls a function against shared object-local cells without
+    /// dereferencing a `func &` result. Engine method dispatch uses this to
+    /// carry an arrow-call lvalue back to the suspended caller. Any other
+    /// callee's plain value comes back as one, for AB_Set to reject after its
+    /// right side (C4AulExec.cpp:858-865).
     pub fn call_reference_with_cells_and_this(
         &self,
         name: &str,

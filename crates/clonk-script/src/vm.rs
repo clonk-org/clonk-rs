@@ -2659,6 +2659,13 @@ pub enum ReferenceCallResult {
 }
 
 impl ReferenceCallResult {
+    fn from_return_value(result: ReturnValue) -> Self {
+        match result {
+            ReturnValue::Reference(reference) => Self::Reference(ValueReference(reference)),
+            ReturnValue::Value(tracked) => Self::Value(tracked.value),
+        }
+    }
+
     fn into_return_value(self) -> ReturnValue {
         match self {
             Self::Reference(reference) => ReturnValue::Reference(reference.into_lvalue()),
@@ -5332,7 +5339,9 @@ impl<'a> Vm<'a> {
         )
     }
 
-    /// Reference-returning counterpart to [`Vm::call_with_cells`].
+    /// Reference-returning counterpart to [`Vm::call_with_cells`]. A callee
+    /// that is no `func &` dereferences its result at AB_RETURN
+    /// (C4AulExec.cpp:1055-1057), so its plain value comes back as one.
     pub(crate) fn call_reference_with_cells(
         &self,
         name: &str,
@@ -5340,8 +5349,8 @@ impl<'a> Vm<'a> {
         cells: &LocalCells,
     ) -> Result<ReferenceCallResult, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::external).collect();
-        self.invoke_reference(name, args, 0, cells.state.clone(), None)
-            .map(|reference| ReferenceCallResult::Reference(ValueReference(reference)))
+        self.invoke_raw(name, args, 0, cells.state.clone(), None)
+            .map(ReferenceCallResult::from_return_value)
     }
 
     /// Reference-returning counterpart to
@@ -5358,8 +5367,8 @@ impl<'a> Vm<'a> {
             caller.definition_context |= self.definition_context;
         }
         let _parameter_override = CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
-        self.invoke_reference(name, args, 0, cells.state.clone(), caller)
-            .map(|reference| ReferenceCallResult::Reference(ValueReference(reference)))
+        self.invoke_raw(name, args, 0, cells.state.clone(), caller)
+            .map(ReferenceCallResult::from_return_value)
     }
 
     /// Call a function with per-object local variable context
@@ -5963,22 +5972,6 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         self.invoke_resolved_script_raw(name, target, args, depth, object_state, caller)?
             .into_value_on_stack()
-    }
-
-    fn invoke_reference(
-        &self,
-        name: &str,
-        args: CallArgs,
-        depth: usize,
-        object_state: ObjectState,
-        caller: Option<ScriptCallerContext>,
-    ) -> Result<LValueRef, RuntimeError> {
-        match self.invoke_raw(name, args, depth, object_state, caller)? {
-            ReturnValue::Reference(reference) => Ok(reference),
-            ReturnValue::Value(_) => Err(RuntimeError::new(format!(
-                "function '{name}' does not return a reference"
-            ))),
-        }
     }
 
     fn invoke_raw(
