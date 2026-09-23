@@ -188,6 +188,56 @@ mod tests {
             .is_none());
     }
 
+    /// Bounds of a cell's opaque, non-black pixels, relative to the cell:
+    /// the box itself, without the pure black drop shadow the classic box
+    /// casts.
+    fn box_bounds(image: &ImageData, [left, top, width, height]: [u32; 4]) -> [u32; 4] {
+        (top..top + height)
+            .flat_map(|y| (left..left + width).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let offset = ((y * image.width() + x) * 4) as usize;
+                let pixel = &image.pixels()[offset..offset + 4];
+                pixel[3] >= 128 && pixel[..3].iter().any(|&channel| channel >= 8)
+            })
+            .fold([u32::MAX, u32::MAX, 0, 0], |[l, t, r, b], (x, y)| {
+                [
+                    l.min(x - left),
+                    t.min(y - top),
+                    r.max(x - left + 1),
+                    b.max(y - top + 1),
+                ]
+            })
+    }
+
+    #[test]
+    fn checkbox_art_keeps_the_classic_box_bounds_at_its_resolution() {
+        // The classic checkmark overhangs its box on every side. The
+        // replacement checkmark spans the classic one's extent, so it sits
+        // on the box the same way only if the box keeps the classic bounds.
+        let icons = prepared_sheets().unwrap();
+        let sheet = icons
+            .iter()
+            .find(|sheet| sheet.name == "GUICheckbox.png")
+            .unwrap();
+        let classic = box_bounds(&sheet.original, [0, 0, 32, 32]);
+        let replacement = sheet
+            .replacement
+            .region_replacement([0, 0, 32, 32])
+            .unwrap();
+        let scale = replacement.width() / 32;
+        let bounds = box_bounds(
+            replacement,
+            [0, 0, replacement.width(), replacement.height()],
+        );
+        assert!(
+            classic
+                .iter()
+                .zip(bounds)
+                .all(|(&classic, bound)| (classic * scale).abs_diff(bound) <= scale / 2),
+            "the replacement box {bounds:?} must keep the classic box {classic:?} at {scale}x"
+        );
+    }
+
     #[test]
     fn checkbox_states_share_identical_uncovered_base_pixels() {
         let icons = prepared_sheets().unwrap();
