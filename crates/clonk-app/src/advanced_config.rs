@@ -775,6 +775,16 @@ pub fn sections_with_voice_input_devices(
     sections.push(graphics(config));
     sections.push(sound(config));
     sections.push(voice(config, input_devices));
+    // Local presentation extension; classic chat remains the default.
+    sections.push(AdvancedConfigSection::new(
+        "Chat",
+        vec![
+            bool_row(config, "Chat", "Enhanced", false),
+            int_row(config, "Chat", "TextSize", 1, 0, 2),
+            int_row(config, "Chat", "Opacity", 85, 40, 100),
+            int_row(config, "Chat", "Duration", 12, 3, 60),
+        ],
+    ));
     sections.push(network(config));
     sections.extend(simple_sections(config));
     sections

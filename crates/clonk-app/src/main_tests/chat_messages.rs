@@ -2030,3 +2030,255 @@ fn c4script_log_lines_reach_the_running_message_board() {
     app.drain_game_log_capture();
     main_assert_eq!(app.chat.message_board.log_history.iter().map(String::as_str).collect::<Vec<_>>() => vec!["Player join: Player", "Beta is dead."]);
 }
+
+#[test]
+fn enhanced_chat_transcript_preserves_metadata_after_recipient_filtering() {
+    // C4Control.cpp:1073-1099,1158-1213 authenticates senders and filters team/private visibility.
+    let mut app = new_state_only_running_sandbox_app();
+    install_message_fixture(&mut app);
+    app.chat.enhanced_preferences.enabled = true;
+    app.execute_message_control(message_control(
+        MESSAGE_TYPE_PRIVATE,
+        7,
+        99,
+        b"not for us",
+        7,
+    ));
+    app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"spoofed", 8));
+    main_assert!(app.chat.enhanced.visible_messages().is_empty());
+    app.engine
+        .set_hostility(7, app.players.local_owner, true)
+        .test_value();
+    app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"hostile", 7));
+    main_assert!(app.chat.enhanced.visible_messages().is_empty());
+    app.execute_message_control(message_control(
+        MESSAGE_TYPE_PRIVATE,
+        7,
+        app.players.local_owner,
+        b"meet here",
+        7,
+    ));
+    let messages = app.chat.enhanced.visible_messages();
+    main_assert_eq!(messages.len() => 1);
+    main_assert_eq!(messages[0].sender.as_str() => "Sender");
+    main_assert_eq!(messages[0].channel => clonk_frontend::enhanced_chat::ChatChannel::Private);
+    main_assert_eq!(messages[0].text.as_str() => "meet here");
+    app.enqueue_control_message_board_line("script log".into());
+    main_assert_eq!(app.chat.enhanced.visible_messages().len() => 1);
+    app.chat.enhanced.toggle_logs();
+    main_assert_eq!(app.chat.enhanced.visible_messages().len() => 2);
+}
+
+#[test]
+fn enhanced_chat_failed_send_keeps_text_and_reports_the_error_in_the_composer() {
+    let mut app = new_running_sandbox_app();
+    install_message_fixture(&mut app);
+    app.snapshot = app.engine.snapshot();
+    app.chat.enhanced_preferences.enabled = true;
+    let (network, _events, commands) = NetworkManager::test_stub_with_commands();
+    drop(commands);
+    app.netplay.manager = Some(network);
+    app.start_running_chat(RunningChatMode::All);
+    app.running_chat_controller_mut()
+        .unwrap()
+        .set_input_text("help needed");
+    app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+        "help needed".into(),
+    )])
+    .test_value();
+    main_assert_eq!(app.running_chat_text() => Some("help needed"));
+    main_assert!(app.chat.enhanced.error.contains("not accepting"));
+}
+
+#[test]
+fn enhanced_chat_restores_the_draft_after_close_and_history_navigation() {
+    let mut app = new_running_sandbox_app();
+    app.chat.enhanced_preferences.enabled = true;
+    app.start_running_chat(RunningChatMode::All);
+    app.running_chat_controller_mut()
+        .unwrap()
+        .set_input_text("unfinished");
+    app.store_message_input_history("already sent");
+    app.browse_running_chat_history(true);
+    main_assert_eq!(app.running_chat_text() => Some("already sent"));
+    app.browse_running_chat_history(false);
+    main_assert_eq!(app.running_chat_text() => Some("unfinished"));
+    app.close_running_chat().test_value();
+    app.start_running_chat(RunningChatMode::All);
+    main_assert_eq!(app.running_chat_text() => Some("unfinished"));
+}
+
+#[test]
+fn enhanced_chat_recipient_keys_submit_existing_controls_and_clear_only_the_sent_draft() {
+    // Packet kinds/payloads remain C4ControlMessage's fields (C4Control.cpp:1073-1213).
+    use clonk_frontend::enhanced_chat::ChatAudience;
+    let mut app = new_running_sandbox_app();
+    install_message_fixture(&mut app);
+    app.snapshot = app.engine.snapshot();
+    app.chat.enhanced_preferences.enabled = true;
+    let (network, _events, mut commands) = NetworkManager::test_stub_with_commands();
+    app.netplay.manager = Some(network);
+    app.start_running_chat(RunningChatMode::All);
+    app.replace_enhanced_chat_text("public draft");
+    app.test_modifiers(ModifiersState::CONTROL);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Tab, ElementState::Released);
+    app.test_modifiers(ModifiersState::empty());
+    main_assert_eq!(app.chat.enhanced.audience => ChatAudience::Allies);
+    for character in "meet at the lift".chars() {
+        app.test_text_input(character);
+    }
+    app.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Enter, ElementState::Released);
+    let sent = commands.take_submitted_messages();
+    main_assert_eq!(sent.len() => 1);
+    main_assert_eq!(sent[0].message_type => MESSAGE_TYPE_TEAM);
+    main_assert_eq!(sent[0].message.as_bytes() => b"meet at the lift");
+    main_assert!(app.chat.running.is_none());
+    app.start_running_chat(RunningChatMode::All);
+    main_assert_eq!(app.running_chat_text() => Some(""));
+    app.select_enhanced_chat_audience(ChatAudience::Everyone);
+    main_assert_eq!(app.running_chat_text() => Some("public draft"));
+    app.select_enhanced_chat_audience(ChatAudience::Private(7));
+    app.replace_enhanced_chat_text("private reply");
+    app.submit_running_chat_text("private reply".into())
+        .test_value();
+    let sent = commands.take_submitted_messages();
+    main_assert_eq!((sent[0].message_type, sent[0].to_player) => (MESSAGE_TYPE_PRIVATE, 7));
+    main_assert_eq!(sent[0].message.as_bytes() => b"private reply");
+}
+
+#[test]
+fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients_and_preferences() {
+    use clonk_frontend::enhanced_chat::ChatAudience;
+    let mut app = new_classic_running_sandbox_app();
+    app.resize(960, 640).test_value();
+    install_message_fixture(&mut app);
+    app.snapshot = app.engine.snapshot();
+    app.chat.enhanced_preferences.enabled = true;
+    for (kind, text) in [
+        (MESSAGE_TYPE_NORMAL, "I found coal near the west tunnel."),
+        (MESSAGE_TYPE_TEAM, "Meet at the lift. Bring a shovel."),
+        (MESSAGE_TYPE_PRIVATE, "I'll cover the bridge."),
+    ] {
+        app.execute_message_control(message_control(
+            kind,
+            7,
+            app.players.local_owner,
+            text.as_bytes(),
+            7,
+        ));
+    }
+    app.enqueue_control_message_board_line(
+        "A game log entry hidden by the conversation filter.".into(),
+    );
+    let capture = |app: &mut GameApp, name: &str| {
+        let surface = app.rendering.graphics.surface();
+        let (width, height) = (surface.width(), surface.height());
+        let mut frame = vec![0; width as usize * height as usize * 4];
+        app.test_render(&mut frame);
+        if let Some(directory) = std::env::var_os("CLONK_CHAT_CAPTURE_DIR") {
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory).test_value();
+            fs::write(
+                directory.join(format!("{name}.png")),
+                encode_screenshot_png(width, height, &frame).test_value(),
+            )
+            .test_value();
+        }
+    };
+    app.chat.enhanced_preferences.enabled = false;
+    app.start_running_chat(RunningChatMode::All);
+    app.running_chat_controller_mut()
+        .test_value()
+        .set_input_text("On my way to the lift.");
+    capture(&mut app, "chat-classic");
+    app.close_running_chat().test_value();
+    app.chat.enhanced_preferences.enabled = true;
+    app.start_running_chat(RunningChatMode::Allies);
+    app.replace_enhanced_chat_text("On my way to the lift.");
+    capture(&mut app, "chat-expanded");
+    let layout = app.enhanced_chat_layout(true).test_value();
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(layout.audience.x + 4),
+        f64::from(layout.audience.y + 4),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    main_assert!(app.chat.audience_picker);
+    capture(&mut app, "chat-recipients");
+    // Everyone is the first recipient row.
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(layout.feed.x + 4),
+        f64::from(layout.feed.y + 4),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    main_assert_eq!(app.chat.enhanced.audience => ChatAudience::Everyone);
+    let size = layout.setting_cell(0);
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(size.x + 4),
+        f64::from(size.y + 4),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    main_assert_eq!(app.chat.enhanced_preferences.text_size => 2);
+    app.resize(640, 480).test_value();
+    app.replace_enhanced_chat_text("Ready when you are.");
+    capture(&mut app, "chat-large-text");
+    app.close_running_chat().test_value();
+    app.resize(960, 640).test_value();
+    capture(&mut app, "chat-compact");
+}
+
+#[test]
+fn enhanced_chat_releasing_an_edit_drag_over_the_transcript_clears_capture() {
+    let mut app = new_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    app.chat.enhanced_preferences.enabled = true;
+    app.start_running_chat(RunningChatMode::All);
+    app.replace_enhanced_chat_text("select part of this draft");
+    let layout = app.enhanced_chat_layout(true).test_value();
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(layout.edit.x + 8),
+        f64::from(layout.edit.y + 8),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    main_assert!(app
+        .running_chat_controller()
+        .test_value()
+        .has_pointer_capture());
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(layout.feed.x + 8),
+        f64::from(layout.feed.y + 8),
+    ));
+    app.test_left_button(ElementState::Released);
+    main_assert!(!app
+        .running_chat_controller()
+        .test_value()
+        .has_pointer_capture());
+}
+
+#[test]
+fn enhanced_chat_records_the_same_raw_control_sequence_as_classic_chat() {
+    // C4MessageInput.cpp:117-157 closes the dialog before dispatching input.
+    let directory = tempdir();
+    let recorded = |enhanced: bool, name: &str| {
+        let mut app = new_running_sandbox_app();
+        app.chat.enhanced_preferences.enabled = enhanced;
+        install_test_recording_template(&mut app, directory.path().join(name));
+        app.start_recording(true).test_value();
+        let before = app
+            .records
+            .session
+            .as_ref()
+            .test_value()
+            .writer
+            .bytes()
+            .len();
+        app.start_running_chat(RunningChatMode::All);
+        app.submit_running_chat_text("hello".into()).test_value();
+        app.records.session.as_ref().test_value().writer.bytes()[before..].to_vec()
+    };
+    main_assert_eq!(recorded(true, "enhanced.c4s") => recorded(false, "classic.c4s"));
+}

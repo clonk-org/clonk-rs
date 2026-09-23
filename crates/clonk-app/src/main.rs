@@ -210,6 +210,8 @@ mod game_app_chat;
 mod game_app_config;
 #[path = "game_app/console_record.rs"]
 mod game_app_console_record;
+#[path = "game_app/enhanced_chat.rs"]
+mod game_app_enhanced_chat;
 #[path = "game_app/input.rs"]
 mod game_app_input;
 #[path = "game_app/lobby.rs"]
@@ -3114,6 +3116,7 @@ impl GameApp {
             main_menu_state,
             startup_tooltip: ClassicTooltipTracker::new(),
             chat: ChatState {
+                enhanced_preferences: settings::load_enhanced_chat_preferences(paths),
                 show_log_timestamps: load_show_log_timestamps(paths),
                 message_board: ClassicMessageBoardState::default(),
                 input_history: VecDeque::new(),
@@ -9793,6 +9796,9 @@ impl GameApp {
         // every game. A runtime multi-line count therefore collapses back to
         // ordinary one-line mode on the next initialization.
         self.chat.running = None;
+        self.chat.enhanced = Default::default();
+        self.chat.pending_chat_message = None;
+        self.chat.audience_picker = false;
         self.dialogs.game_option_input = None;
         self.dialogs.league_signup = None;
         self.dialogs.cancelled_league_signup_continuation = None;

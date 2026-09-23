@@ -23,6 +23,8 @@ pub mod game_option_buttons;
 mod graphics_system;
 pub mod hud;
 pub use clonk_gui::ime;
+pub mod enhanced_chat;
+pub mod enhanced_chat_view;
 pub mod info_dialog;
 mod input;
 pub mod input_dialog;

@@ -5952,7 +5952,16 @@ impl GameApp {
         self.sync_scoreboard_presentation();
         self.reconcile_running_mouse_after_last_gui_close(has_shown_external_menu)?;
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
-        let message_board = self.advance_message_board_overlay();
+        let mut message_board = self.advance_message_board_overlay();
+        if self.chat.enhanced_preferences.enabled
+            && self
+                .chat
+                .running
+                .as_ref()
+                .is_none_or(|chat| matches!(chat.kind, RunningChatKind::Ordinary))
+        {
+            message_board.log_lines.clear();
+        }
         self.update_network_status_overlay();
         self.update_diagnostics_overlay();
         let viewports = collect_viewport_inputs_from_physical_state(
@@ -7130,6 +7139,15 @@ impl GameApp {
             }
         }
 
+        if self.mode == AppMode::Running
+            && self.chat.enhanced_preferences.enabled
+            && self.chat.running.is_none()
+        {
+            self.render_enhanced_chat(false, Some(&frame_gamma));
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
+        }
         let use_running_dialog_stack = self.mode == AppMode::Running;
         let render_network_chart_elevated = self.network_chart_renders_elevated();
         let running_stack_split = if use_running_dialog_stack {

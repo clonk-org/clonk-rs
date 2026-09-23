@@ -283,7 +283,7 @@ impl GameApp {
                         (line, 0x00ff_ffff)
                     }
                 };
-                self.append_control_message_log(line, color, Some(control.by_client));
+                self.append_control_chat_log(line, color, Some(control.by_client), &control);
                 outcome.displayed = true;
                 check_alert = true;
             }
@@ -308,7 +308,7 @@ impl GameApp {
                         } else {
                             format!("<c {color:x}>{{{name}}} {message}")
                         };
-                        self.append_control_message_log(line, CONTROL_LOG_COLOR, None);
+                        self.append_control_chat_log(line, CONTROL_LOG_COLOR, None, &control);
                         outcome.displayed = true;
                     }
                     check_alert = true;
@@ -337,7 +337,12 @@ impl GameApp {
                     } else {
                         format!("{{{nick}}} {message}")
                     };
-                    self.append_control_message_log(line, 0x00ff_ffff, Some(control.by_client));
+                    self.append_control_chat_log(
+                        line,
+                        0x00ff_ffff,
+                        Some(control.by_client),
+                        &control,
+                    );
                     outcome.displayed = true;
                     check_alert = true;
                 } else {
@@ -360,7 +365,7 @@ impl GameApp {
                     } else {
                         format!("<c {color:x}>[{name}] {message}")
                     };
-                    self.append_control_message_log(line, CONTROL_LOG_COLOR, None);
+                    self.append_control_chat_log(line, CONTROL_LOG_COLOR, None, &control);
                     outcome.displayed = true;
                 }
                 check_alert = true;
