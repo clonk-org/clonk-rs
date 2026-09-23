@@ -4,6 +4,27 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-09-23
+
+### Bug fixes
+
+- Throw when a script body without its closing brace runs off its end (#1750)
+- Accept three script forms C4Aul compiles and the port rejected (#1749)
+- Keep every loaded sound playable by decoding an evicted sound again when it plays (#1731)
+
+### Features
+
+- Install approved high-resolution hand gestures (#1741)
+- Show a speaker icon after the name of each lobby client who is talking (#1739)
+- Give crew a terrain-aware navigation AI under the normal profile (#1737)
+- Render approved gamepad icons at high resolution (#1736)
+
+### Performance
+
+- Take a scenario's selector snapshot when it is first needed, so the launch stops waiting for discovery (#1755)
+- Read scenario title pictures, previews and versions when the selector first shows them (#1752)
+- Inflate a packed group only as far as its reads reach (#1743)
+
 ## [0.30.0] - 2026-09-23
 
 ### Bug fixes
