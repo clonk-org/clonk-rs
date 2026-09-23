@@ -5,7 +5,7 @@
   },
   "case_id": "startup-player-selection",
   "comparator": {
-    "binary_sha256": "196b0bcc29878c5ee9c43a62b6146aecf0633b713889a21e38f0bbf3e09aec31",
+    "binary_sha256": "76868863a9e1ae6787540ad8e68f9fcf69443ef12b803afcc44e3947574e4622",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",

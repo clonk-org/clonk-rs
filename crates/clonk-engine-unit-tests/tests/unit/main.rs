@@ -230,4 +230,5 @@ mod tests {
     include!("parts/ocf_rotation.rs");
     include!("parts/order_exec.rs");
     include!("parts/log_levels.rs");
+    include!("parts/navigation_corpus.rs");
 }

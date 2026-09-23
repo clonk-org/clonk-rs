@@ -333,9 +333,9 @@
         let target_id = ObjectId::new(200);
 
         let actor = command_object!(actor_id.as_u64(); position = Vector2::new(0, 0);
-            ocf = ocf::AVAILABLE | ocf::ALIVE; collectible = false);
+            ocf = ocf::NORMAL | ocf::AVAILABLE | ocf::ALIVE; collectible = false);
 
-        let item = command_object!(target_id.as_u64(); position = Vector2::new(8, 0);
+        let item = command_object!(target_id.as_u64(); position = Vector2::new(7, 0);
             ocf = ocf::AVAILABLE | ocf::CARRYABLE; collectible = true; construction = FULL_CON / 2;
             alive = false);
 
@@ -367,12 +367,60 @@
     }
 
     #[test]
+    fn get_collects_only_inside_the_actor_at_rectangle() {
+        // C4Command::Get collects only when cObj->At(Target->x, Target->y,
+        // OCF_Normal | OCF_Collection) holds: the target's position must lie
+        // in the actor's own shape rectangle (raised to the eighteen-pixel
+        // At top) and the actor's OCF must intersect the mask. Nothing else
+        // widens the range (C4Command.cpp:1259-1267; C4Object.cpp:1133-1146;
+        // C4Object.h:340).
+        let actor_id = ObjectId::new(120);
+        let target_id = ObjectId::new(220);
+        // The fixture shape is CLNK's -8,-10,16,20 at the origin, so At
+        // accepts x in -8..=7 and y in -10..=9.
+        let normal_actor = command_object!(actor_id.as_u64(); ocf = ocf::NORMAL | ocf::ALIVE);
+        let maskless_actor = command_object!(actor_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE);
+        for (actor, x, y, collects) in [
+            (&normal_actor, -8, 0, true),
+            (&normal_actor, 7, 0, true),
+            (&normal_actor, -9, 0, false),
+            (&normal_actor, 8, 0, false),
+            (&normal_actor, 0, -10, true),
+            (&normal_actor, 0, 9, true),
+            (&normal_actor, 0, -11, false),
+            (&normal_actor, 0, 10, false),
+            (&normal_actor, 12, 12, false),
+            (&maskless_actor, 0, 0, false),
+        ] {
+            let item = command_object!(target_id.as_u64(); position = Vector2::new(x, y);
+                collectible = true; construction = FULL_CON);
+            let objects = command_objects([actor.clone(), item]);
+            let actor_snapshot = objects.get(&actor_id).expect("actor present");
+            let ctx = command_ctx(actor_snapshot, &objects, 0);
+            let mut state = GetState::from_request(&request!(Get, with_target: Some(target_id)))
+                .expect("state created");
+
+            let result = state.step(&ctx);
+
+            let collected = result
+                .events
+                .iter()
+                .any(|event| matches!(event, CommandEvent::GetObject { .. }));
+            assert_eq!(
+                collected, collects,
+                "target at ({x},{y}) with actor OCF {:#x}",
+                actor.ocf
+            );
+        }
+    }
+
+    #[test]
     fn get_subcommand_rechecks_collection_on_next_execution() {
         let actor_id = ObjectId::new(101);
         let target_id = ObjectId::new(201);
-        let actor = command_object!(actor_id.as_u64(); ocf = ocf::AVAILABLE | ocf::ALIVE;
+        let actor = command_object!(actor_id.as_u64(); ocf = ocf::NORMAL | ocf::AVAILABLE | ocf::ALIVE;
             collectible = false);
-        let item = command_object!(target_id.as_u64(); position = Vector2::new(8, 0);
+        let item = command_object!(target_id.as_u64(); position = Vector2::new(7, 0);
             collectible = true; construction = FULL_CON);
         let mut objects = command_objects([actor, item]);
 
@@ -1109,6 +1157,7 @@
                 base_sell_enabled: true,
                 transfer_zones: &EMPTY_TRANSFER_ZONES,
                 rng: None,
+                navigation_ai: false,
             };
             let mut equal_distance = PutState::from_request(&request).expect("Put state");
             let strict_fallback =
@@ -1144,6 +1193,7 @@
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
+            navigation_ai: false,
         };
         let mut no_route = PutState::from_request(&request).expect("Put state");
         let no_route = no_route.step_with_gravity(&no_route_ctx, math::fixed100(20));

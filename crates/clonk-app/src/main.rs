@@ -3540,11 +3540,9 @@ impl GameApp {
         self.update_check_requested = classic.update_requested;
         self.config.compat_profile = compat_profile;
         // Synchronized, so it is resolved once here rather than read from
-        // configuration mid-round (clonk-org/clonk-rs#1132).
-        self.engine
-            .set_shared_bases(crate::settings::session_shared_bases(
-                self.config.compat_profile,
-            ));
+        // configuration mid-round (clonk-org/clonk-rs#1132). Scenario
+        // activation re-applies it to the engine it constructs.
+        crate::settings::apply_session_profile(&mut self.engine, self.config.compat_profile);
 
         if let Some(screen) = classic.startup_screen.as_deref() {
             self.apply_classic_startup_screen(screen);

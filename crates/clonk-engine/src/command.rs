@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::math::{self, FixedVec2};
+use crate::navigation;
 use crate::pathfinder::{PathFinder, PathfinderDebugSnapshot};
 use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
@@ -24,6 +25,13 @@ const ACQUIRE_REQUEST_INTERVAL: i32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
 const COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST: i32 = 0b1;
 const COMMAND_FLAG_MOVE_TO_PUSH_TARGET: i32 = 0b10;
+/// Port-only MoveTo Data bit marking a waypoint the navigation planner
+/// queued (`sim-navigation-ai`). C4CMD_MoveTo_NoPosAdjust and
+/// C4CMD_MoveTo_PushTarget occupy bits 0-1 (C4Command.h:68-69); bits 9-11
+/// carry the waypoint's move and bit 12 its facing.
+const COMMAND_FLAG_MOVE_TO_NAVIGATION: i32 = 1 << 8;
+const MOVE_TO_NAVIGATION_KIND_SHIFT: u32 = 9;
+const MOVE_TO_NAVIGATION_RIGHT: i32 = 1 << 12;
 const DIG_MOVE_TO_RANGE_DEFAULT: i32 = 5;
 const DIG_OUT_POSITION_RANGE: i32 = 15;
 const DIG_DIRECTION_RANGE: i32 = 1;
@@ -57,7 +65,7 @@ mod tests {
 
     impl DefaultStateStep for MoveToState {
         fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-            self.step_with_waypoint(ctx, false)
+            self.step_with_waypoint(ctx, false, true)
         }
     }
 
@@ -82,4 +90,5 @@ mod tests {
     include!("command/tests/part_05.rs");
     include!("command/tests/part_06.rs");
     include!("command/tests/part_07.rs");
+    include!("command/tests/navigation.rs");
 }

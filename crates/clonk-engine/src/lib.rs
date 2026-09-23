@@ -60,6 +60,7 @@ mod object;
 pub use clonk_engine_core::math;
 mod message;
 mod native_function_parameters;
+pub mod navigation;
 mod network_game_data;
 pub mod ocf;
 #[cfg(test)]
@@ -8828,6 +8829,11 @@ pub struct Engine {
     /// Whether the Shared Bases rule may widen base lookup to allied bases
     /// (clonk-org/clonk-rs#1132); the LegacyClonk profile clears it.
     shared_bases: bool,
+    /// Whether command AI uses the port's navigation extensions instead of
+    /// reproducing C4Command/C4PathFinder exactly. Off by default so an
+    /// engine no session configured computes what the oracle computes; the
+    /// application turns it on for normal-profile rounds.
+    navigation_ai: bool,
     needed_material_strings: Rc<NeededMaterialStrings>,
     /// Process-local `IDS_OBJ_NODIG` template from Application.ResStrTable.
     /// The app refreshes it with the active language and reinstalls it on
@@ -11049,6 +11055,7 @@ impl Engine {
             crew_info_control_counts: HashMap::new(),
             team_home_base_rule: false,
             shared_bases: true,
+            navigation_ai: false,
             needed_material_strings: Rc::new(NeededMaterialStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             construction_check_strings: Rc::new(ConstructionCheckStrings::default()),

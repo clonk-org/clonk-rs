@@ -2578,6 +2578,8 @@ pub struct HostWorldContext {
     /// C4RULE_StructuresNeedEnergy (Game.Rules; FnEnergyCheck gates on
     /// it, C4Script.cpp:1845-1856).
     pub(crate) structures_need_energy: bool,
+    /// The engine's synchronized `navigation_ai` session switch.
+    pub(crate) navigation_ai: bool,
     /// Cached `Game.Rules & C4RULE_FlagRemoveable`, refreshed by the engine
     /// on InitRules/frame one/Tick255 like C++ UpdateRules.
     flag_removeable: bool,
@@ -2764,6 +2766,7 @@ impl Default for HostWorldContext {
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
+            navigation_ai: false,
             flag_removeable: false,
             standard_crew_names: None,
             definition_crew_names: Rc::new(HashMap::new()),
@@ -3241,6 +3244,7 @@ impl HostWorldContext {
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
+            navigation_ai: false,
             flag_removeable: false,
             standard_crew_names: definition_tables
                 .and_then(|tables| tables.standard_crew_names.clone()),

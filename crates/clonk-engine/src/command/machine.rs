@@ -151,12 +151,14 @@ impl MoveToState {
                     ctx.object.physical.can_fly != 0
                 };
                 let (mut x, mut y) = (tx, ty);
+                // The raw cObj->Shape.Hgt, not the eighteen-pixel At
+                // expansion (C4Command.cpp:1640).
                 adjust_move_to_target(
                     landscape,
                     &mut x,
                     &mut y,
                     free_move,
-                    ctx.object.shape.height,
+                    ctx.object.shape_height,
                 );
                 self.tx = Some(x);
                 self.ty = Some(y);
@@ -165,10 +167,13 @@ impl MoveToState {
         None
     }
 
+    /// One C4Command::MoveTo Execute. `allow_path_phase` false skips the
+    /// C4PathFinder phase and steers directly toward the target.
     pub(in crate::command) fn step_with_waypoint(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
         next_is_move_to: bool,
+        allow_path_phase: bool,
     ) -> CommandStepResult {
         // The initial-evaluation Execute consumes the frame without
         // moving (`if (InitEvaluation()) return;`, C4Command.cpp:1555).
@@ -197,7 +202,8 @@ impl MoveToState {
         // C4Command::MoveTo path phase (C4Command.cpp:225-255): crew and
         // definitions with a nonzero Pathfinder participate; SetLevel
         // clamps the raw DefCore value to [1,10] (C4PathFinder.cpp:557-560).
-        if (ctx.object.ocf & ocf::CREW_MEMBER != 0 || ctx.object.pathfinder != 0)
+        if allow_path_phase
+            && (ctx.object.ocf & ocf::CREW_MEMBER != 0 || ctx.object.pathfinder != 0)
             && !self.path_checked
             && c4_distance(ctx.position.x, ctx.position.y, target.x, target.y) < MAX_PATH_RANGE
             && !(inside(ctx.position.x - target.x, -PATH_RANGE, PATH_RANGE)
@@ -225,38 +231,9 @@ impl MoveToState {
                     self.pathfinder_debug_update = Some(finder.debug_snapshot().clone());
                     match path {
                         Some(path) if path.waypoints.len() > 2 => {
-                            let waypoint_count = path.waypoints.len();
-                            let mut operations = Vec::with_capacity(waypoint_count - 2);
-                            for waypoint in
-                                path.waypoints.into_iter().skip(1).take(waypoint_count - 2)
-                            {
-                                let request =
-                                    if let Some(transfer_target) = waypoint.transfer_target {
-                                        CommandRequest::new(CommandId::Transfer)
-                                            .with_target(Some(transfer_target))
-                                            .with_tx(Some(waypoint.x))
-                                            .with_ty(Some(waypoint.y))
-                                            .with_evaluated(true)
-                                            .with_mode(CommandMode::SilentSub)
-                                    } else {
-                                        let (mut x, mut y) = (waypoint.x, waypoint.y);
-                                        adjust_solid_offset(
-                                            landscape,
-                                            &mut x,
-                                            &mut y,
-                                            ctx.object.shape.width / 2,
-                                            ctx.object.shape.height / 2,
-                                        );
-                                        CommandRequest::new(CommandId::MoveTo)
-                                            .with_tx(Some(x))
-                                            .with_ty(Some(y))
-                                            .with_data(CommandData::Integer(self.data))
-                                            .with_update_interval(25)
-                                            .with_evaluated(true)
-                                            .with_mode(CommandMode::SilentSub)
-                                    };
-                                operations.push(CommandOperation::PushFront(request));
-                            }
+                            let operations = pathfinder_waypoint_operations(
+                                path, landscape, ctx.object, self.data,
+                            );
                             return CommandStepResult::running(None).with_operations(operations);
                         }
                         Some(_) => return CommandStepResult::running(None),
@@ -654,7 +631,7 @@ impl MoveToState {
                         &mut x,
                         &mut y,
                         physical.can_fly != 0,
-                        ctx.object.shape.height,
+                        ctx.object.shape_height,
                     );
                 }
                 self.tx = Some(x);
@@ -845,7 +822,8 @@ impl MoveToState {
         // intermediate MoveTo and a scaler, plan one native-height climb
         // toward the final point. The existing side-run and jump then reach a
         // wall where ordinary contact can enter SCALE. Pinned C++ leaves this
-        // case inert (C4Command.cpp:219-220,1874-1893).
+        // case inert (C4Command.cpp:219-220,1874-1893), so the divergence
+        // runs only under the navigation session switch.
         let live_target_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
             ctx.object.shape.width / 5
         } else if ctx.object.move_to_range > 0 {
@@ -853,7 +831,8 @@ impl MoveToState {
         } else {
             self.tolerance
         };
-        let staged_climb = intermediate_waypoint
+        let staged_climb = ctx.navigation_ai
+            && intermediate_waypoint
             && can_scale
             && inside(cx - tx, -live_target_range, live_target_range)
             && cy - ty > 40;
@@ -923,6 +902,510 @@ impl MoveToState {
 
         None
     }
+}
+
+/// The move a navigation waypoint MoveTo performs, carried in its Data word
+/// so it survives savegames and runtime joins with the rest of the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::command) enum NavigationKind {
+    Walk,
+    Drop,
+    Jump,
+    Climb,
+    /// A C4PathFinder waypoint queued as the planner's fallback: native
+    /// steering without a nested path phase, expiring as success.
+    Legacy,
+}
+
+impl NavigationKind {
+    const ALL: [Self; 5] = [
+        Self::Walk,
+        Self::Drop,
+        Self::Jump,
+        Self::Climb,
+        Self::Legacy,
+    ];
+
+    pub(in crate::command) fn from_data(data: i32) -> Option<(Self, bool)> {
+        if data & COMMAND_FLAG_MOVE_TO_NAVIGATION == 0 {
+            return None;
+        }
+        let index = (data >> MOVE_TO_NAVIGATION_KIND_SHIFT) & 0b111;
+        Self::ALL
+            .get(usize::try_from(index).ok()?)
+            .map(|&kind| (kind, data & MOVE_TO_NAVIGATION_RIGHT != 0))
+    }
+
+    pub(in crate::command) fn data(self, right: bool) -> i32 {
+        let index = Self::ALL.iter().position(|&kind| kind == self).unwrap_or(0) as i32;
+        COMMAND_FLAG_MOVE_TO_NAVIGATION
+            | index << MOVE_TO_NAVIGATION_KIND_SHIFT
+            | if right { MOVE_TO_NAVIGATION_RIGHT } else { 0 }
+    }
+
+    fn from_move(movement: navigation::NavMove) -> Self {
+        match movement {
+            navigation::NavMove::Walk => Self::Walk,
+            navigation::NavMove::Drop => Self::Drop,
+            navigation::NavMove::Jump => Self::Jump,
+            navigation::NavMove::Climb => Self::Climb,
+        }
+    }
+}
+
+/// Positions a navigation plan may expand (`navigation::plan` budget).
+const NAVIGATION_PLAN_BUDGET: usize = 30_000;
+/// Plans one goal MoveTo may make before it fails.
+const NAVIGATION_MAX_PLANS: i32 = 6;
+/// Retries a planning goal MoveTo grants its failed waypoint chains, each a
+/// replan after C4Command's ten-frame Retry.
+const NAVIGATION_GOAL_RETRIES: i32 = 2;
+/// Frames of native steering a goal MoveTo may spend without a plan (final
+/// approach, a fallback route, or waiting to stand again) before it fails.
+pub(in crate::command) const NAVIGATION_MAX_STEER_FRAMES: i32 = 400;
+/// Fallback steering replans on this cadence once the actor stands again.
+const NAVIGATION_REPLAN_INTERVAL: i32 = 35;
+/// Vertical arrival tolerance: WALK cannot correct height, and floors are
+/// rarely level to within the C++ crew range.
+const NAVIGATION_ARRIVAL_Y: i32 = navigation::ARRIVAL_TOLERANCE_Y;
+/// Landing tolerance for a Jump or Drop waypoint, the one the planner
+/// verified its jumps against.
+const NAVIGATION_LANDING_X: i32 = navigation::LANDING_TOLERANCE_X;
+
+// A goal MoveTo keeps its navigation bookkeeping in the persisted, otherwise
+// unused C4Command::Permit word (C4Command.h:92; saved at C4Command.cpp:2406):
+// plans made, whether the fallback ran, and native steering frames.
+const PERMIT_PLANS_MASK: i32 = 0xf;
+const PERMIT_FALLBACK: i32 = 1 << 4;
+const PERMIT_STEER_SHIFT: u32 = 8;
+const PERMIT_STEER_MASK: i32 = 0xfff << PERMIT_STEER_SHIFT;
+/// A Jump, Drop or Climb waypoint marks in Permit that its move started.
+const PERMIT_MOVE_STARTED: i32 = 1;
+/// Acquire weighs this many of the nearest candidates by route cost.
+const NAVIGATION_ACQUIRE_CANDIDATES: usize = 8;
+/// Positions each Acquire candidate route may expand.
+const NAVIGATION_ACQUIRE_BUDGET: usize = 12_000;
+/// Get collects within the actor's At rectangle, which reaches about seven
+/// pixels either side of a CLNK (C4Object.cpp:1133-1146).
+const NAVIGATION_PICKUP_RANGE_X: i32 = 7;
+
+impl MoveToState {
+    fn navigation_kind(&self) -> Option<(NavigationKind, bool)> {
+        NavigationKind::from_data(self.data)
+    }
+
+    /// Crew and Pathfinder walkers plan their own routes under the
+    /// navigation switch; fliers, pushers and bodiless objects keep
+    /// C4Command::MoveTo.
+    fn navigation_goal_applies(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+        let object = ctx.object;
+        ctx.navigation_ai
+            && self.navigation_kind().is_none()
+            && (object.ocf & ocf::CREW_MEMBER != 0 || object.pathfinder != 0)
+            && object.physical.can_fly == 0
+            && self.data & COMMAND_FLAG_MOVE_TO_PUSH_TARGET == 0
+            && !object.nav_body.is_empty()
+    }
+
+    /// Whether this MoveTo belongs to the navigation AI, which never runs
+    /// the C4PathFinder phase itself.
+    pub(in crate::command) fn navigation_owned(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+        ctx.navigation_ai && (self.navigation_kind().is_some() || self.navigation_goal_applies(ctx))
+    }
+
+    fn navigation_range_x(ctx: &CommandRuntimeContext<'_>) -> i32 {
+        let crew_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
+            ctx.object.shape.width / 5
+        } else if ctx.object.move_to_range > 0 {
+            ctx.object.move_to_range
+        } else {
+            5
+        };
+        crew_range.max(3)
+    }
+
+    fn navigation_arrived(&self, ctx: &CommandRuntimeContext<'_>, range_x: i32) -> bool {
+        self.resolve_target_position(ctx).is_some_and(|target| {
+            ctx.object.action_procedure == ActionProcedure::Walk
+                && (ctx.position.x - target.x).abs() <= range_x
+                && (ctx.position.y - target.y).abs() <= NAVIGATION_ARRIVAL_Y
+        })
+    }
+
+    /// Under the navigation switch a lifetime that runs out before arrival
+    /// is a failure, so the parent can react instead of retrying the same
+    /// route forever (C++ expires every MoveTo as success,
+    /// C4Command.cpp:1544-1552). Fallback C4PathFinder waypoints keep the
+    /// native semantics.
+    pub(in crate::command) fn navigation_expiry_fails(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> bool {
+        if !ctx.navigation_ai {
+            return false;
+        }
+        match self.navigation_kind() {
+            Some((NavigationKind::Legacy, _)) => false,
+            Some((kind, _)) => !self.navigation_arrived(ctx, Self::waypoint_range_x(ctx, kind)),
+            None => {
+                self.navigation_goal_applies(ctx)
+                    && !self.navigation_arrived(ctx, Self::navigation_range_x(ctx))
+            }
+        }
+    }
+
+    fn waypoint_range_x(ctx: &CommandRuntimeContext<'_>, kind: NavigationKind) -> i32 {
+        match kind {
+            NavigationKind::Jump | NavigationKind::Drop => NAVIGATION_LANDING_X,
+            _ => Self::navigation_range_x(ctx),
+        }
+    }
+
+    /// The navigation Execute. `None` hands this Execute to the native
+    /// C4Command::MoveTo body, without its path phase when the command is
+    /// [`Self::navigation_owned`].
+    pub(in crate::command) fn step_navigation(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        permit: &mut i32,
+        retries: &mut i32,
+    ) -> Option<CommandStepResult> {
+        if !ctx.navigation_ai || !self.evaluated || ctx.object.container.is_some() {
+            return None;
+        }
+        match self.navigation_kind() {
+            Some((NavigationKind::Legacy, _)) => None,
+            Some((kind, right)) => Some(self.step_navigation_waypoint(ctx, kind, right, permit)),
+            None if self.navigation_goal_applies(ctx) => {
+                self.step_navigation_goal(ctx, gravity, permit, retries)
+            }
+            None => None,
+        }
+    }
+
+    fn steer_toward(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        direction: CommandDirection,
+    ) -> CommandStepResult {
+        self.last_direction = direction;
+        if ctx.object.command_direction == direction {
+            CommandStepResult::running(None)
+        } else {
+            CommandStepResult::running(Some(ObjectUpdate::new().with_command_direction(direction)))
+        }
+    }
+
+    fn arrive(&mut self) -> CommandStepResult {
+        self.last_direction = CommandDirection::Stop;
+        CommandStepResult::completed(Some(
+            ObjectUpdate::new().with_command_direction(CommandDirection::Stop),
+        ))
+    }
+
+    /// Execute one planned move. The command is stateless apart from the
+    /// started flag in Permit, so a restored stack resumes it exactly.
+    fn step_navigation_waypoint(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        kind: NavigationKind,
+        right: bool,
+        permit: &mut i32,
+    ) -> CommandStepResult {
+        let Some(target) = self.resolve_target_position(ctx) else {
+            return CommandStepResult::failed(None);
+        };
+        let procedure = ctx.object.action_procedure;
+        let range_x = Self::waypoint_range_x(ctx, kind);
+        let arrived = self.navigation_arrived(ctx, range_x);
+        let toward_target = if target.x > ctx.position.x {
+            CommandDirection::Right
+        } else {
+            CommandDirection::Left
+        };
+        let facing = if right {
+            CommandDirection::Right
+        } else {
+            CommandDirection::Left
+        };
+        let started = *permit & PERMIT_MOVE_STARTED != 0;
+        // A plan never hangles, and only a Climb (or the wall a Jump grabs)
+        // scales: let go and stand again rather than cling to the wrong
+        // surface (ObjectComLetGo, C4ObjectCom.cpp; the away-from-wall xdir
+        // matches C4Command.cpp:339-368).
+        let planned_scale =
+            kind == NavigationKind::Climb || (kind == NavigationKind::Jump && started);
+        if procedure == ActionProcedure::Hang {
+            return CommandStepResult::running(Some(let_go_update(None, 0)));
+        }
+        if procedure == ActionProcedure::Scale && !planned_scale {
+            let away = if ctx.object.direction == Direction::Left {
+                1
+            } else {
+                -1
+            };
+            return CommandStepResult::running(Some(let_go_update(None, away)));
+        }
+        match kind {
+            NavigationKind::Walk | NavigationKind::Legacy => {
+                if arrived {
+                    return self.arrive();
+                }
+                if procedure == ActionProcedure::Walk && (ctx.position.x - target.x).abs() > range_x
+                {
+                    return self.steer_toward(ctx, toward_target);
+                }
+                CommandStepResult::running(None)
+            }
+            NavigationKind::Drop => {
+                if procedure != ActionProcedure::Walk {
+                    *permit |= PERMIT_MOVE_STARTED;
+                    return CommandStepResult::running(None);
+                }
+                if arrived {
+                    return self.arrive();
+                }
+                if started {
+                    // Landed somewhere the plan did not expect.
+                    return CommandStepResult::failed(None);
+                }
+                self.steer_toward(ctx, toward_target)
+            }
+            NavigationKind::Jump => {
+                if procedure == ActionProcedure::Scale && started {
+                    // A jump into a wall ends at its grab (C4Object.cpp:4406-4520).
+                    let near = (ctx.position.x - target.x).abs() <= NAVIGATION_LANDING_X
+                        && (ctx.position.y - target.y).abs() <= 2 * NAVIGATION_ARRIVAL_Y;
+                    return if near {
+                        self.last_direction = CommandDirection::Stop;
+                        CommandStepResult::completed(None)
+                    } else {
+                        CommandStepResult::failed(None)
+                    };
+                }
+                if procedure != ActionProcedure::Walk {
+                    return CommandStepResult::running(None);
+                }
+                if arrived {
+                    return self.arrive();
+                }
+                if started {
+                    return CommandStepResult::failed(None);
+                }
+                // Face the jump, then ObjectComJump launches along ComDir
+                // (C4ObjectCom.cpp:284-296).
+                *permit |= PERMIT_MOVE_STARTED;
+                self.last_direction = facing;
+                CommandStepResult::running(Some(ObjectUpdate::new().with_command_direction(facing)))
+                    .with_operations(vec![CommandOperation::PushFront(
+                        CommandRequest::new(CommandId::Jump)
+                            .with_tx(Some(target.x))
+                            .with_ty(Some(target.y))
+                            .with_mode(CommandMode::SilentSub),
+                    )])
+            }
+            NavigationKind::Climb => {
+                if procedure == ActionProcedure::Scale {
+                    *permit |= PERMIT_MOVE_STARTED;
+                    return self.steer_toward(ctx, CommandDirection::Up);
+                }
+                if procedure != ActionProcedure::Walk {
+                    return CommandStepResult::running(None);
+                }
+                if arrived {
+                    return self.arrive();
+                }
+                if started {
+                    // Back on its feet but not on top: the climb failed.
+                    return CommandStepResult::failed(None);
+                }
+                // Walking into the wall with ComDir toward it starts SCALE
+                // (C4Object.cpp:4406-4520).
+                self.steer_toward(ctx, facing)
+            }
+        }
+    }
+
+    fn step_navigation_goal(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        permit: &mut i32,
+        retries: &mut i32,
+    ) -> Option<CommandStepResult> {
+        let target = self.resolve_target_position(ctx)?;
+        let range_x = Self::navigation_range_x(ctx);
+        if self.navigation_arrived(ctx, range_x) {
+            return Some(self.arrive());
+        }
+        let near = inside(ctx.position.x - target.x, -PATH_RANGE, PATH_RANGE)
+            && inside(ctx.position.y - target.y, -PATH_RANGE, PATH_RANGE);
+        let steer_frames = (*permit & PERMIT_STEER_MASK) >> PERMIT_STEER_SHIFT;
+        let standing = ctx.object.action_procedure == ActionProcedure::Walk;
+        let fallback = *permit & PERMIT_FALLBACK != 0;
+        let replan_due = !fallback || steer_frames % NAVIGATION_REPLAN_INTERVAL == 0;
+        if near || !standing || !replan_due {
+            // Native steering: the final approach, a fallback route, or
+            // waiting to stand again. Bounded so it cannot pace forever.
+            if steer_frames >= NAVIGATION_MAX_STEER_FRAMES {
+                return Some(CommandStepResult::failed(None));
+            }
+            *permit = (*permit & !PERMIT_STEER_MASK) | ((steer_frames + 1) << PERMIT_STEER_SHIFT);
+            return None;
+        }
+        if ctx.object.physical_deferred {
+            // Resolve FairCrew physicals first; the next Execute plans.
+            return Some(resolve_command_physical(ctx.object.id, 1, None));
+        }
+        let landscape = ctx.landscape?;
+        let plans = *permit & PERMIT_PLANS_MASK;
+        if plans >= NAVIGATION_MAX_PLANS {
+            return Some(CommandStepResult::failed(None));
+        }
+        *permit = (*permit & !PERMIT_PLANS_MASK) | (plans + 1);
+        if *retries == 0 {
+            *retries = NAVIGATION_GOAL_RETRIES;
+        }
+        let actor = navigation::NavActor::new(
+            ctx.object.nav_body,
+            &ctx.object.physical,
+            ctx.object.construction,
+            gravity,
+        );
+        let goal = navigation::NavGoal {
+            x: target.x,
+            y: target.y,
+            range_x,
+            range_y: NAVIGATION_ARRIVAL_Y,
+        };
+        match navigation::plan(
+            landscape,
+            &actor,
+            ctx.position,
+            goal,
+            NAVIGATION_PLAN_BUDGET,
+        ) {
+            Some(plan) if !plan.waypoints.is_empty() => {
+                *permit &= !(PERMIT_FALLBACK | PERMIT_STEER_MASK);
+                let operations = plan
+                    .waypoints
+                    .iter()
+                    .take(navigation::MAX_PLAN_WAYPOINTS)
+                    .rev()
+                    .map(|waypoint| {
+                        let kind = NavigationKind::from_move(waypoint.movement);
+                        CommandOperation::PushFront(
+                            CommandRequest::new(CommandId::MoveTo)
+                                .with_tx(Some(waypoint.x))
+                                .with_ty(Some(waypoint.y))
+                                .with_data(CommandData::Integer(kind.data(waypoint.right)))
+                                .with_update_interval(
+                                    (waypoint.frames.saturating_mul(2) + 40).clamp(40, 3000),
+                                )
+                                .with_evaluated(true)
+                                .with_mode(CommandMode::SilentSub),
+                        )
+                    })
+                    .collect();
+                Some(CommandStepResult::running(None).with_operations(operations))
+            }
+            // Already inside the goal region: native steering finishes.
+            Some(_) => None,
+            None if fallback => Some(CommandStepResult::failed(None)),
+            None => {
+                *permit |= PERMIT_FALLBACK;
+                Some(self.navigation_fallback(ctx, landscape, target))
+            }
+        }
+    }
+
+    /// No planned route: try the C4PathFinder route C4Command::MoveTo would
+    /// take (C4Command.cpp:228-255), queued as native-steering waypoints, or
+    /// steer natively when it finds none. The goal's steering budget bounds
+    /// either.
+    fn navigation_fallback(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        landscape: &crate::Landscape,
+        target: Vector2,
+    ) -> CommandStepResult {
+        let transfer_zones = ctx.transfer_zones.states();
+        let mut finder = PathFinder::new(landscape, &transfer_zones);
+        finder.set_level(ctx.object.pathfinder.clamp(1, 10));
+        finder.enable_transfer_zones(ctx.object.no_transfer_zones == 0);
+        match finder.find(ctx.position, target) {
+            Some(path) if path.waypoints.len() > 2 => {
+                let legacy = NavigationKind::Legacy.data(false);
+                let operations = pathfinder_waypoint_operations(path, landscape, ctx.object, 0)
+                    .into_iter()
+                    .map(|operation| match operation {
+                        CommandOperation::PushFront(request) if request.id == CommandId::MoveTo => {
+                            CommandOperation::PushFront(
+                                request.with_data(CommandData::Integer(legacy)),
+                            )
+                        }
+                        other => other,
+                    })
+                    .collect();
+                CommandStepResult::running(None).with_operations(operations)
+            }
+            _ => CommandStepResult::running(None),
+        }
+    }
+}
+
+/// C4PathFinder::SetCompletePath hands every intermediate waypoint, target
+/// side first, to ObjectAddWaypoint, which pushes each one onto the front of
+/// the stack as a Transfer or MoveTo (C4PathFinder.cpp:383-400;
+/// C4Command.cpp:189-209).
+pub(in crate::command) fn pathfinder_waypoint_operations(
+    path: crate::pathfinder::Path,
+    landscape: &crate::Landscape,
+    object: &CommandObjectSnapshot,
+    data: i32,
+) -> Vec<CommandOperation> {
+    let waypoint_count = path.waypoints.len();
+    // cObj->Command->Data: the Data of the command currently on the stack
+    // front, which starts as the parent MoveTo and becomes each pushed
+    // waypoint in turn. A Transfer is added with AddCommand's default zero
+    // Data (C4Command.cpp:194-206).
+    let mut front_data = data;
+    path.waypoints
+        .into_iter()
+        .skip(1)
+        .take(waypoint_count.saturating_sub(2))
+        .map(|waypoint| {
+            let request = if let Some(transfer_target) = waypoint.transfer_target {
+                front_data = 0;
+                CommandRequest::new(CommandId::Transfer)
+                    .with_target(Some(transfer_target))
+                    .with_tx(Some(waypoint.x))
+                    .with_ty(Some(waypoint.y))
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub)
+            } else {
+                let (mut x, mut y) = (waypoint.x, waypoint.y);
+                // Raw Shape.Wdt/Hgt halves; only the height is ever expanded
+                // in the snapshot's At rectangle (C4Command.cpp:197-198).
+                adjust_solid_offset(
+                    landscape,
+                    &mut x,
+                    &mut y,
+                    object.shape.width / 2,
+                    object.shape_height / 2,
+                );
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(x))
+                    .with_ty(Some(y))
+                    .with_data(CommandData::Integer(front_data))
+                    .with_update_interval(25)
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub)
+            };
+            CommandOperation::PushFront(request)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4287,10 +4770,16 @@ impl GetState {
             return result;
         }
 
-        let dx = target_snapshot.position.x - ctx.position.x;
-        let dy = target_snapshot.position.y - ctx.position.y;
-        const PICKUP_RANGE: i32 = 12;
-        if dx.abs() <= PICKUP_RANGE && dy.abs() <= PICKUP_RANGE {
+        // "Target in collection range": cObj->At(Target->x, Target->y,
+        // OCF_Normal | OCF_Collection) tests the target position against the
+        // actor's own At rectangle and OCF (C4Command.cpp:1259-1267;
+        // C4Object.cpp:1133-1146).
+        let in_collection_range = ctx.object.has_nonzero_status()
+            && ctx
+                .object
+                .at_point(target_snapshot.position.x, target_snapshot.position.y)
+            && ctx.object.ocf & (ocf::NORMAL | ocf::COLLECTION) != 0;
+        if in_collection_range {
             return self.transfer_to_actor(ctx, target_id, update, true);
         }
 
@@ -5224,34 +5713,161 @@ impl AcquireState {
         true
     }
 
+    /// Every valid candidate within the search box, in C++'s preference
+    /// order: squared distance, then forward Game.Objects order
+    /// (C4Command.cpp:2108-2126).
+    fn ranked_candidates<'a>(
+        &self,
+        ctx: &'a CommandRuntimeContext<'_>,
+    ) -> Vec<&'a CommandObjectSnapshot> {
+        let mut candidates: Vec<(i64, usize, ObjectId, &CommandObjectSnapshot)> = ctx
+            .objects
+            .values()
+            .filter(|snapshot| self.candidate_is_valid(snapshot, ctx))
+            .filter_map(|snapshot| {
+                let dx = i64::from(snapshot.position.x) - i64::from(ctx.position.x);
+                let dy = i64::from(snapshot.position.y) - i64::from(ctx.position.y);
+                (dx.abs() <= i64::from(self.range_x) && dy.abs() <= i64::from(self.range_y))
+                    .then_some((
+                        dx * dx + dy * dy,
+                        snapshot.master_list_order,
+                        snapshot.id,
+                        snapshot,
+                    ))
+            })
+            .collect();
+        candidates.sort_by_key(|&(distance, order, id, _)| (distance, order, id));
+        candidates
+            .into_iter()
+            .map(|(_, _, _, snapshot)| snapshot)
+            .collect()
+    }
+
     pub(in crate::command) fn find_candidate(
         &self,
         ctx: &CommandRuntimeContext<'_>,
     ) -> Option<ObjectId> {
-        let mut best: Option<(ObjectId, i64, usize)> = None;
-        for snapshot in ctx.objects.values() {
-            if !self.candidate_is_valid(snapshot, ctx) {
-                continue;
+        self.ranked_candidates(ctx)
+            .first()
+            .map(|snapshot| snapshot.id)
+    }
+
+    /// The navigation AI's choice: of the nearest few candidates, the one
+    /// with the cheapest planned route, skipping `excluded` (the candidate
+    /// whose Get just failed) and preferring one no other object is already
+    /// fetching. `None` when none is reachable, which falls back to Buy.
+    pub(in crate::command) fn find_navigation_candidate(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        excluded: Option<ObjectId>,
+    ) -> Option<ObjectId> {
+        let candidates = self
+            .ranked_candidates(ctx)
+            .into_iter()
+            .filter(|snapshot| Some(snapshot.id) != excluded);
+        let landscape = match ctx.landscape {
+            Some(landscape)
+                if ctx.object.action_procedure == ActionProcedure::Walk
+                    && ctx.object.container.is_none()
+                    && !ctx.object.nav_body.is_empty() =>
+            {
+                landscape
             }
-            let dx = i64::from(snapshot.position.x) - i64::from(ctx.position.x);
-            let dy = i64::from(snapshot.position.y) - i64::from(ctx.position.y);
-            if dx.abs() > i64::from(self.range_x) || dy.abs() > i64::from(self.range_y) {
-                continue;
-            }
-            let distance = dx * dx + dy * dy;
-            if best.is_none_or(|(best_id, best_distance, best_order)| {
-                (distance, snapshot.master_list_order, snapshot.id)
-                    < (best_distance, best_order, best_id)
-            }) {
-                best = Some((snapshot.id, distance, snapshot.master_list_order));
-            }
+            // Only an actor standing in the landscape can plan; one walking
+            // inside a building, or not walking at all, keeps the native pick.
+            _ => return candidates.map(|snapshot| snapshot.id).next(),
+        };
+        let actor = navigation::NavActor::new(
+            ctx.object.nav_body,
+            &ctx.object.physical,
+            ctx.object.construction,
+            gravity,
+        );
+        let fetched_by_another = |candidate: ObjectId| {
+            ctx.objects.values().any(|other| {
+                other.id != ctx.object.id
+                    && other.commands.iter().any(|command| {
+                        !command.finished
+                            && command.name == "Get"
+                            && command.target == Some(candidate)
+                    })
+            })
+        };
+        candidates
+            .take(NAVIGATION_ACQUIRE_CANDIDATES)
+            .filter_map(|snapshot| {
+                let position = snapshot
+                    .container
+                    .and_then(|container| ctx.resolve_position(container))
+                    .unwrap_or(snapshot.position);
+                // Get's pursuit MoveTo grounds the item position the same way
+                // (C4Command.cpp:1290,1639-1641).
+                let (mut x, mut y) = (position.x, position.y);
+                adjust_move_to_target(landscape, &mut x, &mut y, false, ctx.object.shape_height);
+                let goal = navigation::NavGoal {
+                    x,
+                    y,
+                    range_x: NAVIGATION_PICKUP_RANGE_X,
+                    range_y: NAVIGATION_ARRIVAL_Y,
+                };
+                navigation::plan(
+                    landscape,
+                    &actor,
+                    ctx.position,
+                    goal,
+                    NAVIGATION_ACQUIRE_BUDGET,
+                )
+                .map(|plan| ((fetched_by_another(snapshot.id), plan.cost), snapshot.id))
+            })
+            .min_by_key(|&(key, _)| key)
+            .map(|(_, id)| id)
+    }
+
+    /// C4Command::Acquire under the navigation switch. Permit remembers the
+    /// candidate the last Get went for, so a failed fetch is not retried at
+    /// the same item.
+    pub(in crate::command) fn step_navigation(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        permit: &mut i32,
+    ) -> CommandStepResult {
+        let excluded = u64::try_from(*permit)
+            .ok()
+            .filter(|&number| number > 0)
+            .map(ObjectId::new);
+        let result = self.step_selecting(ctx, |state, ctx| {
+            state.find_navigation_candidate(ctx, gravity, excluded)
+        });
+        if let Some(chosen) = result
+            .operations
+            .iter()
+            .find_map(|operation| match operation {
+                CommandOperation::PushFront(request) if request.id == CommandId::Get => {
+                    request.target
+                }
+                _ => None,
+            })
+        {
+            *permit = i32::try_from(chosen.as_u64()).unwrap_or(0);
         }
-        best.map(|(id, _, _)| id)
+        result
     }
 
     pub(in crate::command) fn step(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
+        self.step_selecting(ctx, |state, ctx| state.find_candidate(ctx))
+    }
+
+    /// C4Command::Acquire with `select` choosing the material to Get
+    /// (C4Command.cpp:2108-2126 for the native choice).
+    fn step_selecting(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        select: impl FnOnce(&Self, &CommandRuntimeContext<'_>) -> Option<ObjectId>,
     ) -> CommandStepResult {
         if self.definition_id.is_empty() {
             return CommandStepResult::failed(None);
@@ -5313,7 +5929,7 @@ impl AcquireState {
             return CommandStepResult::running(None).with_events(vec![event]);
         }
 
-        let Some(candidate_id) = self.find_candidate(ctx) else {
+        let Some(candidate_id) = select(self, ctx) else {
             self.maybe_reset_buy(ctx.frame);
             self.script_invoked = false;
             let mut result = CommandStepResult::running(None);
@@ -6647,10 +7263,16 @@ impl ActiveCommand {
         }
 
         // C4Command::Execute decrements this before InitEvaluation and the
-        // handler. Expiry is ordinary success and performs no command work.
+        // handler. Expiry is ordinary success and performs no command work,
+        // except for a navigation MoveTo that never arrived.
         if self.update_interval > 0 {
             self.update_interval -= 1;
             if self.update_interval == 0 {
+                if let CommandState::MoveTo(state) = &self.state {
+                    if state.navigation_expiry_fails(ctx) {
+                        return CommandStepResult::failed(None);
+                    }
+                }
                 return CommandStepResult::completed(None);
             }
         }
@@ -6685,7 +7307,12 @@ impl ActiveCommand {
         let mut result = match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => {
-                let mut result = state.step_with_waypoint(ctx, next_is_move_to);
+                let navigation =
+                    state.step_navigation(ctx, gravity, &mut self.permit, &mut self.retries);
+                let mut result = navigation.unwrap_or_else(|| {
+                    let allow_path_phase = !state.navigation_owned(ctx);
+                    state.step_with_waypoint(ctx, next_is_move_to, allow_path_phase)
+                });
                 if let Some(snapshot) = state.pathfinder_debug_update.take() {
                     result
                         .events
@@ -6729,6 +7356,9 @@ impl ActiveCommand {
             CommandState::Sell(state) => state.step(ctx),
             CommandState::Take(state) => state.step(ctx),
             CommandState::Take2(state) => state.step(ctx),
+            CommandState::Acquire(state) if ctx.navigation_ai => {
+                state.step_navigation(ctx, gravity, &mut self.permit)
+            }
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
@@ -6759,6 +7389,9 @@ pub struct CommandRuntimeContext<'a> {
     pub base_buy_enabled: bool,
     pub base_sell_enabled: bool,
     pub transfer_zones: &'a TransferZoneTable,
+    /// The synchronized `Engine::navigation_ai` session switch: false
+    /// reproduces C4Command and C4PathFinder exactly.
+    pub navigation_ai: bool,
 }
 
 impl<'a> CommandRuntimeContext<'a> {

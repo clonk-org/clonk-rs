@@ -257,6 +257,21 @@
       "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-08-25)"
     },
     {
+      "id": "sim-navigation-ai",
+      "area": "simulation",
+      "summary": "Navigation AI for crew and Pathfinder walkers. A MoveTo goal is planned over the positions the actor's collision vertices can stand at, joined by the moves the engine performs for it (walking over small steps, walking off a ledge, the ObjectComJump arc, scaling to KneelUp), instead of C4PathFinder's single-pixel route (clonk-org/clonk-rs#209). Planned waypoints and goals that expire before arrival fail rather than succeed, and a goal with no planned route tries the C4PathFinder route once before failing, so a parent command cannot retry an impossible route forever. Acquire takes the nearest candidates in order of planned route cost, skipping the one its last Get failed to reach and preferring any no other object is fetching. A walking scaler under an intermediate fallback waypoint more than 40 pixels overhead also plans a side run and wall jump toward it. C++ routes with C4PathFinder, expires every MoveTo as success and fetches the nearest material, so this issues MoveTo, Jump and Get commands C++ never does and changes synchronized command and movement state. The profile reverts it through the navigation_ai session switch, which scenario activation installs on the engine that runs the round.",
+      "cited_in": [
+        "crates/clonk-engine/src/navigation.rs",
+        "crates/clonk-engine/src/command/machine.rs",
+        "crates/clonk-app-core/src/config.rs"
+      ],
+      "cpp_reference": "C4Command.cpp:211-330,1544-1552,1874-1893,2108-2130; C4PathFinder.cpp:403-406",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-09-22)"
+    },
+    {
       "id": "sim-s2-terminal-params",
       "area": "simulation",
       "summary": "S2 map-generator boundary inputs: C++ turns a negative Mandel alpha into a huge uint32 iteration budget, divides Gradient by a zero width, and takes a remainder by zero at alpha=-2. Rust bounds alpha to ten iterations, substitutes a denominator of one, and returns false from the raw algorithm. These inputs are excluded from the C++ differential runs.",

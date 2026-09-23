@@ -583,6 +583,10 @@ fn get_collection_limit_puts_away_before_reject_collect() {
     ));
     actor.set_c4_callback_convention(true);
     actor.set_collection_limit(1);
+    // Get collects only when the item lies in the actor's own At rectangle
+    // (C4Command.cpp:1259-1267; C4Object.cpp:1133-1146), so the actor needs
+    // CLNK's real shape rather than a script-only definition's empty one.
+    actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
     let mut held = crate::support::TestValueExt::test_value(Definition::from_script(
         "HELD",
         "Held item",
@@ -609,7 +613,10 @@ fn get_collection_limit_puts_away_before_reject_collect() {
 
     let clonk = engine.spawn_test_object(SpawnConfig::new("CLNK"));
     let held = engine.spawn_test_object(SpawnConfig::new("HELD").with_container(clonk));
-    let incoming = engine.spawn_test_object(SpawnConfig::new("INCM"));
+    // CreateObject's y is the bottom, so the shaped CLNK's centre rises to
+    // y = -10 while the shapeless item keeps its own; put the item there.
+    let clonk_centre = engine.test_object_snapshot(clonk).position;
+    let incoming = engine.spawn_test_object(SpawnConfig::new("INCM").with_position(clonk_centre));
     arm_get(&mut engine, clonk, incoming);
 
     crate::support::TestValueExt::test_value(engine.tick_without_snapshot());

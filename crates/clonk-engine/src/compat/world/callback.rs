@@ -123,6 +123,7 @@ impl HostWorldContext {
             player_info_updates: Rc::clone(&engine.host_requests.player_info_updates),
             scenario_script_counter: engine.scenario_script_counter,
             structures_need_energy: engine.structures_need_energy,
+            navigation_ai: engine.navigation_ai,
             flag_removeable: engine.flag_removeable,
             standard_crew_names: tables.standard_crew_names.clone(),
             definition_crew_names: Rc::clone(&tables.definition_crew_names),

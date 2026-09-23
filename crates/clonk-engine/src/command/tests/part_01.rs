@@ -181,6 +181,7 @@
             shape_height: 20,
             shape: DefinitionRect::new(-8, -10, 16, 20),
             entrance: None,
+            nav_body: crate::navigation::NavBody::default(),
             id: ObjectId::new(id),
             master_list_order: id as usize,
             definition_id: format!("DEF{id}"),
@@ -311,6 +312,14 @@
         command_context!(empty_command_ctx(walker, 0); landscape: Some(landscape))
     }
 
+    /// [`jump_ctx`] with the normal profile's navigation switch on.
+    fn nav_jump_ctx<'a>(
+        walker: &'a CommandObjectSnapshot,
+        landscape: &'a crate::Landscape,
+    ) -> CommandRuntimeContext<'a> {
+        command_context!(jump_ctx(walker, landscape); navigation_ai: true)
+    }
+
     /// A MoveTo state past its InitEvaluation Execute with the raw Tx/Ty
     /// (the C++ equivalent of an Evaluated command): the movement-control
     /// geometry pins below run against these coordinates directly.
@@ -340,6 +349,7 @@
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
+            navigation_ai: false,
         }
     }
 
@@ -1053,6 +1063,149 @@
         );
     }
 
+    #[test]
+    fn move_to_init_evaluation_lifts_by_the_raw_shape_height() {
+        // InitEvaluation passes the raw cObj->Shape.Hgt to AdjustMoveToTarget,
+        // not the eighteen-pixel At expansion: a ten-pixel actor's grounded
+        // target rises by 10/2 = 5 above the bottom of free space
+        // (C4Command.cpp:94-114,1639-1641; C4Object.h:340).
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut small = walking_jumper(Vector2::new(100, 100));
+        small.shape_top = -5;
+        small.shape_height = 10;
+        // The snapshot's At rectangle keeps the addtop expansion to 18.
+        small.shape = DefinitionRect::new(92, 87, 16, 18);
+        let evaluated_target =
+            |stack: &CommandStack| match &stack.entries.front().expect("MoveTo").state {
+                CommandState::MoveTo(state) => (state.tx, state.ty),
+                other => panic!("expected MoveTo, got {other:?}"),
+            };
+        for physical_deferred in [false, true] {
+            small.physical_deferred = physical_deferred;
+            let mut ctx = empty_command_ctx(&small, 1);
+            ctx.landscape = Some(&landscape);
+            let mut stack = CommandStack::new();
+            stack
+                .push_front(request!(MoveTo, with_tx: Some(100), with_ty: Some(50)))
+                .expect("MoveTo queues");
+
+            let evaluation = stack.execute_front(&ctx).expect("MoveTo evaluates");
+            if physical_deferred {
+                let command_instance_id = match evaluation.events.as_slice() {
+                    [CommandEvent::ResolveCommandPhysical {
+                        command_instance_id,
+                        ..
+                    }] => *command_instance_id,
+                    other => panic!("unexpected evaluation events: {other:?}"),
+                };
+                stack
+                    .execute_pending_physical(
+                        &ctx,
+                        crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                        command_instance_id,
+                        small.physical,
+                    )
+                    .expect("deferred evaluation resumes");
+            }
+
+            assert_eq!(
+                evaluated_target(&stack),
+                (Some(100), Some(104)),
+                "free space bottoms out at 109; lift by raw Shape.Hgt/2 (deferred physical: {physical_deferred})"
+            );
+        }
+    }
+
+    fn waypoint(
+        x: i32,
+        y: i32,
+        transfer_target: Option<ObjectId>,
+    ) -> crate::pathfinder::PathWaypoint {
+        crate::pathfinder::PathWaypoint {
+            x,
+            y,
+            transfer_target,
+        }
+    }
+
+    #[test]
+    fn pathfinder_waypoints_take_their_data_from_the_current_stack_front() {
+        // ObjectAddWaypoint passes cObj->Command->Data, the Data of whatever
+        // command is on the stack front at that moment. The first waypoint
+        // inherits the parent MoveTo's flags, but once a Transfer (Data 0) has
+        // been pushed every later MoveTo inherits zero (C4Command.cpp:189-209;
+        // AddCommand's default iData, C4Object.h:221-225).
+        let landscape = crate::Landscape::flat(300, 200);
+        let walker = walking_jumper(Vector2::new(20, 100));
+        let zone_owner = ObjectId::new(77);
+        let path = crate::pathfinder::Path {
+            length: 0,
+            waypoints: vec![
+                waypoint(20, 100, None),
+                waypoint(200, 100, None),
+                waypoint(150, 100, Some(zone_owner)),
+                waypoint(100, 100, None),
+                waypoint(250, 100, None),
+            ],
+        };
+
+        let operations = pathfinder_waypoint_operations(
+            path,
+            &landscape,
+            &walker,
+            COMMAND_FLAG_MOVE_TO_PUSH_TARGET,
+        );
+
+        let pushed = operations
+            .iter()
+            .map(|operation| match operation {
+                CommandOperation::PushFront(request) => {
+                    (request.id, request.tx, request.data.clone())
+                }
+                other => panic!("unexpected operation {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pushed,
+            vec![
+                (
+                    CommandId::MoveTo,
+                    Some(200),
+                    CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET)
+                ),
+                (CommandId::Transfer, Some(150), CommandData::None),
+                (CommandId::MoveTo, Some(100), CommandData::Integer(0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn pathfinder_waypoints_keep_their_raw_half_height_off_solid() {
+        // ObjectAddWaypoint calls AdjustSolidOffset with the raw
+        // cObj->Shape.Hgt / 2. For a ten-pixel actor two pixels above a floor
+        // at 110 that pushes the waypoint up while cnt < 5, from 108 to 105;
+        // the eighteen-pixel At height would keep going to 101
+        // (C4Command.cpp:126-145,197-198).
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut small = walking_jumper(Vector2::new(20, 100));
+        small.shape_top = -5;
+        small.shape_height = 10;
+        small.shape = DefinitionRect::new(12, 87, 16, 18);
+        let path = crate::pathfinder::Path {
+            length: 0,
+            waypoints: vec![
+                waypoint(20, 100, None),
+                waypoint(100, 108, None),
+                waypoint(250, 100, None),
+            ],
+        };
+
+        let operations = pathfinder_waypoint_operations(path, &landscape, &small, 0);
+
+        let move_to = pushed_request(&operations, CommandId::MoveTo);
+        assert_eq!((move_to.tx, move_to.ty), (Some(100), Some(105)));
+    }
+
     // C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): the first
     // Execute only evaluates (returns true — no movement that frame);
     // AdjustMoveToTarget grounds a mid-air target unless Data carries
@@ -1607,13 +1760,9 @@
         );
     }
 
-    #[test]
-    fn move_to_far_vertical_waypoint_stages_max_height_wall_jump() {
-        // Pinned C++ leaves this point-clear 67px vertical waypoint inert:
-        // DFA_WALK assigns only Left/Right and JumpControl accepts at most a
-        // 40px overhead gap (C4Command.cpp:189-208,228-255,319-327,1874-1893).
-        // Deliberately diverge for an intermediate pathfinder waypoint by
-        // staging one native-height wall jump toward the final destination.
+    /// Frontier's clonk-org/clonk-rs#209 U-route: a shaft at x 40..=80 down
+    /// from the y=100 surface into a tunnel that runs east at y 145..=175.
+    fn u_route_landscape() -> crate::Landscape {
         let width = 320usize;
         let height = 220usize;
         let mut bytes = vec![0; width * height];
@@ -1638,10 +1787,49 @@
             vec![None, Some("Earth".to_owned())],
             vec![None; 2],
         ));
+        landscape
+    }
 
+    #[test]
+    fn move_to_far_vertical_waypoint_stays_inert_without_navigation_ai() {
+        // The staged wall jump below is a normal-profile divergence. With the
+        // session's navigation switch off, the same intermediate waypoint
+        // stays exactly as pinned C++ leaves it: no Jump, no side MoveTo
+        // (C4Command.cpp:219-220,319-327,1874-1893).
+        let landscape = u_route_landscape();
         let mut walker = walking_jumper(Vector2::new(80, 166));
         walker.physical.can_scale = 1;
         let ctx = jump_ctx(&walker, &landscape);
+        assert!(!ctx.navigation_ai);
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                request!(MoveTo, with_tx: Some(160), with_ty: Some(90), with_mode: CommandMode::Base),
+            )
+            .expect("outer MoveTo queues");
+        stack
+            .push_front(
+                request!(MoveTo, with_tx: Some(80), with_ty: Some(99), with_update_interval: 25, with_evaluated: true, with_mode: CommandMode::SilentSub),
+            )
+            .expect("pathfinder waypoint queues");
+
+        stack.step(&ctx).expect("vertical waypoint executes");
+
+        assert_eq!(stack.command_names(), vec!["MoveTo", "MoveTo"]);
+    }
+
+    #[test]
+    fn move_to_far_vertical_waypoint_stages_max_height_wall_jump() {
+        // Pinned C++ leaves this point-clear 67px vertical waypoint inert:
+        // DFA_WALK assigns only Left/Right and JumpControl accepts at most a
+        // 40px overhead gap (C4Command.cpp:189-208,228-255,319-327,1874-1893).
+        // Deliberately diverge for an intermediate pathfinder waypoint by
+        // staging one native-height wall jump toward the final destination.
+        let landscape = u_route_landscape();
+
+        let mut walker = walking_jumper(Vector2::new(80, 166));
+        walker.physical.can_scale = 1;
+        let ctx = nav_jump_ctx(&walker, &landscape);
         let mut stack = CommandStack::new();
         stack
             .push_back(
@@ -1684,7 +1872,7 @@
         // A qualifying chained scaler still needs a wall beside the staged
         // 40px point; point-clear sky alone must not invent a jump.
         let no_wall = crate::Landscape::flat(200, 180);
-        let no_wall_ctx = jump_ctx(&walker, &no_wall);
+        let no_wall_ctx = nav_jump_ctx(&walker, &no_wall);
         let mut no_wall_stack = CommandStack::new();
         no_wall_stack
             .push_back(
@@ -1704,7 +1892,7 @@
         // An actor that cannot enter SCALE must not be sent into the wall.
         let mut non_scaler = walker.clone();
         non_scaler.physical.can_scale = 0;
-        let non_scaler_ctx = jump_ctx(&non_scaler, &landscape);
+        let non_scaler_ctx = nav_jump_ctx(&non_scaler, &landscape);
         let mut non_scaler_stack = CommandStack::new();
         non_scaler_stack
             .push_back(
@@ -1742,7 +1930,7 @@
             position: Vector2::new(84, 166),
             ..walker.clone()
         };
-        let offset_ctx = jump_ctx(&offset_scaler, &sparse_wall);
+        let offset_ctx = nav_jump_ctx(&offset_scaler, &sparse_wall);
         let mut offset_stack = CommandStack::new();
         offset_stack
             .push_back(
@@ -1791,7 +1979,7 @@
             -3 * JUMP_ANGLE_RANGE,
             3 * JUMP_ANGLE_RANGE,
         ));
-        let wide_range_ctx = jump_ctx(&wide_range_scaler, &sparse_wall);
+        let wide_range_ctx = nav_jump_ctx(&wide_range_scaler, &sparse_wall);
         let mut wide_range_stack = CommandStack::new();
         wide_range_stack
             .push_back(
@@ -1814,7 +2002,7 @@
         let mut deferred_scaler = walker.clone();
         deferred_scaler.physical.can_scale = 0;
         deferred_scaler.physical_deferred = true;
-        let deferred_ctx = jump_ctx(&deferred_scaler, &landscape);
+        let deferred_ctx = nav_jump_ctx(&deferred_scaler, &landscape);
         let mut deferred_stack = CommandStack::new();
         deferred_stack
             .push_back(
@@ -1863,7 +2051,7 @@
             physical_deferred: false,
             ..deferred_scaler
         };
-        let callback_ctx = jump_ctx(&callback_scaler, &landscape);
+        let callback_ctx = nav_jump_ctx(&callback_scaler, &landscape);
         let mut callback_stack = CommandStack::new();
         callback_stack.restore_from_snapshot(&decoded);
         callback_stack

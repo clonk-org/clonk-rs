@@ -816,6 +816,7 @@ impl Engine {
                 .unwrap_or(0),
             shape: self.object_shape_rect(object),
             entrance: self.object_entrance_area(object),
+            nav_body: crate::navigation::NavBody::from_vertices(&object.state.vertices),
             status: object.state.status,
             destroyed: object.destroyed,
             category: object.state.category,
@@ -1086,6 +1087,7 @@ impl Engine {
             base_buy_enabled: self.base_buy_enabled,
             base_sell_enabled: self.base_sell_enabled,
             transfer_zones: &transfer_zones,
+            navigation_ai: self.navigation_ai,
         };
         let command_gravity = self.physics.gravity_as_c4fixed();
         let result = match resume {
