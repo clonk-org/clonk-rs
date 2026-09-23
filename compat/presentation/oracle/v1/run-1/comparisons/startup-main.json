@@ -1,11 +1,11 @@
 {
   "actual": {
     "path": "run-1/rust/artifacts/startup-main.layout.json",
-    "sha256": "fde4dd665a7d23ba997660d5752fc7747e1660cc3976eba202518ac720cdbede"
+    "sha256": "61e666da6e64195755f6ad7b816ce9ef9b5019e2be87c4a37eb2894cf2821b2b"
   },
   "case_id": "startup-main",
   "comparator": {
-    "binary_sha256": "196b0bcc29878c5ee9c43a62b6146aecf0633b713889a21e38f0bbf3e09aec31",
+    "binary_sha256": "76868863a9e1ae6787540ad8e68f9fcf69443ef12b803afcc44e3947574e4622",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",

@@ -4,195 +4,195 @@
     "cpp": [
       {
         "case_id": "startup-main",
-        "sha256": "89617ee75139dd732919089ccbd3a27fb23f679e5608f61b0be4826dd2089e74"
+        "sha256": "fb2169e5d0678538fdc5418b7ca958af56f5c6eba9fbb3338f43ed7408edda09"
       },
       {
         "case_id": "startup-scenario-selection",
-        "sha256": "4b0d2f12467e19a64f41ddcbd8babc7a5bbafea312b9fd43b7f101f25f761bfa"
+        "sha256": "7f9a23b98e8d066f8bd36b293308333dd71133c6f6cd4f7d2e91633f02e042cf"
       },
       {
         "case_id": "startup-network-browser",
-        "sha256": "7c18d761605fae5a17765aa6ea7939cacc8da5e73d8aa09aa383c9cd2667dd3d"
+        "sha256": "a12607be08cc7194a3114091561ad7a63b876d6b14ee67a6326e884d8a14980b"
       },
       {
         "case_id": "startup-player-selection",
-        "sha256": "3e802be3bf478b594d27436a65b655073e11157c88056e23c6612826bf07a401"
+        "sha256": "2720ac79eed2468c0f5aaaa854f04d93e19efe679b6067b079d85bc4468867f8"
       },
       {
         "case_id": "startup-options",
-        "sha256": "e9aef8020c940f6a92bb52271dc728607b52bb0f53eeb1c11ca64db4c933bbc6"
+        "sha256": "7aad0e6eef9d330e0515283e217bf93bc3527a83798fd1bfc5dd84ebf589558c"
       },
       {
         "case_id": "startup-about",
-        "sha256": "4c2f60317a7117a038ba2bc31cae7de017e70d27e6c084949e83f4686a76258c"
+        "sha256": "ade201ccd7bc4bec8e8d608ff3059250f825286ebe5ec34c4d51f601fac55a58"
       },
       {
         "case_id": "network-lobby",
-        "sha256": "8deed6a74bf8949d6052103d101d495bddd966c0d82520088bac1fcb4fb00bc3"
+        "sha256": "1683f6c8159e67c1dc449fc7103235e52fb4a60d11085731d527351b40966219"
       },
       {
         "case_id": "loader",
-        "sha256": "8cfd726e24e65475b7ffc1c14e3c9f74dbb31db3306287d33502007e07ebd1f2"
+        "sha256": "a32c03f3175e8000be3addb628bc62ab946b5a145109c0fccf10af419338d6a9"
       },
       {
         "case_id": "hud",
-        "sha256": "1b140b8a7b14160ab24ecef8e1b6ac6408575fc75261cf6ba47b9074567dba7b"
+        "sha256": "e484bd45a84e43365d65bd9d2c1679cb75afe274f51cfaa94db24c2b97aabbf1"
       },
       {
         "case_id": "ingame-menu",
-        "sha256": "32f10dad0058fbb10b598de8bd21846974ada04e563a5e339c44f1b2545c73a5"
+        "sha256": "bb6cb4378c0680779c14bb6f0f1c6d189386736c49fd5b74dc57f9263c6106ba"
       },
       {
         "case_id": "object-menu",
-        "sha256": "511f5b5e105966d4de038e8eabb7295b5726a58fbca447b257f2b951c3c4a73f"
+        "sha256": "36ab480e8dff106fb193f4dcb17185cfd6f454afeb8c1cc9330347d0118d13b0"
       },
       {
         "case_id": "gameplay",
-        "sha256": "62d1721e7925b747809d4d880bf45a56520f4fd60b7347a2a21d392bf4e483d3"
+        "sha256": "776e697e8721aac24437625da0b8ef9c9aba0a329df7664a0e3b00fd3c1ebcb9"
       },
       {
         "case_id": "evaluation",
-        "sha256": "9f8b70cb800e8058df58ef1026d39b85bf75e0df3a11a3711523bf8519dfab17"
+        "sha256": "4a413dca725eb5c3aee30358cdc38d62c6350b20ff26047a27daf346f8269de5"
       },
       {
         "case_id": "startup-options-scale-initial-reference",
-        "sha256": "cf79595eb529fa7d0741e1fa999adce69726991778fa0b7af5e975cc2bf9e3ca"
+        "sha256": "06b1f11f9bce761c42d93eeeab5b60d1d5066518141e80fea575dd3900a607bb"
       },
       {
         "case_id": "startup-options-scale-decremented-reference",
-        "sha256": "2a89ce3a42c74a8a6b4a057a4b483a0f04340eb576799c95b3f264517062a6c4"
+        "sha256": "b2e0ec885746cde7ac20919106dae30836bb41fa5bbb09910dde4a07d837d9d4"
       },
       {
         "case_id": "startup-options-scale-initial-minimum",
-        "sha256": "7042394c8d92b3ea4c7e815bd0a8b9ed9a6a2c32c61ffa884d512e8f5d3c89e0"
+        "sha256": "45f8ba23fc1bc159a342f5ba451613550b8a050c56b0bdff9ce63a13cd43dc83"
       },
       {
         "case_id": "startup-options-scale-decremented-minimum",
-        "sha256": "44a22369c8db2be85d087cf03d731aae1e19436ceb3255a0275e47d2998124b3"
+        "sha256": "24e04debb1a6b7066672af957a3dcf39c92eff1307190b150699c41d26a94fc3"
       },
       {
         "case_id": "startup-options-reset-reference",
-        "sha256": "5dca784a50a5c9c65202a8588bf98190c3bb9e8ba9499a525f596901c257ef4f"
+        "sha256": "5d79b2acfbf3720e0518e6d4c4452b76ff646034f19a525432723729f0ccbfb0"
       },
       {
         "case_id": "startup-options-reset-minimum",
-        "sha256": "86956a440a731fa3e17ddd69947cbbf95cb5188b4af1db229cb28a198a8cb322"
+        "sha256": "1e84e3573bc52aeb8e2e41bcacd8113735e434d01d74fa203cb28b43f5be600f"
       },
       {
         "case_id": "startup-options-key-keyboard-reference",
-        "sha256": "30421f8c0a453d8bfc514b7f4e067458d8dae864c91a5d327be1aaae98366174"
+        "sha256": "b1b31fd1b8c11c11aee72f8742e0d4ad4a2531e86427da6327348372245d1e04"
       },
       {
         "case_id": "startup-options-key-keyboard-minimum",
-        "sha256": "c739c0f7ec8efddbf35a72d17b69ba8dd7e26cb33dd54895f2c40bd2be05b871"
+        "sha256": "215033f233f75930771fb9e45f30c6165011756bb5722ab7c6ff729037ca7ee4"
       },
       {
         "case_id": "startup-options-key-gamepad-reference",
-        "sha256": "ca67b019934bfb14e9869cb40afdbca6155ec85ee534e5f2e1004e28cd33c5e4"
+        "sha256": "284bca937307be3ef781922136ba3b9fc455ba5ade1410d243c00a223549b6ab"
       },
       {
         "case_id": "startup-options-key-gamepad-minimum",
-        "sha256": "64e8d0c0533faf1fca4aa93ed4ed25bf341a49d646bde024a6f2a951a702c5a4"
+        "sha256": "ca99bb34aa8b785854185e38b9f5ef454956d6f1dd851038deed66b6c3d2caf1"
       }
     ],
     "rust": [
       {
         "case_id": "startup-main",
-        "sha256": "dc15f8b869097b18c677fcad4aabc51c558abf73154e4193a8966bc456f6ad91"
+        "sha256": "6412edbd903c67e34a107fcac11d26e05f30f4d07eb85afc31bf7adab0cc5a31"
       },
       {
         "case_id": "startup-scenario-selection",
-        "sha256": "e3af0224a8ed7dbe26a46f94f380cff8180fa556cfc9b1be9a20fd7ca64a48a0"
+        "sha256": "77f7a3da8eec80837d80658851a4e8ea15355c110d4500ec6cc5d3e944fdb7d3"
       },
       {
         "case_id": "startup-network-browser",
-        "sha256": "f335b01045586b130e12046be0f4081fce6a7d088ae3ea18d0f4a187f1e747d6"
+        "sha256": "298f5ef797dc059f409b41e0c06892f480e1468136c63d4c462981069fc43daf"
       },
       {
         "case_id": "startup-player-selection",
-        "sha256": "1e75bd2be95a28d8259d09ebaa6c7446f7639eec6df225a17b97a6618e2bc6a5"
+        "sha256": "4d02ceb93914341b2a4dfa95b09b488d18f75155503610ace24780a9e909e626"
       },
       {
         "case_id": "startup-options",
-        "sha256": "663fb4e80e6f121863ea2af52ff7dc8d631fbc4cf767e2cd1a782fe3f728cf21"
+        "sha256": "ffd99d800c1eeeba12f77e8be71557a321c0d6c6bfb95c998742b81c01f47124"
       },
       {
         "case_id": "startup-about",
-        "sha256": "714ef62dfaa1f93d6610b7c65510ccdac53cd57ed5252d2439d842f034aeea81"
+        "sha256": "0798afaedbfc6fd33e46ec6a368067c5408af3d428e7479a573bbd90bd500f7f"
       },
       {
         "case_id": "network-lobby",
-        "sha256": "060af344711675d0afc930add4bb33369630544b323ac936b6155c96358b0abf"
+        "sha256": "71c846beed6ede3a7e3d72aefdc3aacfa22a95b439085db9632ab9c152681241"
       },
       {
         "case_id": "loader",
-        "sha256": "69066e103eaec2b55c20afe178e3b96447ea41cd99d13d5a8399820b787fa596"
+        "sha256": "db4894dace498bb1b938618f39ccdd348d3f3c24df504976a05f4a29346fbedd"
       },
       {
         "case_id": "hud",
-        "sha256": "a72d0f66521cec2b8eeb2e80d16c9442f6695381bde7b75af598a6deb56f0c0e"
+        "sha256": "1818085070544079b7415df4c71a7684b707efc010811ac7c6c27a03ef53ba35"
       },
       {
         "case_id": "ingame-menu",
-        "sha256": "a77dd2c70a1e65e43eee4a60432ec88c5ebf2904cbbbb772c66a6e1dca96c23c"
+        "sha256": "713fdec059e93566bbc1d83b898efbb11ad8c5cebe64c0d30be9d949c4743a31"
       },
       {
         "case_id": "object-menu",
-        "sha256": "89db3389f37eee6732be44af3e147f7df4e8fd08cb9971eb90be5044412313ba"
+        "sha256": "65da8ef19485b0bd45b5a8967f09bda667a0b2403e6fdbd4575108b8f49697d1"
       },
       {
         "case_id": "gameplay",
-        "sha256": "17d5fdd739f03944e2ac61d90b1dec99c30743aa726aa960b8806d65eb477c0e"
+        "sha256": "c8cae74d6fce095bf9c9988a7a52e998cd2cdc2c5132a18bc3ae9e718835d3d9"
       },
       {
         "case_id": "evaluation",
-        "sha256": "e9d2c138c8b277bb43c555e7031fbae0ead9df4f190df460e31b4ee0c2af9387"
+        "sha256": "462fe3a70a5e18c17e1c9ddb3dfcaf83842659ff797290f1de93d900bfa67cb2"
       },
       {
         "case_id": "startup-options-scale-initial-reference",
-        "sha256": "bb3aaa8ba35d2e600b62ee5908f0482f6be15ed5c7a5b5cdd52b6e851bc78100"
+        "sha256": "d9905a811546257e459b55ed446bf10008581a2d5a9f1f04ae1ed878193358b3"
       },
       {
         "case_id": "startup-options-scale-decremented-reference",
-        "sha256": "50782f1b166bff3f4121ef666f1094848a403f39877c830d235d81eb99938a3a"
+        "sha256": "74c46512cf24255c0620f17d5ba06a06398acb9c8accfb209c406da5b3a59a20"
       },
       {
         "case_id": "startup-options-scale-initial-minimum",
-        "sha256": "1d53fd6ec03578a4a2095fa2c697237d58e967313b3ade8fab23012dfa58c6ac"
+        "sha256": "40893b2cb6a481352f354e501d1946724e2dfebf38eb670bc09bffcf52b675e9"
       },
       {
         "case_id": "startup-options-scale-decremented-minimum",
-        "sha256": "05cd969b8fb0ba222478438a08a0a41b6e3ac39e5b450cd20a575ab797ea1155"
+        "sha256": "b42385cfc67698cda9047dd53f12fe88faad25d984f7f952f7cdebc4d96bfdbd"
       },
       {
         "case_id": "startup-options-reset-reference",
-        "sha256": "56487fd340565a2e13daaba406298e9d8e76b3832d8c3a5f7c9b06933165dbf8"
+        "sha256": "2edd64a2962946cb5c13e5c8e702fdbf14f2dd6a169108578fac8053c5472373"
       },
       {
         "case_id": "startup-options-reset-minimum",
-        "sha256": "116d6435fbed18e67ab366d5cfdedb737510e08dac7a08e0240120adb22d3e66"
+        "sha256": "9e766fc657fc82d5e9e618fa6d0ccd93368fea316743f1772aa399dd4e4a51d5"
       },
       {
         "case_id": "startup-options-key-keyboard-reference",
-        "sha256": "76e1e6196f6d6a4c323057981464d4eadfcfa2997e8658b5d390bb28cc0a6330"
+        "sha256": "28b52795703c17f140c0d1e6ac47874de1ff93665a9d5e16412cecd986c46ebb"
       },
       {
         "case_id": "startup-options-key-keyboard-minimum",
-        "sha256": "72ae2a6669aa680c64a9f6d97d266e63cf38732826eea890413467a0936fbd0d"
+        "sha256": "a28628a137f2b5554cf528aa524c6386872139bd2524584e2593f0d7dfc1f6fb"
       },
       {
         "case_id": "startup-options-key-gamepad-reference",
-        "sha256": "57dede74486a5f8e8aaded7c72034fc3543c98a79ec8b08298fb5f385a7ae9b4"
+        "sha256": "b1aa3d151946ffcf3298c00b7183babc313bee730dc636c28172952129f09e41"
       },
       {
         "case_id": "startup-options-key-gamepad-minimum",
-        "sha256": "74afc00fd3dd68ffa8a8880c4adecad32e780d1a1bf2c6156755494bdc04fed7"
+        "sha256": "25f42be1a478238465d875972002e07f09f4556900ce9eaeae7f81a06a00c78f"
       }
     ]
   },
   "launcher_sha256": "648d200a1bfe4f6e8d7079bd26d0bfb429fa5ff90cc7ecdc78aba2728016be1f",
-  "launches_sha256": "cfd8c727d1a7754c88b8dbf59c2d2d25687c17fa4e4cde3c0f9dbbfb1768ce20",
-  "nonce": "5c879a3c9f68dfde79267639784c837ace3fd3d8063862fdd010d5201e68dd91",
+  "launches_sha256": "7c67e50cc365a0021e5166536179500e45480ac6a4ccdfec54801e120c899f4d",
+  "nonce": "4ccdc958a10bad3d24d9fb47051ceed5e0677ea6184621afda278c7466c555d5",
   "run_id": "run-1",
   "schema": "clonk-rs/presentation-launcher-receipt/v2"
 }
