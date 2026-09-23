@@ -74,6 +74,9 @@ pub struct Parser<'a> {
     /// Preparser-only diagnostics that do not poison the retained function.
     /// The recovering top-level loop drains these in source order.
     non_fatal_diagnostics: Vec<ParseError>,
+    /// Functions whose head failed but which C4Aul keeps, each with its body's
+    /// error. The recovering top-level loop drains these in source order.
+    kept_functions: Vec<(Function, Option<ParseError>)>,
     /// Active loop bodies in the current function. C4Aul only emits control
     /// flow for `break`/`continue` while a loop parse context exists.
     loop_depth: usize,
@@ -135,6 +138,7 @@ impl<'a> Parser<'a> {
             global_script: false,
             parsing_old_style_function: false,
             non_fatal_diagnostics: Vec::new(),
+            kept_functions: Vec::new(),
             loop_depth: 0,
             hard_inherited_line: None,
             hard_inherited_column: None,
@@ -266,6 +270,10 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            for (function, error) in std::mem::take(&mut self.kept_functions) {
+                functions.push(function);
+                diagnostics.extend(error);
+            }
         }
 
         diagnostics.append(&mut self.non_fatal_diagnostics);
@@ -316,10 +324,16 @@ impl<'a> Parser<'a> {
         self.expect_func_keyword("expected 'func' declaration")?;
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
         let (name, name_token) = self.expect_identifier("expected function name")?;
-        self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
+        // C4Aul creates the function at its name, before it reads the
+        // parameter list, and starts its body there for now
+        // (C4AulParse.cpp:1602-1620).
+        let mut body_start = self.cursor();
         let mut params = Vec::new();
-        self.parse_parameter_list(&mut params)?;
-        self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
+        let parameter_list = (|| {
+            self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
+            self.parse_parameter_list(&mut params, &mut body_start)?;
+            self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")
+        })();
         let head = FunctionHead {
             name,
             source_line: name_token.line.saturating_sub(1),
@@ -327,6 +341,13 @@ impl<'a> Parser<'a> {
             returns_reference,
             params,
         };
+        if let Err(error) = parameter_list {
+            self.keep_function_with_broken_head(head, body_start);
+            return Err(error);
+        }
+        // A closed parameter list moves the body start past its ')'
+        // (C4AulParse.cpp:1633, 1687).
+        let after_parameters = self.cursor();
         // Below #strict 2 a head without '{' is only a warning, and C4Aul
         // compiles its body in legacy mode (C4AulParse.cpp:1698-1704).
         let legacy_body = self.strict_level < 2 && !self.check_symbol(Symbol::LBrace)?;
@@ -336,8 +357,11 @@ impl<'a> Parser<'a> {
                 "'func': expecting opening block ('{') after func declaration",
                 position,
             ));
-        } else {
-            self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
+        } else if let Err(error) =
+            self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")
+        {
+            self.keep_function_with_broken_head(head, after_parameters);
+            return Err(error);
         }
         let body_depth = self.brace_depth;
         self.begin_global_local_tracking(head.access, &head.params);
@@ -435,6 +459,38 @@ impl<'a> Parser<'a> {
             self.new_style_function(head, body, implicit_return, description),
             error,
         ))
+    }
+
+    /// Keeps a function whose head failed, as C4Aul does. The preparser
+    /// reports the error and goes on from it, but the function it created at
+    /// its name stays registered with the parameters read so far. The parser
+    /// pass then compiles the function as a new-style body from `body_start`
+    /// (C4AulParse.cpp:128-129, 1400-1427, 1602-1620). Declarations in that
+    /// stretch belong to the preparser, which the caller's recovery replays.
+    fn keep_function_with_broken_head(&mut self, head: FunctionHead, body_start: ParserCursor<'a>) {
+        let resume = self.cursor();
+        let declarations = self.script_var_decls.len();
+        self.restore_cursor(body_start);
+        self.begin_global_local_tracking(head.access, &head.params);
+        self.parsing_new_style_body = true;
+        self.body_ended_by_declaration = false;
+        let (mut body, error) = self.parse_block_statements_until_error();
+        self.parsing_new_style_body = false;
+        let ended_by_declaration = std::mem::take(&mut self.body_ended_by_declaration);
+        let implicit_return = error.is_none()
+            && !ended_by_declaration
+            && self.check_symbol(Symbol::RBrace).unwrap_or(false);
+        if let Some(error) = &error {
+            body.push(Stmt::ParseError {
+                message: error.message().to_string(),
+                line: error.line(),
+                column: error.column(),
+            });
+        }
+        let function = self.new_style_function(head, body, implicit_return, None);
+        self.script_var_decls.truncate(declarations);
+        self.restore_cursor(resume);
+        self.kept_functions.push((function, error));
     }
 
     /// Builds a function from its head and body. The records its body left
@@ -604,7 +660,11 @@ impl<'a> Parser<'a> {
         result
     }
 
-    fn parse_parameter_list(&mut self, params: &mut Vec<Parameter>) -> Result<(), ParseError> {
+    fn parse_parameter_list(
+        &mut self,
+        params: &mut Vec<Parameter>,
+        body_start: &mut ParserCursor<'a>,
+    ) -> Result<(), ParseError> {
         // C++ advances `cpar` for every comma-delimited declaration even
         // when C4ValueMapNames::AddName deduplicates its name. Do not derive
         // this limit from `params.len()`.
@@ -638,7 +698,9 @@ impl<'a> Parser<'a> {
 
             // `...` ends the parameter list: the function takes anything via
             // Par() and declares no further names (C4AulParse.cpp:1642-1648).
+            // C4Aul moves the body start past it before it matches the ')'.
             if self.consume_if_symbol(Symbol::Ellipsis)?.is_some() {
+                *body_start = self.cursor();
                 break;
             }
 
