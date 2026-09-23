@@ -4,7 +4,7 @@ use crate::ast::{
     VarDecl, VarDeclKind,
 };
 use crate::error::ParseError;
-use crate::lexer::Lexer;
+use crate::lexer::{Lexer, LexerCheckpoint};
 use crate::token::{DiagnosticPosition, Keyword, Symbol, Token, TokenKind};
 use crate::value::Literal;
 
@@ -22,6 +22,26 @@ const MAX_FUNCTION_PARAMETERS: usize = 10;
 /// headroom below the cliff while sitting far above any real script — the
 /// deepest shipped content nests in single digits (clonk-org/clonk-rs#962).
 const MAX_EXPRESSION_DEPTH: usize = 128;
+
+/// The parts of a new-style function declaration that precede its body.
+struct FunctionHead {
+    name: String,
+    /// Zero-based line of the function's name.
+    source_line: usize,
+    access: AccessLevel,
+    returns_reference: bool,
+    params: Vec<Parameter>,
+}
+
+/// Everything that decides which token the parser reads next. Restoring it
+/// rewinds the source the way C4Aul resets its read position `SPos`.
+struct ParserCursor<'a> {
+    lexer: LexerCheckpoint<'a>,
+    peeked: Option<Token>,
+    lookahead_buffer: Vec<Token>,
+    brace_depth: usize,
+    consumed_tokens: usize,
+}
 
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
@@ -54,6 +74,9 @@ pub struct Parser<'a> {
     /// Preparser-only diagnostics that do not poison the retained function.
     /// The recovering top-level loop drains these in source order.
     non_fatal_diagnostics: Vec<ParseError>,
+    /// Functions whose head failed but which C4Aul keeps, each with its body's
+    /// error. The recovering top-level loop drains these in source order.
+    kept_functions: Vec<(Function, Option<ParseError>)>,
     /// Active loop bodies in the current function. C4Aul only emits control
     /// flow for `break`/`continue` while a loop parse context exists.
     loop_depth: usize,
@@ -115,6 +138,7 @@ impl<'a> Parser<'a> {
             global_script: false,
             parsing_old_style_function: false,
             non_fatal_diagnostics: Vec::new(),
+            kept_functions: Vec::new(),
             loop_depth: 0,
             hard_inherited_line: None,
             hard_inherited_column: None,
@@ -246,6 +270,10 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            for (function, error) in std::mem::take(&mut self.kept_functions) {
+                functions.push(function);
+                diagnostics.extend(error);
+            }
         }
 
         diagnostics.append(&mut self.non_fatal_diagnostics);
@@ -296,9 +324,30 @@ impl<'a> Parser<'a> {
         self.expect_func_keyword("expected 'func' declaration")?;
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
         let (name, name_token) = self.expect_identifier("expected function name")?;
-        self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
-        let params = self.parse_parameter_list()?;
-        self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
+        // C4Aul creates the function at its name, before it reads the
+        // parameter list, and starts its body there for now
+        // (C4AulParse.cpp:1602-1620).
+        let mut body_start = self.cursor();
+        let mut params = Vec::new();
+        let parameter_list = (|| {
+            self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
+            self.parse_parameter_list(&mut params, &mut body_start)?;
+            self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")
+        })();
+        let head = FunctionHead {
+            name,
+            source_line: name_token.line.saturating_sub(1),
+            access,
+            returns_reference,
+            params,
+        };
+        if let Err(error) = parameter_list {
+            self.keep_function_with_broken_head(head, body_start);
+            return Err(error);
+        }
+        // A closed parameter list moves the body start past its ')'
+        // (C4AulParse.cpp:1633, 1687).
+        let after_parameters = self.cursor();
         // Below #strict 2 a head without '{' is only a warning, and C4Aul
         // compiles its body in legacy mode (C4AulParse.cpp:1698-1704).
         let legacy_body = self.strict_level < 2 && !self.check_symbol(Symbol::LBrace)?;
@@ -308,11 +357,14 @@ impl<'a> Parser<'a> {
                 "'func': expecting opening block ('{') after func declaration",
                 position,
             ));
-        } else {
-            self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
+        } else if let Err(error) =
+            self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")
+        {
+            self.keep_function_with_broken_head(head, after_parameters);
+            return Err(error);
         }
         let body_depth = self.brace_depth;
-        self.begin_global_local_tracking(access, &params);
+        self.begin_global_local_tracking(head.access, &head.params);
 
         let mut description = None;
         let mut body = Vec::new();
@@ -404,30 +456,74 @@ impl<'a> Parser<'a> {
         }
 
         Ok((
-            Function {
-                name,
-                params,
-                body,
-                access,
-                returns_reference,
-                implicit_return,
-                description,
-                strict_level: None,
-                source_line: name_token.line.saturating_sub(1),
-                source_host: None,
-                source_name: None,
-                global_link_host: None,
-                overloaded: None,
-                hard_inherited_line: self.hard_inherited_line.take(),
-                hard_inherited_column: self.hard_inherited_column.take(),
-                hard_inherited_stmt_index: self.hard_inherited_stmt_index.take(),
-                global_local_candidates: std::mem::take(&mut self.global_local_candidates),
-                global_local_reference: None,
-                compiled: std::sync::OnceLock::new(),
-                resolved_snapshot: std::sync::OnceLock::new(),
-            },
+            self.new_style_function(head, body, implicit_return, description),
             error,
         ))
+    }
+
+    /// Keeps a function whose head failed, as C4Aul does. The preparser
+    /// reports the error and goes on from it, but the function it created at
+    /// its name stays registered with the parameters read so far. The parser
+    /// pass then compiles the function as a new-style body from `body_start`
+    /// (C4AulParse.cpp:128-129, 1400-1427, 1602-1620). Declarations in that
+    /// stretch belong to the preparser, which the caller's recovery replays.
+    fn keep_function_with_broken_head(&mut self, head: FunctionHead, body_start: ParserCursor<'a>) {
+        let resume = self.cursor();
+        let declarations = self.script_var_decls.len();
+        self.restore_cursor(body_start);
+        self.begin_global_local_tracking(head.access, &head.params);
+        self.parsing_new_style_body = true;
+        self.body_ended_by_declaration = false;
+        let (mut body, error) = self.parse_block_statements_until_error();
+        self.parsing_new_style_body = false;
+        let ended_by_declaration = std::mem::take(&mut self.body_ended_by_declaration);
+        let implicit_return = error.is_none()
+            && !ended_by_declaration
+            && self.check_symbol(Symbol::RBrace).unwrap_or(false);
+        if let Some(error) = &error {
+            body.push(Stmt::ParseError {
+                message: error.message().to_string(),
+                line: error.line(),
+                column: error.column(),
+            });
+        }
+        let function = self.new_style_function(head, body, implicit_return, None);
+        self.script_var_decls.truncate(declarations);
+        self.restore_cursor(resume);
+        self.kept_functions.push((function, error));
+    }
+
+    /// Builds a function from its head and body. The records its body left
+    /// for the link-time checks move from the parser into the function.
+    fn new_style_function(
+        &mut self,
+        head: FunctionHead,
+        body: Vec<Stmt>,
+        implicit_return: bool,
+        description: Option<String>,
+    ) -> Function {
+        Function {
+            name: head.name,
+            params: head.params,
+            body,
+            access: head.access,
+            returns_reference: head.returns_reference,
+            implicit_return,
+            description,
+            strict_level: None,
+            source_line: head.source_line,
+            source_host: None,
+            source_name: None,
+            global_link_host: None,
+            overloaded: None,
+            hard_inherited_line: self.hard_inherited_line.take(),
+            hard_inherited_column: self.hard_inherited_column.take(),
+            hard_inherited_stmt_index: self.hard_inherited_stmt_index.take(),
+            global_local_candidates: std::mem::take(&mut self.global_local_candidates),
+            global_local_reference: None,
+            compiled: std::sync::OnceLock::new(),
+            resolved_snapshot: std::sync::OnceLock::new(),
+        }
     }
 
     /// Start a function body's bookkeeping for the named-`local` check. Only a
@@ -564,14 +660,17 @@ impl<'a> Parser<'a> {
         result
     }
 
-    fn parse_parameter_list(&mut self) -> Result<Vec<Parameter>, ParseError> {
-        let mut params = Vec::new();
+    fn parse_parameter_list(
+        &mut self,
+        params: &mut Vec<Parameter>,
+        body_start: &mut ParserCursor<'a>,
+    ) -> Result<(), ParseError> {
         // C++ advances `cpar` for every comma-delimited declaration even
         // when C4ValueMapNames::AddName deduplicates its name. Do not derive
         // this limit from `params.len()`.
         let mut syntactic_parameter_count = 0;
         if self.check_symbol(Symbol::RParen)? {
-            return Ok(params);
+            return Ok(());
         }
         loop {
             // C++ checks ')' before the cap on every iteration. Besides the
@@ -599,7 +698,9 @@ impl<'a> Parser<'a> {
 
             // `...` ends the parameter list: the function takes anything via
             // Par() and declares no further names (C4AulParse.cpp:1642-1648).
+            // C4Aul moves the body start past it before it matches the ')'.
             if self.consume_if_symbol(Symbol::Ellipsis)?.is_some() {
+                *body_start = self.cursor();
                 break;
             }
 
@@ -704,7 +805,7 @@ impl<'a> Parser<'a> {
             }
             break;
         }
-        Ok(params)
+        Ok(())
     }
 
     fn reject_parameter_disabled_operator(&mut self) -> Result<(), ParseError> {
@@ -1135,11 +1236,7 @@ impl<'a> Parser<'a> {
             self.speculative_tokens.is_none(),
             "statement lookahead cannot nest inside speculative parsing"
         );
-        let lexer_checkpoint = self.lexer.checkpoint();
-        let peeked = self.peeked.clone();
-        let lookahead_buffer = self.lookahead_buffer.clone();
-        let brace_depth = self.brace_depth;
-        let consumed_tokens = self.consumed_tokens;
+        let cursor = self.cursor();
 
         let result = (|| {
             self.expect_symbol(Symbol::LBrace, "expected '{' to probe statement")?;
@@ -1165,18 +1262,32 @@ impl<'a> Parser<'a> {
         })();
 
         if result.is_ok() {
-            self.lexer.restore(lexer_checkpoint);
-            self.peeked = peeked;
-            self.lookahead_buffer = lookahead_buffer;
-            self.brace_depth = brace_depth;
-            self.consumed_tokens = consumed_tokens;
+            self.restore_cursor(cursor);
         } else {
             // An exception bypasses C++ IsMapLiteral's `SPos = SPos0`.
             // Preserve that forward progress for recovery, but still honor
             // the lookahead's Discard policy for strings scanned before it.
-            self.lexer.finish_failed_discard_scan(lexer_checkpoint);
+            self.lexer.finish_failed_discard_scan(cursor.lexer);
         }
         result
+    }
+
+    fn cursor(&self) -> ParserCursor<'a> {
+        ParserCursor {
+            lexer: self.lexer.checkpoint(),
+            peeked: self.peeked.clone(),
+            lookahead_buffer: self.lookahead_buffer.clone(),
+            brace_depth: self.brace_depth,
+            consumed_tokens: self.consumed_tokens,
+        }
+    }
+
+    fn restore_cursor(&mut self, cursor: ParserCursor<'a>) {
+        self.lexer.restore(cursor.lexer);
+        self.peeked = cursor.peeked;
+        self.lookahead_buffer = cursor.lookahead_buffer;
+        self.brace_depth = cursor.brace_depth;
+        self.consumed_tokens = cursor.consumed_tokens;
     }
 
     /// `SkipBlock<closingAtt>` from the C++ lookahead: nested groups recurse,

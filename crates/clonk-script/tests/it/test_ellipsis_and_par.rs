@@ -18,7 +18,10 @@ run_cases! {
 #[test]
 fn function_declaration_rejects_eleventh_parameter() {
     // The limit is a direct parse error at every strictness level
-    // (C4AulParse.cpp:1624-1640), not a call-time truncation rule.
+    // (C4AulParse.cpp:1624-1640), not a call-time truncation rule. C4Aul has
+    // already created the function when it throws (C4AulParse.cpp:1602-1620),
+    // so the function stays: the pinned oracle's `GameCall("TooMany")` on this
+    // script throws its syntax error instead of finding nothing.
     for strict_prefix in ["", "#strict 3\n"] {
         let source = format!(
             "{strict_prefix}func TooMany(a, b, c, d, e, f, g, h, i, j, k) {{ return 1; }}\n\
@@ -33,8 +36,8 @@ fn function_declaration_rejects_eleventh_parameter() {
             script.parse_diagnostics()
         );
         assert!(
-            !script.functions().contains_key("TooMany"),
-            "the rejected declaration must not be registered"
+            script.functions().contains_key("TooMany"),
+            "a function whose parameter list fails is kept"
         );
         assert!(
             script.functions().contains_key("Healthy"),

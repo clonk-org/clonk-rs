@@ -15,6 +15,7 @@ mod test_assignment_in_unary;
 mod test_body_declarations;
 mod test_braceless_if_assignment;
 mod test_braceless_if_spacing;
+mod test_broken_function_head;
 mod test_c4id_scope_resolution;
 mod test_call_depth;
 mod test_call_with_ref_args;
