@@ -1595,8 +1595,9 @@ fn chart_hide_restores_projected_message_instead_of_inactive_chat() {
 }
 
 #[test]
-fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
+fn classic_running_chat_multiline_paste_submits_lines_and_retains_final_text() {
     let mut app = new_running_sandbox_app();
+    app.chat.enhanced_preferences.enabled = false;
     install_message_fixture(&mut app);
     app.snapshot = app.engine.snapshot();
     let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
@@ -1646,8 +1647,9 @@ fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
 }
 
 #[test]
-fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() {
+fn classic_running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() {
     let mut app = new_running_sandbox_app();
+    app.chat.enhanced_preferences.enabled = false;
     app.chat.input_history.push_front("history".to_string());
     app.start_running_chat(RunningChatMode::All);
     for character in "long text ".repeat(100).chars() {
@@ -2037,6 +2039,8 @@ fn enhanced_chat_transcript_preserves_metadata_after_recipient_filtering() {
     let mut app = new_state_only_running_sandbox_app();
     install_message_fixture(&mut app);
     app.chat.enhanced_preferences.enabled = true;
+    // Isolate recipient checks from the startup log now captured by default.
+    app.chat.enhanced.clear_messages();
     app.execute_message_control(message_control(
         MESSAGE_TYPE_PRIVATE,
         7,
@@ -2281,4 +2285,31 @@ fn enhanced_chat_records_the_same_raw_control_sequence_as_classic_chat() {
         app.records.session.as_ref().test_value().writer.bytes()[before..].to_vec()
     };
     main_assert_eq!(recorded(true, "enhanced.c4s") => recorded(false, "classic.c4s"));
+}
+
+#[test]
+fn running_chat_defaults_to_enhanced_and_respects_the_compatibility_profile() {
+    use crate::settings::CompatProfile;
+    let mut app = new_running_sandbox_app();
+    app.start_running_chat(RunningChatMode::All);
+    main_assert!(app.enhanced_chat_active());
+    main_assert_eq!(
+        app.game_option_input_layout().test_value().edit =>
+        app.enhanced_chat_layout(true).test_value().edit
+    );
+    app.close_running_chat().test_value();
+
+    let command_line = ClassicCommandLine::default();
+    app.apply_classic_command_line_with_profile(&command_line, CompatProfile::LegacyClonk)
+        .test_value();
+    main_assert!(!app.chat.enhanced_preferences.enabled);
+    app.start_running_chat(RunningChatMode::All);
+    main_assert!(!app.enhanced_chat_active());
+    app.close_running_chat().test_value();
+    app.synchronize_advanced_options_runtime();
+    main_assert!(!app.chat.enhanced_preferences.enabled);
+
+    app.apply_classic_command_line_with_profile(&command_line, CompatProfile::Normal)
+        .test_value();
+    main_assert!(app.chat.enhanced_preferences.enabled);
 }

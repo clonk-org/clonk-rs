@@ -13465,6 +13465,8 @@ fn debug_key_gates_remaps_and_native_priority_body() {
         b"[Keys]\nDbgModeToggle=Return\n",
         "parse chat/debug collision",
     );
+    // Pin the native empty-submit dismissal as well as key priority.
+    chat_priority.chat.enhanced_preferences.enabled = false;
     chat_priority.start_running_chat(RunningChatMode::All);
     chat_priority.test_key(VirtualKeyCode::Enter, ElementState::Pressed);
     main_assert!(!chat_priority.engine.debug_mode());

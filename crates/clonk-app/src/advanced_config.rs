@@ -779,7 +779,7 @@ pub fn sections_with_voice_input_devices(
     sections.push(AdvancedConfigSection::new(
         "Chat",
         vec![
-            bool_row(config, "Chat", "Enhanced", false),
+            bool_row(config, "Chat", "Enhanced", true),
             int_row(config, "Chat", "TextSize", 1, 0, 2),
             int_row(config, "Chat", "Opacity", 85, 40, 100),
             int_row(config, "Chat", "Duration", 12, 3, 60),

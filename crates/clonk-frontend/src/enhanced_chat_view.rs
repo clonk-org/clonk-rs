@@ -1,4 +1,4 @@
-//! Layout and rendering for the optional in-game conversation panel.
+//! Layout and rendering for the in-game conversation panel.
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ pub struct ChatPreferences {
 impl Default for ChatPreferences {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             text_size: 1,
             opacity: 85,
             duration_seconds: 12,

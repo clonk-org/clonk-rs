@@ -4324,6 +4324,8 @@ fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                    }"#,
     );
+    // Keep the native compact geometry so the scoreboard body is exposed.
+    app.chat.enhanced_preferences.enabled = false;
     toggle_scoreboard(&mut app, ModifiersState::empty());
     app.start_running_chat(RunningChatMode::All);
     main_assert!(app.running_chat_active());
@@ -4363,6 +4365,8 @@ fn activated_chat_under_list_top_scoreboard_does_not_gain_keyboard_focus() {
                        SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                    }"#,
     );
+    // Keep the native compact geometry so the scoreboard body is exposed.
+    app.chat.enhanced_preferences.enabled = false;
     toggle_scoreboard(&mut app, ModifiersState::empty());
     app.start_running_chat(RunningChatMode::All);
 

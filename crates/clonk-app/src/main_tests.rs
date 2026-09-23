@@ -2616,6 +2616,8 @@ fn new_classic_running_sandbox_app() -> GameApp {
         SandboxFixtureAssets::Classic,
     );
     apply_test_post_migration_renderer_config(&mut app);
+    // Native presentation contracts select the classic chat layout explicitly.
+    app.chat.enhanced_preferences.enabled = false;
     app
 }
 

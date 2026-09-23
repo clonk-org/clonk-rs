@@ -1,4 +1,4 @@
-//! Optional chat presentation. Messages still use the classic control path.
+//! Chat presentation. Messages still use the classic control path.
 
 use super::*;
 use clonk_frontend::enhanced_chat::{ChatAudience, ChatChannel, ChatMessage, EnhancedChat};

@@ -1437,7 +1437,8 @@ impl GameApp {
         self.rendering.display_flags.is_fullscreen = is_fullscreen;
         self.lobby.white_chat = load_white_lobby_chat(paths);
         self.chat.show_log_timestamps = load_show_log_timestamps(paths);
-        self.chat.enhanced_preferences = settings::load_enhanced_chat_preferences(paths);
+        self.chat.enhanced_preferences =
+            settings::load_enhanced_chat_preferences(paths, self.config.compat_profile);
         self.config.show_folder_maps = load_show_folder_maps(paths);
         self.lobby.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
         let native_config = load_native_config_bytes(paths);

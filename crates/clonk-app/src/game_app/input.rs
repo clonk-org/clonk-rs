@@ -5284,6 +5284,12 @@ impl GameApp {
     pub(crate) fn store_message_input_history(&mut self, text: &str) {
         if self.enhanced_chat_active() {
             self.chat.enhanced.remember_sent(text);
+        } else {
+            // Keep shared lobby/classic history available without changing the
+            // enhanced composer's selected recipient or that recipient's history.
+            self.chat
+                .enhanced
+                .remember_sent_for(clonk_frontend::enhanced_chat::ChatAudience::Everyone, text);
         }
         if text.is_empty() {
             return;
