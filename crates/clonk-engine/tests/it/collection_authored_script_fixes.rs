@@ -865,3 +865,73 @@ fn an_abwaerts_clonk_is_drawn_from_the_sheet_its_actions_are_cut_for() {
         }
     }
 }
+
+/// Asks the Races rope for the `LineBreak` a breaking line calls. `Par(0)` 1
+/// skips the base rope's break message.
+const ROPE_BREAK_PROBE: &str = r#"#strict
+public func Break() { return DefinitionCall(171E, "LineBreak", 1); }
+"#;
+
+/// clonk-org/clonk-rs-content#121: the Races rope pack's `Rope.c4d` (`171E`)
+/// ended with `LineBr eak: return(0);`. C4Aul reads `LineBr` as an old-style
+/// function name and stops at `eak`, so the rope never overrode the
+/// `LineBreak` it includes from `1E1E`, which plays the break sound, shows
+/// the break message and answers 1. The override answers 0 now.
+#[test]
+fn a_race_rope_overrides_the_line_break_it_includes() {
+    let mut engine = load_installed_scenario("Collection.c4f/Races.c4f/AbwaertsExtremTeam2.c4s", 0);
+    engine
+        .register_script_definition("RBPR", "Rope break probe", ROPE_BREAK_PROBE)
+        .expect("the probe registers");
+    let probe = engine.spawn_test_object(SpawnConfig::new("RBPR"));
+    let index = engine.test_object_index(probe);
+
+    let answer = engine
+        .call_object_function(index, "Break", Vec::new())
+        .expect("the rope answers");
+    assert_eq!(answer.as_c4_int(), Some(0));
+}
+
+/// Asks the settlement goal about a player whose team account is gone, as
+/// the goal check does while a player is still choosing a team.
+const ACCOUNTLESS_GOAL_PROBE: &str = r#"#strict
+public func Ask(int player, object goal)
+{
+    RemoveObject(FindObjectOwner(ACNT, player));
+    return goal->IsFulfilledforPlr(player);
+}
+"#;
+
+/// clonk-org/clonk-rs-content#121: both settlement feasts' `Value.c4d` goal
+/// asked `FindObjectOwner(ACNT, player)` for the player's team account and
+/// called it unchecked. A player choosing a team already counts in
+/// `GetPlayerCount` (C4PlayerList.cpp:172-178) but gets its account only from
+/// `TACC`'s `InitializePlayer`, so every goal check failed with a zero call
+/// target until then. The goal checks for the account first now, as its own
+/// `AllPlayersHaveValue` does.
+#[test]
+fn a_settlement_goal_answers_for_a_player_without_an_account() {
+    for path in [
+        "Collection.c4f/BaseMelees.c4f/ClassicMelees.c4f/GrantSettlingFeast.c4s",
+        "Collection.c4f/BaseMelees.c4f/ClassicMelees.c4f/LittleSettlingFeast.c4s",
+    ] {
+        let mut engine = load_installed_scenario(path, 0);
+        let player = join_local_player_on_team(&mut engine, "Settler", 1);
+        let goal = object_with_definition(&engine, "VALG").expect("the scenario sets the goal");
+        engine
+            .register_script_definition("VGPR", "Settlement goal probe", ACCOUNTLESS_GOAL_PROBE)
+            .expect("the probe registers");
+        let probe = engine.spawn_test_object(SpawnConfig::new("VGPR"));
+        let index = engine.test_object_index(probe);
+
+        let answer = engine
+            .call_object_function(
+                index,
+                "Ask",
+                vec![Value::Int(player), Value::Object(goal.as_u64())],
+            )
+            .unwrap_or_else(|error| panic!("{path}: the goal answers: {error}"));
+        // The new player has gained no value yet.
+        assert_eq!(answer.as_c4_int().unwrap_or(0), 0, "{path}");
+    }
+}

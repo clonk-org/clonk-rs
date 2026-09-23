@@ -5,7 +5,7 @@
   },
   "case_id": "startup-main",
   "comparator": {
-    "binary_sha256": "3036be529bfb70600ada9bbafa7e653a5fcb883a7a8b724ac2af658ae762efd6",
+    "binary_sha256": "196b0bcc29878c5ee9c43a62b6146aecf0633b713889a21e38f0bbf3e09aec31",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",
