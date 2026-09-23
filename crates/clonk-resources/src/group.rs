@@ -80,6 +80,12 @@ enum PackedSource {
         data: Arc<Vec<u8>>,
         range: Range<usize>,
     },
+    /// A compressed image, inflated only as far as reads reach. A root spans
+    /// `0..usize::MAX` until its stream ends; a child spans its own entry.
+    Inflating {
+        image: Arc<InflatingImage>,
+        range: Range<usize>,
+    },
 }
 
 impl PackedSource {
@@ -93,7 +99,7 @@ impl PackedSource {
 
     fn memory_slice(&self) -> Option<&[u8]> {
         match self {
-            Self::File(_) => None,
+            Self::File(_) | Self::Inflating { .. } => None,
             Self::Memory { data, range } => data.get(range.clone()),
         }
     }
@@ -108,6 +114,360 @@ impl PackedSource {
                 range,
             })
         }
+    }
+}
+
+/// Output the stream inflates at a time while a read is still short.
+const INFLATE_CHUNK_BYTES: usize = 256 * 1024;
+/// Compressed bytes read from a group's file at a time.
+const COMPRESSED_CHUNK_BYTES: usize = 256 * 1024;
+/// Unread compressed bytes to have in hand before parsing a gzip member header.
+const GZIP_HEADER_READAHEAD_BYTES: usize = 64 * 1024;
+
+/// A packed group's image, inflated off its gzip stream only as far as reads
+/// reach. C4Group reads a packed group front to back the same way: opening it
+/// reads the header and the entry table (C4Group.cpp:762-797), and reading an
+/// entry advances the stream to that entry (C4Group.cpp:1245-1261). Scenario
+/// discovery, which reads a few leading entries of every group, therefore
+/// inflates only the start of each image.
+struct InflatingImage {
+    state: std::sync::Mutex<InflateState>,
+    /// The whole image once the stream has been read to its end; reads are
+    /// then borrowed from it without the lock.
+    complete: std::sync::OnceLock<Arc<Vec<u8>>>,
+}
+
+impl std::fmt::Debug for InflatingImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InflatingImage")
+            .field("complete", &self.complete.get().map(|image| image.len()))
+            .finish_non_exhaustive()
+    }
+}
+
+struct InflateState {
+    /// Compressed bytes in hand; those before `input` are already inflated.
+    compressed: Vec<u8>,
+    /// The next compressed byte to read.
+    input: usize,
+    /// The rest of a file-backed stream, read a chunk at a time so a group
+    /// holds only the compressed bytes it has yet to inflate. `None` once the
+    /// file is exhausted, and for a stream given whole in memory.
+    file: Option<File>,
+    /// The gzip member being inflated, if one is open.
+    member: Option<GzipMember>,
+    output: Vec<u8>,
+    /// Where the image ends, once its entry table has been read.
+    expected_len: Option<usize>,
+    /// A damaged stream cannot be read past; every later read reports it.
+    failure: Option<String>,
+}
+
+struct GzipMember {
+    inflater: flate2::Decompress,
+    /// Where this member's output starts, for its trailer's checksum.
+    output_start: usize,
+}
+
+impl InflatingImage {
+    fn new(compressed: Vec<u8>) -> Self {
+        Self::with_input(compressed, None)
+    }
+
+    /// Inflates the gzip stream `file` holds from its current position.
+    fn from_file(file: File) -> Self {
+        Self::with_input(Vec::new(), Some(file))
+    }
+
+    fn with_input(compressed: Vec<u8>, file: Option<File>) -> Self {
+        Self {
+            state: std::sync::Mutex::new(InflateState {
+                compressed,
+                input: 0,
+                file,
+                member: None,
+                output: Vec::new(),
+                expected_len: None,
+                failure: None,
+            }),
+            complete: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, InflateState>, GroupError> {
+        self.state
+            .lock()
+            .map_err(|_| GroupError::InvalidGroup("group decompression state is poisoned".into()))
+    }
+
+    /// Records where the image ends, so a read reaching it finishes the stream.
+    fn set_expected_len(&self, len: usize) -> Result<(), GroupError> {
+        self.lock()?.expected_len = Some(len);
+        Ok(())
+    }
+
+    /// Bytes `range` of the image, inflating the stream up to `range.end`.
+    fn bytes(&self, range: Range<usize>) -> Result<Cow<'_, [u8]>, GroupError> {
+        let exceeds = || GroupError::InvalidGroup("entry exceeds group bounds".into());
+        if let Some(image) = self.complete.get() {
+            return image.get(range).map(Cow::Borrowed).ok_or_else(exceeds);
+        }
+        let mut state = self.lock()?;
+        if let Some(image) = self.complete.get() {
+            return image.get(range).map(Cow::Borrowed).ok_or_else(exceeds);
+        }
+        let reaches_end = state.expected_len.is_some_and(|len| range.end >= len);
+        state.inflate_to(if reaches_end { usize::MAX } else { range.end })?;
+        if state.at_end() {
+            let image = self.finish(&mut state);
+            return image.get(range).map(Cow::Borrowed).ok_or_else(exceeds);
+        }
+        state
+            .output
+            .get(range)
+            .map(|bytes| Cow::Owned(bytes.to_vec()))
+            .ok_or_else(exceeds)
+    }
+
+    /// Up to `range.len()` bytes from `range.start`, fewer where the image ends.
+    fn available(&self, range: Range<usize>) -> Result<Vec<u8>, GroupError> {
+        if let Some(image) = self.complete.get() {
+            let end = range.end.min(image.len());
+            return Ok(image
+                .get(range.start.min(end)..end)
+                .unwrap_or_default()
+                .to_vec());
+        }
+        let mut state = self.lock()?;
+        state.inflate_to(range.end)?;
+        let end = range.end.min(state.output.len());
+        Ok(state.output[range.start.min(end)..end].to_vec())
+    }
+
+    /// The whole image.
+    fn all(&self) -> Result<&Arc<Vec<u8>>, GroupError> {
+        if let Some(image) = self.complete.get() {
+            return Ok(image);
+        }
+        let mut state = self.lock()?;
+        if let Some(image) = self.complete.get() {
+            return Ok(image);
+        }
+        state.inflate_to(usize::MAX)?;
+        Ok(self.finish(&mut state))
+    }
+
+    fn finish(&self, state: &mut InflateState) -> &Arc<Vec<u8>> {
+        let output = std::mem::take(&mut state.output);
+        state.compressed = Vec::new();
+        state.input = 0;
+        state.file = None;
+        self.complete.get_or_init(|| Arc::new(output))
+    }
+}
+
+impl InflateState {
+    fn at_end(&self) -> bool {
+        self.member.is_none() && self.input >= self.compressed.len() && self.file.is_none()
+    }
+
+    fn unread(&self) -> usize {
+        self.compressed.len() - self.input
+    }
+
+    /// Has at least `wanted` unread compressed bytes in hand where the stream
+    /// holds that many, reading its file on demand. Input already inflated is
+    /// dropped first: a raw deflate stream refers back only into its output.
+    fn fill_input(&mut self, wanted: usize) -> Result<(), GroupError> {
+        while self.unread() < wanted {
+            let Some(file) = self.file.as_mut() else {
+                return Ok(());
+            };
+            if self.input > 0 {
+                self.compressed.drain(..self.input);
+                self.input = 0;
+            }
+            let start = self.compressed.len();
+            self.compressed.resize(start + COMPRESSED_CHUNK_BYTES, 0);
+            let read = file.read(&mut self.compressed[start..]);
+            let read = read.inspect_err(|_| self.compressed.truncate(start))?;
+            self.compressed.truncate(start + read);
+            if read == 0 {
+                self.file = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn inflate_to(&mut self, end: usize) -> Result<(), GroupError> {
+        if self.output.len() >= end {
+            return Ok(());
+        }
+        if let Some(failure) = &self.failure {
+            return Err(GroupError::InvalidGroup(failure.clone()));
+        }
+        self.try_inflate_to(end).inspect_err(|error| {
+            if let GroupError::InvalidGroup(message) = error {
+                self.failure = Some(message.clone());
+            }
+        })
+    }
+
+    fn try_inflate_to(&mut self, end: usize) -> Result<(), GroupError> {
+        let invalid = |detail: String| {
+            GroupError::InvalidGroup(format!("gzip decompression failed: {detail}"))
+        };
+        while self.output.len() < end {
+            if self.member.is_none() {
+                self.fill_input(GZIP_HEADER_READAHEAD_BYTES)?;
+                if self.unread() == 0 {
+                    return Ok(());
+                }
+                let header_len = gzip_member_header_len(&self.compressed[self.input..])
+                    .ok_or_else(|| invalid("invalid gzip header".into()))?;
+                self.input += header_len;
+                self.member = Some(GzipMember {
+                    inflater: flate2::Decompress::new(false),
+                    output_start: self.output.len(),
+                });
+            }
+            if self.unread() == 0 {
+                self.fill_input(1)?;
+            }
+            let wanted = end
+                .saturating_sub(self.output.len())
+                .min(INFLATE_CHUNK_BYTES);
+            self.output.reserve(wanted.max(1));
+            let (status, consumed, produced) = {
+                let Some(member) = self.member.as_mut() else {
+                    continue;
+                };
+                let before_in = member.inflater.total_in();
+                let before_out = self.output.len();
+                let status = member
+                    .inflater
+                    .decompress_vec(
+                        &self.compressed[self.input..],
+                        &mut self.output,
+                        flate2::FlushDecompress::None,
+                    )
+                    .map_err(|error| invalid(error.to_string()))?;
+                let consumed = usize::try_from(member.inflater.total_in() - before_in)
+                    .map_err(|_| invalid("oversized deflate step".into()))?;
+                (status, consumed, self.output.len() - before_out)
+            };
+            self.input += consumed;
+            match status {
+                flate2::Status::StreamEnd => self.close_member()?,
+                flate2::Status::Ok | flate2::Status::BufError if consumed == 0 && produced == 0 => {
+                    // The deflate block needs more input than is in hand.
+                    if self.file.is_none() {
+                        return Err(invalid("incomplete deflate stream".into()));
+                    }
+                    self.fill_input(self.unread() + COMPRESSED_CHUNK_BYTES)?;
+                }
+                flate2::Status::Ok | flate2::Status::BufError => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks the finished member's trailer, as the eager decoder did.
+    fn close_member(&mut self) -> Result<(), GroupError> {
+        let invalid =
+            |detail: &str| GroupError::InvalidGroup(format!("gzip decompression failed: {detail}"));
+        let member = self
+            .member
+            .take()
+            .ok_or_else(|| invalid("no open gzip member"))?;
+        self.fill_input(8)?;
+        let trailer = self
+            .compressed
+            .get(self.input..self.input + 8)
+            .ok_or_else(|| invalid("incomplete gzip trailer"))?;
+        let stored_crc = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+        let stored_len = u32::from_le_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);
+        let mut crc = flate2::Crc::new();
+        crc.update(&self.output[member.output_start..]);
+        if crc.sum() != stored_crc || crc.amount() != stored_len {
+            return Err(invalid(
+                "corrupt gzip stream does not have a matching checksum",
+            ));
+        }
+        self.input += 8;
+        Ok(())
+    }
+}
+
+/// The length of the gzip member header at the start of `bytes`, which may
+/// carry C4Group's scrambled magic (StdGzCompressedFile.cpp:62-95).
+fn gzip_member_header_len(bytes: &[u8]) -> Option<usize> {
+    const FHCRC: u8 = 0x02;
+    const FEXTRA: u8 = 0x04;
+    const FNAME: u8 = 0x08;
+    const FCOMMENT: u8 = 0x10;
+    let fixed = bytes.get(..10)?;
+    if (fixed[..2] != C4GROUP_GZ_MAGIC && fixed[..2] != GZ_MAGIC) || fixed[2] != 8 {
+        return None;
+    }
+    let flags = fixed[3];
+    let mut len = 10;
+    if flags & FEXTRA != 0 {
+        let extra = bytes.get(len..len + 2)?;
+        len += 2 + usize::from(u16::from_le_bytes([extra[0], extra[1]]));
+    }
+    for flag in [FNAME, FCOMMENT] {
+        if flags & flag != 0 {
+            len += bytes.get(len..)?.iter().position(|&byte| byte == 0)? + 1;
+        }
+    }
+    if flags & FHCRC != 0 {
+        len += 2;
+    }
+    (len <= bytes.len()).then_some(len)
+}
+
+/// Reads a range of an inflating image, inflating as it goes, so the entry
+/// table parser can read a compressed group without inflating all of it.
+struct InflatingReader<'a> {
+    image: &'a InflatingImage,
+    range: Range<usize>,
+    position: usize,
+}
+
+impl Read for InflatingReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let start = self.range.start.saturating_add(self.position);
+        let end = start.saturating_add(buffer.len()).min(self.range.end);
+        if start >= end {
+            return Ok(0);
+        }
+        let bytes = self.image.available(start..end).map_err(io::Error::other)?;
+        buffer[..bytes.len()].copy_from_slice(&bytes);
+        self.position += bytes.len();
+        Ok(bytes.len())
+    }
+}
+
+impl Seek for InflatingReader<'_> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let target = match position {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::Current(delta) => (self.position as u64).checked_add_signed(delta),
+            SeekFrom::End(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "an inflating group image has no known end",
+                ))
+            }
+        }
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "seek before the image start")
+        })?;
+        self.position = usize::try_from(target)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "seek beyond the image"))?;
+        Ok(target)
     }
 }
 
@@ -490,7 +850,7 @@ impl Group {
                 if path.is_dir() {
                     Self::open_with_directory_index(&path, directory.is_indexed())
                 } else {
-                    Self::from_child_bytes(path.clone(), fs::read(path)?)
+                    Self::from_child_file(path)
                 }
             }
             GroupKind::Packed(packed) => packed.open_child_by_name(&entry.name_bytes),
@@ -504,7 +864,7 @@ impl Group {
                 if path.is_dir() {
                     Self::open_with_directory_index(&path, directory.is_indexed())
                 } else {
-                    Self::from_child_bytes(path.clone(), fs::read(path)?)
+                    Self::from_child_file(path)
                 }
             }
             GroupKind::Packed(packed) => packed.open_child(relative),
@@ -585,6 +945,25 @@ impl Group {
 
     fn from_child_bytes(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
         let packed = PackedGroup::from_child_memory(path, data)?;
+        Ok(Self {
+            kind: GroupKind::Packed(packed),
+        })
+    }
+
+    /// A packed child file of a directory group. A compressed one streams from
+    /// its file as it is read, rather than being read and inflated whole.
+    fn from_child_file(path: PathBuf) -> Result<Self, GroupError> {
+        let mut file = File::open(&path)?;
+        let mut magic = [0u8; 2];
+        let compressed = file.read_exact(&mut magic).is_ok() && is_compressed_group(&magic);
+        file.seek(SeekFrom::Start(0))?;
+        if !compressed {
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)?;
+            return Self::from_child_bytes(path, data);
+        }
+        let packed =
+            PackedGroup::from_compressed_file(path, file, PackedEntryNamePolicy::ChildBasename)?;
         Ok(Self {
             kind: GroupKind::Packed(packed),
         })
@@ -816,6 +1195,9 @@ impl PackedGroup {
     }
 
     fn from_raw_source(path: PathBuf, source: PackedSource) -> Result<Self, GroupError> {
+        if matches!(source, PackedSource::Inflating { .. }) {
+            return Self::parse_inflating(path, source, PackedEntryNamePolicy::ChildBasename);
+        }
         let reader_source = source.clone();
         let data = reader_source.memory_slice().ok_or_else(|| {
             GroupError::InvalidGroup("raw memory group has no memory source".into())
@@ -829,11 +1211,56 @@ impl PackedGroup {
         )
     }
 
-    fn from_child_memory(path: PathBuf, mut data: Vec<u8>) -> Result<Self, GroupError> {
-        if data.len() >= 2 && (data[..2] == C4GROUP_GZ_MAGIC || data[..2] == GZ_MAGIC) {
-            data = decompress_group(data)?;
+    fn from_child_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        if is_compressed_group(&data) {
+            return Self::from_compressed(path, data, PackedEntryNamePolicy::ChildBasename);
         }
         Self::from_raw_memory(path, data)
+    }
+
+    fn from_compressed(
+        path: PathBuf,
+        compressed: Vec<u8>,
+        entry_name_policy: PackedEntryNamePolicy,
+    ) -> Result<Self, GroupError> {
+        Self::from_inflating_image(path, InflatingImage::new(compressed), entry_name_policy)
+    }
+
+    fn from_compressed_file(
+        path: PathBuf,
+        file: File,
+        entry_name_policy: PackedEntryNamePolicy,
+    ) -> Result<Self, GroupError> {
+        Self::from_inflating_image(path, InflatingImage::from_file(file), entry_name_policy)
+    }
+
+    /// Opens a gzip-wrapped group image without inflating it: only the header
+    /// and the entry table are read now, and entries as they are read.
+    fn from_inflating_image(
+        path: PathBuf,
+        image: InflatingImage,
+        entry_name_policy: PackedEntryNamePolicy,
+    ) -> Result<Self, GroupError> {
+        let image = Arc::new(image);
+        let group = Self::parse_inflating(
+            path,
+            PackedSource::Inflating {
+                image: Arc::clone(&image),
+                range: 0..usize::MAX,
+            },
+            entry_name_policy,
+        )?;
+        let image_len = group
+            .entries
+            .iter()
+            .map(|entry| entry.offset.saturating_add(entry.size))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(group.data_offset);
+        if let Ok(image_len) = usize::try_from(image_len) {
+            image.set_expected_len(image_len)?;
+        }
+        Ok(group)
     }
 
     fn from_source(path: PathBuf, source: PackedSource) -> Result<Self, GroupError> {
@@ -845,21 +1272,9 @@ impl PackedGroup {
                     && (magic == C4GROUP_GZ_MAGIC || magic == GZ_MAGIC);
                 file.seek(SeekFrom::Start(0))?;
                 if is_compressed {
-                    let mut compressed = Vec::new();
-                    file.read_to_end(&mut compressed)?;
-                    let data = decompress_group(compressed)?;
-                    let source = PackedSource::from_memory(data);
-                    let reader_source = source.clone();
-                    let mut cursor =
-                        Cursor::new(reader_source.memory_slice().ok_or_else(|| {
-                            GroupError::InvalidGroup(
-                                "decompressed group has no memory source".into(),
-                            )
-                        })?);
-                    return Self::parse_from_reader(
+                    return Self::from_compressed_file(
                         path,
-                        source,
-                        &mut cursor,
+                        file,
                         PackedEntryNamePolicy::RootValidated,
                     );
                 }
@@ -874,25 +1289,47 @@ impl PackedGroup {
                 let bytes = memory.memory_slice().ok_or_else(|| {
                     GroupError::InvalidGroup("memory group has invalid bounds".into())
                 })?;
-                let source = if bytes.len() >= 2
-                    && (bytes[..2] == C4GROUP_GZ_MAGIC || bytes[..2] == GZ_MAGIC)
-                {
-                    PackedSource::from_memory(decompress_group(bytes.to_vec())?)
-                } else {
-                    memory
-                };
-                let reader_source = source.clone();
+                if is_compressed_group(bytes) {
+                    return Self::from_compressed(
+                        path,
+                        bytes.to_vec(),
+                        PackedEntryNamePolicy::RootValidated,
+                    );
+                }
+                let reader_source = memory.clone();
                 let mut cursor = Cursor::new(reader_source.memory_slice().ok_or_else(|| {
                     GroupError::InvalidGroup("memory group has invalid bounds".into())
                 })?);
                 Self::parse_from_reader(
                     path,
-                    source,
+                    memory,
                     &mut cursor,
                     PackedEntryNamePolicy::RootValidated,
                 )
             }
+            inflating @ PackedSource::Inflating { .. } => {
+                Self::parse_inflating(path, inflating, PackedEntryNamePolicy::RootValidated)
+            }
         }
+    }
+
+    fn parse_inflating(
+        path: PathBuf,
+        source: PackedSource,
+        entry_name_policy: PackedEntryNamePolicy,
+    ) -> Result<Self, GroupError> {
+        let PackedSource::Inflating { image, range } = &source else {
+            return Err(GroupError::InvalidGroup(
+                "an inflating group needs an inflating source".into(),
+            ));
+        };
+        let image = Arc::clone(image);
+        let mut reader = InflatingReader {
+            image: &image,
+            range: range.clone(),
+            position: 0,
+        };
+        Self::parse_from_reader(path, source, &mut reader, entry_name_policy)
     }
 
     fn parse_from_reader<R: Read + Seek>(
@@ -959,7 +1396,47 @@ impl PackedGroup {
                 .memory_slice()
                 .map(<[u8]>::to_vec)
                 .ok_or_else(|| GroupError::InvalidGroup("memory group has invalid bounds".into())),
+            PackedSource::Inflating { image, range } => {
+                let image = image.all()?;
+                let end = range.end.min(image.len());
+                image
+                    .get(range.start..end)
+                    .map(<[u8]>::to_vec)
+                    .ok_or_else(|| GroupError::InvalidGroup("child group exceeds its image".into()))
+            }
         }
+    }
+
+    /// Where `entry`'s bytes lie in the image backing `range`, this group's
+    /// own span of it.
+    fn entry_image_range(
+        &self,
+        entry: &PackedEntry,
+        range: &Range<usize>,
+    ) -> Result<Range<usize>, GroupError> {
+        let invalid = |problem: &str| {
+            GroupError::InvalidGroup(format!(
+                "entry '{}' {problem}",
+                entry.relative_path.display()
+            ))
+        };
+        let start = self
+            .data_offset
+            .checked_add(entry.offset)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| invalid("has invalid offset"))?;
+        let size = usize::try_from(entry.size).map_err(|_| invalid("exceeds platform limits"))?;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| invalid("has invalid size"))?;
+        if end > range.len() {
+            return Err(invalid("exceeds group bounds"));
+        }
+        let start = range
+            .start
+            .checked_add(start)
+            .ok_or_else(|| invalid("has invalid offset"))?;
+        Ok(start..start + size)
     }
 
     fn read_file_cow(&self, relative: &Path) -> Result<Cow<'_, [u8]>, GroupError> {
@@ -1019,6 +1496,9 @@ impl PackedGroup {
                 let start = range.start + start as usize;
                 let end = range.start + end as usize;
                 Ok(Cow::Borrowed(&data[start..end]))
+            }
+            PackedSource::Inflating { image, range } => {
+                image.bytes(self.entry_image_range(entry, range)?)
             }
         }
     }
@@ -1172,6 +1652,15 @@ impl PackedGroup {
                     })?;
                 PackedGroup::from_raw_source(path, source)?
             }
+            // A child of a compressed group is a span of the same stream, so
+            // it stays uninflated past what its own reads reach.
+            PackedSource::Inflating { image, range } => PackedGroup::from_raw_source(
+                path,
+                PackedSource::Inflating {
+                    image: Arc::clone(image),
+                    range: self.entry_image_range(entry, range)?,
+                },
+            )?,
         };
         Ok(Group {
             kind: GroupKind::Packed(packed),
@@ -1640,39 +2129,10 @@ fn sanitize_group_entry_filename_bytes(name: &[u8]) -> Vec<u8> {
 const C4GROUP_GZ_MAGIC: [u8; 2] = [0x1E, 0x8C];
 const GZ_MAGIC: [u8; 2] = [0x1F, 0x8B];
 
-fn decompress_group(mut compressed: Vec<u8>) -> Result<Vec<u8>, GroupError> {
-    let mut data = Vec::new();
-    let mut offset = 0;
-
-    while offset < compressed.len() {
-        match compressed.get(offset..offset + GZ_MAGIC.len()) {
-            Some(magic) if magic == C4GROUP_GZ_MAGIC => {
-                compressed[offset..offset + GZ_MAGIC.len()].copy_from_slice(&GZ_MAGIC);
-            }
-            Some(magic) if magic == GZ_MAGIC => {}
-            _ => {
-                return Err(GroupError::InvalidGroup(
-                    "gzip decompression failed: invalid gzip header".to_string(),
-                ));
-            }
-        }
-
-        let input_len = compressed.len() - offset;
-        let mut decoder = flate2::bufread::GzDecoder::new(&compressed[offset..]);
-        decoder.read_to_end(&mut data).map_err(|error| {
-            GroupError::InvalidGroup(format!("gzip decompression failed: {error}"))
-        })?;
-        let remaining = decoder.into_inner().len();
-        let consumed = input_len - remaining;
-        if consumed == 0 {
-            return Err(GroupError::InvalidGroup(
-                "gzip decompression failed: decoder made no progress".to_string(),
-            ));
-        }
-        offset += consumed;
-    }
-
-    Ok(data)
+fn is_compressed_group(bytes: &[u8]) -> bool {
+    bytes
+        .get(..2)
+        .is_some_and(|magic| magic == C4GROUP_GZ_MAGIC || magic == GZ_MAGIC)
 }
 
 fn mem_unscramble(buffer: &mut [u8]) {
@@ -2276,20 +2736,36 @@ mod tests {
         compressed
     }
 
-    #[test]
-    fn decompress_group_accepts_scrambled_magic_on_every_gzip_member() {
-        let mut compressed = gzip_member(b"first", C4GROUP_GZ_MAGIC);
-        compressed.extend(gzip_member(b"second", C4GROUP_GZ_MAGIC));
-
-        assert_eq!(decompress_group(compressed).unwrap(), b"firstsecond");
+    fn inflate_all(compressed: Vec<u8>) -> Result<Vec<u8>, GroupError> {
+        InflatingImage::new(compressed)
+            .all()
+            .map(|image| image.to_vec())
     }
 
     #[test]
-    fn decompress_group_accepts_standard_multi_member_gzip() {
+    fn a_group_stream_accepts_scrambled_magic_on_every_gzip_member() {
+        let mut compressed = gzip_member(b"first", C4GROUP_GZ_MAGIC);
+        compressed.extend(gzip_member(b"second", C4GROUP_GZ_MAGIC));
+
+        assert_eq!(inflate_all(compressed).unwrap(), b"firstsecond");
+    }
+
+    #[test]
+    fn a_group_stream_accepts_standard_multi_member_gzip() {
         let mut compressed = gzip_member(b"first", GZ_MAGIC);
         compressed.extend(gzip_member(b"second", GZ_MAGIC));
 
-        assert_eq!(decompress_group(compressed).unwrap(), b"firstsecond");
+        assert_eq!(inflate_all(compressed).unwrap(), b"firstsecond");
+    }
+
+    #[test]
+    fn a_group_stream_rejects_a_member_whose_checksum_does_not_match() {
+        let mut compressed = gzip_member(b"first", C4GROUP_GZ_MAGIC);
+        let trailer = compressed.len() - 8;
+        compressed[trailer] ^= 0xFF;
+
+        let error = inflate_all(compressed).unwrap_err();
+        assert!(error.to_string().contains("checksum"), "{error}");
     }
 
     fn gzip_group_image(image: &[u8]) -> Vec<u8> {
@@ -2330,6 +2806,67 @@ mod tests {
         let group = Group::open(&path).unwrap();
         let data = group.read_file("hello.txt").unwrap();
         assert_eq!(data, b"world");
+    }
+
+    /// Bytes that deflate cannot shrink much, so their compressed form spans
+    /// most of a stream.
+    fn incompressible_bytes(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_F491_u32;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_packed_group_serves_its_leading_entries_before_a_truncated_tail() {
+        // C4Group::OpenRealGrpFile reads only the header and the entry table
+        // off the gzip stream (C4Group.cpp:762-797), and reading an entry
+        // advances the stream just as far as that entry (C4Group.cpp:1245-1261).
+        // A group cut short therefore fails only the entries it lost.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Cut.c4s");
+        let landscape = incompressible_bytes(256 * 1024);
+        let image = packed_group_image_with_entries(&[
+            ("Scenario.txt", false, b"[Head]\r\n"),
+            ("Landscape.bmp", false, &landscape),
+        ]);
+        let mut compressed = gzip_member(&image, C4GROUP_GZ_MAGIC);
+        compressed.truncate(compressed.len() / 2);
+        fs::write(&path, &compressed).unwrap();
+
+        let group = Group::open(&path).unwrap();
+
+        assert_eq!(group.read_file("Scenario.txt").unwrap(), b"[Head]\r\n");
+        assert!(group.read_file("Landscape.bmp").is_err());
+    }
+
+    #[test]
+    fn a_packed_group_reads_entries_past_several_compressed_chunks_of_its_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Long.c4s");
+        let landscape = incompressible_bytes(4 * COMPRESSED_CHUNK_BYTES);
+        let image = packed_group_image_with_entries(&[
+            ("Scenario.txt", false, b"[Head]\r\n"),
+            ("Landscape.bmp", false, &landscape),
+            ("Script.c", false, b"func Initialize() {}\r\n"),
+        ]);
+        let mut compressed = gzip_member(&image[..image.len() / 2], C4GROUP_GZ_MAGIC);
+        compressed.extend(gzip_member(&image[image.len() / 2..], GZ_MAGIC));
+        fs::write(&path, &compressed).unwrap();
+
+        let group = Group::open(&path).unwrap();
+
+        assert_eq!(
+            group.read_file("Script.c").unwrap(),
+            b"func Initialize() {}\r\n"
+        );
+        assert_eq!(group.read_file("Landscape.bmp").unwrap(), landscape);
+        assert_eq!(group.raw_image().unwrap(), image);
     }
 
     #[test]
