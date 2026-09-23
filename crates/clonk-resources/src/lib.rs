@@ -57,7 +57,8 @@ pub use scenario::{
     discover_many_with_languages, discover_many_with_languages_and_packs,
     discover_many_with_languages_and_packs_with_progress, discover_with_languages,
     discover_with_languages_and_packs, discover_with_languages_and_packs_with_progress,
-    ScenarioDiscoveryError, ScenarioDiscoveryProgress, ScenarioEntry, ScenarioEntryKind,
+    load_scenario_extended, ScenarioDiscoveryError, ScenarioDiscoveryProgress, ScenarioEntry,
+    ScenarioEntryKind, ScenarioExtended,
 };
 pub use script_strings::{
     decode_legacy_script_text, decode_legacy_system_text, encode_legacy_script_text,

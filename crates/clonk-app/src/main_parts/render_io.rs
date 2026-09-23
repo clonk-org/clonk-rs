@@ -114,11 +114,11 @@ pub(crate) fn scensel_selection_info(
 ) -> clonk_frontend::startup_scensel::SelectionInfo<'_> {
     scensel_selection(menu)
         .map(|entry| clonk_frontend::startup_scensel::SelectionInfo {
-            picture: entry.title_picture.as_ref(),
+            picture: entry.title_picture(),
             title: Some(entry.title.as_str()),
             desc: entry.description.as_deref(),
             author: entry.author.as_deref(),
-            version: entry.version.as_deref(),
+            version: entry.version(),
         })
         .unwrap_or_default()
 }

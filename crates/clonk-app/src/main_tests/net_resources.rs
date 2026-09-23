@@ -4126,10 +4126,73 @@ fn load_frontend_scenarios_fills_missing_preview_from_install() {
     main_assert_eq!(scenarios.len() => 1, "duplicate scenario should be merged");
     let scenario = &scenarios[0];
     main_assert_eq!(scenario.title => "User Alpha");
-    let preview = scenario.preview.test_ref();
+    let preview = scenario.preview().test_value();
     main_assert_eq!(preview.width() => 1);
     main_assert_eq!(preview.height() => 1);
     main_assert_eq!(preview.pixels() => &[0x10, 0x20, 0x30, 0x40]);
+
+    reset_cached_app_paths();
+}
+
+// C4ScenarioListLoader reads an entry's title picture and version only for
+// the selection: Entry::Load with fLoadEx, reached through LoadExtended
+// (C4StartupScenSelDlg.cpp:520-555, 1173-1182). The right page therefore
+// shows what the files hold when it first shows the entry.
+#[test]
+fn load_frontend_scenarios_reads_title_picture_and_version_when_first_shown() {
+    let _env_lock = crate::tests::env_lock().lock();
+    reset_cached_app_paths();
+
+    let install_dir = tempdir();
+    let planet_dir = install_dir.path().join("planet");
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
+    let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+    fs::create_dir_all(&scenario_dir).test_value();
+    fs::write(scenario_dir.join("Scenario.json"), br#"{"name":"Alpha"}"#).test_value();
+    write_preview_png(&scenario_dir.join("Title.png"), [0x10, 0x20, 0x30, 0x40]);
+    fs::write(scenario_dir.join("Version.txt"), b"1.0").test_value();
+    let user_dir = install_dir.path().join("user-data");
+    fs::create_dir_all(&user_dir).test_value();
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
+
+    let scenarios = load_frontend_scenarios();
+    write_preview_png(&scenario_dir.join("Title.png"), [0x50, 0x60, 0x70, 0x80]);
+    fs::write(scenario_dir.join("Version.txt"), b"2.0").test_value();
+
+    let scenario = &scenarios[0];
+    main_assert_eq!(scenario.title_picture().test_value().pixels() => &[0x50, 0x60, 0x70, 0x80]);
+    main_assert_eq!(scenario.preview().test_value().pixels() => &[0x50, 0x60, 0x70, 0x80]);
+    main_assert_eq!(scenario.version() => Some("2.0"));
+
+    reset_cached_app_paths();
+}
+
+// Listing a folder reads no title image either (Entry::Load without fLoadEx,
+// C4StartupScenSelDlg.cpp:470-519): the list rows, built for every search hit,
+// carry the preview unread until a view shows it.
+#[test]
+fn scenario_menu_rows_read_their_preview_only_when_shown() {
+    let _env_lock = crate::tests::env_lock().lock();
+    reset_cached_app_paths();
+
+    let install_dir = tempdir();
+    let planet_dir = install_dir.path().join("planet");
+    fs::create_dir_all(&planet_dir).test_value();
+    fs::write(planet_dir.join("System.c4g"), b"stub").test_value();
+    let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+    fs::create_dir_all(&scenario_dir).test_value();
+    fs::write(scenario_dir.join("Scenario.json"), br#"{"name":"Alpha"}"#).test_value();
+    write_preview_png(&scenario_dir.join("Title.png"), [0x10, 0x20, 0x30, 0x40]);
+    let user_dir = install_dir.path().join("user-data");
+    fs::create_dir_all(&user_dir).test_value();
+    let _guard = test_env_guard(install_dir.path(), user_dir.as_path());
+
+    let rows = build_menu_entries(&load_frontend_scenarios(), false);
+    write_preview_png(&scenario_dir.join("Title.png"), [0x50, 0x60, 0x70, 0x80]);
+
+    let preview = rows[0].preview.as_ref().test_value().load().test_value();
+    main_assert_eq!(preview.pixels() => &[0x50, 0x60, 0x70, 0x80]);
 
     reset_cached_app_paths();
 }

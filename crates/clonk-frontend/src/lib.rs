@@ -103,7 +103,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 pub use clonk_gui::{
-    GuiError as StartupMenuError, GuiResult as StartupMenuResult, ImageData, KeyCode,
+    GuiError as StartupMenuError, GuiResult as StartupMenuResult, ImageData, KeyCode, LazyImage,
     Point as GuiPoint, ScenarioEntry, ScenarioKind,
 };
 pub use hud::{CommandIcon, CommandImage, CommandOverlayIcon};

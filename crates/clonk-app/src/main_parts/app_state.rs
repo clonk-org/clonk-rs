@@ -10314,18 +10314,14 @@ pub(crate) struct FrontendScenario {
     /// preflights must inspect all contributors.
     pub(crate) source_paths: Vec<PathBuf>,
     pub(crate) root_label: Option<String>,
-    pub(crate) preview: Option<ImageData>,
-    /// Right-page Title.png/Title.bmp picture (C4ScenarioListLoader::Entry
-    /// fctTitle); unlike `preview` this never falls back to Loader/Icon art.
-    pub(crate) title_picture: Option<ImageData>,
+    /// The list preview, title picture and version, read when first shown.
+    pub(crate) extended: ExtendedEntry,
     pub(crate) children: Vec<FrontendScenario>,
     pub(crate) folder_index: Option<i32>,
     pub(crate) icon_index: Option<i32>,
     pub(crate) difficulty: Option<i32>,
     /// Author of packed groups (C4StartupScenSelDlg.cpp:536-552).
     pub(crate) author: Option<String>,
-    /// Version.txt contents (C4StartupScenSelDlg.cpp:554).
-    pub(crate) version: Option<String>,
     /// Scenario.txt [Definitions] LocalOnly (C4Scenario.cpp:482).
     pub(crate) local_only: Option<bool>,
     /// Scenario.txt [Definitions] AllowUserChange (C4Scenario.cpp:483).
@@ -10333,4 +10329,109 @@ pub(crate) struct FrontendScenario {
     /// Ordered external modules from [Definitions], used to seed the fixed
     /// entries in C4DefinitionSelDlg.
     pub(crate) definition_modules: Vec<String>,
+}
+
+/// The selection-time part of an entry: its list preview, title picture and
+/// version. C4ScenarioListLoader reads these only for the selected entry
+/// (Entry::Load with fLoadEx, reached through LoadExtended;
+/// C4StartupScenSelDlg.cpp:520-555, 1173-1182). The port reads them the
+/// first time something shows them, and every clone of the entry shares
+/// what was read.
+#[derive(Clone, Default)]
+pub(crate) struct ExtendedEntry(Arc<ExtendedEntryState>);
+
+#[derive(Default)]
+struct ExtendedEntryState {
+    /// The groups the entry came from, in root order. Each field comes from
+    /// the first of them that has it, as merging the roots' entries does.
+    sources: Vec<PathBuf>,
+    loaded: std::sync::OnceLock<LoadedExtendedEntry>,
+}
+
+#[derive(Default)]
+struct LoadedExtendedEntry {
+    preview: Option<ImageData>,
+    /// Right-page Title.png/Title.bmp picture (C4ScenarioListLoader::Entry
+    /// fctTitle); unlike `preview` this never falls back to Loader/Icon art.
+    title_picture: Option<ImageData>,
+    /// Version.txt contents (C4StartupScenSelDlg.cpp:554).
+    version: Option<String>,
+}
+
+impl ExtendedEntry {
+    pub(crate) fn from_sources(sources: Vec<PathBuf>) -> Self {
+        Self(Arc::new(ExtendedEntryState {
+            sources,
+            loaded: std::sync::OnceLock::new(),
+        }))
+    }
+
+    /// Selection-time data that is already in memory, such as generated
+    /// placeholder art.
+    pub(crate) fn known(preview: Option<ImageData>) -> Self {
+        Self(Arc::new(ExtendedEntryState {
+            sources: Vec::new(),
+            loaded: std::sync::OnceLock::from(LoadedExtendedEntry {
+                preview,
+                ..LoadedExtendedEntry::default()
+            }),
+        }))
+    }
+
+    /// Whether the entry can have a preview at all, known without reading it.
+    pub(crate) fn may_have_preview(&self) -> bool {
+        !self.0.sources.is_empty()
+            || self
+                .0
+                .loaded
+                .get()
+                .is_some_and(|loaded| loaded.preview.is_some())
+    }
+
+    pub(crate) fn preview(&self) -> Option<&ImageData> {
+        self.loaded().preview.as_ref()
+    }
+
+    pub(crate) fn title_picture(&self) -> Option<&ImageData> {
+        self.loaded().title_picture.as_ref()
+    }
+
+    pub(crate) fn version(&self) -> Option<&str> {
+        self.loaded().version.as_deref()
+    }
+
+    fn loaded(&self) -> &LoadedExtendedEntry {
+        self.0.loaded.get_or_init(|| {
+            let to_image = |preview: resource_scenario::ScenarioPreview| {
+                let (width, height, pixels) = preview.into_arc();
+                ImageData::from_arc(width, height, pixels)
+            };
+            let mut loaded = LoadedExtendedEntry::default();
+            for source in &self.0.sources {
+                if loaded.preview.is_some()
+                    && loaded.title_picture.is_some()
+                    && loaded.version.is_some()
+                {
+                    break;
+                }
+                let extended = resource_scenario::load_scenario_extended(source);
+                loaded.preview = loaded.preview.or_else(|| extended.preview.map(to_image));
+                loaded.title_picture = loaded
+                    .title_picture
+                    .or_else(|| extended.title_picture.map(to_image));
+                loaded.version = loaded.version.or(extended.version);
+            }
+            loaded
+        })
+    }
+}
+
+impl std::fmt::Debug for ExtendedEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtendedEntry")
+            .field("sources", &self.0.sources)
+            .field("loaded", &self.0.loaded.get().is_some())
+            .finish()
+    }
 }

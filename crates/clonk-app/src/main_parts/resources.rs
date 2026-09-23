@@ -58,22 +58,24 @@ pub(crate) fn prepare_scenario_selector_metadata(
             .as_deref()
             .filter(|_| entry.kind == ScenarioKind::Scenario)
         {
+            // One open serves both the loader head and the fair-crew rule.
+            let group = Group::open(path).map_err(|error| error.to_string());
             let head = languages
                 .as_ref()
                 .map_err(Clone::clone)
                 .and_then(|languages| {
-                    let group = Group::open(path).map_err(|error| error.to_string())?;
+                    let group = group.as_ref().map_err(Clone::clone)?;
                     ScenarioLoaderHead::load_from_group_with_languages_and_packs(
-                        &group,
+                        group,
                         languages,
                         language_packs,
                     )
                     .map_err(|error| error.to_string())
                 });
-            entry.selector_metadata = Some(Arc::new(ScenarioSelectorMetadata {
-                head,
-                fair_crew: scenario_fair_crew_constraint(Some(entry)),
-            }));
+            let fair_crew = group
+                .as_ref()
+                .map_or(FairCrewConstraint::Free, group_fair_crew_constraint);
+            entry.selector_metadata = Some(Arc::new(ScenarioSelectorMetadata { head, fair_crew }));
         }
         if !prepare_scenario_selector_metadata(
             &mut entry.children,
@@ -107,14 +109,12 @@ impl FrontendScenario {
             path: Some(path.to_path_buf()),
             source_paths: vec![path.to_path_buf()],
             root_label: None,
-            preview: None,
-            title_picture: None,
+            extended: ExtendedEntry::default(),
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
             author: None,
-            version: None,
             local_only: None,
             allow_user_change: None,
             definition_modules: Vec::new(),
@@ -130,8 +130,26 @@ impl FrontendScenario {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             location: self.location_label(),
-            preview: self.preview.clone(),
+            preview: self.extended.may_have_preview().then(|| {
+                let extended = self.extended.clone();
+                LazyImage::new(move || extended.preview().cloned())
+            }),
         }
+    }
+
+    /// The list preview: the entry's title, loader or icon image.
+    pub(crate) fn preview(&self) -> Option<&ImageData> {
+        self.extended.preview()
+    }
+
+    /// The right page's title picture (fctTitle).
+    pub(crate) fn title_picture(&self) -> Option<&ImageData> {
+        self.extended.title_picture()
+    }
+
+    /// The entry's `Version.txt` text.
+    pub(crate) fn version(&self) -> Option<&str> {
+        self.extended.version()
     }
 
     pub(crate) fn from_resource(entry: resource_scenario::ScenarioEntry, root_label: &str) -> Self {
@@ -144,14 +162,11 @@ impl FrontendScenario {
             is_editable,
             is_playable,
             mission_access,
-            preview,
-            title_picture,
             children,
             folder_index,
             icon_index,
             difficulty,
             author,
-            version,
             local_only,
             allow_user_change,
             definition_modules,
@@ -168,13 +183,6 @@ impl FrontendScenario {
             .map(|child| FrontendScenario::from_resource(child, root_label))
             .collect();
 
-        let to_image = |preview: resource_scenario::ScenarioPreview| {
-            let (width, height, pixels) = preview.into_arc();
-            ImageData::from_arc(width, height, pixels)
-        };
-        let preview = preview.map(to_image);
-        let title_picture = title_picture.map(to_image);
-
         let source_paths = vec![path.clone()];
         Self {
             identifier,
@@ -186,16 +194,14 @@ impl FrontendScenario {
             mission_access,
             selector_metadata: None,
             path: Some(path),
+            extended: ExtendedEntry::from_sources(source_paths.clone()),
             source_paths,
             root_label: Some(root_label.to_string()),
-            preview,
-            title_picture,
             children,
             folder_index,
             icon_index,
             difficulty,
             author,
-            version,
             local_only,
             allow_user_change,
             definition_modules,
@@ -250,17 +256,15 @@ impl FrontendScenario {
             path: None,
             source_paths: Vec::new(),
             root_label: None,
-            preview: Some(generate_preview_placeholder(
+            extended: ExtendedEntry::known(Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
                 FALLBACK_SCENARIO_TITLE,
-            )),
-            title_picture: None,
+            ))),
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
             author: None,
-            version: None,
             local_only: None,
             allow_user_change: None,
             definition_modules: Vec::new(),
@@ -336,11 +340,11 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
             existing.source_paths.push(path);
         }
     }
+    // The preview, title picture and version each come from the first root
+    // that has them once they are read.
+    existing.extended = ExtendedEntry::from_sources(existing.source_paths.clone());
     if existing.description.is_none() {
         existing.description = incoming.description.take();
-    }
-    if existing.preview.is_none() {
-        existing.preview = incoming.preview.take();
     }
     if existing.path.is_none() {
         existing.path = incoming.path.take();
@@ -359,14 +363,8 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
     if existing.difficulty.is_none() {
         existing.difficulty = incoming.difficulty;
     }
-    if existing.title_picture.is_none() {
-        existing.title_picture = incoming.title_picture.take();
-    }
     if existing.author.is_none() {
         existing.author = incoming.author.take();
-    }
-    if existing.version.is_none() {
-        existing.version = incoming.version.take();
     }
     if existing.local_only.is_none() {
         existing.local_only = incoming.local_only;
@@ -1138,17 +1136,15 @@ impl SavedScenarioInfo {
             path: self.path.clone(),
             source_paths: Vec::new(),
             root_label: self.root_label.clone(),
-            preview: Some(generate_preview_placeholder(
+            extended: ExtendedEntry::known(Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
                 &self.title,
-            )),
-            title_picture: None,
+            ))),
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
             author: None,
-            version: None,
             local_only: None,
             allow_user_change: None,
             definition_modules: Vec::new(),
@@ -4891,13 +4887,17 @@ pub(crate) fn scenario_fair_crew_constraint(
     if let Some(metadata) = scenario.and_then(|scenario| scenario.selector_metadata.as_deref()) {
         return metadata.fair_crew;
     }
-    let Some(path) = scenario.and_then(|scenario| scenario.path.as_deref()) else {
-        return FairCrewConstraint::Free;
-    };
-    let Some(source) = Group::open(path)
-        .ok()
-        .and_then(|group| read_group_file_case_insensitive(&group, "Scenario.txt"))
-    else {
+    scenario
+        .and_then(|scenario| scenario.path.as_deref())
+        .and_then(|path| Group::open(path).ok())
+        .map_or(FairCrewConstraint::Free, |group| {
+            group_fair_crew_constraint(&group)
+        })
+}
+
+/// The `[Head] ForcedNoCrew` rule of the scenario that `group` holds.
+fn group_fair_crew_constraint(group: &Group) -> FairCrewConstraint {
+    let Some(source) = read_group_file_case_insensitive(group, "Scenario.txt") else {
         return FairCrewConstraint::Free;
     };
     let mut reader = io::Cursor::new(source);

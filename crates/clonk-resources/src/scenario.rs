@@ -176,20 +176,15 @@ pub struct ScenarioEntry {
     /// Scenario.txt `[Head] MissionAccess`; kept separate from `is_playable`
     /// because grants can change while the catalog remains loaded.
     pub mission_access: Option<String>,
-    pub preview: Option<ScenarioPreview>,
-    /// The right-page Title.png/Title.bmp picture (C4ScenarioListLoader::
-    /// Entry fctTitle, C4StartupScenSelDlg.cpp:532-534); shares pixel data
-    /// with `preview` when both come from the same title image.
-    pub title_picture: Option<ScenarioPreview>,
     pub children: Vec<ScenarioEntry>,
     pub folder_index: Option<i32>,
     pub icon_index: Option<i32>,
     pub difficulty: Option<i32>,
     /// `Author.txt`/group maker of packed groups (Entry::Load,
     /// C4StartupScenSelDlg.cpp:536-552); unpacked directories have none.
+    /// C4ScenarioListLoader reads it with the selection-time data, but the
+    /// port's scenario search needs it for every entry.
     pub author: Option<String>,
-    /// `Version.txt` contents (C4CFN_Version, C4StartupScenSelDlg.cpp:554).
-    pub version: Option<String>,
     /// Scenario.txt `[Definitions] LocalOnly` (C4Scenario.cpp:482).
     pub local_only: Option<bool>,
     /// Scenario.txt `[Definitions] AllowUserChange` (C4Scenario.cpp:483).
@@ -1056,7 +1051,6 @@ fn build_scenario_entry(
     }
 
     let title = title.unwrap_or(fallback);
-    let (preview, title_picture) = load_preview_images(group)?;
     let description = manifest
         .as_ref()
         .and_then(|info| info.description.as_ref())
@@ -1090,14 +1084,11 @@ fn build_scenario_entry(
         is_editable: group.is_directory(),
         is_playable: true,
         mission_access: legacy.as_ref().and_then(|info| info.mission_access.clone()),
-        preview,
-        title_picture,
         children: Vec::new(),
         folder_index: None,
         icon_index,
         difficulty,
         author: load_author(group),
-        version: load_version(group),
         local_only: legacy.as_ref().and_then(|info| info.local_only),
         allow_user_change: legacy.as_ref().and_then(|info| info.allow_user_change),
         definition_modules: legacy
@@ -1126,7 +1117,6 @@ fn build_folder_entry(
     }
 
     let title = title.unwrap_or(fallback);
-    let (preview, title_picture) = load_preview_images(group)?;
     // Extension-less directories are C4ScenarioListLoader::RegularFolder:
     // their contents come from a directory iteration that also accepts
     // nested plain directories (C4StartupScenSelDlg.cpp:1043-1085), while
@@ -1154,14 +1144,11 @@ fn build_folder_entry(
         is_editable: group.is_directory(),
         is_playable: false,
         mission_access: None,
-        preview,
-        title_picture,
         children,
         folder_index,
         icon_index: None,
         difficulty: None,
         author: load_author(group),
-        version: load_version(group),
         local_only: None,
         allow_user_change: None,
         definition_modules: Vec::new(),
@@ -1194,6 +1181,37 @@ fn description_from_desc_files(
 }
 
 /// `Version.txt` (C4CFN_Version, C4StartupScenSelDlg.cpp:554).
+/// What C4ScenarioListLoader reads of an entry only once the player selects
+/// it: Entry::Load with fLoadEx, reached through LoadExtended
+/// (C4StartupScenSelDlg.cpp:520-555, 1173-1182). Discovery leaves it unread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScenarioExtended {
+    /// The list preview: the first title, loader or icon image that decodes.
+    pub preview: Option<ScenarioPreview>,
+    /// The right-page Title.png/Title.bmp picture (C4ScenarioListLoader::
+    /// Entry fctTitle, C4StartupScenSelDlg.cpp:532-534); shares pixel data
+    /// with `preview` when both come from the same title image.
+    pub title_picture: Option<ScenarioPreview>,
+    /// `Version.txt` contents (C4CFN_Version, C4StartupScenSelDlg.cpp:554).
+    pub version: Option<String>,
+}
+
+/// Reads the selection-time data of the entry that discovery reported at
+/// `path`. An entry that can no longer be opened, or whose images cannot be
+/// read, has none of it.
+pub fn load_scenario_extended(path: &Path) -> ScenarioExtended {
+    Group::open(path)
+        .map(|group| {
+            let (preview, title_picture) = load_preview_images(&group).unwrap_or_default();
+            ScenarioExtended {
+                preview,
+                title_picture,
+                version: load_version(&group),
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn load_version(group: &Group) -> Option<String> {
     group
         .read_file("Version.txt")
@@ -2335,6 +2353,8 @@ mod tests {
             .iter()
             .find(|entry| entry.title == "Loaded")
             .unwrap();
+        let titled = load_scenario_extended(&titled.path);
+        let loaded = load_scenario_extended(&loaded.path);
         assert!(titled.title_picture.is_some());
         assert!(titled.preview.is_some());
         assert!(loaded.title_picture.is_none(), "loader is not a title pic");
@@ -2453,7 +2473,10 @@ mod tests {
             entries[0].definition_modules,
             ["Objects.c4d", "Knights.c4d"]
         );
-        assert_eq!(entries[0].version.as_deref(), Some("4.9.8.2"));
+        assert_eq!(
+            load_scenario_extended(&entries[0].path).version.as_deref(),
+            Some("4.9.8.2")
+        );
     }
 
     #[test]

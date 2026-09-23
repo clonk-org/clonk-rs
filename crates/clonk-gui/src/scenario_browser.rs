@@ -31,7 +31,34 @@ pub struct ScenarioEntry {
     pub is_editable: bool,
     pub is_playable: bool,
     pub location: Option<String>,
-    pub preview: Option<ImageData>,
+    pub preview: Option<LazyImage>,
+}
+
+/// A row's preview image, produced when a view first shows the row.
+#[derive(Clone)]
+pub struct LazyImage(Arc<dyn Fn() -> Option<ImageData> + Send + Sync>);
+
+impl LazyImage {
+    /// An image that `load` produces each time a view asks for it; `load`
+    /// keeps any cache itself.
+    pub fn new(load: impl Fn() -> Option<ImageData> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(load))
+    }
+
+    /// An image that is already decoded.
+    pub fn ready(image: ImageData) -> Self {
+        Self::new(move || Some(image.clone()))
+    }
+
+    pub fn load(&self) -> Option<ImageData> {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for LazyImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LazyImage")
+    }
 }
 
 impl ScenarioEntry {
@@ -274,8 +301,10 @@ impl ScenarioBrowser {
                 )?;
                 self.gui
                     .set_label_text(self.layout.info_panel.description_label, description)?;
-                self.gui
-                    .set_picture_image(self.layout.info_panel.preview, entry.preview.clone())?;
+                self.gui.set_picture_image(
+                    self.layout.info_panel.preview,
+                    entry.preview.as_ref().and_then(LazyImage::load),
+                )?;
                 return Ok(());
             }
         }
@@ -649,5 +678,38 @@ mod tests {
         assert!(escape.gui.captured);
         assert!(escape.messages.is_empty());
         assert!(browser.selected_entry().is_none());
+    }
+
+    #[test]
+    fn a_row_preview_is_produced_only_when_the_info_panel_shows_the_row() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let loads = Arc::new(AtomicUsize::new(0));
+        let preview = {
+            let loads = Arc::clone(&loads);
+            LazyImage::new(move || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Some(ImageData::new(1, 1, vec![1, 2, 3, 255]))
+            })
+        };
+        let entries = ["first", "second"]
+            .map(|identifier| ScenarioEntry {
+                identifier: identifier.into(),
+                title: identifier.into(),
+                description: None,
+                kind: ScenarioKind::Scenario,
+                is_editable: false,
+                is_playable: true,
+                location: None,
+                preview: Some(preview.clone()),
+            })
+            .to_vec();
+
+        let mut browser = ScenarioBrowser::new(entries, test_font()).expect("browser");
+        browser.layout(Size::new(480.0, 720.0));
+        assert_eq!(loads.load(Ordering::SeqCst), 0, "rows read no preview");
+
+        browser.select_entry_by_index(1).expect("select");
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "the shown row's preview");
     }
 }
