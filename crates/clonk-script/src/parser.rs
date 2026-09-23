@@ -23,6 +23,16 @@ const MAX_FUNCTION_PARAMETERS: usize = 10;
 /// deepest shipped content nests in single digits (clonk-org/clonk-rs#962).
 const MAX_EXPRESSION_DEPTH: usize = 128;
 
+/// The parts of a new-style function declaration that precede its body.
+struct FunctionHead {
+    name: String,
+    /// Zero-based line of the function's name.
+    source_line: usize,
+    access: AccessLevel,
+    returns_reference: bool,
+    params: Vec<Parameter>,
+}
+
 /// Everything that decides which token the parser reads next. Restoring it
 /// rewinds the source the way C4Aul resets its read position `SPos`.
 struct ParserCursor<'a> {
@@ -307,8 +317,16 @@ impl<'a> Parser<'a> {
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
         let (name, name_token) = self.expect_identifier("expected function name")?;
         self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
-        let params = self.parse_parameter_list()?;
+        let mut params = Vec::new();
+        self.parse_parameter_list(&mut params)?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
+        let head = FunctionHead {
+            name,
+            source_line: name_token.line.saturating_sub(1),
+            access,
+            returns_reference,
+            params,
+        };
         // Below #strict 2 a head without '{' is only a warning, and C4Aul
         // compiles its body in legacy mode (C4AulParse.cpp:1698-1704).
         let legacy_body = self.strict_level < 2 && !self.check_symbol(Symbol::LBrace)?;
@@ -322,7 +340,7 @@ impl<'a> Parser<'a> {
             self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
         }
         let body_depth = self.brace_depth;
-        self.begin_global_local_tracking(access, &params);
+        self.begin_global_local_tracking(head.access, &head.params);
 
         let mut description = None;
         let mut body = Vec::new();
@@ -414,30 +432,42 @@ impl<'a> Parser<'a> {
         }
 
         Ok((
-            Function {
-                name,
-                params,
-                body,
-                access,
-                returns_reference,
-                implicit_return,
-                description,
-                strict_level: None,
-                source_line: name_token.line.saturating_sub(1),
-                source_host: None,
-                source_name: None,
-                global_link_host: None,
-                overloaded: None,
-                hard_inherited_line: self.hard_inherited_line.take(),
-                hard_inherited_column: self.hard_inherited_column.take(),
-                hard_inherited_stmt_index: self.hard_inherited_stmt_index.take(),
-                global_local_candidates: std::mem::take(&mut self.global_local_candidates),
-                global_local_reference: None,
-                compiled: std::sync::OnceLock::new(),
-                resolved_snapshot: std::sync::OnceLock::new(),
-            },
+            self.new_style_function(head, body, implicit_return, description),
             error,
         ))
+    }
+
+    /// Builds a function from its head and body. The records its body left
+    /// for the link-time checks move from the parser into the function.
+    fn new_style_function(
+        &mut self,
+        head: FunctionHead,
+        body: Vec<Stmt>,
+        implicit_return: bool,
+        description: Option<String>,
+    ) -> Function {
+        Function {
+            name: head.name,
+            params: head.params,
+            body,
+            access: head.access,
+            returns_reference: head.returns_reference,
+            implicit_return,
+            description,
+            strict_level: None,
+            source_line: head.source_line,
+            source_host: None,
+            source_name: None,
+            global_link_host: None,
+            overloaded: None,
+            hard_inherited_line: self.hard_inherited_line.take(),
+            hard_inherited_column: self.hard_inherited_column.take(),
+            hard_inherited_stmt_index: self.hard_inherited_stmt_index.take(),
+            global_local_candidates: std::mem::take(&mut self.global_local_candidates),
+            global_local_reference: None,
+            compiled: std::sync::OnceLock::new(),
+            resolved_snapshot: std::sync::OnceLock::new(),
+        }
     }
 
     /// Start a function body's bookkeeping for the named-`local` check. Only a
@@ -574,14 +604,13 @@ impl<'a> Parser<'a> {
         result
     }
 
-    fn parse_parameter_list(&mut self) -> Result<Vec<Parameter>, ParseError> {
-        let mut params = Vec::new();
+    fn parse_parameter_list(&mut self, params: &mut Vec<Parameter>) -> Result<(), ParseError> {
         // C++ advances `cpar` for every comma-delimited declaration even
         // when C4ValueMapNames::AddName deduplicates its name. Do not derive
         // this limit from `params.len()`.
         let mut syntactic_parameter_count = 0;
         if self.check_symbol(Symbol::RParen)? {
-            return Ok(params);
+            return Ok(());
         }
         loop {
             // C++ checks ')' before the cap on every iteration. Besides the
@@ -714,7 +743,7 @@ impl<'a> Parser<'a> {
             }
             break;
         }
-        Ok(params)
+        Ok(())
     }
 
     fn reject_parameter_disabled_operator(&mut self) -> Result<(), ParseError> {
