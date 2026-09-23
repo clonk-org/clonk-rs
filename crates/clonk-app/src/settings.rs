@@ -49,12 +49,12 @@ impl VoiceActivationMode {
 pub use clonk_app_core::config::{
     apply_session_profile, resolve_compat_profile, session_control_mode,
     session_fair_crew_strength, session_game_tick_delay_ms, session_max_load_file_size,
-    session_navigation_ai, session_shared_bases, CompatProfile,
+    CompatProfile,
 };
 #[cfg(test)]
 pub use clonk_app_core::config::{
-    CPP_CONTROL_MODE_DECENTRAL, CPP_INGAME_GAME_TICK_DELAY_MS, CPP_MAX_LOAD_FILE_SIZE,
-    DEFAULT_MAX_LOAD_FILE_SIZE,
+    session_navigation_ai, session_shared_bases, CPP_CONTROL_MODE_DECENTRAL,
+    CPP_INGAME_GAME_TICK_DELAY_MS, CPP_MAX_LOAD_FILE_SIZE, DEFAULT_MAX_LOAD_FILE_SIZE,
 };
 
 /// The two tuning values a voice-activated capture needs, resolved into the
