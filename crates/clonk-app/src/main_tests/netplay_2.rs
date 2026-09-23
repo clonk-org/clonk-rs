@@ -14512,6 +14512,30 @@ fn save_to_slot_writes_native_c4group_savegame() {
     );
     main_assert_eq!(restore_plan.restore_infos.clients.len() => 1);
 
+    // Hold the save worker so it cannot publish the slot before the stale slot
+    // is checked below: it runs one job at a time, and the save queues behind
+    // this one (clonk-org/clonk-rs#1754).
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    app.saves
+        .submit_background_job(Box::new(move || {
+            held_tx.send(()).expect("the test observes the held worker");
+            release_rx.recv().expect("the test releases the held worker");
+            crate::save_worker::BackgroundSaveCompletion::PlayerFile(
+                crate::save_worker::PlayerFileSaveCompletion {
+                    player_number: 0,
+                    info_id: 0,
+                    path: std::path::PathBuf::new(),
+                    official_derivation: false,
+                    derivation: None,
+                    result: Ok(()),
+                    persistence: std::time::Duration::ZERO,
+                },
+            )
+        }))
+        .test_value();
+    held_rx.recv_timeout(std::time::Duration::from_secs(10)).test_value();
+
     app.clear_message_board_log();
     app.save_to_slot(10);
 
@@ -14522,6 +14546,7 @@ fn save_to_slot_writes_native_c4group_savegame() {
     main_assert!(old_slot.exists("Stale.txt"));
     main_assert!(!old_slot.exists("Game.txt"));
 
+    release_tx.send(()).test_value();
     app.finish_background_save_jobs();
 
     main_assert_eq!(
