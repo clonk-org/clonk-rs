@@ -242,6 +242,7 @@ impl FrontendScenario {
             is_playable,
             mission_access,
             children,
+            contents_loaded: _,
             folder_index,
             icon_index,
             difficulty,
