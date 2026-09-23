@@ -4,7 +4,7 @@ use crate::ast::{
     VarDecl, VarDeclKind,
 };
 use crate::error::ParseError;
-use crate::lexer::Lexer;
+use crate::lexer::{Lexer, LexerCheckpoint};
 use crate::token::{DiagnosticPosition, Keyword, Symbol, Token, TokenKind};
 use crate::value::Literal;
 
@@ -22,6 +22,16 @@ const MAX_FUNCTION_PARAMETERS: usize = 10;
 /// headroom below the cliff while sitting far above any real script — the
 /// deepest shipped content nests in single digits (clonk-org/clonk-rs#962).
 const MAX_EXPRESSION_DEPTH: usize = 128;
+
+/// Everything that decides which token the parser reads next. Restoring it
+/// rewinds the source the way C4Aul resets its read position `SPos`.
+struct ParserCursor<'a> {
+    lexer: LexerCheckpoint<'a>,
+    peeked: Option<Token>,
+    lookahead_buffer: Vec<Token>,
+    brace_depth: usize,
+    consumed_tokens: usize,
+}
 
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
@@ -1135,11 +1145,7 @@ impl<'a> Parser<'a> {
             self.speculative_tokens.is_none(),
             "statement lookahead cannot nest inside speculative parsing"
         );
-        let lexer_checkpoint = self.lexer.checkpoint();
-        let peeked = self.peeked.clone();
-        let lookahead_buffer = self.lookahead_buffer.clone();
-        let brace_depth = self.brace_depth;
-        let consumed_tokens = self.consumed_tokens;
+        let cursor = self.cursor();
 
         let result = (|| {
             self.expect_symbol(Symbol::LBrace, "expected '{' to probe statement")?;
@@ -1165,18 +1171,32 @@ impl<'a> Parser<'a> {
         })();
 
         if result.is_ok() {
-            self.lexer.restore(lexer_checkpoint);
-            self.peeked = peeked;
-            self.lookahead_buffer = lookahead_buffer;
-            self.brace_depth = brace_depth;
-            self.consumed_tokens = consumed_tokens;
+            self.restore_cursor(cursor);
         } else {
             // An exception bypasses C++ IsMapLiteral's `SPos = SPos0`.
             // Preserve that forward progress for recovery, but still honor
             // the lookahead's Discard policy for strings scanned before it.
-            self.lexer.finish_failed_discard_scan(lexer_checkpoint);
+            self.lexer.finish_failed_discard_scan(cursor.lexer);
         }
         result
+    }
+
+    fn cursor(&self) -> ParserCursor<'a> {
+        ParserCursor {
+            lexer: self.lexer.checkpoint(),
+            peeked: self.peeked.clone(),
+            lookahead_buffer: self.lookahead_buffer.clone(),
+            brace_depth: self.brace_depth,
+            consumed_tokens: self.consumed_tokens,
+        }
+    }
+
+    fn restore_cursor(&mut self, cursor: ParserCursor<'a>) {
+        self.lexer.restore(cursor.lexer);
+        self.peeked = cursor.peeked;
+        self.lookahead_buffer = cursor.lookahead_buffer;
+        self.brace_depth = cursor.brace_depth;
+        self.consumed_tokens = cursor.consumed_tokens;
     }
 
     /// `SkipBlock<closingAtt>` from the C++ lookahead: nested groups recurse,
