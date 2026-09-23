@@ -862,6 +862,8 @@ impl GameApp {
             );
         };
 
+        // The folders that are open stay open, so the new tree lists them too.
+        let open_folders = self.menu_state.open_folder_identifiers();
         let (sender, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         self.scensel.discovery = Some(ScenarioSelectorDiscoveryState {
@@ -875,7 +877,7 @@ impl GameApp {
         });
         thread::spawn(move || {
             let mut last_percent = 0_u8;
-            let entries = load_frontend_scenarios_from_paths_with_progress(&paths, |percent| {
+            let entries = load_frontend_root_scenarios_with_progress(&paths, |percent| {
                 if cancel.load(AtomicOrdering::Relaxed) {
                     return false;
                 }
@@ -890,7 +892,8 @@ impl GameApp {
                 }
                 true
             });
-            if let Some(entries) = entries {
+            if let Some(mut entries) = entries {
+                load_frontend_folder_path(&paths, &mut entries, &open_folders);
                 warm_scenario_selector_snapshots(&entries);
                 let _ = sender.send(ScenarioSelectorDiscoveryEvent::Finished(entries));
             }

@@ -157,7 +157,7 @@ fn runtime_scenario_app(
     )
     .test_value();
     wait_for_menu(&mut app);
-    let scenario = resolve_next_mission_scenario(&app.scensel.catalog, scenario_id).test_value();
+    let scenario = app.next_mission_scenario(scenario_id).test_value();
     (paths_guard, paths, app, scenario)
 }
 

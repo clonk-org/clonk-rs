@@ -469,6 +469,10 @@ impl GameApp {
         // isolated `MenuState::submit_search` method retains C++ behavior for
         // parity coverage.
         self.startup_tooltip.pointer_left();
+        // The search spans every folder, so it lists the ones not entered yet.
+        if !self.menu_state.search_edit.text().trim().is_empty() {
+            self.load_every_scenario_folder();
+        }
         // Rebuilding the list necessarily recreates and reselects a row.
         // That programmatic selection must stay silent while the user types;
         // dependent controls are synchronized explicitly below.
@@ -700,9 +704,87 @@ impl GameApp {
     }
 
     pub(crate) fn enter_scenario_folder(&mut self, identifier: &str) {
+        self.load_scenario_folder(identifier, false);
         self.menu_state.enter_folder(identifier);
         self.configure_current_folder_map();
         self.refresh_scenario_entry_enabled();
+    }
+
+    /// Lists the entries of the folder `identifier` into the menu tree and the
+    /// catalog, once or, with `reload`, again, as C4ScenarioListLoader loads a
+    /// folder when it is entered (C4StartupScenSelDlg.cpp:901-914, 1161-1171).
+    pub(crate) fn load_scenario_folder(&mut self, identifier: &str, reload: bool) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        let Some(folder) = self.menu_state.find_scenario_entry(identifier) else {
+            return;
+        };
+        if !matches!(folder.kind, ScenarioKind::Folder) || folder.contents_loaded && !reload {
+            return;
+        }
+        let children = load_frontend_folder_contents(paths, folder);
+        warm_scenario_selector_snapshots(&children);
+        for child in &children {
+            self.scensel
+                .catalog
+                .insert(child.identifier.clone(), child.clone());
+        }
+        if let Some(folder) = self.scensel.catalog.get_mut(identifier) {
+            folder.children = children.clone();
+            folder.contents_loaded = true;
+        }
+        self.menu_state
+            .install_folder_contents(identifier, &children);
+    }
+
+    /// Lists every folder that is not listed yet, for the search across
+    /// folders.
+    pub(crate) fn load_every_scenario_folder(&mut self) {
+        if self.app_paths.is_none() {
+            return;
+        }
+        while let Some(identifier) = self.menu_state.first_unloaded_folder() {
+            self.load_scenario_folder(&identifier, false);
+        }
+    }
+
+    /// The catalog entry for `identifier`, listing the folders on its path
+    /// that are not listed yet.
+    pub(crate) fn scenario_catalog_entry(&mut self, identifier: &str) -> Option<FrontendScenario> {
+        if let Some(entry) = self.scensel.catalog.get(identifier) {
+            return Some(entry.clone());
+        }
+        let segments = identifier.split('/').collect::<Vec<_>>();
+        for depth in 1..segments.len() {
+            self.load_scenario_folder(&segments[..depth].join("/"), false);
+        }
+        self.scensel.catalog.get(identifier).cloned()
+    }
+
+    /// The scenario a NextMission `path` names, matched the way
+    /// [`resolve_next_mission_scenario`] matches it, listing the folders on the
+    /// path that are not listed yet.
+    pub(crate) fn next_mission_scenario(&mut self, path: &str) -> Option<FrontendScenario> {
+        if let Some(scenario) = resolve_next_mission_scenario(&self.scensel.catalog, path) {
+            return Some(scenario);
+        }
+        let requested = normalized_scenario_identifier(path);
+        let segments = requested.split('/').collect::<Vec<_>>();
+        for depth in 1..segments.len() {
+            let prefix = segments[..depth].join("/");
+            let Some(folder) = self
+                .scensel
+                .catalog
+                .keys()
+                .find(|identifier| normalized_scenario_identifier(identifier) == prefix)
+                .cloned()
+            else {
+                break;
+            };
+            self.load_scenario_folder(&folder, false);
+        }
+        resolve_next_mission_scenario(&self.scensel.catalog, path)
     }
 
     pub(crate) fn close_scenario_browser(&mut self) {

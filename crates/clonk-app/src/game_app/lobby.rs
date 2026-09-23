@@ -5146,6 +5146,7 @@ impl GameApp {
                         root_label: None,
                         extended: ExtendedEntry::default(),
                         children: Vec::new(),
+                        contents_loaded: true,
                         folder_index: None,
                         icon_index: None,
                         difficulty: None,

@@ -1020,6 +1020,7 @@ fn activating_a_scenario_joins_the_local_player_with_crew() {
         root_label: None,
         extended: ExtendedEntry::default(),
         children: Vec::new(),
+        contents_loaded: true,
         folder_index: None,
         icon_index: None,
         difficulty: None,

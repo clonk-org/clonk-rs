@@ -1350,13 +1350,12 @@ fn stage_pixel_checkpoint(
     app: &mut crate::GameApp,
     case: PixelCaptureCase,
 ) -> Result<crate::presentation_pixel_startup::StartupPixelCheckpoint> {
-    let scenario = crate::resolve_next_mission_scenario(&app.scensel.catalog, case.scenario())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "trusted presentation scenario is unavailable: {}",
-                case.scenario()
-            )
-        })?;
+    let scenario = app.next_mission_scenario(case.scenario()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "trusted presentation scenario is unavailable: {}",
+            case.scenario()
+        )
+    })?;
     let content_root = app
         .app_paths
         .as_ref()
@@ -3955,11 +3954,9 @@ mod tests {
         // Pinned C++ oracle: src/C4Game.cpp:776-858 executes one real game
         // frame, while src/C4Game.cpp:1902 advances Game.FrameCounter.
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Gameplay.scenario(),
-        )
-        .expect("tracked Tutorial02 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Gameplay.scenario())
+            .expect("tracked Tutorial02 scenario");
 
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Gameplay)?;
 
@@ -3976,11 +3973,9 @@ mod tests {
         // C4GameMessage::Draw lays out the portrait-backed tutorial message
         // (src/C4Viewport.cpp:836-854; src/C4GameMessage.cpp:99-170,348-353).
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Gameplay.scenario(),
-        )
-        .expect("tracked Tutorial02 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Gameplay.scenario())
+            .expect("tracked Tutorial02 scenario");
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Gameplay)?;
 
         let rendered = render_runtime_layout_capture(
@@ -4040,11 +4035,9 @@ mod tests {
         // after each game pass, where src/C4GraphicsSystem.cpp:130 advances
         // C4MessageBoard before composing the running frame.
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Hud.scenario(),
-        )
-        .expect("tracked Tutorial01 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Hud.scenario())
+            .expect("tracked Tutorial01 scenario");
 
         stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Hud)?;
 
@@ -4063,11 +4056,9 @@ mod tests {
         // frame and C4Game::Sec1Timer consumes it once per scheduler second
         // (src/C4Game.cpp:1755-1759,1902-1917).
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Hud.scenario(),
-        )
-        .expect("tracked Tutorial01 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Hud.scenario())
+            .expect("tracked Tutorial01 scenario");
 
         stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Hud)?;
 
@@ -4083,11 +4074,9 @@ mod tests {
         // fullscreen boards into the captured back buffer in one ordered pass
         // (src/C4GraphicsSystem.cpp:130-199,352-365).
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Hud.scenario(),
-        )
-        .expect("tracked Tutorial01 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Hud.scenario())
+            .expect("tracked Tutorial01 scenario");
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Hud)?;
 
         let rendered =
@@ -4147,11 +4136,9 @@ mod tests {
         // item rows and optional command strip consumed by C4Menu::Draw
         // (src/C4Menu.cpp:642-783,796-880).
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::IngameMenu.scenario(),
-        )
-        .expect("tracked Tutorial01 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::IngameMenu.scenario())
+            .expect("tracked Tutorial01 scenario");
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::IngameMenu)?;
 
         let rendered = render_runtime_layout_capture(
@@ -4205,11 +4192,9 @@ mod tests {
         // C4GameMessage::Draw appends its portrait-backed tutorial message
         // (src/C4Menu.cpp:796-880; src/C4GameMessage.cpp:159-292).
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::ObjectMenu.scenario(),
-        )
-        .expect("tracked Tutorial03 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::ObjectMenu.scenario())
+            .expect("tracked Tutorial03 scenario");
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::ObjectMenu)?;
 
         let rendered = render_runtime_layout_capture(
@@ -4258,11 +4243,9 @@ mod tests {
         // (src/C4GameOverDlg.cpp:115-258;
         // src/C4PlayerInfoListBox.cpp:79-154,184-231).
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Evaluation.scenario(),
-        )
-        .expect("tracked Tutorial01 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Evaluation.scenario())
+            .expect("tracked Tutorial01 scenario");
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Evaluation)?;
 
         let rendered = render_runtime_layout_capture(
@@ -4343,11 +4326,9 @@ mod tests {
         // Pinned C++ oracle: src/C4Game.cpp:776-858 fixes the state consumed
         // by C4Viewport::Draw; the capture takes that real presented frame.
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Gameplay.scenario(),
-        )
-        .expect("tracked Tutorial02 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Gameplay.scenario())
+            .expect("tracked Tutorial02 scenario");
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::Gameplay)?;
 
         let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
@@ -4398,11 +4379,9 @@ mod tests {
         // (src/C4LoaderScreen.cpp:281-324;
         // parity/oracle/presentation_capture.patch:2035).
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::Loader.scenario(),
-        )
-        .expect("tracked Tutorial01 loader scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::Loader.scenario())
+            .expect("tracked Tutorial01 loader scenario");
         let checkpoint = crate::presentation_pixel_startup::stage_loader_checkpoint(app, scenario)?;
         let stale_surface = crate::encode_surface_to_png(app.rendering.graphics.surface())?;
 
@@ -4421,11 +4400,9 @@ mod tests {
         // Player AutoContextMenu is loaded by C4InfoCore.cpp:171 and object
         // definitions bind their automatic context-menu mode at C4Def.cpp:416.
         let app = fixture.app();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::ObjectMenu.scenario(),
-        )
-        .expect("tracked Tutorial03 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::ObjectMenu.scenario())
+            .expect("tracked Tutorial03 scenario");
 
         let checkpoint = stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::ObjectMenu)?;
         let png = render_checkpoint_png(app, checkpoint.render_ordinal)?;
@@ -4450,11 +4427,9 @@ mod tests {
         let random = PresentationRandomGuard::install();
         let app = fixture.app();
         random.pin_runtime_streams();
-        let scenario = crate::resolve_next_mission_scenario(
-            &app.scensel.catalog,
-            PixelCaptureCase::ObjectMenu.scenario(),
-        )
-        .expect("tracked Tutorial03 scenario");
+        let scenario = app
+            .next_mission_scenario(PixelCaptureCase::ObjectMenu.scenario())
+            .expect("tracked Tutorial03 scenario");
 
         stage_tutorial_checkpoint(app, scenario, PixelCaptureCase::ObjectMenu)?;
         let report = clonk_engine::particles::presentation_safe_random_capture_report();

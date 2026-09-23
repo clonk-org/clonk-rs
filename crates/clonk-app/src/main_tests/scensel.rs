@@ -1470,7 +1470,9 @@ fn scensel_search_routes_window_text_and_enter() {
             _ => Some(entry.title.clone()),
         })
     }
-    let mut query = first_scenario_title(app.menu_state.visible_entries()).test_value();
+    // The root lists folders only, so list the whole tree before descending.
+    app.load_every_scenario_folder();
+    let mut query = first_scenario_title(&app.menu_state.stack[0].entries).test_value();
     Markup::strip_markup(&mut query);
     query.make_ascii_lowercase();
 
@@ -1935,6 +1937,41 @@ fn scensel_delete_falls_through_to_search_edit_without_a_selection() {
 // (src/C4StartupScenSelDlg.cpp:1472-1537,1727-1735). The enhanced product
 // path reapplies its catalog-wide query atomically after rediscovery.
 #[test]
+fn scensel_lists_a_folders_entries_once_the_folder_is_entered() {
+    // C4ScenarioListLoader loads the root folder when the selector is shown,
+    // and a folder's entries once it is entered (C4StartupScenSelDlg.cpp:
+    // 901-914, 1150-1171, 1431-1437, 1669-1679).
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let folder = paths.scenario_dir().join("LazyPack.c4f");
+    let inner = folder.join("Inner.c4s");
+    fs::create_dir_all(&inner).test_value();
+    fs::write(folder.join("Folder.txt"), "[Head]\nIndex=1\n").test_value();
+    fs::write(inner.join("Scenario.txt"), "[Head]\nTitle=Lazy Inner\n").test_value();
+
+    let mut app = new_menu_app_with_paths(800, 600, &paths);
+    app.open_scenario_browser();
+    main_assert!(app.scensel.catalog.contains_key("LazyPack.c4f"));
+    main_assert!(
+        !app.scensel.catalog.contains_key("LazyPack.c4f/Inner.c4s"),
+        "the folder's entries wait until it is entered"
+    );
+
+    app.enter_scenario_folder("LazyPack.c4f");
+    main_assert_eq!(
+        app.menu_state
+            .visible_entries()
+            .iter()
+            .map(|entry| entry.identifier.as_str())
+            .collect::<Vec<_>>() =>
+        vec!["LazyPack.c4f/Inner.c4s"]
+    );
+    main_assert!(app.scensel.catalog.contains_key("LazyPack.c4f/Inner.c4s"));
+    reset_cached_app_paths();
+}
+
+#[test]
 fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
     let _lock = env_lock().lock();
     let user_data = tempdir();
@@ -1961,7 +1998,7 @@ fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
 
     let mut app = new_menu_app_with_paths(800, 600, &paths);
     app.open_scenario_browser();
-    app.menu_state.enter_folder("RefreshPack.c4f");
+    app.enter_scenario_folder("RefreshPack.c4f");
     main_assert_eq!(app.menu_state.current_folder().map(|folder| folder.identifier.as_str()) => Some("RefreshPack.c4f"));
     let beta_index = app
         .menu_state

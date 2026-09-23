@@ -2065,7 +2065,7 @@ fn installed_scenario_loader_uses_recursive_folder_resource_tier() {
     config.save(paths.config_file()).test_value();
     let mut app = test_game_app(320, 200, AudioOptions::default(), Some(&paths)).test_value();
     let scenario =
-        resolve_next_mission_scenario(&app.scensel.catalog, "Fantasy.c4f/Crystalvalley.c4s")
+        app.next_mission_scenario("Fantasy.c4f/Crystalvalley.c4s")
             .test_value();
     let setup = build_scenario_loader(
         &scenario,

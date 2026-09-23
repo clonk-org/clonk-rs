@@ -78,6 +78,8 @@ struct DiscoveryContext<'a> {
     current: usize,
     total: usize,
     emitted_percent: u8,
+    /// Leave each folder's own entries unlisted.
+    shallow: bool,
 }
 
 impl<'a> DiscoveryContext<'a> {
@@ -87,6 +89,14 @@ impl<'a> DiscoveryContext<'a> {
             current: 0,
             total: 0,
             emitted_percent: 0,
+            shallow: false,
+        }
+    }
+
+    fn shallow(callback: &'a mut dyn FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>) -> Self {
+        Self {
+            shallow: true,
+            ..Self::new(callback)
         }
     }
 
@@ -177,6 +187,11 @@ pub struct ScenarioEntry {
     /// because grants can change while the catalog remains loaded.
     pub mission_access: Option<String>,
     pub children: Vec<ScenarioEntry>,
+    /// Whether `children` lists the folder's entries, as
+    /// `C4ScenarioListLoader::Folder::fContentsLoaded` records it
+    /// (C4StartupScenSelDlg.cpp:901-904). A shallow listing leaves it unset
+    /// until the folder is entered. Always set for scenarios.
+    pub contents_loaded: bool,
     pub folder_index: Option<i32>,
     pub icon_index: Option<i32>,
     pub difficulty: Option<i32>,
@@ -272,8 +287,33 @@ where
     F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
 {
     let mut context = DiscoveryContext::new(&mut progress);
+    discover_entry_in(path.as_ref(), languages, language_packs, &mut context)
+}
+
+/// [`discover_entry_with_languages_and_packs_with_progress`] for a root that
+/// the selector lists as one entry: a folder keeps its own entries unlisted
+/// until it is entered (C4StartupScenSelDlg.cpp:1150-1159).
+pub fn discover_entry_shallow_with_progress<F>(
+    path: impl AsRef<Path>,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    mut progress: F,
+) -> Result<Option<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+{
+    let mut context = DiscoveryContext::shallow(&mut progress);
+    discover_entry_in(path.as_ref(), languages, language_packs, &mut context)
+}
+
+fn discover_entry_in(
+    path: &Path,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
+) -> Result<Option<ScenarioEntry>, ScenarioDiscoveryError> {
     context.add_work(1)?;
-    let entry = collect_group_entry(path.as_ref(), "", languages, language_packs, &mut context)?;
+    let entry = collect_group_entry(path, "", languages, language_packs, context)?;
     context.complete_work()?;
     context.finish()?;
     Ok(entry)
@@ -343,15 +383,70 @@ where
     P: AsRef<Path>,
     F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
 {
+    let mut context = DiscoveryContext::new(&mut progress);
+    discover_many_in(roots, languages, language_packs, &mut context)
+}
+
+/// Lists the scenario roots the way `C4ScenarioListLoader::Load` lists its
+/// root folder: every entry with its own data, but no folder's entries
+/// (C4StartupScenSelDlg.cpp:1150-1159).
+/// [`discover_folder_contents_with_progress`] lists a folder when it is
+/// entered.
+pub fn discover_many_shallow_with_progress<I, P, F>(
+    roots: I,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    mut progress: F,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+    F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+{
+    let mut context = DiscoveryContext::shallow(&mut progress);
+    discover_many_in(roots, languages, language_packs, &mut context)
+}
+
+/// Lists the entries of the folder at `folder`, named `identifier`, the
+/// way `C4ScenarioListLoader::Folder::LoadContents` does once the folder is
+/// entered: the folders inside it keep their own entries unlisted
+/// (C4StartupScenSelDlg.cpp:901-914, 958-1085, 1161-1171).
+pub fn discover_folder_contents_with_progress<F>(
+    folder: &Path,
+    identifier: &str,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    mut progress: F,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+{
+    let mut context = DiscoveryContext::shallow(&mut progress);
+    let group = Group::open(folder).map_err(|err| group_error(folder, err))?;
+    let entries =
+        collect_folder_contents(&group, identifier, languages, language_packs, &mut context)?;
+    context.finish()?;
+    Ok(entries)
+}
+
+fn discover_many_in<I, P>(
+    roots: I,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
     let roots = roots
         .into_iter()
         .map(|root| root.as_ref().to_path_buf())
         .collect::<Vec<_>>();
-    let mut context = DiscoveryContext::new(&mut progress);
     context.add_work(roots.len())?;
     let mut entries = Vec::new();
     for root in roots {
-        let mut discovered = collect_from_path(&root, "", languages, language_packs, &mut context)?;
+        let mut discovered = collect_from_path(&root, "", languages, language_packs, context)?;
         entries.append(&mut discovered);
         context.complete_work()?;
     }
@@ -1085,6 +1180,7 @@ fn build_scenario_entry(
         is_playable: true,
         mission_access: legacy.as_ref().and_then(|info| info.mission_access.clone()),
         children: Vec::new(),
+        contents_loaded: true,
         folder_index: None,
         icon_index,
         difficulty,
@@ -1117,21 +1213,10 @@ fn build_folder_entry(
     }
 
     let title = title.unwrap_or(fallback);
-    // Extension-less directories are C4ScenarioListLoader::RegularFolder:
-    // their contents come from a directory iteration that also accepts
-    // nested plain directories (C4StartupScenSelDlg.cpp:1043-1085), while
-    // .c4f folders (packed or unpacked) only search the "*.c4s"/"*.c4f"
-    // masks (SubFolder::DoLoadContents, :973-1014).
-    let children = if group.is_directory() && group.root().extension().is_none() {
-        collect_from_directory(
-            group.root(),
-            &identifier,
-            languages,
-            language_packs,
-            context,
-        )?
+    let children = if context.shallow {
+        Vec::new()
     } else {
-        collect_children_from_group(group, &identifier, languages, language_packs, context)?
+        collect_folder_contents(group, &identifier, languages, language_packs, context)?
     };
     let folder_index = folder_info.and_then(|info| info.index);
 
@@ -1145,6 +1230,7 @@ fn build_folder_entry(
         is_playable: false,
         mission_access: None,
         children,
+        contents_loaded: !context.shallow,
         folder_index,
         icon_index: None,
         difficulty: None,
@@ -1153,6 +1239,26 @@ fn build_folder_entry(
         allow_user_change: None,
         definition_modules: Vec::new(),
     })
+}
+
+/// The entries of the folder `group`, named `identifier`. Extension-less
+/// directories are C4ScenarioListLoader::RegularFolder: their contents come
+/// from a directory iteration that also accepts nested plain directories
+/// (C4StartupScenSelDlg.cpp:1043-1085), while .c4f folders (packed or
+/// unpacked) only search the "*.c4s"/"*.c4f" masks
+/// (SubFolder::DoLoadContents, :973-1014).
+fn collect_folder_contents(
+    group: &Group,
+    identifier: &str,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    if group.is_directory() && group.root().extension().is_none() {
+        collect_from_directory(group.root(), identifier, languages, language_packs, context)
+    } else {
+        collect_children_from_group(group, identifier, languages, language_packs, context)
+    }
 }
 
 /// The right-page description per `C4CFN_ScenarioDesc` = "Desc{}.rtf"
@@ -1796,6 +1902,45 @@ mod tests {
         assert_eq!(folder_entry.title, "Missions Pack");
         assert_eq!(folder_entry.children.len(), 1);
         assert_eq!(folder_entry.children[0].title, "Bravo");
+        assert!(folder_entry.contents_loaded);
+    }
+
+    #[test]
+    fn a_shallow_listing_leaves_a_folders_contents_until_it_is_entered() {
+        // C4ScenarioListLoader lists the root folder alone and loads a
+        // folder's entries once it is entered (C4StartupScenSelDlg.cpp:
+        // 901-914, 1150-1171).
+        let dir = tempdir().unwrap();
+        let folder = dir.path().join("Missions.c4f");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("Folder.txt"), "Title=Missions Pack\n").unwrap();
+        let child = folder.join("Bravo.c4s");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("Scenario.json"), br#"{"name":"Bravo"}"#).unwrap();
+        let languages = default_language_sequence();
+        let packs = LanguagePacks::default();
+
+        let entries = discover_many_shallow_with_progress([dir.path()], &languages, &packs, |_| {
+            ControlFlow::Continue(())
+        })
+        .expect("discover the root");
+        assert_eq!(entries.len(), 1);
+        let folder_entry = &entries[0];
+        assert_eq!(folder_entry.title, "Missions Pack");
+        assert!(!folder_entry.contents_loaded);
+        assert!(folder_entry.children.is_empty());
+
+        let contents = discover_folder_contents_with_progress(
+            &folder_entry.path,
+            &folder_entry.identifier,
+            &languages,
+            &packs,
+            |_| ControlFlow::Continue(()),
+        )
+        .expect("discover the folder's contents");
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].identifier, "Missions.c4f/Bravo.c4s");
+        assert_eq!(contents[0].title, "Bravo");
     }
 
     #[test]
@@ -1836,6 +1981,46 @@ mod tests {
         assert_eq!(folder_entry.kind, ScenarioEntryKind::Folder);
         assert_eq!(folder_entry.children.len(), 1);
         assert_eq!(folder_entry.children[0].title, "Packed Child");
+    }
+
+    #[test]
+    fn a_folder_packed_inside_a_packed_folder_lists_its_contents_from_its_path() {
+        let dir = tempdir().unwrap();
+        let leaf = build_group(&[("Scenario.json", br#"{"name":"Nested Leaf"}"#.to_vec())]);
+        let mut inner = build_group(&[("Folder.txt", b"Title=Inner".to_vec()), ("Leaf.c4s", leaf)]);
+        mark_group_entry_child(&mut inner, 1);
+        let mut outer = build_group(&[
+            ("Folder.txt", b"Title=Outer".to_vec()),
+            ("Inner.c4f", inner),
+        ]);
+        mark_group_entry_child(&mut outer, 1);
+        fs::write(dir.path().join("Outer.c4f"), gzip_group_image(&outer)).unwrap();
+        let languages = default_language_sequence();
+        let packs = LanguagePacks::default();
+        let contents = |entry: &ScenarioEntry| {
+            discover_folder_contents_with_progress(
+                &entry.path,
+                &entry.identifier,
+                &languages,
+                &packs,
+                |_| ControlFlow::Continue(()),
+            )
+            .expect("discover the folder's contents")
+        };
+
+        let roots = discover_many_shallow_with_progress([dir.path()], &languages, &packs, |_| {
+            ControlFlow::Continue(())
+        })
+        .expect("discover the root");
+        let inner_entries = contents(&roots[0]);
+        assert_eq!(inner_entries.len(), 1);
+        assert_eq!(inner_entries[0].title, "Inner");
+        assert!(!inner_entries[0].contents_loaded);
+
+        let leaves = contents(&inner_entries[0]);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].identifier, "Outer.c4f/Inner.c4f/Leaf.c4s");
+        assert_eq!(leaves[0].title, "Nested Leaf");
     }
 
     #[cfg(unix)]
