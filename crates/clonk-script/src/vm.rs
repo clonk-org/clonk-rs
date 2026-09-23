@@ -10296,6 +10296,7 @@ impl CompiledFunctionBuilder {
                 method,
                 args,
                 is_arrow,
+                failsafe,
             } => {
                 let mut args = args.clone();
                 let callee = if *is_arrow {
@@ -10316,7 +10317,7 @@ impl CompiledFunctionBuilder {
                 self.call_sites[*site].return_reference = true;
                 if *is_arrow {
                     self.call_sites[*site].kind = CompiledCallKind::Method {
-                        failsafe: false,
+                        failsafe: *failsafe,
                         reference: true,
                     };
                 }

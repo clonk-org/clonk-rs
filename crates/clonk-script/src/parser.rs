@@ -1674,6 +1674,7 @@ impl<'a> Parser<'a> {
                                 method: name.clone(),
                                 args: vec![first_arg],
                                 is_arrow: false,
+                                failsafe: false,
                             });
                         }
                         // NEW: Allow any function call as a potential lvalue
@@ -1694,6 +1695,7 @@ impl<'a> Parser<'a> {
                         method,
                         args,
                         is_arrow: true,
+                        failsafe: is_optional,
                     });
                 }
                 Err(ParseError::new(

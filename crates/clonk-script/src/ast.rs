@@ -612,6 +612,8 @@ pub enum AssignmentTarget {
         /// Distinguishes `obj->Fn(arg)` (target + ten slots) from the
         /// normalized direct native spelling `Fn(arg, obj)` (native arity).
         is_arrow: bool,
+        /// `obj->~Fn(arg)`, compiled to AB_CALLFS in place of AB_CALL.
+        failsafe: bool,
     },
     FunctionCall {
         // func(&...) as lvalue - reference-returning function call
