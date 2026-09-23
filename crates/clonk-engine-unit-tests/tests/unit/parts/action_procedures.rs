@@ -2659,39 +2659,32 @@ fn build_procedure_requires_components_before_progress() -> Result<(), EngineErr
     Ok(())
 }
 
-#[test]
-fn automatic_construction_returns_collected_material_through_a_climbable_u_route() {
-    struct FrontierDefinitionResolver {
-        roots: Vec<std::path::PathBuf>,
-    }
+struct FrontierDefinitionResolver {
+    roots: Vec<std::path::PathBuf>,
+}
 
-    impl clonk_engine::scenario::LegacyDefinitionResolver for FrontierDefinitionResolver {
-        fn resolve_definition_groups(
-            &self,
-            _scenario: &clonk_resources::Group,
-            identifier: &str,
-        ) -> Result<Vec<clonk_resources::Group>, ScenarioError> {
-            let relative = identifier.replace('\\', "/");
-            self.roots
-                .iter()
-                .map(|root| root.join(&relative))
-                .find(|candidate| candidate.exists())
-                .map(clonk_resources::Group::open)
-                .transpose()
-                .map_err(ScenarioError::Resources)?
-                .map(|group| vec![group])
-                .ok_or(ScenarioError::LegacyDefinitionNotFound { path: relative })
-        }
+impl clonk_engine::scenario::LegacyDefinitionResolver for FrontierDefinitionResolver {
+    fn resolve_definition_groups(
+        &self,
+        _scenario: &clonk_resources::Group,
+        identifier: &str,
+    ) -> Result<Vec<clonk_resources::Group>, ScenarioError> {
+        let relative = identifier.replace('\\', "/");
+        self.roots
+            .iter()
+            .map(|root| root.join(&relative))
+            .find(|candidate| candidate.exists())
+            .map(clonk_resources::Group::open)
+            .transpose()
+            .map_err(ScenarioError::Resources)?
+            .map(|group| vec![group])
+            .ok_or(ScenarioError::LegacyDefinitionNotFound { path: relative })
     }
+}
 
-    // Frontier exposes the point-path/traversal mismatch behind automatic
-    // construction with unmodified CLNK, CST1 and ROCK definitions. The
-    // pathfinder callback accepts point-clear rays
-    // (C4Game.cpp:2288-2292,2671; C4PathFinder.cpp:545-550), but a WALK
-    // command only steers horizontally and its high-angle jump is limited
-    // to 40 pixels (C4Command.cpp:319-327,1874-1893). This
-    // deliberately corrected route must therefore prove actor traversal,
-    // not merely time out or postpone the same reachable material trip.
+/// Frontier with its materials and System.c4g, one player joined: the
+/// unmodified CLNK, CST1 and ROCK definitions and the player's crew Clonk.
+fn frontier_crew_engine(navigation_ai: bool) -> (Engine, i32, ObjectId) {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let content = repository.join("content");
     let scenario_path = content.join("Missions.c4f/Frontier.c4s");
@@ -2713,8 +2706,7 @@ fn automatic_construction_returns_collected_material_through_a_climbable_u_route
     .test_value();
 
     let mut engine = Engine::with_seed(0);
-    // The corrected route is a normal-profile divergence.
-    engine.set_navigation_ai(true);
+    engine.set_navigation_ai(navigation_ai);
     engine.configure_materials_from_library(&material_library);
     engine.install_global_scripts(&system_scripts);
     scenario.apply(&mut engine).test_value();
@@ -2723,6 +2715,21 @@ fn automatic_construction_returns_collected_material_through_a_climbable_u_route
         .test_value()
         .number();
     let clonk = engine.crew_cursor(owner).test_value();
+    (engine, owner, clonk)
+}
+
+#[test]
+fn automatic_construction_returns_collected_material_through_a_climbable_u_route() {
+    // Frontier exposes the point-path/traversal mismatch behind automatic
+    // construction with unmodified CLNK, CST1 and ROCK definitions. The
+    // pathfinder callback accepts point-clear rays
+    // (C4Game.cpp:2288-2292,2671; C4PathFinder.cpp:545-550), but a WALK
+    // command only steers horizontally and its high-angle jump is limited
+    // to 40 pixels (C4Command.cpp:319-327,1874-1893). This
+    // deliberately corrected route must therefore prove actor traversal,
+    // not merely time out or postpone the same reachable material trip.
+    // The corrected route is a normal-profile divergence.
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
 
     let width = 320usize;
     let height = 220usize;
