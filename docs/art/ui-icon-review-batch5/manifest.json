@@ -1,0 +1,188 @@
+{
+  "title": "Clonk hand gesture icon review \u2014 batch 5",
+  "status": "All seven approved and installed as high-resolution Hand.png cell replacements",
+  "method": "OpenAI built-in imagegen, checkerboard removal, and fitting to original alpha bounds",
+  "icons": [
+    {
+      "id": "HAND-01",
+      "label": "Open grasp",
+      "source": "planet/Graphics.c4g/Hand.png",
+      "sourceCell": [
+        0,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "158227cbcbb29918345766d63225ad46e744b7700018e4c95419cbe97b417c78",
+      "before": "before/hand-0.png",
+      "after": "after/hand-0.png",
+      "gameSize": "game-size/hand-0.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "99578e6ab7217952b95e6395dee1a4774ae95457013b4964312131bf3ddbfdb8",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": null,
+      "previousPreview": null,
+      "roundTwoReview": "approve"
+    },
+    {
+      "id": "HAND-02",
+      "label": "Closing grasp",
+      "source": "planet/Graphics.c4g/Hand.png",
+      "sourceCell": [
+        64,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "158227cbcbb29918345766d63225ad46e744b7700018e4c95419cbe97b417c78",
+      "before": "before/hand-1.png",
+      "after": "after/hand-1.png",
+      "gameSize": "game-size/hand-1.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "65e6e22022ccb80eceda0d7963d4b90eedb77d42fa631fd8e71b40e97fffd132",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "That doesn't look like a proper hand",
+      "previousPreview": "history/hand-1-round-1.png",
+      "roundTwoReview": "approve"
+    },
+    {
+      "id": "HAND-03",
+      "label": "Flat hand",
+      "source": "planet/Graphics.c4g/Hand.png",
+      "sourceCell": [
+        128,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "158227cbcbb29918345766d63225ad46e744b7700018e4c95419cbe97b417c78",
+      "before": "before/hand-2.png",
+      "after": "after/hand-2.png",
+      "gameSize": "game-size/hand-2.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "32068206a80da159abc767d31bb07f18a0a546ff028f40e1da2f153a9595db35",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "That doesn't look like a proper hand",
+      "previousPreview": "history/hand-2-round-1.png",
+      "roundTwoReview": "approve"
+    },
+    {
+      "id": "HAND-04",
+      "label": "Point",
+      "source": "planet/Graphics.c4g/Hand.png",
+      "sourceCell": [
+        192,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "158227cbcbb29918345766d63225ad46e744b7700018e4c95419cbe97b417c78",
+      "before": "before/hand-3.png",
+      "after": "after/hand-3.png",
+      "gameSize": "game-size/hand-3.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "d6324af2a42e32eef59a47c1c1503f3fca1fd5d9cb8bcacfe24215412a28621c",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "That doesn't look like a proper hand",
+      "previousPreview": "history/hand-3-round-1.png",
+      "roundTwoReview": "approve"
+    },
+    {
+      "id": "HAND-05",
+      "label": "Open horizontal hand",
+      "source": "planet/Graphics.c4g/Hand.png",
+      "sourceCell": [
+        256,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "158227cbcbb29918345766d63225ad46e744b7700018e4c95419cbe97b417c78",
+      "before": "before/hand-4.png",
+      "after": "after/hand-4.png",
+      "gameSize": "game-size/hand-4.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "b94caf9fe83e150b0b1b9dff67e3358bcabc1ca4e366594c032ae561fb218b9c",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": null,
+      "previousPreview": null,
+      "roundTwoReview": "approve"
+    },
+    {
+      "id": "HAND-06",
+      "label": "Raised thumb",
+      "source": "planet/Graphics.c4g/Hand.png",
+      "sourceCell": [
+        320,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "158227cbcbb29918345766d63225ad46e744b7700018e4c95419cbe97b417c78",
+      "before": "before/hand-5.png",
+      "after": "after/hand-5.png",
+      "gameSize": "game-size/hand-5.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "77f1bd793fba4d7416880be8b6b828378dac5b35e64f665d53bd1f7a84eb1fad",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": null,
+      "previousPreview": null,
+      "roundTwoReview": "approve"
+    },
+    {
+      "id": "HAND-07",
+      "label": "Upright palm",
+      "source": "planet/Graphics.c4g/Hand.png",
+      "sourceCell": [
+        384,
+        0,
+        64,
+        64
+      ],
+      "sourceSha256": "158227cbcbb29918345766d63225ad46e744b7700018e4c95419cbe97b417c78",
+      "before": "before/hand-6.png",
+      "after": "after/hand-6.png",
+      "gameSize": "game-size/hand-6.png",
+      "afterSize": [
+        512,
+        512
+      ],
+      "afterSha256": "2de1ef31aa7ece092558d87f07e224eb455f0a8bbd3b358ccccbba4dc25cf290",
+      "review": "approved",
+      "roundOneReview": "approve",
+      "roundOneFeedback": null,
+      "previousPreview": null,
+      "roundTwoReview": "approve"
+    }
+  ],
+  "otherLowResolutionCandidates": [
+    "Rank.png: twenty-four 16x16 rank symbols",
+    "Options.png: sixteen remaining 35x35 cells",
+    "Control.png: mixed-size keyboard and command facets",
+    "Flag.png and Crew.png: owner-colored art requiring color-mask preservation"
+  ]
+}

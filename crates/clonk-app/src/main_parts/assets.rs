@@ -3318,6 +3318,7 @@ pub(crate) fn load_game_graphics_resources(
     let install_hd_hud = crate::hd_hud_icons::is_installed(fallback.hud_graphics.as_ref());
     let install_hd_menu = crate::hd_menu_icons::is_installed(fallback.hud_graphics.as_ref());
     let install_hd_gamepad = crate::hd_gamepad_icons::is_installed(fallback.hud_graphics.as_ref());
+    let install_hd_hand = crate::hd_hand_icons::is_installed(fallback.hud_graphics.as_ref());
     let Some(paths) = paths else {
         return Ok(fallback);
     };
@@ -3379,6 +3380,9 @@ pub(crate) fn load_game_graphics_resources(
     }
     if install_hd_gamepad {
         crate::hd_gamepad_icons::install_hud(Arc::make_mut(&mut resources.hud_graphics))?;
+    }
+    if install_hd_hand {
+        crate::hd_hand_icons::install_hud(Arc::make_mut(&mut resources.hud_graphics))?;
     }
     Ok(resources)
 }

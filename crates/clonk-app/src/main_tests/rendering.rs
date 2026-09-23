@@ -2219,6 +2219,36 @@ fn active_scenario_upgrades_stock_hud_icons_and_keeps_custom_art() {
 }
 
 #[test]
+fn approved_hand_gestures_reach_startup_and_loaded_game_hud() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(320, 200, &paths);
+    let startup = app.assets.hud_graphics();
+    let startup_hand = startup.hand.as_ref().test_value();
+    for phase in 0..7 {
+        let art = startup_hand
+            .region_replacement([phase * 64, 0, 64, 64])
+            .test_value();
+        main_assert_eq!((art.width(), art.height()) => (512, 512));
+    }
+
+    let scenario =
+        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+            .test_value();
+    let game = app
+        .loaded_game_graphics_resources(&scenario, None)
+        .test_value();
+    let game_hand = game.hud_graphics.hand.as_ref().test_value();
+    for phase in 0..7 {
+        let art = game_hand
+            .region_replacement([phase * 64, 0, 64, 64])
+            .test_value();
+        main_assert_eq!((art.width(), art.height()) => (512, 512));
+    }
+}
+
+#[test]
 fn real_running_hud_retains_full_resolution_approved_score_and_wealth_sources() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);

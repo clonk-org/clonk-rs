@@ -149,6 +149,7 @@ mod game_message;
 mod gamepad;
 mod gpu_instance;
 mod hd_gamepad_icons;
+mod hd_hand_icons;
 mod hd_hud_icons;
 mod hd_menu_icons;
 mod hd_ui_icons;
@@ -2643,6 +2644,7 @@ impl GameApp {
                 Arc::make_mut(&mut assets.hud_graphics),
                 &mut assets.startup_dialog_images,
             )?;
+            hd_hand_icons::install_hud(Arc::make_mut(&mut assets.hud_graphics))?;
         }
         if let Some(source) = assets.startup_native_font_source.as_mut() {
             source.snap_to_pixels = presentation_features.snap_text_to_pixels;

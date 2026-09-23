@@ -1,0 +1,30 @@
+{
+  "HAND-01": {
+    "decision": "approve",
+    "feedback": null
+  },
+  "HAND-02": {
+    "decision": "revise",
+    "feedback": "That doesn't look like a proper hand"
+  },
+  "HAND-03": {
+    "decision": "revise",
+    "feedback": "That doesn't look like a proper hand"
+  },
+  "HAND-04": {
+    "decision": "revise",
+    "feedback": "That doesn't look like a proper hand"
+  },
+  "HAND-05": {
+    "decision": "approve",
+    "feedback": null
+  },
+  "HAND-06": {
+    "decision": "approve",
+    "feedback": null
+  },
+  "HAND-07": {
+    "decision": "approve",
+    "feedback": null
+  }
+}
