@@ -152,9 +152,11 @@ fn empty_host_registration_snapshot() -> &'static HostRegistrationSnapshot {
 }
 
 /// Cross-object `func &` dispatch. Kept separate from [`HostFunction`] so an
-/// lvalue call result is never flattened to a copied [`Value`].
+/// lvalue call result is never flattened to a copied [`Value`]. `Ok(None)`
+/// reports a fail-safe call that found no function, where AB_CALLFS leaves a
+/// plain nil in place of the result (C4AulExec.cpp:1262-1266).
 pub type MethodReferenceDispatch =
-    std::rc::Rc<dyn Fn(&[Value]) -> Result<ValueReference, RuntimeError>>;
+    std::rc::Rc<dyn Fn(&[Value]) -> Result<Option<ValueReference>, RuntimeError>>;
 
 /// Cross-object dispatch for an arrow call whose callee declares `&`
 /// parameters. C++ hands the callee `C4V_pC4Value` slots pointing straight at

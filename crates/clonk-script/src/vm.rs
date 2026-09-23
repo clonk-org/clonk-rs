@@ -8101,9 +8101,12 @@ impl<'a> Vm<'a> {
             }
             let _guard = CallerContextGuard::enter(Some(env.caller_context()));
             let _parameter_override = CallParameterOverrideGuard::enter(0);
-            return dispatch(&dispatch_args)
-                .map(ValueReference::into_lvalue)
-                .map(ReturnValue::Reference);
+            return dispatch(&dispatch_args).map(|found| {
+                found.map_or_else(
+                    || ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
+                    |reference| ReturnValue::Reference(reference.into_lvalue()),
+                )
+            });
         }
 
         // Without a host method bridge, an arrow call can still select a
