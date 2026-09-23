@@ -149,6 +149,40 @@ fn engine_wide_known_failsafe_name_preserves_zero_target_validation() {
 }
 
 #[test]
+fn globally_unresolved_failsafe_arrow_assignment_runs_its_value_before_failing() {
+    // An unresolved `->~` name compiles to a nil without AB_CALLFS
+    // (C4AulParse.cpp:3215-3231), so its zero target goes unchecked. AB_Set
+    // evaluates its right side first and then rejects that nil, which converts
+    // to no reference, naming its type "any" (C4AulExec.cpp:266-275, 858-865;
+    // C4Value.cpp:340-344, 424-427, 491-500).
+    let source = r#"
+        #strict
+        func Probe() { ZeroTarget()->~GloballyMissing() = RightSide(); }
+    "#;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::new();
+    crate::support::load_script(&mut engine, source);
+    for (name, result) in [("ZeroTarget", Value::Int(0)), ("RightSide", Value::Int(42))] {
+        let calls = Arc::clone(&calls);
+        engine.register_host_function(name, move |_| {
+            calls.lock().unwrap().push(name);
+            Ok(result.clone())
+        });
+    }
+
+    let error = engine
+        .call("Probe", &[])
+        .expect_err("nil is no reference to assign through");
+    assert!(
+        error
+            .to_string()
+            .contains(r#"operator "=" left side: got "any", but expected "&"!"#),
+        "got: {error}"
+    );
+    assert_eq!(*calls.lock().unwrap(), ["ZeroTarget", "RightSide"]);
+}
+
+#[test]
 fn removal_during_arguments_stops_before_bare_local_method_dispatch() {
     // Parse_Params evaluates Clear first, then AB_CALL observes that
     // AssignRemoval cleared its retained receiver and errors before Method

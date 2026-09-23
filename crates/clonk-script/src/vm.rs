@@ -8017,15 +8017,23 @@ impl<'a> Vm<'a> {
     /// must preserve the method's reference result without reconstructing an
     /// expression after a host boundary.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn invoke_method_reference_call_args_raw(
         &self,
         mut target: Value,
         name: &str,
         evaluated_args: CallArgs,
+        failsafe: bool,
         target_sweep_cursor: usize,
         env: &mut Environment,
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
+        if failsafe && !self.direct_call_function_known(name) {
+            // An unresolved `->~name` compiles to a nil in place of AB_CALLFS,
+            // with no zero-target check (C4AulParse.cpp:3215-3231). That nil
+            // is no reference, so AB_Set rejects it after its right side ran.
+            return Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)));
+        }
         if let Value::Proplist(map) = &target {
             if let Some(Value::Int(id)) = map.get("id") {
                 if *id > 0 {
@@ -12171,6 +12179,7 @@ impl CompiledFunction {
                                     receiver.into_value()?,
                                     name,
                                     arguments,
+                                    *failsafe,
                                     sweep_cursor,
                                     env,
                                     depth,
