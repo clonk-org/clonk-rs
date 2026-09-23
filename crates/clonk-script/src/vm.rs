@@ -8113,15 +8113,16 @@ impl<'a> Vm<'a> {
         // Without a host method bridge, an arrow call can still select a
         // script `func &` from the executing object context. The continuation
         // call-result task owns the target and ten parameter slots already.
+        // A plain return stays a value, which AB_Set rejects after its right
+        // side (C4AulExec.cpp:266-275, 858-865).
         let _parameter_override = CallParameterOverrideGuard::enter(0);
-        self.invoke_reference(
+        self.invoke_raw(
             name,
             evaluated_args,
             depth + 1,
             env.object_state.clone(),
             Some(env.caller_context()),
         )
-        .map(ReturnValue::Reference)
     }
 
     /// Object-call entry for the continuation executor. Its argument task has

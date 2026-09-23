@@ -183,6 +183,39 @@ fn globally_unresolved_failsafe_arrow_assignment_runs_its_value_before_failing()
 }
 
 #[test]
+fn an_arrow_assignment_to_a_plain_return_runs_its_value_before_failing() {
+    // A callee that is no `func &` leaves a plain value where AB_Set expects
+    // a reference. AB_Set evaluates its right side first and only then
+    // rejects the value (C4AulExec.cpp:266-275, 858-865).
+    let source = r#"
+        #strict
+        func Plain() { return 3; }
+        func Probe(target) { target->Plain() = RightSide(); }
+    "#;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::new();
+    crate::support::load_script(&mut engine, source);
+    {
+        let calls = Arc::clone(&calls);
+        engine.register_host_function("RightSide", move |_| {
+            calls.lock().unwrap().push("RightSide");
+            Ok(Value::Int(42))
+        });
+    }
+
+    let error = engine
+        .call("Probe", &[Value::Object(7)])
+        .expect_err("a plain value is no reference to assign through");
+    assert!(
+        error
+            .to_string()
+            .contains(r#"operator "=" left side: got "int", but expected "&"!"#),
+        "got: {error}"
+    );
+    assert_eq!(*calls.lock().unwrap(), ["RightSide"]);
+}
+
+#[test]
 fn removal_during_arguments_stops_before_bare_local_method_dispatch() {
     // Parse_Params evaluates Clear first, then AB_CALL observes that
     // AssignRemoval cleared its retained receiver and errors before Method
