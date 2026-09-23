@@ -2040,6 +2040,52 @@ fn installed_app_uses_all_approved_hud_icons_at_their_original_layout_sizes() {
 }
 
 #[test]
+fn installed_app_uses_approved_gamepad_phases_in_all_three_views() {
+    let temporary = tempfile::tempdir().test_value();
+    let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);
+    persist_config_value(&paths, "General", "CompatProfile", "Normal").test_value();
+    let app = new_menu_app_with_paths(1280, 720, &paths);
+    let dialog = app.assets.dialog_image("Gamepad.png").test_value();
+    let hud = app.assets.hud_graphics();
+    let hud = hud.gamepad.as_ref().test_value();
+    for image in [&dialog, hud] {
+        main_assert_eq!((image.width(), image.height()) => (320, 36));
+        for phase in 0..4 {
+            let art = image
+                .region_replacement([phase * 80, 0, 80, 36])
+                .test_value();
+            main_assert_eq!((art.width(), art.height()) => (640, 288));
+            main_assert!(art.pixels().chunks_exact(4).any(|pixel| pixel[3] == 0));
+            main_assert!(art.pixels().chunks_exact(4).any(|pixel| pixel[3] == 255));
+        }
+    }
+    let options = app
+        .assets
+        .options_dlg_assets(crate::settings::CompatProfile::Normal)
+        .test_value();
+    let properties = app.assets.plrprop_assets(false, 1.0).test_value();
+    for image in [
+        options.gamepad.test_value(),
+        properties.gamepad.test_value(),
+    ] {
+        main_assert!(image.region_replacement([160, 0, 80, 36]).is_some());
+    }
+    let scenario =
+        resolve_next_mission_scenario(&app.scensel.catalog, "ClonkMars.c4f/01_Fossae.c4s")
+            .test_value();
+    let game = app
+        .loaded_game_graphics_resources(&scenario, None)
+        .test_value();
+    let gamepad = game.hud_graphics.gamepad.as_ref().test_value();
+    for phase in 0..4 {
+        let art = gamepad
+            .region_replacement([phase * 80, 0, 80, 36])
+            .test_value();
+        main_assert_eq!((art.width(), art.height()) => (640, 288));
+    }
+}
+
+#[test]
 fn installed_app_uses_approved_menu_icons_in_original_sheet_cells() {
     let temporary = tempfile::tempdir().test_value();
     let (_guard, paths) = exact_loader_test_paths(temporary.path(), None);

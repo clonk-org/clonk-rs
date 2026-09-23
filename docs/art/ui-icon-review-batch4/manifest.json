@@ -1,0 +1,143 @@
+{
+  "title": "Clonk gamepad icon review \u2014 batch 4",
+  "status": "All four approved; installed as high-resolution Gamepad.png cell replacements",
+  "method": "OpenAI built-in imagegen controller and polished numeral edits, with deterministic transparent cutouts and original-cell placement",
+  "controllerBaseSha256": "824ebf3107bf92998fea397397b010be7a8ce48d6a30abf8ae5ec294de87ad54",
+  "icons": [
+    {
+      "id": "PAD-01",
+      "label": "Player 1 gamepad",
+      "source": "planet/Graphics.c4g/Gamepad.png",
+      "sourceCell": [
+        0,
+        0,
+        80,
+        36
+      ],
+      "sourceSha256": "876a175e833b279fb6ea1264265f51d863437adbf012ddb3616d38b62135b138",
+      "before": "before/gamepad-1.png",
+      "after": "after/gamepad-1.png",
+      "gameSize": "game-size/gamepad-1.png",
+      "afterSize": [
+        1280,
+        576
+      ],
+      "afterSha256": "91b39d55d5eb8c01ab9b74187aeaa89404422687646a7cc46167eeba82038052",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "The numbers need to be more faithful",
+      "roundTwoReview": "revise",
+      "roundTwoFeedback": "Those numbers look scuffed",
+      "roundThreeReview": "approve",
+      "roundThreeFeedback": "This is great!",
+      "roundFourReview": null,
+      "previousPreview": "history/gamepad-1-round-2.png",
+      "revisionDetail": null,
+      "roundOnePreview": "history/gamepad-1-round-1.png",
+      "note": "Unchanged from round 3; the approved controller base is unchanged."
+    },
+    {
+      "id": "PAD-02",
+      "label": "Player 2 gamepad",
+      "source": "planet/Graphics.c4g/Gamepad.png",
+      "sourceCell": [
+        80,
+        0,
+        80,
+        36
+      ],
+      "sourceSha256": "876a175e833b279fb6ea1264265f51d863437adbf012ddb3616d38b62135b138",
+      "before": "before/gamepad-2.png",
+      "after": "after/gamepad-2.png",
+      "gameSize": "game-size/gamepad-2.png",
+      "afterSize": [
+        1280,
+        576
+      ],
+      "afterSha256": "51768573e550d95285628ede7d3808f508b5edaf8eb1f63a3f557c16f73a274b",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "The numbers need to be more faithful",
+      "roundTwoReview": "revise",
+      "roundTwoFeedback": "Those numbers look scuffed",
+      "roundThreeReview": "approve",
+      "roundThreeFeedback": "This is great!",
+      "roundFourReview": null,
+      "previousPreview": "history/gamepad-2-round-2.png",
+      "revisionDetail": null,
+      "roundOnePreview": "history/gamepad-2-round-1.png",
+      "note": "Unchanged from round 3; the approved controller base is unchanged."
+    },
+    {
+      "id": "PAD-03",
+      "label": "Player 3 gamepad",
+      "source": "planet/Graphics.c4g/Gamepad.png",
+      "sourceCell": [
+        160,
+        0,
+        80,
+        36
+      ],
+      "sourceSha256": "876a175e833b279fb6ea1264265f51d863437adbf012ddb3616d38b62135b138",
+      "before": "before/gamepad-3.png",
+      "after": "after/gamepad-3.png",
+      "gameSize": "game-size/gamepad-3.png",
+      "afterSize": [
+        1280,
+        576
+      ],
+      "afterSha256": "03d16b0dbe8fd18328293ad1650fa614e5e098268b0885fcaa6b65079cfe0912",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "The numbers need to be more faithful",
+      "roundTwoReview": "revise",
+      "roundTwoFeedback": "Those numbers look scuffed",
+      "roundThreeReview": "revise",
+      "roundThreeFeedback": "The 3 could be a little better though",
+      "roundFourReview": "approve",
+      "previousPreview": "history/gamepad-3-round-3.png",
+      "revisionDetail": "pad-03-revision-detail.png",
+      "roundOnePreview": "history/gamepad-3-round-1.png",
+      "note": "The 3 has a flatter top, clearer waist, and more balanced lower curve; the controller is unchanged."
+    },
+    {
+      "id": "PAD-04",
+      "label": "Player 4 gamepad",
+      "source": "planet/Graphics.c4g/Gamepad.png",
+      "sourceCell": [
+        240,
+        0,
+        80,
+        36
+      ],
+      "sourceSha256": "876a175e833b279fb6ea1264265f51d863437adbf012ddb3616d38b62135b138",
+      "before": "before/gamepad-4.png",
+      "after": "after/gamepad-4.png",
+      "gameSize": "game-size/gamepad-4.png",
+      "afterSize": [
+        1280,
+        576
+      ],
+      "afterSha256": "75e6ff7c319c32be40661058b86924a67201a1e4473da991ea97656c1fc19db7",
+      "review": "approved",
+      "roundOneReview": "revise",
+      "roundOneFeedback": "The numbers need to be more faithful",
+      "roundTwoReview": "revise",
+      "roundTwoFeedback": "Those numbers look scuffed",
+      "roundThreeReview": "approve",
+      "roundThreeFeedback": "This is great!",
+      "roundFourReview": null,
+      "previousPreview": "history/gamepad-4-round-2.png",
+      "revisionDetail": null,
+      "roundOnePreview": "history/gamepad-4-round-1.png",
+      "note": "Unchanged from round 3; the approved controller base is unchanged."
+    }
+  ],
+  "otherLowResolutionCandidates": [
+    "Hand.png: seven 64x64 gesture phases",
+    "Rank.png: twenty-four 16x16 rank symbols",
+    "Options.png: sixteen 35x35 cells outside the seven upgraded phases",
+    "Control.png: mixed keyboard, command and key facets",
+    "Flag.png and Crew.png: owner-colored art requiring color-mask preservation"
+  ]
+}

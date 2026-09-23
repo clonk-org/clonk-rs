@@ -1,0 +1,18 @@
+{
+  "PAD-01": {
+    "decision": "approve",
+    "feedback": "This is great!"
+  },
+  "PAD-02": {
+    "decision": "approve",
+    "feedback": "This is great!"
+  },
+  "PAD-03": {
+    "decision": "revise",
+    "feedback": "The 3 could be a little better though"
+  },
+  "PAD-04": {
+    "decision": "approve",
+    "feedback": "This is great!"
+  }
+}

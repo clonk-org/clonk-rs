@@ -148,6 +148,7 @@ mod device_loss_probe;
 mod game_message;
 mod gamepad;
 mod gpu_instance;
+mod hd_gamepad_icons;
 mod hd_hud_icons;
 mod hd_menu_icons;
 mod hd_ui_icons;
@@ -2635,6 +2636,10 @@ impl GameApp {
                 &mut assets.startup_dialog_images,
             )?;
             hd_menu_icons::install(
+                Arc::make_mut(&mut assets.hud_graphics),
+                &mut assets.startup_dialog_images,
+            )?;
+            hd_gamepad_icons::install(
                 Arc::make_mut(&mut assets.hud_graphics),
                 &mut assets.startup_dialog_images,
             )?;
