@@ -5689,12 +5689,14 @@ impl GameLobby {
             gamma,
         );
         let label_x = row.rect.x + row.rect.h + ICON_LABEL_SPACING;
+        let name = client.display_name();
+        let ping = client.ping_ms.map(|ping| format!("{ping} ms"));
         draw_clipped_text_mode(
             surface,
             &resources.fonts.text,
             label_x,
             row.rect.y,
-            &client.display_name(),
+            &name,
             client.color,
             TextAlign::Left,
             gamma,
@@ -5703,10 +5705,8 @@ impl GameLobby {
         );
         if self.speaking_clients.contains(&client.id) {
             let font = &resources.fonts.text;
-            let name_end = label_x + font.measure(&client.display_name(), false).0;
-            let ping_width = client
-                .ping_ms
-                .map(|ping| font.measure(&format!("{ping} ms"), false).0);
+            let name_end = label_x + font.measure(&name, false).0;
+            let ping_width = ping.as_deref().map(|ping| font.measure(ping, false).0);
             draw_speaking_icon(
                 surface,
                 speaking_icon_rect(row, name_end, ping_width),
@@ -5715,13 +5715,13 @@ impl GameLobby {
                 gamma,
             );
         }
-        if let Some(ping) = client.ping_ms {
+        if let Some(ping) = &ping {
             draw_clipped_text(
                 surface,
                 &resources.fonts.text,
                 row.rect.x + row.rect.w,
                 row.rect.y,
-                &format!("{ping} ms"),
+                ping,
                 COLOR_WHITE,
                 TextAlign::Right,
                 gamma,
