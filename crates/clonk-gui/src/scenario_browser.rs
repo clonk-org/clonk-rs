@@ -31,7 +31,34 @@ pub struct ScenarioEntry {
     pub is_editable: bool,
     pub is_playable: bool,
     pub location: Option<String>,
-    pub preview: Option<ImageData>,
+    pub preview: Option<LazyImage>,
+}
+
+/// A row's preview image, produced when a view first shows the row.
+#[derive(Clone)]
+pub struct LazyImage(Arc<dyn Fn() -> Option<ImageData> + Send + Sync>);
+
+impl LazyImage {
+    /// An image that `load` produces each time a view asks for it; `load`
+    /// keeps any cache itself.
+    pub fn new(load: impl Fn() -> Option<ImageData> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(load))
+    }
+
+    /// An image that is already decoded.
+    pub fn ready(image: ImageData) -> Self {
+        Self::new(move || Some(image.clone()))
+    }
+
+    pub fn load(&self) -> Option<ImageData> {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for LazyImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LazyImage")
+    }
 }
 
 impl ScenarioEntry {
@@ -274,8 +301,10 @@ impl ScenarioBrowser {
                 )?;
                 self.gui
                     .set_label_text(self.layout.info_panel.description_label, description)?;
-                self.gui
-                    .set_picture_image(self.layout.info_panel.preview, entry.preview.clone())?;
+                self.gui.set_picture_image(
+                    self.layout.info_panel.preview,
+                    entry.preview.as_ref().and_then(LazyImage::load),
+                )?;
                 return Ok(());
             }
         }

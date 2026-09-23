@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub use scenario_browser::{
-    ScenarioBrowser, ScenarioBrowserMessage, ScenarioBrowserResponse, ScenarioEntry,
+    LazyImage, ScenarioBrowser, ScenarioBrowserMessage, ScenarioBrowserResponse, ScenarioEntry,
     ScenarioEntrySummary, ScenarioKind,
 };
 

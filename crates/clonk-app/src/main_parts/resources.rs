@@ -132,7 +132,7 @@ impl FrontendScenario {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             location: self.location_label(),
-            preview: self.preview().cloned(),
+            preview: self.preview().cloned().map(LazyImage::ready),
         }
     }
 
