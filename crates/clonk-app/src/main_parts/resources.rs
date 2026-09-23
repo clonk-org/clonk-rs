@@ -58,22 +58,24 @@ pub(crate) fn prepare_scenario_selector_metadata(
             .as_deref()
             .filter(|_| entry.kind == ScenarioKind::Scenario)
         {
+            // One open serves both the loader head and the fair-crew rule.
+            let group = Group::open(path).map_err(|error| error.to_string());
             let head = languages
                 .as_ref()
                 .map_err(Clone::clone)
                 .and_then(|languages| {
-                    let group = Group::open(path).map_err(|error| error.to_string())?;
+                    let group = group.as_ref().map_err(Clone::clone)?;
                     ScenarioLoaderHead::load_from_group_with_languages_and_packs(
-                        &group,
+                        group,
                         languages,
                         language_packs,
                     )
                     .map_err(|error| error.to_string())
                 });
-            entry.selector_metadata = Some(Arc::new(ScenarioSelectorMetadata {
-                head,
-                fair_crew: scenario_fair_crew_constraint(Some(entry)),
-            }));
+            let fair_crew = group
+                .as_ref()
+                .map_or(FairCrewConstraint::Free, group_fair_crew_constraint);
+            entry.selector_metadata = Some(Arc::new(ScenarioSelectorMetadata { head, fair_crew }));
         }
         if !prepare_scenario_selector_metadata(
             &mut entry.children,
