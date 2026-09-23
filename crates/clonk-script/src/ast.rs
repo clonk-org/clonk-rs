@@ -141,6 +141,11 @@ pub struct Function {
     pub body: Vec<Stmt>,
     pub access: AccessLevel,
     pub returns_reference: bool,
+    /// Whether running past the last statement returns nil. C4Aul adds that
+    /// `return nil` only at the `}` of a body that opened with `{`
+    /// (C4AulParse.cpp:1866-1880); any other body runs into AB_EOFN, which
+    /// throws `function didn't return` (C4AulExec.cpp:398-399).
+    pub(crate) implicit_return: bool,
     /// Raw localized function-description metadata from the leading
     /// `[caption|Image=...|Condition=...]` block. C4Aul retains this on the
     /// script function for context-menu discovery (C4AulParse.cpp:1825-1853;
@@ -219,6 +224,7 @@ impl std::fmt::Debug for Function {
             .field("body", &self.body)
             .field("access", &self.access)
             .field("returns_reference", &self.returns_reference)
+            .field("implicit_return", &self.implicit_return)
             .field("description", &self.description)
             .field("strict_level", &self.strict_level)
             .field("source_host", &self.source_host)
@@ -242,6 +248,7 @@ impl Clone for Function {
             body: self.body.clone(),
             access: self.access,
             returns_reference: self.returns_reference,
+            implicit_return: self.implicit_return,
             description: self.description.clone(),
             strict_level: self.strict_level,
             source_host: self.source_host,
@@ -267,6 +274,7 @@ impl PartialEq for Function {
             && self.body == other.body
             && self.access == other.access
             && self.returns_reference == other.returns_reference
+            && self.implicit_return == other.implicit_return
             && self.description == other.description
             && self.strict_level == other.strict_level
             && self.source_host == other.source_host

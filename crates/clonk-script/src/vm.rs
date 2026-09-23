@@ -5614,6 +5614,7 @@ impl<'a> Vm<'a> {
             body: vec![Stmt::Return(Some(expr))],
             access: AccessLevel::Public,
             returns_reference: false,
+            implicit_return: true,
             description: None,
             strict_level,
             source_host: None,
@@ -9454,6 +9455,7 @@ pub(crate) struct CompiledFunctionCache {
     body: Arc<Vec<Stmt>>,
     strict_level: Option<u8>,
     returns_reference: bool,
+    implicit_return: bool,
     compiled: Option<Arc<CompiledFunction>>,
 }
 
@@ -9465,6 +9467,7 @@ impl CompiledFunctionCache {
             body: Arc::new(function.body.clone()),
             strict_level: function.strict_level,
             returns_reference: function.returns_reference,
+            implicit_return: function.implicit_return,
             compiled,
         }
     }
@@ -9478,7 +9481,8 @@ impl CompiledFunctionCache {
             || self.params == function.params
                 && *self.body == function.body
                 && self.strict_level == function.strict_level
-                && self.returns_reference == function.returns_reference)
+                && self.returns_reference == function.returns_reference
+                && self.implicit_return == function.implicit_return)
             .then_some(self)
     }
 }
@@ -10743,7 +10747,11 @@ impl CompiledFunctionBuilder {
         if self.stack_depth != 0 {
             return None;
         }
-        self.instructions.push(CompiledInstruction::Finish);
+        self.instructions.push(if function.implicit_return {
+            CompiledInstruction::Finish
+        } else {
+            CompiledInstruction::Error("function didn't return".to_string())
+        });
         let mut legacy_pin_instructions = vec![false; self.instructions.len()];
         for range in self.legacy_pin_ranges {
             legacy_pin_instructions[range].fill(true);

@@ -187,3 +187,53 @@ fn a_legacy_body_at_the_end_of_the_script_keeps_its_code() {
         Value::Int(5)
     );
 }
+
+#[test]
+fn a_body_that_ends_without_its_closing_brace_throws_when_it_runs_off_its_end() {
+    // C4Aul adds `return nil` only at the `}` of a body that opened with `{`
+    // (C4AulParse.cpp:1866-1880). A label, a declaration or the end of the
+    // script ends any other body with no return. Running past its last
+    // statement reaches the AB_EOFN after every function, which throws
+    // (C4AulParse.cpp:3549-3580; C4AulExec.cpp:398-399). The pinned oracle
+    // reports `function didn't return` for all three shapes.
+    for (function, source) in [
+        (
+            "OldStyle",
+            "#strict\nOldStyle:\n  Var(0) = 1;\nNextLabel:\n  return(1);\n",
+        ),
+        (
+            "CutShort",
+            "#strict\nfunc CutShort() { Var(0) = 1;\nfunc After() { return(1); }\n",
+        ),
+        (
+            "LegacyAtEnd",
+            "#strict\nfunc LegacyAtEnd()\n  Var(0) = 1;\n",
+        ),
+    ] {
+        let mut engine = Engine::new();
+        engine.add_script(Script::compile(source).expect("the script compiles"));
+        let error = engine
+            .call(function, &[])
+            .expect_err("running off the end throws");
+        assert!(
+            error.to_string().contains("function didn't return"),
+            "{function}: {error}"
+        );
+    }
+}
+
+#[test]
+fn running_off_the_end_of_an_unclosed_body_aborts_its_caller() {
+    // AB_EOFN throws a C4AulExecError, and Exec unwinds every context of the
+    // call before it reports the error (C4AulExec.cpp:1318-1339).
+    let mut engine = Engine::new();
+    engine.add_script(
+        Script::compile(
+            "#strict\nfunc Caller() { OldStyle(); return(2); }\nOldStyle:\n  Var(0) = 1;\nNextLabel:\n  return(1);\n",
+        )
+        .expect("the script compiles"),
+    );
+    engine
+        .call("Caller", &[])
+        .expect_err("the callee's error ends the caller too");
+}

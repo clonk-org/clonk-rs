@@ -319,6 +319,9 @@ impl<'a> Parser<'a> {
         let mut description = None;
         let mut body = Vec::new();
         let mut ended_at_stray_brace = false;
+        // Only a body closed by its own `}` gets C4Aul's `return nil`
+        // (C4AulParse.cpp:1866-1880).
+        let mut implicit_return = false;
         let error = match self.parse_function_description() {
             Ok(parsed) => {
                 description = parsed;
@@ -377,9 +380,12 @@ impl<'a> Parser<'a> {
                         ));
                         None
                     }
-                    None => self
-                        .expect_symbol(Symbol::RBrace, "expected '}' after function body")
-                        .err(),
+                    None => {
+                        let closed =
+                            self.expect_symbol(Symbol::RBrace, "expected '}' after function body");
+                        implicit_return = closed.is_ok();
+                        closed.err()
+                    }
                 }
             }
             Err(error) => Some(error),
@@ -407,6 +413,7 @@ impl<'a> Parser<'a> {
                 body,
                 access,
                 returns_reference,
+                implicit_return,
                 description,
                 strict_level: None,
                 source_line: name_token.line.saturating_sub(1),
@@ -511,6 +518,9 @@ impl<'a> Parser<'a> {
                 body,
                 access,
                 returns_reference: false,
+                // A label, declaration or end of script ends an old-style
+                // body, never a `}` (C4AulParse.cpp:1763-1805, 2216-2238).
+                implicit_return: false,
                 description,
                 strict_level: None,
                 source_line: name_token.line.saturating_sub(1),
