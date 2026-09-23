@@ -967,11 +967,6 @@ impl SoundPcmBudget {
         }
     }
 
-    fn remaining_bytes(&self) -> usize {
-        self.limit_bytes
-            .saturating_sub(self.retained_bytes.load(Ordering::Acquire))
-    }
-
     fn reserve(self: &Arc<Self>, bytes: usize) -> Result<SoundPcmReservation, AudioDecodeError> {
         let mut current = self.retained_bytes.load(Ordering::Acquire);
         loop {
@@ -1014,7 +1009,9 @@ impl Drop for SoundPcmReservation {
 }
 
 struct MixerState {
-    sounds: HashMap<SoundId, Arc<AudioClip>>,
+    sounds: HashMap<SoundId, SoundAsset>,
+    /// Orders sound loads and plays for evicting the least recently used.
+    sound_use_clock: u64,
     music: HashMap<MusicId, Arc<MusicAsset>>,
     channels: Vec<Option<ChannelPlayback>>,
     /// Numeric channel slots that are currently occupied, kept in ascending
@@ -1038,6 +1035,18 @@ struct MixerState {
 struct AudioClip {
     frames: Arc<Vec<[f32; 2]>>,
     _reservation: SoundPcmReservation,
+}
+
+/// A loaded sound effect. `C4SoundSystem::LoadEffects` keeps every sample of
+/// a group resident and playable (C4SoundSystem.cpp:106-136). The port keeps
+/// each sound's source, and at most the retained budget of decoded PCM: an
+/// idle sound's PCM is evicted for room and decoded again when it is played
+/// (clonk-org/clonk-rs#1718).
+struct SoundAsset {
+    source: SharedAudioData,
+    frames: usize,
+    decoded: Option<Arc<AudioClip>>,
+    last_used: u64,
 }
 
 /// A loaded music object retains the compressed source, as C4's SDL_mixer
@@ -1172,6 +1181,7 @@ impl AudioMixer {
     ) -> Self {
         let state = MixerState {
             sounds: HashMap::new(),
+            sound_use_clock: 0,
             music: HashMap::new(),
             channels: (0..max_channels).map(|_| None).collect(),
             active_channel_indices: Vec::new(),
@@ -1236,29 +1246,133 @@ impl AudioMixer {
         }
         let load_guard = self.sound_pcm_budget.load_guard.lock().unwrap();
         let data = source()?;
-        let max_output_frames = self.sound_pcm_budget.remaining_bytes() / STEREO_PCM_FRAME_BYTES;
+        // Decoding validates the source, as SDL_mixer's load does; whether the
+        // PCM is kept depends only on the room the budget has.
+        let (frames, decoded) = self.decode_sound(data.clone())?;
+        drop(load_guard);
+        let mut state = self.state.lock().unwrap();
+        let id = SoundId(state.next_sound_id);
+        state.next_sound_id += 1;
+        state.sound_use_clock += 1;
+        let last_used = state.sound_use_clock;
+        state.sounds.insert(
+            id,
+            SoundAsset {
+                source: data,
+                frames,
+                decoded,
+                last_used,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Decodes a sound for output. The PCM comes back only when the retained
+    /// budget can hold it, after evicting idle sounds, and the frame count
+    /// either way. A sound too large for the whole budget is an error.
+    /// Callers hold the budget's load guard.
+    fn decode_sound(
+        &self,
+        data: SharedAudioData,
+    ) -> Result<(usize, Option<Arc<AudioClip>>), AudioDecodeError> {
+        let max_output_frames = self.sound_pcm_budget.limit_bytes / STEREO_PCM_FRAME_BYTES;
         let decoded = decode_audio_bounded_for_output(data, self.sample_rate, max_output_frames)?;
+        let frames = decoded.frames.len();
         let retained_bytes = decoded
             .frames
             .capacity()
             .checked_mul(STEREO_PCM_FRAME_BYTES)
             .ok_or(AudioDecodeError::DecodedAudioTooLarge)?;
-        let reservation = self.sound_pcm_budget.reserve(retained_bytes)?;
-        let clip = Arc::new(AudioClip {
-            frames: Arc::new(decoded.frames),
-            _reservation: reservation,
+        let clip = self.reserve_sound_pcm(retained_bytes).map(|reservation| {
+            Arc::new(AudioClip {
+                frames: Arc::new(decoded.frames),
+                _reservation: reservation,
+            })
         });
-        drop(load_guard);
+        Ok((frames, clip))
+    }
+
+    /// Reserves decoded PCM, evicting the least recently used idle sounds
+    /// while the budget is short. `None` once no idle sound is left to evict.
+    fn reserve_sound_pcm(&self, bytes: usize) -> Option<SoundPcmReservation> {
+        loop {
+            if let Ok(reservation) = self.sound_pcm_budget.reserve(bytes) {
+                return Some(reservation);
+            }
+            if !self.evict_idle_sound() {
+                return None;
+            }
+        }
+    }
+
+    /// Drops the decoded PCM of the least recently used sound that no channel
+    /// plays. Channels clone a clip only under the state lock, so a clip held
+    /// by nothing but its asset is idle.
+    fn evict_idle_sound(&self) -> bool {
         let mut state = self.state.lock().unwrap();
-        let id = SoundId(state.next_sound_id);
-        state.next_sound_id += 1;
-        state.sounds.insert(id, clip);
-        Ok(id)
+        let idle = state
+            .sounds
+            .values_mut()
+            .filter(|asset| {
+                asset
+                    .decoded
+                    .as_ref()
+                    .is_some_and(|clip| Arc::strong_count(clip) == 1)
+            })
+            .min_by_key(|asset| asset.last_used);
+        idle.and_then(|asset| asset.decoded.take()).is_some()
+    }
+
+    /// The sound's decoded PCM, decoding it again if it was evicted.
+    fn decoded_sound(&self, id: SoundId) -> Result<Arc<AudioClip>, AudioError> {
+        let source = {
+            let mut state = self.state.lock().unwrap();
+            state.sound_use_clock += 1;
+            let clock = state.sound_use_clock;
+            let asset = state
+                .sounds
+                .get_mut(&id)
+                .ok_or(AudioError::InvalidChannel)?;
+            asset.last_used = clock;
+            if let Some(clip) = &asset.decoded {
+                return Ok(clip.clone());
+            }
+            asset.source.clone()
+        };
+        let _load_guard = self.sound_pcm_budget.load_guard.lock().unwrap();
+        // Another play may have decoded it while this one waited for the guard.
+        let cached = {
+            let state = self.state.lock().unwrap();
+            state
+                .sounds
+                .get(&id)
+                .and_then(|asset| asset.decoded.clone())
+        };
+        if let Some(clip) = cached {
+            return Ok(clip);
+        }
+        let (_, clip) = self.decode_sound(source)?;
+        let clip = clip.ok_or(AudioDecodeError::DecodedAudioTooLarge)?;
+        let mut state = self.state.lock().unwrap();
+        let asset = state
+            .sounds
+            .get_mut(&id)
+            .ok_or(AudioError::InvalidChannel)?;
+        Ok(asset.decoded.get_or_insert(clip).clone())
     }
 
     #[cfg(test)]
     fn retained_sound_pcm_bytes(&self) -> usize {
         self.sound_pcm_budget.retained_bytes.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn sound_is_decoded(&self, id: SoundId) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .sounds
+            .get(&id)
+            .is_some_and(|asset| asset.decoded.is_some())
     }
 
     pub(crate) fn load_music(&self, data: &[u8]) -> Result<MusicId, AudioError> {
@@ -1312,8 +1426,8 @@ impl AudioMixer {
             return Some(0);
         }
         let state = self.state.lock().unwrap();
-        state.sounds.get(&id).map(|clip| {
-            let frames = clip.frames.len();
+        state.sounds.get(&id).map(|asset| {
+            let frames = asset.frames;
             if self.sample_rate == 0 {
                 0
             } else {
@@ -1332,12 +1446,9 @@ impl AudioMixer {
             }
             return Ok(ChannelId(INERT_CHANNEL_INDEX, generation));
         }
+        // Holding the clip keeps it from being evicted before a channel does.
+        let clip = self.decoded_sound(id)?;
         let mut state = self.state.lock().unwrap();
-        let clip = state
-            .sounds
-            .get(&id)
-            .cloned()
-            .ok_or(AudioError::InvalidChannel)?;
         let channel_index = state
             .channels
             .iter()
@@ -3370,14 +3481,68 @@ mod tests {
         mixer.unload_sound(sound_id);
 
         assert_eq!(mixer.retained_sound_pcm_bytes(), decoded_bytes);
+        // A playing clip is never evicted: another sound loads, but its PCM
+        // has no room until the channel lets go.
+        let other = mixer.load_sound(&data).expect("the source loads");
         assert!(matches!(
-            mixer.load_sound(&data),
+            mixer.play_sound(other, false),
             Err(AudioError::Decode(AudioDecodeError::DecodedAudioTooLarge))
         ));
 
         mixer.halt_channel(channel);
         assert_eq!(mixer.retained_sound_pcm_bytes(), 0);
-        assert!(mixer.load_sound(&data).is_ok());
+        assert!(mixer.play_sound(other, false).is_ok());
+    }
+
+    /// `C4SoundSystem::LoadEffects` keeps every sample of a group resident and
+    /// playable (C4SoundSystem.cpp:106-136). The retained budget only bounds
+    /// how many stay decoded at once (clonk-org/clonk-rs#1718).
+    #[test]
+    fn a_sound_loaded_past_the_retained_budget_still_plays() {
+        let data = generate_sine_wave(10, 440.0, 44_100);
+        let decoded_bytes = 441 * std::mem::size_of::<[f32; 2]>();
+        let mixer = AudioMixer::new_with_sound_pcm_limit(44_100, 2, decoded_bytes);
+        let first = mixer.load_sound(&data).unwrap();
+        let second = mixer
+            .load_sound(&data)
+            .expect("a sound past the budget still loads");
+
+        for sound in [second, first, second] {
+            let channel = mixer
+                .play_sound(sound, false)
+                .expect("every loaded sound plays");
+            mixer.halt_channel(channel);
+            assert!(mixer.retained_sound_pcm_bytes() <= decoded_bytes);
+        }
+    }
+
+    #[test]
+    fn an_evicted_sound_keeps_its_duration() {
+        let data = generate_sine_wave(10, 440.0, 44_100);
+        let decoded_bytes = 441 * std::mem::size_of::<[f32; 2]>();
+        let mixer = AudioMixer::new_with_sound_pcm_limit(44_100, 1, decoded_bytes);
+        let evicted = mixer.load_sound(&data).unwrap();
+        let _kept = mixer.load_sound(&data).unwrap();
+
+        assert!(!mixer.sound_is_decoded(evicted));
+        assert_eq!(mixer.sound_duration_ms(evicted), Some(10));
+    }
+
+    #[test]
+    fn eviction_takes_the_least_recently_used_idle_sound() {
+        let data = generate_sine_wave(10, 440.0, 44_100);
+        let decoded_bytes = 441 * std::mem::size_of::<[f32; 2]>();
+        let mixer = AudioMixer::new_with_sound_pcm_limit(44_100, 1, 2 * decoded_bytes);
+        let played = mixer.load_sound(&data).unwrap();
+        let idle = mixer.load_sound(&data).unwrap();
+        let channel = mixer.play_sound(played, false).unwrap();
+        mixer.halt_channel(channel);
+
+        let newest = mixer.load_sound(&data).unwrap();
+
+        assert!(mixer.sound_is_decoded(played));
+        assert!(!mixer.sound_is_decoded(idle));
+        assert!(mixer.sound_is_decoded(newest));
     }
 
     #[test]
