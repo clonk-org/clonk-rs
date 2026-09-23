@@ -2029,6 +2029,46 @@ fn arrow_calls_resolve_on_the_target_object_like_cpp() {
 }
 
 #[test]
+fn a_failsafe_arrow_reference_call_that_misses_on_the_target_leaves_nil() {
+    // `Slot` is known engine-wide, so `->~Slot()` compiles to AB_CALLFS. PROB
+    // has no Slot, and AB_CALLFS leaves a plain nil where the call's result
+    // would be (C4AulExec.cpp:1262-1266). A `func &` returns that nil. An
+    // assignment evaluates its right side and then AB_Set rejects the nil
+    // as no reference (C4AulExec.cpp:266-275, 858-865).
+    let caller_script = r#"#strict
+        local right_side_calls;
+        public func &Slot() { return right_side_calls; }
+        public func &SlotOf(target) { return target->~Slot(); }
+        public func ReturnMissing(target) { return [SlotOf(target), 7]; }
+        public func RightSide() { right_side_calls = 1; return 5; }
+        public func AssignMissing(target) { target->~Slot() = RightSide(); return 1; }
+        "#;
+
+    let mut engine = Engine::with_seed(7);
+    engine.register_test_script_definition("CLLR", "Caller", caller_script);
+    engine.register_test_script_definition("PROB", "Probe", "#strict\n");
+    let caller = engine.spawn_test_object(SpawnConfig::new("CLLR"));
+    let probe = engine.spawn_test_object(SpawnConfig::new("PROB"));
+    engine.tick_without_snapshot().test_value();
+    let caller_idx = engine.test_object_index(caller);
+    let target_arg = vec![Value::Object(probe.as_u64())];
+
+    let result = engine.call_test_object_function(caller_idx, "ReturnMissing", target_arg.clone());
+    unit_assert_eq!(result => Value::Array(vec![Value::Nil, Value::Int(7)]));
+
+    let error = engine
+        .call_object_function(caller_idx, "AssignMissing", target_arg)
+        .expect_err("nil is no reference to assign through");
+    let EngineError::Script { source, .. } = error else {
+        panic!("the assignment failed outside the script: {error:?}");
+    };
+    let message = source.to_string();
+    unit_assert!(message.contains(r#"operator "=" left side: got "any", but expected "&"!"#), "{message}");
+    let caller_idx = engine.test_object_index(caller);
+    unit_assert_eq!(engine.objects[caller_idx].state.local_vars.get("right_side_calls") => Some(&Value::Int(1)), "the right side ran before the assignment failed");
+}
+
+#[test]
 fn removing_an_arrow_target_reports_zero_instead_of_a_missing_engine_function() {
     // The parameter C4Value predates AssignRemoval and is nil by the time the
     // following AB_CALL runs. It therefore fails at the target-zero check,

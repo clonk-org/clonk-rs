@@ -812,10 +812,12 @@ pub(crate) fn arrow_method_ref_args_dispatch(
 /// Reference-preserving AB_CALL twin for an arrow call in lvalue position.
 /// C++ passes the call-target stack cell as `pReturn`; a `func &` therefore
 /// leaves a C4V_pC4Value in the suspended caller instead of a copied value
-/// (C4AulExec.cpp:1290-1299, 1054-1067).
+/// (C4AulExec.cpp:1290-1299, 1054-1067). A fail-safe call that finds no
+/// function answers `None`: AB_CALLFS leaves a plain nil instead
+/// (C4AulExec.cpp:1262-1266).
 pub(crate) fn arrow_method_reference_dispatch(
     args: &[Value],
-) -> Result<clonk_script::ValueReference, RuntimeError> {
+) -> Result<Option<clonk_script::ValueReference>, RuntimeError> {
     let target_value = args.first().cloned().unwrap_or(Value::Nil);
     let Some(Value::String(name)) = args.get(1) else {
         return Err(RuntimeError::new(
@@ -837,10 +839,8 @@ pub(crate) fn arrow_method_reference_dispatch(
             )));
         };
         return match call_scoped_script_reference(script, Some(def_id), name, &pars) {
-            Some(result) => result,
-            None if failsafe => Err(RuntimeError::new(format!(
-                "function '{name}' does not return a reference"
-            ))),
+            Some(result) => result.map(Some),
+            None if failsafe => Ok(None),
             None => Err(RuntimeError::new(format!(
                 "Definition call: No function \"{name}\" in definition \"{}\"!",
                 clonk_script::c4_id_text(stored_id)
@@ -872,20 +872,16 @@ pub(crate) fn arrow_method_reference_dispatch(
             )));
         }
         return match call_world_object_reference_from_arrow(target, function, &pars) {
-            Some(result) => result,
-            None if failsafe => Err(RuntimeError::new(format!(
-                "function '{function}' does not return a reference"
-            ))),
+            Some(result) => result.map(Some),
+            None if failsafe => Ok(None),
             None => Err(RuntimeError::new(format!(
                 "Object call: No function \"{function}\" in object {target}!"
             ))),
         };
     }
     match call_world_object_reference_from_arrow(target, name, &pars) {
-        Some(result) => result,
-        None if failsafe => Err(RuntimeError::new(format!(
-            "function '{name}' does not return a reference"
-        ))),
+        Some(result) => result.map(Some),
+        None if failsafe => Ok(None),
         None => Err(RuntimeError::new(format!(
             "Object call: No function \"{name}\" in object {target}!"
         ))),

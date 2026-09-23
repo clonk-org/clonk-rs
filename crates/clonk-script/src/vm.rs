@@ -8017,15 +8017,23 @@ impl<'a> Vm<'a> {
     /// must preserve the method's reference result without reconstructing an
     /// expression after a host boundary.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn invoke_method_reference_call_args_raw(
         &self,
         mut target: Value,
         name: &str,
         evaluated_args: CallArgs,
+        failsafe: bool,
         target_sweep_cursor: usize,
         env: &mut Environment,
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
+        if failsafe && !self.direct_call_function_known(name) {
+            // An unresolved `->~name` compiles to a nil in place of AB_CALLFS,
+            // with no zero-target check (C4AulParse.cpp:3215-3231). That nil
+            // is no reference, so AB_Set rejects it after its right side ran.
+            return Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)));
+        }
         if let Value::Proplist(map) = &target {
             if let Some(Value::Int(id)) = map.get("id") {
                 if *id > 0 {
@@ -8087,15 +8095,18 @@ impl<'a> Vm<'a> {
             let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
             dispatch_args.push(target);
             dispatch_args.push(Value::String(name.to_owned().into()));
-            dispatch_args.push(Value::Bool(false));
+            dispatch_args.push(Value::Bool(failsafe));
             for arg in &evaluated_args {
                 dispatch_args.push(arg.read()?);
             }
             let _guard = CallerContextGuard::enter(Some(env.caller_context()));
             let _parameter_override = CallParameterOverrideGuard::enter(0);
-            return dispatch(&dispatch_args)
-                .map(ValueReference::into_lvalue)
-                .map(ReturnValue::Reference);
+            return dispatch(&dispatch_args).map(|found| {
+                found.map_or_else(
+                    || ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
+                    |reference| ReturnValue::Reference(reference.into_lvalue()),
+                )
+            });
         }
 
         // Without a host method bridge, an arrow call can still select a
@@ -10296,6 +10307,7 @@ impl CompiledFunctionBuilder {
                 method,
                 args,
                 is_arrow,
+                failsafe,
             } => {
                 let mut args = args.clone();
                 let callee = if *is_arrow {
@@ -10316,7 +10328,7 @@ impl CompiledFunctionBuilder {
                 self.call_sites[*site].return_reference = true;
                 if *is_arrow {
                     self.call_sites[*site].kind = CompiledCallKind::Method {
-                        failsafe: false,
+                        failsafe: *failsafe,
                         reference: true,
                     };
                 }
@@ -10343,6 +10355,9 @@ impl CompiledFunctionBuilder {
             AssignmentTarget::ArrayAppend(base) => {
                 self.compile_reference_expression(base)?;
                 self.instructions.push(CompiledInstruction::AppendReference);
+            }
+            AssignmentTarget::ShortCircuit(expression) => {
+                self.compile_reference_expression(expression)?;
             }
             AssignmentTarget::Index(base, index) => {
                 self.compile_assignment_target(base)?;
@@ -12170,6 +12185,7 @@ impl CompiledFunction {
                                     receiver.into_value()?,
                                     name,
                                     arguments,
+                                    *failsafe,
                                     sweep_cursor,
                                     env,
                                     depth,
