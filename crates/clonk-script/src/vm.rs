@@ -8095,7 +8095,7 @@ impl<'a> Vm<'a> {
             let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
             dispatch_args.push(target);
             dispatch_args.push(Value::String(name.to_owned().into()));
-            dispatch_args.push(Value::Bool(false));
+            dispatch_args.push(Value::Bool(failsafe));
             for arg in &evaluated_args {
                 dispatch_args.push(arg.read()?);
             }
