@@ -19,9 +19,11 @@ license above. See docs/art/startup-icons.md for the sources and modifications.
 ui-icons/*.png are high-resolution adaptations of GUIIcons.png, GUIIcons2.png
 and GUICheckbox.png by RedWolf Design (GUIIcons.png also credits Jonathan Veit,
 AniProGuy). Generated with OpenAI imagegen and approved for Clonk Rust in 2026.
-These adaptations use the same CC BY-NC 4.0 license above. See
-docs/art/ui-icons.md and docs/art/ui-icon-prompts.json for source coordinates,
-prompts, preparation, and the shared checkbox-base construction.
+The checkbox box is instead rebuilt at 8x from GUICheckbox.png by
+docs/art/ui-checkbox/prepare_runtime.py; its checkmark is the approved
+imagegen artwork. These adaptations use the same CC BY-NC 4.0 license above.
+See docs/art/ui-icons.md and docs/art/ui-icon-prompts.json for source
+coordinates, prompts, preparation, and the shared checkbox-base construction.
 
 hud-icons/*.png are high-resolution adaptations of the nine matching icons in
 planet/Graphics.c4g by RedWolf Design. Generated with OpenAI imagegen and
