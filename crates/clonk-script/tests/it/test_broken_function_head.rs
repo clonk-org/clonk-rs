@@ -28,6 +28,26 @@ fn a_function_whose_parameter_list_fails_to_parse_is_kept() {
 }
 
 #[test]
+fn a_strict_two_head_without_its_brace_compiles_the_rest_as_its_body() {
+    // Under #strict 2 a head without `{` is an error. C4Aul throws it after the
+    // closed parameter list moved the body start past the ')'
+    // (C4AulParse.cpp:1687, 1698-1704). The pinned oracle's
+    // `GameCall("NoBrace", 41)` on this script returned 42.
+    let mut engine = Engine::new();
+    engine
+        .load_script("#strict 2\n\nfunc NoBrace(a) return a + 1;\n\nfunc Next() { return 0; }\n")
+        .expect("a broken head is quarantined");
+
+    assert_eq!(
+        engine
+            .call("NoBrace", &[Value::Int(41)])
+            .expect("the statement after the head is the body"),
+        Value::Int(42)
+    );
+    assert!(engine.has_function("Next"));
+}
+
+#[test]
 fn a_variadic_head_without_its_parenthesis_compiles_the_rest_as_its_body() {
     // C4Aul starts the body after `...` before it matches the ')'
     // (C4AulParse.cpp:1642-1646), so the block after the broken head is the
