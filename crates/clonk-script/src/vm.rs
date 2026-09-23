@@ -2650,6 +2650,23 @@ impl ValueReference {
     }
 }
 
+/// What a call made for its reference leaves on the caller's stack: the live
+/// C4Value a `func &` returns, or a plain value. A fail-safe call that finds
+/// no function leaves a plain nil (C4AulExec.cpp:1262-1266).
+pub enum ReferenceCallResult {
+    Reference(ValueReference),
+    Value(Value),
+}
+
+impl ReferenceCallResult {
+    fn into_return_value(self) -> ReturnValue {
+        match self {
+            Self::Reference(reference) => ReturnValue::Reference(reference.into_lvalue()),
+            Self::Value(value) => ReturnValue::Value(TrackedValue::runtime(value)),
+        }
+    }
+}
+
 impl LValueRef {
     fn ensure_active_object_reference_cell_registered(&self) {
         match self {
@@ -5321,10 +5338,10 @@ impl<'a> Vm<'a> {
         name: &str,
         args: &[Value],
         cells: &LocalCells,
-    ) -> Result<ValueReference, RuntimeError> {
+    ) -> Result<ReferenceCallResult, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::external).collect();
         self.invoke_reference(name, args, 0, cells.state.clone(), None)
-            .map(ValueReference)
+            .map(|reference| ReferenceCallResult::Reference(ValueReference(reference)))
     }
 
     /// Reference-returning counterpart to
@@ -5334,7 +5351,7 @@ impl<'a> Vm<'a> {
         name: &str,
         args: &[Value],
         cells: &LocalCells,
-    ) -> Result<ValueReference, RuntimeError> {
+    ) -> Result<ReferenceCallResult, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::runtime).collect();
         let mut caller = current_caller_context();
         if let Some(caller) = &mut caller {
@@ -5342,7 +5359,7 @@ impl<'a> Vm<'a> {
         }
         let _parameter_override = CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
         self.invoke_reference(name, args, 0, cells.state.clone(), caller)
-            .map(ValueReference)
+            .map(|reference| ReferenceCallResult::Reference(ValueReference(reference)))
     }
 
     /// Call a function with per-object local variable context
@@ -8102,12 +8119,7 @@ impl<'a> Vm<'a> {
             }
             let _guard = CallerContextGuard::enter(Some(env.caller_context()));
             let _parameter_override = CallParameterOverrideGuard::enter(0);
-            return dispatch(&dispatch_args).map(|found| {
-                found.map_or_else(
-                    || ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
-                    |reference| ReturnValue::Reference(reference.into_lvalue()),
-                )
-            });
+            return dispatch(&dispatch_args).map(ReferenceCallResult::into_return_value);
         }
 
         // Without a host method bridge, an arrow call can still select a

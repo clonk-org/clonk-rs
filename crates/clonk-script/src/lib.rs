@@ -39,9 +39,9 @@ pub use crate::vm::{
     clear_active_object_references, data_string, lift_native_continuation, set_value_cell,
     start_call_trace, start_script_profiler, stop_script_profiler, value_cell,
     with_diagnostic_object_formatter, CallerVarSlots, HostCallArg, HostCallerStrictness,
-    LocalCells, NativeCallOutcome, NativeContinuation, ObjectReferenceSweep, ScriptCallOutcome,
-    ScriptHostIdentity, ScriptProfileEntry, ScriptSuspension, ScriptValueStackContext, ValueCell,
-    ValueReference,
+    LocalCells, NativeCallOutcome, NativeContinuation, ObjectReferenceSweep, ReferenceCallResult,
+    ScriptCallOutcome, ScriptHostIdentity, ScriptProfileEntry, ScriptSuspension,
+    ScriptValueStackContext, ValueCell, ValueReference,
 };
 
 mod value;

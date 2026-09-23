@@ -358,9 +358,9 @@ fn arrow_func_ref_result_writes_through_the_dispatch_reference() {
             assert_eq!(args[0], Value::Object(9));
             assert_eq!(args[1], Value::String("SacrificeMade".into()));
             assert_eq!(args[2], Value::Bool(false));
-            Ok(Some(clonk_script::ValueReference::from_cell(Rc::clone(
-                &slot,
-            ))))
+            Ok(clonk_script::ReferenceCallResult::Reference(
+                clonk_script::ValueReference::from_cell(Rc::clone(&slot)),
+            ))
         }));
     }
 
@@ -398,11 +398,15 @@ fn precreated_dispatch_reference_joins_the_active_removal_index() {
         let slot = Rc::clone(&slot);
         let observed_during_sweep = Rc::clone(&observed_during_sweep);
         engine.register_method_reference_dispatch(Rc::new(move |args| match &args[1] {
-            Value::String(name) if name.as_ref() == "RetainedSlot" => Ok(Some(reference.clone())),
+            Value::String(name) if name.as_ref() == "RetainedSlot" => Ok(
+                clonk_script::ReferenceCallResult::Reference(reference.clone()),
+            ),
             Value::String(name) if name.as_ref() == "SweepSlot" => {
                 clear_active_object_references(7);
                 *observed_during_sweep.borrow_mut() = Some(slot.borrow().clone());
-                Ok(Some(increment_reference.clone()))
+                Ok(clonk_script::ReferenceCallResult::Reference(
+                    increment_reference.clone(),
+                ))
             }
             method => panic!("unexpected method reference dispatch: {method:?}"),
         }));
