@@ -140,7 +140,7 @@ impl VoiceMediaWorker {
                 }
                 if let Some(policy) = policy.as_ref() {
                     remove_streams(&audio, state.reconcile_context(policy.context));
-                    let eligible = policy.enabled && policy.context.is_some()
+                    let eligible = policy.microphone_enabled && policy.context.is_some()
                         && policy.local_identity.is_some() && transport.available();
                     if !eligible && capture_key.is_some() {
                         let mut control = thread_control.lock();
@@ -206,14 +206,14 @@ impl VoiceMediaWorker {
             .is_some_and(|old| old.context.is_some() && old.context != policy.context);
         if changed_context
             || transport.is_some()
-            || !policy.enabled
+            || !policy.microphone_enabled
             || policy.local_identity.is_none()
         {
             control.capture_key = None;
             control.capture_revision = control.capture_revision.wrapping_add(1);
         }
         let privacy_changed = control.policy.as_ref().is_none_or(|old| {
-            old.enabled != policy.enabled
+            old.microphone_enabled != policy.microphone_enabled
                 || old.context != policy.context
                 || old.local_identity != policy.local_identity
                 || old.activation != policy.activation
@@ -427,7 +427,7 @@ mod tests {
     }
     fn policy() -> VoiceMediaPolicy {
         VoiceMediaPolicy {
-            enabled: true,
+            microphone_enabled: true,
             context: Some(VoiceChatContext::Lobby),
             speakers: BTreeMap::new(),
             local_identity: Some((0, LOBBY_VOICE_PLAYER_ID)),
@@ -523,7 +523,7 @@ mod tests {
         .unwrap();
         opening_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let mut disabled = policy();
-        disabled.enabled = false;
+        disabled.microphone_enabled = false;
         let update_at = Instant::now();
         worker.update(disabled, None, audio.worker_handle());
         assert!(
