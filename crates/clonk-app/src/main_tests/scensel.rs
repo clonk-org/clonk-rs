@@ -3936,7 +3936,7 @@ fn scensel_enhanced_search_timing_report() {
 #[test]
 fn scensel_rows_without_artwork_do_not_generate_preview_pixels() {
     let mut entry = FrontendScenario::from_command_line(Path::new("Bare.c4s"));
-    entry.preview = None;
+    entry.extended = ExtendedEntry::default();
     let rows = build_menu_entries(&[entry], false);
     main_assert!(rows[0].preview.is_none());
 }
@@ -3964,7 +3964,7 @@ fn scensel_installed_catalog_search_timing_report() {
         app.scensel
             .catalog
             .values()
-            .filter(|entry| entry.preview.is_none())
+            .filter(|entry| entry.preview().is_none())
             .count()
     );
     install_classic_test_assets(&mut app);

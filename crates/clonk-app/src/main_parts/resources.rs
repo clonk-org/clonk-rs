@@ -109,14 +109,12 @@ impl FrontendScenario {
             path: Some(path.to_path_buf()),
             source_paths: vec![path.to_path_buf()],
             root_label: None,
-            preview: None,
-            title_picture: None,
+            extended: ExtendedEntry::default(),
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
             author: None,
-            version: None,
             local_only: None,
             allow_user_change: None,
             definition_modules: Vec::new(),
@@ -132,23 +130,26 @@ impl FrontendScenario {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             location: self.location_label(),
-            preview: self.preview().cloned().map(LazyImage::ready),
+            preview: self.extended.may_have_preview().then(|| {
+                let extended = self.extended.clone();
+                LazyImage::new(move || extended.preview().cloned())
+            }),
         }
     }
 
     /// The list preview: the entry's title, loader or icon image.
     pub(crate) fn preview(&self) -> Option<&ImageData> {
-        self.preview.as_ref()
+        self.extended.preview()
     }
 
     /// The right page's title picture (fctTitle).
     pub(crate) fn title_picture(&self) -> Option<&ImageData> {
-        self.title_picture.as_ref()
+        self.extended.title_picture()
     }
 
     /// The entry's `Version.txt` text.
     pub(crate) fn version(&self) -> Option<&str> {
-        self.version.as_deref()
+        self.extended.version()
     }
 
     pub(crate) fn from_resource(entry: resource_scenario::ScenarioEntry, root_label: &str) -> Self {
@@ -161,14 +162,11 @@ impl FrontendScenario {
             is_editable,
             is_playable,
             mission_access,
-            preview,
-            title_picture,
             children,
             folder_index,
             icon_index,
             difficulty,
             author,
-            version,
             local_only,
             allow_user_change,
             definition_modules,
@@ -185,13 +183,6 @@ impl FrontendScenario {
             .map(|child| FrontendScenario::from_resource(child, root_label))
             .collect();
 
-        let to_image = |preview: resource_scenario::ScenarioPreview| {
-            let (width, height, pixels) = preview.into_arc();
-            ImageData::from_arc(width, height, pixels)
-        };
-        let preview = preview.map(to_image);
-        let title_picture = title_picture.map(to_image);
-
         let source_paths = vec![path.clone()];
         Self {
             identifier,
@@ -203,16 +194,14 @@ impl FrontendScenario {
             mission_access,
             selector_metadata: None,
             path: Some(path),
+            extended: ExtendedEntry::from_sources(source_paths.clone()),
             source_paths,
             root_label: Some(root_label.to_string()),
-            preview,
-            title_picture,
             children,
             folder_index,
             icon_index,
             difficulty,
             author,
-            version,
             local_only,
             allow_user_change,
             definition_modules,
@@ -267,17 +256,15 @@ impl FrontendScenario {
             path: None,
             source_paths: Vec::new(),
             root_label: None,
-            preview: Some(generate_preview_placeholder(
+            extended: ExtendedEntry::known(Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
                 FALLBACK_SCENARIO_TITLE,
-            )),
-            title_picture: None,
+            ))),
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
             author: None,
-            version: None,
             local_only: None,
             allow_user_change: None,
             definition_modules: Vec::new(),
@@ -353,11 +340,11 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
             existing.source_paths.push(path);
         }
     }
+    // The preview, title picture and version each come from the first root
+    // that has them once they are read.
+    existing.extended = ExtendedEntry::from_sources(existing.source_paths.clone());
     if existing.description.is_none() {
         existing.description = incoming.description.take();
-    }
-    if existing.preview.is_none() {
-        existing.preview = incoming.preview.take();
     }
     if existing.path.is_none() {
         existing.path = incoming.path.take();
@@ -376,14 +363,8 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
     if existing.difficulty.is_none() {
         existing.difficulty = incoming.difficulty;
     }
-    if existing.title_picture.is_none() {
-        existing.title_picture = incoming.title_picture.take();
-    }
     if existing.author.is_none() {
         existing.author = incoming.author.take();
-    }
-    if existing.version.is_none() {
-        existing.version = incoming.version.take();
     }
     if existing.local_only.is_none() {
         existing.local_only = incoming.local_only;
@@ -1155,17 +1136,15 @@ impl SavedScenarioInfo {
             path: self.path.clone(),
             source_paths: Vec::new(),
             root_label: self.root_label.clone(),
-            preview: Some(generate_preview_placeholder(
+            extended: ExtendedEntry::known(Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
                 &self.title,
-            )),
-            title_picture: None,
+            ))),
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
             author: None,
-            version: None,
             local_only: None,
             allow_user_change: None,
             definition_modules: Vec::new(),
