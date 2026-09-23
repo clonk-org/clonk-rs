@@ -512,6 +512,30 @@ impl<'a> Search<'a> {
         None
     }
 
+    /// A drop off the ledge at (x, y), provided walking a pixel or two
+    /// further before the fall ends the same move: WALK does not stop the
+    /// actor exactly at the edge.
+    fn robust_drop(&self, x: i32, y: i32, dir: i32) -> Option<(i32, i32, i32)> {
+        let (lx, ly, frames) = self.drop(x, y, dir)?;
+        let landing = Landing::Stand {
+            x: lx,
+            y: ly,
+            frames,
+        };
+        (1..=JUMP_TAKEOFF_SLACK)
+            .all(|late| {
+                self.drop(x + dir * late, y, dir)
+                    .is_some_and(|(ox, oy, of)| {
+                        landing.matches(&Landing::Stand {
+                            x: ox,
+                            y: oy,
+                            frames: of,
+                        })
+                    })
+            })
+            .then_some((lx, ly, frames))
+    }
+
     fn jump(&self, x: i32, y: i32, dir: i32) -> Option<Landing> {
         self.fly(x, y, self.actor.walk_speed * dir, -self.actor.jump_speed)
     }
@@ -568,7 +592,7 @@ impl<'a> Search<'a> {
                 WalkStep::Stand(ny) => out.push(((x + dir, ny), Edge::Walk, self.walk_cost)),
                 WalkStep::Ledge => {
                     at_edge = true;
-                    if let Some((lx, ly, frames)) = self.drop(x, y, dir) {
+                    if let Some((lx, ly, frames)) = self.robust_drop(x, y, dir) {
                         out.push(((lx, ly), Edge::Drop, frames * COST_PER_FRAME));
                     }
                 }
@@ -1027,6 +1051,38 @@ mod tests {
             matches!(landing, Some(Landing::Wall { dir: -1, .. })),
             "{landing:?}"
         );
+    }
+
+    #[test]
+    fn a_drop_is_offered_only_where_a_late_takeoff_lands_alike() {
+        // WALK carries the actor a pixel or two past the ledge before it
+        // falls, so a landing that only holds for the exact takeoff misses
+        // its lip and falls on (measured on Frontier: planned (221,130),
+        // tumbled into the pit beside it).
+        let drops = |landscape: &Landscape| {
+            let actor = clonk(true);
+            let search = Search::new(
+                landscape,
+                &actor,
+                Vector2::new(199, G - 10),
+                goal(215, G + 30),
+            );
+            let mut edges = Vec::new();
+            search.successors(199, G - 10, &mut edges);
+            edges
+                .into_iter()
+                .filter(|(_, edge, _)| *edge == Edge::Drop)
+                .map(|(to, _, _)| to)
+                .collect::<Vec<_>>()
+        };
+        let pit = (240, G, 320, H as i32 - 1, false);
+        let lip = terrain(&[(200, G, 239, G + 39, false), pit]);
+        assert_eq!(drops(&lip), vec![], "the landing is the lip of a pit");
+
+        let floor = terrain(&[(200, G, 320, G + 39, false)]);
+        let landed = drops(&floor);
+        assert_eq!(landed.len(), 1, "{landed:?}");
+        assert_eq!(landed[0].1, G + 30, "{landed:?}");
     }
 
     #[test]
