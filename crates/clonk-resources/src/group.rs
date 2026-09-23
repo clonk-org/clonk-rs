@@ -1474,28 +1474,7 @@ impl PackedGroup {
                 Ok(Cow::Owned(buffer))
             }
             PackedSource::Memory { data, range } => {
-                let start = self.data_offset.checked_add(entry.offset).ok_or_else(|| {
-                    GroupError::InvalidGroup(format!(
-                        "entry '{}' has invalid offset",
-                        entry.relative_path.display()
-                    ))
-                })?;
-                let end = start.checked_add(entry.size).ok_or_else(|| {
-                    GroupError::InvalidGroup(format!(
-                        "entry '{}' has invalid size",
-                        entry.relative_path.display()
-                    ))
-                })?;
-                let source_len = range.len() as u64;
-                if end > source_len {
-                    return Err(GroupError::InvalidGroup(format!(
-                        "entry '{}' exceeds group bounds",
-                        entry.relative_path.display()
-                    )));
-                }
-                let start = range.start + start as usize;
-                let end = range.start + end as usize;
-                Ok(Cow::Borrowed(&data[start..end]))
+                Ok(Cow::Borrowed(&data[self.entry_image_range(entry, range)?]))
             }
             PackedSource::Inflating { image, range } => {
                 image.bytes(self.entry_image_range(entry, range)?)
@@ -1609,47 +1588,14 @@ impl PackedGroup {
                 PackedGroup::from_raw_memory(path, self.read_entry_bytes_cow(entry)?.into_owned())?
             }
             PackedSource::Memory { data, range } => {
-                let relative_start = self
-                    .data_offset
-                    .checked_add(entry.offset)
-                    .and_then(|offset| usize::try_from(offset).ok())
-                    .ok_or_else(|| {
-                        GroupError::InvalidGroup(format!(
-                            "entry '{}' has invalid offset",
-                            entry.relative_path.display()
-                        ))
-                    })?;
-                let size = usize::try_from(entry.size).map_err(|_| {
-                    GroupError::InvalidGroup(format!(
-                        "entry '{}' exceeds platform limits",
-                        entry.relative_path.display()
-                    ))
-                })?;
-                let start = range.start.checked_add(relative_start).ok_or_else(|| {
-                    GroupError::InvalidGroup(format!(
-                        "entry '{}' has invalid offset",
-                        entry.relative_path.display()
-                    ))
-                })?;
-                let end = start.checked_add(size).ok_or_else(|| {
-                    GroupError::InvalidGroup(format!(
-                        "entry '{}' has invalid size",
-                        entry.relative_path.display()
-                    ))
-                })?;
-                if end > range.end {
-                    return Err(GroupError::InvalidGroup(format!(
-                        "entry '{}' exceeds group bounds",
-                        entry.relative_path.display()
-                    )));
-                }
                 let source =
-                    PackedSource::from_memory_range(data, start..end).ok_or_else(|| {
-                        GroupError::InvalidGroup(format!(
-                            "entry '{}' exceeds group bounds",
-                            entry.relative_path.display()
-                        ))
-                    })?;
+                    PackedSource::from_memory_range(data, self.entry_image_range(entry, range)?)
+                        .ok_or_else(|| {
+                            GroupError::InvalidGroup(format!(
+                                "entry '{}' exceeds group bounds",
+                                entry.relative_path.display()
+                            ))
+                        })?;
                 PackedGroup::from_raw_source(path, source)?
             }
             // A child of a compressed group is a span of the same stream, so
