@@ -4891,13 +4891,17 @@ pub(crate) fn scenario_fair_crew_constraint(
     if let Some(metadata) = scenario.and_then(|scenario| scenario.selector_metadata.as_deref()) {
         return metadata.fair_crew;
     }
-    let Some(path) = scenario.and_then(|scenario| scenario.path.as_deref()) else {
-        return FairCrewConstraint::Free;
-    };
-    let Some(source) = Group::open(path)
-        .ok()
-        .and_then(|group| read_group_file_case_insensitive(&group, "Scenario.txt"))
-    else {
+    scenario
+        .and_then(|scenario| scenario.path.as_deref())
+        .and_then(|path| Group::open(path).ok())
+        .map_or(FairCrewConstraint::Free, |group| {
+            group_fair_crew_constraint(&group)
+        })
+}
+
+/// The `[Head] ForcedNoCrew` rule of the scenario that `group` holds.
+fn group_fair_crew_constraint(group: &Group) -> FairCrewConstraint {
+    let Some(source) = read_group_file_case_insensitive(group, "Scenario.txt") else {
         return FairCrewConstraint::Free;
     };
     let mut reader = io::Cursor::new(source);
