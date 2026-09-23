@@ -399,6 +399,35 @@ fn every_inexantros_first_act_elevator_hangs_inside_the_landscape() {
     }
 }
 
+/// clonk-org/clonk-rs-content#69: InExantros spoke German to every player. Its
+/// messages now come from `StringTblDE.txt`/`StringTblUS.txt` tables beside
+/// each script, loaded for the player's language and substituted into the
+/// script before it is parsed (C4ScriptHost.cpp:57, 74), and a definition's
+/// name is the `Names.txt` line for that language (C4Def.cpp:637-638). The
+/// last act's final boss and its dark figure's lava line pin both, in English
+/// for a US player and unchanged for a German one.
+#[test]
+fn the_inexantros_final_act_speaks_the_players_language() {
+    for (languages, boss, lava) in [
+        (["US"], "Final boss", "fiery load of lava"),
+        (["DE"], "Endgegner", "feuerigen Ladung Lava"),
+    ] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Adventures.c4f/InExantros.c4f/3.Akt.c4s",
+            0,
+            &languages,
+        );
+        assert_eq!(engine.definition_name("_BB_"), Some(boss), "{languages:?}");
+
+        let figure = engine.spawn_test_object(SpawnConfig::new("_GE2"));
+        call(&mut engine, figure, "Los");
+        assert!(
+            engine.message_line_contains(lava),
+            "the {languages:?} dark figure threatens with lava"
+        );
+    }
+}
+
 /// Relaunches a player the way the pack's Clonk does from `Destruction`.
 const RELAUNCH_PROBE: &str = r#"#strict
 public func Relaunch(int player)
