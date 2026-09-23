@@ -34,6 +34,8 @@ const KNEEL_UP_FRAMES: i32 = 10;
 const MAX_FLIGHT_FRAMES: i32 = 240;
 /// Pixels a simulated climb may cover.
 const MAX_CLIMB: i32 = 600;
+/// Walls a simulated drop may let go of before it counts as no landing.
+const MAX_LET_GOS: usize = 8;
 /// How far beyond the start/goal box the search may wander.
 const SEARCH_MARGIN_X: i32 = 400;
 const SEARCH_MARGIN_Y: i32 = 300;
@@ -444,6 +446,35 @@ impl<'a> Search<'a> {
         None
     }
 
+    /// Walk off the ledge at (x, y) and fall. A wall met on the way is let go
+    /// of again, as the executor does with every grab a Drop did not plan
+    /// (ObjectComLetGo: a one pixel per frame xdir away from the wall), so a
+    /// drop can bounce down a shaft. Returns the standing position and the
+    /// frames the fall takes.
+    fn drop(&self, x: i32, y: i32, dir: i32) -> Option<(i32, i32, i32)> {
+        let (mut x, mut y, mut frames) = (x, y, 0);
+        let mut vx = self.actor.walk_speed * dir;
+        for _ in 0..=MAX_LET_GOS {
+            match self.fly(x, y, vx, C4Fixed::ZERO)? {
+                Landing::Stand {
+                    x,
+                    y,
+                    frames: flight,
+                } => return Some((x, y, frames + flight)),
+                Landing::Wall {
+                    x: wall_x,
+                    y: wall_y,
+                    dir: wall,
+                    frames: flight,
+                } => {
+                    (x, y, frames) = (wall_x, wall_y, frames + flight);
+                    vx = math::itofix(-wall);
+                }
+            }
+        }
+        None
+    }
+
     fn jump(&self, x: i32, y: i32, dir: i32) -> Option<Landing> {
         self.fly(x, y, self.actor.walk_speed * dir, -self.actor.jump_speed)
     }
@@ -500,30 +531,8 @@ impl<'a> Search<'a> {
                 WalkStep::Stand(ny) => out.push(((x + dir, ny), Edge::Walk, self.walk_cost)),
                 WalkStep::Ledge => {
                     at_edge = true;
-                    match self.fly(x, y, self.actor.walk_speed * dir, C4Fixed::ZERO) {
-                        Some(Landing::Stand {
-                            x: lx,
-                            y: ly,
-                            frames,
-                        }) => out.push(((lx, ly), Edge::Drop, frames * COST_PER_FRAME)),
-                        Some(Landing::Wall {
-                            x: wx,
-                            y: wy,
-                            dir: wall_dir,
-                            frames,
-                        }) => {
-                            if let Some((tx, ty, climb)) = self.climb(wx, wy, wall_dir) {
-                                out.push((
-                                    (tx, ty),
-                                    Edge::JumpClimb {
-                                        right: wall_dir > 0,
-                                        grab: (wx, wy),
-                                    },
-                                    (frames + climb) * COST_PER_FRAME + JUMP_PENALTY,
-                                ));
-                            }
-                        }
-                        None => {}
+                    if let Some((lx, ly, frames)) = self.drop(x, y, dir) {
+                        out.push(((lx, ly), Edge::Drop, frames * COST_PER_FRAME));
                     }
                 }
                 WalkStep::Wall => {
@@ -923,6 +932,32 @@ mod tests {
         )
         .expect("out of the pit");
         assert!(moves(&up).contains(&NavMove::Climb), "{up:?}");
+    }
+
+    #[test]
+    fn drops_down_a_shaft_by_letting_go_of_its_walls() {
+        // Walking off into a shaft ends against its far wall, which a scaler
+        // grabs (C4Object.cpp:4406-4520). The executor lets go of any grab
+        // a Drop did not plan (ObjectComLetGo: ObjectActionJump with a one
+        // pixel per frame xdir away from the wall, C4ObjectCom.cpp), so the
+        // fall goes on down the shaft.
+        let shaft = terrain(&[(200, G, 220, G + 59, false)]);
+        let plan = plan(
+            &shaft,
+            &clonk(true),
+            Vector2::new(260, G - 10),
+            NavGoal {
+                x: 210,
+                y: G + 50,
+                range_x: 10,
+                range_y: 6,
+            },
+            20_000,
+        )
+        .expect("down the shaft");
+        assert_eq!(moves(&plan), vec![NavMove::Walk, NavMove::Drop], "{plan:?}");
+        let bottom = plan.waypoints.last().expect("drop");
+        assert_eq!(bottom.y, G + 50, "{plan:?}");
     }
 
     #[test]
