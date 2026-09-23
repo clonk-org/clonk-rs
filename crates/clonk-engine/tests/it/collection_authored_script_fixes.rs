@@ -369,6 +369,36 @@ fn a_golden_wipf_relaunch_runs_to_its_end() {
         .unwrap_or_else(|error| panic!("the relaunch completes: {error}"));
 }
 
+/// clonk-org/clonk-rs-content#59: InExantros' first act created its fourth
+/// cave elevator at (5587,9728), far below the 1450-pixel landscape, where no
+/// player could reach it. The author's value is lost; it hangs at (5587,928)
+/// now, in the cave that holds the act's Manaquelle.
+#[test]
+fn every_inexantros_first_act_elevator_hangs_inside_the_landscape() {
+    let engine =
+        load_installed_scenario("Collection.c4f/Adventures.c4f/InExantros.c4f/1.Akt.c4s", 0);
+    let landscape = engine.landscape().expect("the first act's landscape");
+    let elevators = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "ELEV" && object.status != ObjectStatus::Deleted)
+        .map(|object| (object.position.x, object.position.y))
+        .collect::<Vec<_>>();
+
+    assert_eq!(elevators.len(), 4, "{elevators:?}");
+    for (x, y) in elevators {
+        assert!(
+            (0..landscape.estimated_height()).contains(&y),
+            "({x},{y}) is inside the landscape"
+        );
+        assert!(
+            !landscape.is_solid_at(x, y),
+            "({x},{y}) hangs in open space"
+        );
+    }
+}
+
 /// Relaunches a player the way the pack's Clonk does from `Destruction`.
 const RELAUNCH_PROBE: &str = r#"#strict
 public func Relaunch(int player)
