@@ -3208,7 +3208,7 @@ impl GameApp {
             is_editable: false,
             is_playable: true,
             mission_access: None,
-            selector_metadata: None,
+            selector_snapshot: SelectorSnapshot::default(),
             path: Some(combined_path.clone()),
             source_paths: vec![combined_path],
             root_label: None,

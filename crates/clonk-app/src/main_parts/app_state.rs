@@ -10307,7 +10307,7 @@ pub(crate) struct FrontendScenario {
     pub(crate) mission_access: Option<String>,
     /// Catalog-generation snapshot for row labels and the game-option strip.
     /// Activation still reads the current file through the start-time loader.
-    pub(crate) selector_metadata: Option<Arc<ScenarioSelectorMetadata>>,
+    pub(crate) selector_snapshot: SelectorSnapshot,
     pub(crate) path: Option<PathBuf>,
     /// Every real/logical group path that contributed to this merged entry.
     /// `path` remains the first-root presentation source, while parity

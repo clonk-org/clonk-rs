@@ -3988,6 +3988,51 @@ fn scensel_installed_catalog_search_timing_report() {
     }
 }
 
+// C4ScenarioListLoader reads a scenario's C4S when it loads that entry's
+// folder (C4StartupScenSelDlg.cpp:689-719), not for the whole tree at once.
+// The port takes the snapshot when something first needs it.
+#[test]
+fn scensel_takes_a_scenario_snapshot_when_it_is_first_needed() {
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let path = paths.scenario_dir().join("Snapshot.c4s");
+    fs::create_dir_all(&path).test_value();
+    fs::write(path.join("Scenario.txt"), "[Head]\nTitle=Snapshot\nForcedNoCrew=1\n").test_value();
+
+    let scenarios = load_frontend_scenarios_from_paths(&paths);
+    fs::write(path.join("Scenario.txt"), "[Head]\nTitle=Snapshot\nForcedNoCrew=2\n").test_value();
+
+    let scenario = scenarios.iter().find(|scenario| scenario.identifier == "Snapshot.c4s").test_value();
+    main_assert_eq!(scenario_fair_crew_constraint(Some(scenario)) => FairCrewConstraint::ForceNormal);
+}
+
+// Discovery's callers take the other snapshots in the background, so the first
+// search finds each core already read, as C++ keeps it from the folder load.
+#[test]
+fn scensel_warms_every_scenario_snapshot_in_the_background() {
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    let path = paths.scenario_dir().join("Warm.c4s");
+    fs::create_dir_all(&path).test_value();
+    fs::write(path.join("Scenario.txt"), "[Head]\nTitle=Warm\nForcedNoCrew=1\n").test_value();
+
+    let scenarios = load_frontend_scenarios_from_paths(&paths);
+    warm_scenario_selector_snapshots(&scenarios);
+    let scenario = scenarios.iter().find(|scenario| scenario.identifier == "Warm.c4s").test_value();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !scenario.selector_snapshot.is_taken() {
+        main_assert!(Instant::now() < deadline, "the background warmer never took the snapshot");
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(path.join("Scenario.txt"), "[Head]\nTitle=Warm\nForcedNoCrew=2\n").test_value();
+
+    main_assert_eq!(scenario_fair_crew_constraint(Some(scenario)) => FairCrewConstraint::ForceFair);
+}
+
 // C4StartupScenSelDlg.cpp:689-719 retains C4S while loading each catalog
 // entry; CanOpen reads that stored core at 736-802 instead of reopening it.
 // The product search must keep those loaded rows usable without disk I/O,
@@ -4086,7 +4131,7 @@ fn scensel_cached_rows_match_live_start_rules_in_both_modes() {
                 app.submit_scenario_search().test_value();
                 main_assert_eq!(app.menu_state.visible_entries().len() => 4);
                 for entry in app.menu_state.visible_entries() {
-                    main_assert!(entry.selector_metadata.is_some());
+                    main_assert!(entry.selector_metadata().is_some());
                     let live = app
                         .scenario_selector_open_error(entry, mode)
                         .test_value()

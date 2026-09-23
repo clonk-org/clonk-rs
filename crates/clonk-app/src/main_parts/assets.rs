@@ -8724,7 +8724,7 @@ pub(crate) fn run_integration_test(
         is_editable: false,
         is_playable: true,
         mission_access: None,
-        selector_metadata: None,
+        selector_snapshot: SelectorSnapshot::default(),
         path: Some(scenario_path.to_path_buf()),
         source_paths: Vec::new(),
         root_label: None,
