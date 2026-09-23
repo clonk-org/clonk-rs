@@ -36,6 +36,9 @@ const MAX_FLIGHT_FRAMES: i32 = 240;
 const MAX_CLIMB: i32 = 600;
 /// Walls a simulated drop may let go of before it counts as no landing.
 const MAX_LET_GOS: usize = 8;
+/// OCF_HitSpeed3: at this |xdir| + |ydir| a flier tumbles off a wall instead
+/// of grabbing it (C4Movement.cpp:37; C4Object.cpp:593,2095-2101,4428-4433).
+const HIT_SPEED3: i32 = 6;
 /// How far beyond the start/goal box the search may wander.
 const SEARCH_MARGIN_X: i32 = 400;
 const SEARCH_MARGIN_Y: i32 = 300;
@@ -235,6 +238,7 @@ struct Link {
     cost: i32,
 }
 
+#[derive(Debug)]
 enum Landing {
     Stand {
         x: i32,
@@ -350,6 +354,24 @@ impl<'a> Search<'a> {
             .any(|(vx, vy, _)| self.landscape.is_solid_at(x + vx + dir, y + vy))
     }
 
+    /// The side whose vertices alone block a step down from (x, y). The
+    /// touching vertex's CNAT is the contact direction (C4Movement.cpp:172),
+    /// so the engine reports a side contact there, not a floor.
+    fn caught_side(&self, x: i32, y: i32) -> Option<i32> {
+        let caught = |side: u32| {
+            self.actor
+                .body
+                .vertices()
+                .filter(|(_, _, cnat)| cnat & side != 0)
+                .any(|(vx, vy, _)| self.landscape.is_solid_at(x + vx, y + vy + 1))
+        };
+        match (caught(CNAT_LEFT), caught(CNAT_RIGHT)) {
+            (true, false) => Some(-1),
+            (false, true) => Some(1),
+            _ => None,
+        }
+    }
+
     fn settle(&self, x: i32, y: i32) -> Option<(i32, i32)> {
         [0, 1, -1, 2, -2, 3, -3]
             .into_iter()
@@ -388,6 +410,7 @@ impl<'a> Search<'a> {
     fn fly(&self, x: i32, y: i32, mut vx: C4Fixed, mut vy: C4Fixed) -> Option<Landing> {
         let (mut fx, mut fy) = (math::itofix(x), math::itofix(y));
         let (mut ix, mut iy) = (x, y);
+        let tumbles = |vx: C4Fixed, vy: C4Fixed| vx.abs() + vy.abs() >= math::itofix(HIT_SPEED3);
         for frame in 1..=MAX_FLIGHT_FRAMES {
             vy += self.actor.gravity;
             fx += vx;
@@ -396,6 +419,9 @@ impl<'a> Search<'a> {
                 let step = (tx - ix).signum();
                 if !self.fits(ix + step, iy) {
                     let side_contact = self.wall_contact(ix, iy, step);
+                    if side_contact && tumbles(vx, vy) {
+                        return None;
+                    }
                     if side_contact && self.actor.can_scale {
                         return Some(Landing::Wall {
                             x: ix,
@@ -421,11 +447,22 @@ impl<'a> Search<'a> {
                 let step = (ty - iy).signum();
                 if !self.fits(ix, iy + step) {
                     if step > 0 {
-                        return self.standing(ix, iy).then_some(Landing::Stand {
-                            x: ix,
-                            y: iy,
-                            frames: frame,
-                        });
+                        if self.standing(ix, iy) {
+                            return Some(Landing::Stand {
+                                x: ix,
+                                y: iy,
+                                frames: frame,
+                            });
+                        }
+                        return self
+                            .caught_side(ix, iy)
+                            .filter(|_| self.actor.can_scale && !tumbles(vx, vy))
+                            .map(|dir| Landing::Wall {
+                                x: ix,
+                                y: iy,
+                                dir,
+                                frames: frame,
+                            });
                     }
                     if self.actor.can_hangle || self.actor.can_scale {
                         // Touching a ceiling mid-flight turns a hangler into
@@ -958,6 +995,38 @@ mod tests {
         assert_eq!(moves(&plan), vec![NavMove::Walk, NavMove::Drop], "{plan:?}");
         let bottom = plan.waypoints.last().expect("drop");
         assert_eq!(bottom.y, G + 50, "{plan:?}");
+    }
+
+    #[test]
+    fn a_fast_wall_contact_tumbles_instead_of_grabbing() {
+        // OCF_HitSpeed3 (|xdir| + |ydir| of six, C4Movement.cpp:37;
+        // C4Object.cpp:593,2095-2101) turns a flier's wall contact into
+        // TUMBLE (C4Object.cpp:4428-4433), which no plan can follow.
+        let wall = terrain(&[(220, 0, 239, G - 1, true)]);
+        let actor = clonk(true);
+        let search = Search::new(&wall, &actor, Vector2::new(150, G - 10), goal(150, G - 10));
+        let slow = search.fly(205, G - 60, actor.walk_speed, C4Fixed::ZERO);
+        assert!(
+            matches!(slow, Some(Landing::Wall { dir: 1, .. })),
+            "{slow:?}"
+        );
+        let fast = search.fly(205, G - 60, actor.walk_speed, math::itofix(5));
+        assert!(fast.is_none(), "{fast:?}");
+    }
+
+    #[test]
+    fn a_side_vertex_caught_on_a_corner_grabs_the_wall() {
+        // Contact direction is the touching vertex's CNAT (C4Movement.cpp:
+        // 172), so a lower side vertex landing on a corner is a side contact,
+        // which a scaler in flight answers with SCALE (C4Object.cpp:4423-4439).
+        let shaft = terrain(&[(200, G, 220, G + 59, false)]);
+        let actor = clonk(true);
+        let search = Search::new(&shaft, &actor, Vector2::new(260, G - 10), goal(210, G + 50));
+        let landing = search.fly(219, G - 10, actor.walk_speed * -1, C4Fixed::ZERO);
+        assert!(
+            matches!(landing, Some(Landing::Wall { dir: -1, .. })),
+            "{landing:?}"
+        );
     }
 
     #[test]
