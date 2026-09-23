@@ -38,3 +38,10 @@ derived from the approved ui-icons/checkbox-on.png artwork. They use the same
 CC BY-NC 4.0 license above. See docs/art/menu-icons.md and
 docs/art/ui-icon-review-batch3/generation-notes.md for the source cells,
 review history, and preparation.
+
+gamepad-icons/*.png are high-resolution adaptations of the four 80x36 phases
+in planet/Graphics.c4g/Gamepad.png by RedWolf Design. Generated with OpenAI
+imagegen and approved for Clonk Rust in 2026, then prepared as transparent
+sprites at 8x the source dimensions. They use the same CC BY-NC 4.0 license
+above. See docs/art/ui-icon-review-batch4/generation-notes.md for the source
+cells, review history, and preparation.
