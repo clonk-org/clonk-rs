@@ -132,8 +132,23 @@ impl FrontendScenario {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             location: self.location_label(),
-            preview: self.preview.clone(),
+            preview: self.preview().cloned(),
         }
+    }
+
+    /// The list preview: the entry's title, loader or icon image.
+    pub(crate) fn preview(&self) -> Option<&ImageData> {
+        self.preview.as_ref()
+    }
+
+    /// The right page's title picture (fctTitle).
+    pub(crate) fn title_picture(&self) -> Option<&ImageData> {
+        self.title_picture.as_ref()
+    }
+
+    /// The entry's `Version.txt` text.
+    pub(crate) fn version(&self) -> Option<&str> {
+        self.version.as_deref()
     }
 
     pub(crate) fn from_resource(entry: resource_scenario::ScenarioEntry, root_label: &str) -> Self {
