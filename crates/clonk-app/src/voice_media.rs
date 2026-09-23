@@ -51,7 +51,7 @@ pub(crate) fn service_voice_media(
             audio.remove_voice_stream(voice_stream_id(client, player));
         }
     };
-    if !policy.enabled || !transport.available() {
+    if !transport.available() {
         remove(state.clear());
         return;
     }
@@ -95,7 +95,10 @@ pub(crate) fn service_voice_media(
         }
         audio.update_voice_stream(stream_id, volume, pan);
     }
-    let Some((client_id, player_id)) = policy.local_identity else {
+    // `enabled` is the microphone opt-in and nothing else: a player who never
+    // took it still hears the players who did. This is the one gate every
+    // capture below passes, so a disabled player's microphone stays closed.
+    let Some((client_id, player_id)) = policy.local_identity.filter(|_| policy.enabled) else {
         state.stop_capture();
         return;
     };
