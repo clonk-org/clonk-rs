@@ -6,7 +6,7 @@
 //! only classic GUI furniture and refuses incomplete or substituted resources.
 //! Sheets and dialogs outside this bounded slice are emitted as typed requests.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
@@ -1502,6 +1502,8 @@ pub struct LobbyResources<'a> {
     checkbox: &'a ImageData,
     scroll: &'a ImageData,
     context: &'a ImageData,
+    /// The app's own voice-chat speaker, drawn instead of `Ico_Sound`.
+    speaking: Option<&'a ImageData>,
 }
 
 impl<'a> LobbyResources<'a> {
@@ -1531,9 +1533,17 @@ impl<'a> LobbyResources<'a> {
             checkbox,
             scroll,
             context,
+            speaking: None,
         };
         resources.validate()?;
         Ok(resources)
+    }
+
+    /// Draws voice-chat speakers with the app's own sprite, as the in-game
+    /// speaking overlay does. An empty image keeps the classic sound icon.
+    pub fn with_speaking_icon(mut self, icon: Option<&'a ImageData>) -> Self {
+        self.speaking = icon.filter(|icon| icon.width() > 0 && icon.height() > 0);
+        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -1700,6 +1710,8 @@ pub struct GameLobby {
     resource_rows: Vec<LobbyResourceRow>,
     option_rows: Vec<LobbyOptionRow>,
     client_sound_status: HashMap<i32, (bool, Instant)>,
+    /// Port-only voice chat: the clients whose voice is live right now.
+    speaking_clients: BTreeSet<i32>,
     logs: Vec<LobbyLogLine>,
     chat_edit: LobbyChatEditView,
     chat_scroll: i32,
@@ -1774,6 +1786,7 @@ impl GameLobby {
             resource_rows: Vec::new(),
             option_rows: Vec::new(),
             client_sound_status: HashMap::new(),
+            speaking_clients: BTreeSet::new(),
             logs: Vec::new(),
             chat_edit: LobbyChatEditView {
                 cursor_visible: true,
@@ -2425,6 +2438,17 @@ impl GameLobby {
         {
             self.client_sound_status.insert(client_id, (muted, now));
         }
+    }
+
+    /// Port-only voice chat: the clients whose voice is live, each marked with
+    /// a speaker after its name. The app replaces the whole set as voice
+    /// activity changes; LegacyClonk has no voice chat to mirror.
+    pub fn set_speaking_clients(&mut self, clients: BTreeSet<i32>) {
+        self.speaking_clients = clients;
+    }
+
+    pub fn speaking_clients(&self) -> &BTreeSet<i32> {
+        &self.speaking_clients
     }
 
     fn client_status_at(&self, client: &LobbyClientRow, now: Instant) -> LobbyClientStatus {
@@ -5677,6 +5701,20 @@ impl GameLobby {
             layout.roster_client,
             false,
         );
+        if self.speaking_clients.contains(&client.id) {
+            let font = &resources.fonts.text;
+            let name_end = label_x + font.measure(&client.display_name(), false).0;
+            let ping_width = client
+                .ping_ms
+                .map(|ping| font.measure(&format!("{ping} ms"), false).0);
+            draw_speaking_icon(
+                surface,
+                speaking_icon_rect(row, name_end, ping_width),
+                layout.roster_client,
+                resources,
+                gamma,
+            );
+        }
         if let Some(ping) = client.ping_ms {
             draw_clipped_text(
                 surface,
@@ -6337,6 +6375,47 @@ fn draw_standard_icon_clipped(
     draw_source_clipped(surface, icons, source, rect, clip, gamma);
 }
 
+/// Where a speaking client's speaker goes: right after the name, but short of
+/// the ping or the add-player button that ends the row.
+fn speaking_icon_rect(
+    row: LobbyRosterRowLayout,
+    name_end: i32,
+    ping_width: Option<i32>,
+) -> IntRect {
+    let size = row.rect.h;
+    let row_end = row.rect.x + row.rect.w;
+    let end = row
+        .add_player
+        .map(|add| add.x)
+        .or_else(|| ping_width.map(|width| row_end - width))
+        .unwrap_or(row_end);
+    let x = (name_end + ICON_LABEL_SPACING).min(end - ICON_LABEL_SPACING - size);
+    IntRect::new(x, row.rect.y, size, size)
+}
+
+/// A voice-chat speaker: the app's own sprite, else `C4GUI::Icons::Ico_Sound`
+/// from the classic sheet (src/C4Gui.h:701), as the in-game speaking overlay
+/// draws it.
+fn draw_speaking_icon(
+    surface: &mut Surface,
+    rect: IntRect,
+    clip: IntRect,
+    resources: &LobbyResources<'_>,
+    gamma: Option<&GammaRamp>,
+) {
+    match resources.speaking {
+        Some(icon) => draw_image_clipped(surface, icon, rect, clip, gamma),
+        None => draw_standard_icon_clipped(
+            surface,
+            rect,
+            clip,
+            &resources.icons,
+            LobbyClientStatus::Sound.icon_phase(),
+            gamma,
+        ),
+    }
+}
+
 fn draw_phase(
     surface: &mut Surface,
     rect: IntRect,
@@ -6757,6 +6836,194 @@ mod tests {
         assert_eq!(
             lobby.client_status_at(&remote, start + Duration::from_secs(2)),
             LobbyClientStatus::Sound
+        );
+    }
+
+    /// The shipped classic lobby sheets, for tests that draw roster rows.
+    struct LobbySheets {
+        caption: ImageData,
+        button: ImageData,
+        button_down: ImageData,
+        icons: ImageData,
+        icons_extended: ImageData,
+        highlight: ImageData,
+        checkbox: ImageData,
+        scroll: ImageData,
+        context: ImageData,
+    }
+
+    impl LobbySheets {
+        fn load() -> Self {
+            Self {
+                caption: load_graphics_png("GUICaption.png"),
+                button: load_graphics_png("GUIButton.png"),
+                button_down: load_graphics_png("GUIButtonDown.png"),
+                icons: load_graphics_png("GUIIcons.png"),
+                icons_extended: load_graphics_png("GUIIcons2.png"),
+                highlight: load_graphics_png("GUIButtonHighlight.png"),
+                checkbox: load_graphics_png("GUICheckbox.png"),
+                scroll: load_graphics_png("GUIScroll.png"),
+                context: load_graphics_png("GUIContext.png"),
+            }
+        }
+
+        fn resources<'a>(&'a self, fonts: &'a ClonkFontSet) -> LobbyResources<'a> {
+            LobbyResources::new(
+                fonts,
+                &fonts.text,
+                &self.caption,
+                &self.button,
+                &self.button_down,
+                &self.icons,
+                &self.icons_extended,
+                &self.highlight,
+                &self.checkbox,
+                &self.scroll,
+                &self.context,
+            )
+            .expect("the shipped lobby sheets are valid")
+        }
+    }
+
+    /// Draws every client row of the Players sheet at 1280x720, returning the
+    /// surface and each drawn client with its row layout.
+    fn draw_client_rows(
+        lobby: &mut GameLobby,
+        resources: &LobbyResources<'_>,
+    ) -> (Surface, Vec<(LobbyClientRow, LobbyRosterRowLayout)>) {
+        let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
+        let roster = lobby.roster_layout(&layout, 22);
+        let rows: Vec<_> = roster
+            .rows
+            .iter()
+            .filter_map(|row| match &lobby.rows()[row.index] {
+                LobbyRosterRow::Client(client) => Some((client.clone(), *row)),
+                _ => None,
+            })
+            .collect();
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        for (client, row) in &rows {
+            lobby.draw_client_row(&mut surface, client, *row, &layout, resources, true, None);
+        }
+        (surface, rows)
+    }
+
+    /// The bounds of every pixel drawn in exactly `color`.
+    fn bounds_of(surface: &Surface, color: Color) -> Option<IntRect> {
+        let (width, height) = (surface.width() as i32, surface.height() as i32);
+        let hits: Vec<(i32, i32)> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|&(x, y)| surface.get_pixel(x as u32, y as u32) == Some(color))
+            .collect();
+        let left = hits.iter().map(|&(x, _)| x).min()?;
+        let top = hits.iter().map(|&(_, y)| y).min()?;
+        let right = hits.iter().map(|&(x, _)| x).max()?;
+        let bottom = hits.iter().map(|&(_, y)| y).max()?;
+        Some(IntRect::new(left, top, right - left + 1, bottom - top + 1))
+    }
+
+    const SPEAKER_COLOR: Color = Color::opaque(255, 0, 255);
+
+    fn speaker_sprite() -> ImageData {
+        ImageData::new(2, 2, [255, 0, 255, 255].repeat(4))
+    }
+
+    #[test]
+    fn a_speaking_client_shows_the_speaker_after_its_name() {
+        let fonts = endeavour_font_set();
+        let sheets = LobbySheets::load();
+        let sprite = speaker_sprite();
+        let resources = sheets.resources(&fonts).with_speaking_icon(Some(&sprite));
+        let mut lobby = lobby(LobbyRole::Host, vec![client(1, true), client(7, false)]);
+        lobby.set_speaking_clients(BTreeSet::from([7]));
+
+        let (surface, rows) = draw_client_rows(&mut lobby, &resources);
+
+        let (client, row) = &rows[1];
+        let (name_width, _) = fonts.text.measure(&client.display_name(), false);
+        let name_end = row.rect.x + row.rect.h + ICON_LABEL_SPACING + name_width;
+        // Only the talking client's row carries the speaker: one row high,
+        // right after the name.
+        assert_eq!(
+            bounds_of(&surface, SPEAKER_COLOR),
+            Some(IntRect::new(
+                name_end + ICON_LABEL_SPACING,
+                row.rect.y,
+                row.rect.h,
+                row.rect.h
+            ))
+        );
+    }
+
+    #[test]
+    fn without_its_sprite_the_speaker_is_the_classic_sound_icon() {
+        let fonts = endeavour_font_set();
+        let sheets = LobbySheets::load();
+        let resources = sheets.resources(&fonts);
+        let mut lobby = lobby(LobbyRole::Host, vec![client(1, true), client(7, false)]);
+        lobby.set_speaking_clients(BTreeSet::from([7]));
+
+        let (surface, rows) = draw_client_rows(&mut lobby, &resources);
+
+        let (client, row) = &rows[1];
+        let (name_width, _) = fonts.text.measure(&client.display_name(), false);
+        let icon = IntRect::new(
+            row.rect.x + row.rect.h + 2 * ICON_LABEL_SPACING + name_width,
+            row.rect.y,
+            row.rect.h,
+            row.rect.h,
+        );
+        // `C4GUI::Icons::Ico_Sound` (src/C4Gui.h:701), which the in-game
+        // speaking overlay falls back to as well.
+        let mut expected = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        draw_standard_icon_clipped(
+            &mut expected,
+            icon,
+            icon,
+            &resources.icons,
+            LobbyClientStatus::Sound.icon_phase(),
+            None,
+        );
+        let pixels = |surface: &Surface| {
+            (icon.y..icon.y + icon.h)
+                .flat_map(|y| (icon.x..icon.x + icon.w).map(move |x| (x as u32, y as u32)))
+                .map(|(x, y)| surface.get_pixel(x, y))
+                .collect::<Vec<_>>()
+        };
+        assert!(pixels(&expected)
+            .iter()
+            .any(|pixel| *pixel != Some(Color::transparent())));
+        assert_eq!(pixels(&surface), pixels(&expected));
+    }
+
+    #[test]
+    fn the_speaker_after_a_long_name_stops_short_of_the_ping() {
+        let fonts = endeavour_font_set();
+        let sheets = LobbySheets::load();
+        let sprite = speaker_sprite();
+        let resources = sheets.resources(&fonts).with_speaking_icon(Some(&sprite));
+        let mut rows = vec![client(1, true), client(7, false)];
+        if let LobbyRosterRow::Client(remote) = &mut rows[1] {
+            remote.name = "W".repeat(60);
+            remote.ping_ms = Some(35);
+        }
+        let mut lobby = lobby(LobbyRole::Host, rows);
+        lobby.set_speaking_clients(BTreeSet::from([7]));
+
+        let (surface, rows) = draw_client_rows(&mut lobby, &resources);
+
+        let (client, row) = &rows[1];
+        let (name_width, _) = fonts.text.measure(&client.display_name(), false);
+        let (ping_width, _) = fonts.text.measure("35 ms", false);
+        let ping_x = row.rect.x + row.rect.w - ping_width;
+        let icon_x = ping_x - ICON_LABEL_SPACING - row.rect.h;
+        assert!(
+            row.rect.x + row.rect.h + 2 * ICON_LABEL_SPACING + name_width > icon_x,
+            "the name must reach the ping for this case"
+        );
+        assert_eq!(
+            bounds_of(&surface, SPEAKER_COLOR),
+            Some(IntRect::new(icon_x, row.rect.y, row.rect.h, row.rect.h))
         );
     }
 
