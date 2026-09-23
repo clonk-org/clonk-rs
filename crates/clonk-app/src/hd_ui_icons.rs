@@ -238,6 +238,64 @@ mod tests {
         );
     }
 
+    /// Premultiplied RGBA of one pixel, in levels.
+    fn premultiplied(image: &ImageData, x: u32, y: u32) -> [f64; 4] {
+        let offset = ((y * image.width() + x) * 4) as usize;
+        let pixel = &image.pixels()[offset..offset + 4];
+        let alpha = f64::from(pixel[3]) / 255.0;
+        [
+            f64::from(pixel[0]) * alpha,
+            f64::from(pixel[1]) * alpha,
+            f64::from(pixel[2]) * alpha,
+            f64::from(pixel[3]),
+        ]
+    }
+
+    #[test]
+    fn unchecked_checkbox_art_averages_back_to_the_flat_classic_box() {
+        // The classic box is flat: a face with one-pixel edge bands over a
+        // soft drop shadow. Averaged over each classic pixel, the replacement
+        // reproduces the classic cell, which a raised bevel cannot.
+        let icons = prepared_sheets().unwrap();
+        let sheet = icons
+            .iter()
+            .find(|sheet| sheet.name == "GUICheckbox.png")
+            .unwrap();
+        let replacement = sheet
+            .replacement
+            .region_replacement([0, 0, 32, 32])
+            .unwrap();
+        let scale = replacement.width() / 32;
+        let mean_difference = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let averaged = (0..scale * scale)
+                    .map(|index| {
+                        premultiplied(
+                            replacement,
+                            x * scale + index % scale,
+                            y * scale + index / scale,
+                        )
+                    })
+                    .fold([0.0; 4], |sum, pixel| {
+                        std::array::from_fn(|channel| sum[channel] + pixel[channel])
+                    })
+                    .map(|sum| sum / f64::from(scale * scale));
+                averaged
+                    .iter()
+                    .zip(premultiplied(&sheet.original, x, y))
+                    .map(|(averaged, classic)| (averaged - classic).abs())
+                    .fold(0.0, f64::max)
+            })
+            .sum::<f64>()
+            / 1024.0;
+        assert!(
+            mean_difference <= 3.0,
+            "averaged over each classic pixel, the replacement differs from the classic box by \
+             {mean_difference:.1} levels per pixel"
+        );
+    }
+
     #[test]
     fn checkbox_states_share_identical_uncovered_base_pixels() {
         let icons = prepared_sheets().unwrap();
@@ -249,7 +307,7 @@ mod tests {
         let unchecked = sheet.region_replacement([0, 0, 32, 32]).unwrap();
         for rect in [[32, 0, 32, 32], [96, 0, 32, 32]] {
             let checked = sheet.region_replacement(rect).unwrap();
-            // The upper-left inset and bevel are clear of both checkmarks.
+            // The upper-left face and inset lines are clear of both checkmarks.
             for y in 45..100 {
                 for x in 35..100 {
                     let offset = (y * 256 + x) * 4;

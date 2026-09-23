@@ -9,8 +9,8 @@ counterparts. Recording off is grayscale with no checkmark. The unlocked lock
 uses the same rounded body, metal bands and rivets, with an open shackle.
 Both checkbox states use the exact same prepared unchecked base and a separate
 red checkmark. The disabled checked state desaturates only the checkmark;
-uncovered base pixels remain identical. The base keeps the classic box
-bounds; see [Checkbox box](#checkbox-box).
+uncovered base pixels remain identical. The base is the classic box rebuilt
+at 8×; see [Checkbox box](#checkbox-box).
 
 `ImageData` attaches replacements to cells in the original sheets. Facet draws
 resolve those cells, including clipped subrectangles, before sampling or GPU
@@ -53,7 +53,7 @@ These are unscaled crops of the application's retained GPU renderer at
 has the new batch disabled; the previously shipped options icons and Wipf
 remain enabled in both. The message dialog uses deterministic fixture text.
 These are rendered application screens, not generated mockups. They show the
-checkbox as approved on 2026-09-22, before its box took the classic bounds.
+checkbox as approved on 2026-09-22, before the checkbox revisions below.
 
 - [Audio options, full native frame](ui-icons-audio.png)
 - [Voice options, full native frame](ui-icons-voice.png)
@@ -73,30 +73,47 @@ priority, stable texture identities, and shared checkbox pixels.
 
 ## Checkbox box
 
-The checkbox box keeps the classic box bounds at 8×: x 32–208 and y 40–216 of
-the 256-pixel cell, from x 4–26 and y 5–27 of the classic 32-pixel cell. The
-approved checkmark spans the classic checkmark's extent, so it overhangs the
-box on every side and sits centred on it, as the classic checkmark does. The
-approved base drew a larger box, x 27–244 and y 32–247, which left the
-checkmark above and left of the box's centre and covering less of it.
+The checkbox box is the flat classic box of `GUICheckbox.png`, rebuilt at 8×.
+It keeps the classic box bounds: x 4–26 and y 5–27 of the classic 32-pixel
+cell, x 32–208 and y 40–216 of the 256-pixel one. The approved checkmark spans
+the classic checkmark's extent, so it overhangs the box on every side and sits
+centred on it, as the classic checkmark does.
 
 [`ui-checkbox/prepare_runtime.py`](ui-checkbox/prepare_runtime.py) prepares the
-three checkbox sprites from the approved pair kept in `ui-checkbox/approved/`:
+three checkbox sprites:
 
-- It recovers the approved checkmark layer from the pair. The layer's coverage
-  is exact wherever the base is not opaque. Where the checkmark's antialiased
-  rim covers the opaque base, its coverage is solved from the colour of the
-  nearest solidly covered checkmark pixel.
-- It fits the approved base's box to the classic bounds with Lanczos
-  resampling in premultiplied alpha.
-- It composites the checkmark over the fitted base for the checked state, and
-  the checkmark's Rec. 709 luma for the disabled checked state.
+- It recovers the approved checkmark layer from the approved pair kept in
+  `ui-checkbox/approved/`. The layer's coverage is exact wherever the base is
+  not opaque. Where the checkmark's antialiased rim covers the opaque base,
+  its coverage is solved from the colour of the nearest solidly covered
+  checkmark pixel.
+- It rebuilds the classic unchecked box at 8×. The classic cell is a box over
+  a pure black drop shadow. The script fits the shadow as a blurred, offset
+  box, which gives the box's own coverage and colour. Each edge band keeps its
+  colour along the edge, relative to the face, and the face mottling is
+  upsampled smoothly. Averaged back over each classic pixel, the rebuilt box
+  is within two levels of the classic cell on average.
+- It composites the checkmark over the box for the checked state, and the
+  checkmark's Rec. 709 luma for the disabled checked state.
 
-![Classic, previous and current checkboxes in the Audio options](ui-checkbox/box-proportions.png)
+### Checkbox revisions
 
-These are unscaled crops of the Audio options, captured as above. The Classic
-row is the capture's classic side; the Before row is the same capture on the
-previous revision.
-`ui-checkbox/build_comparison.py <previous> <current> <output>` lays out the
-two capture directories. `ui-checkbox/update_overview.py` redraws the checkbox
-tiles of the sprite overview from the runtime sprites.
+1. **Box bounds** (clonk-org/clonk-rs#1734). The approved base drew a larger
+   box, x 27–244 and y 32–247, which left the checkmark above and left of the
+   box's centre and covering less of it. Its box was fitted to the classic
+   bounds.
+
+   ![Classic, approved and fitted checkboxes in the Audio options](ui-checkbox/box-proportions.png)
+
+2. **Flat box** (clonk-org/clonk-rs#1732). The fitted box kept the approved
+   base's raised metal bevel, where the classic box is flat. The box is now
+   rebuilt from the classic cell.
+
+   ![Classic, fitted and flat checkboxes in the Audio options](ui-checkbox/flat-box.png)
+
+Both are unscaled crops of the Audio options, captured as above. Each Classic
+row is the capture's classic side; each Before row is the same capture on the
+revision before. `ui-checkbox/build_comparison.py <previous> <current>
+<output>` lays out the two capture directories, and
+`ui-checkbox/update_overview.py` redraws the checkbox tiles of the sprite
+overview from the runtime sprites.

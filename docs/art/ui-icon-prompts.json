@@ -492,7 +492,7 @@
         32
       ],
       "asset": "crates/clonk-app/assets/ui-icons/checkbox-off.png",
-      "sha256": "048b03321a8477301547c9ce3375e29380f060c89e008821d8056906e9d30359",
+      "sha256": "80d3e4208e75436a79f2edd5c43c2b81d97d3e72f3fdbc772989a66886967458",
       "approvedRuntime": "docs/art/ui-checkbox/approved/checkbox-off.png",
       "approvedRuntimeSha256": "1f64c6f58ac383d468d0bea20ebbc02663ef4a0230035bf8cd9d831fe3642b18",
       "approvedPreviewSha256": "143f7fb3fd441554782bd21039ad1b9f78ed7ac6f0c5a958a101dd98c7b41fb2",
@@ -518,7 +518,8 @@
       },
       "review": "Approved 2026-09-22",
       "revisions": [
-        "2026-09-23: box fitted to the classic box bounds at 8x by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1734)"
+        "2026-09-23: box fitted to the classic box bounds at 8x by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1734)",
+        "2026-09-23: raised bevel replaced by the flat classic box rebuilt at 8x from GUICheckbox.png by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1732)"
       ]
     },
     {
@@ -533,7 +534,7 @@
         32
       ],
       "asset": "crates/clonk-app/assets/ui-icons/checkbox-on.png",
-      "sha256": "a620921ad145a428c9f848faadddc2bae55669fff96952c4660f5445d0e11ba1",
+      "sha256": "1e097678293fb8185e530dcbf2ec465b64379363848b9248973e7199761e68fb",
       "approvedRuntime": "docs/art/ui-checkbox/approved/checkbox-on.png",
       "approvedRuntimeSha256": "c93faf75b48c4efd6d0ff426fdce7369654b2a6d369e5cfbc035155dc46505ea",
       "approvedPreviewSha256": "2b528e2b47644df34f9563589f40c4d6478f993fcf0e320a12fba94f97c737d3",
@@ -560,9 +561,10 @@
       },
       "review": "Approved 2026-09-22",
       "revisions": [
-        "2026-09-23: approved checkmark recovered from the approved pair and composited over the base fitted to the classic box bounds by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1734)"
+        "2026-09-23: approved checkmark recovered from the approved pair and composited over the base fitted to the classic box bounds by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1734)",
+        "2026-09-23: approved checkmark composited over the flat classic box rebuilt at 8x from GUICheckbox.png by docs/art/ui-checkbox/prepare_runtime.py (clonk-org/clonk-rs#1732)"
       ]
     }
   ],
-  "preparation": "Connected beige matte removed; one-source-pixel contraction; Lanczos reduction to 256px. Checkbox checkmark composited over the same prepared unchecked base; disabled state desaturates only the checkmark. Transparent RGB normalized to zero. The checkbox sprites are then prepared by docs/art/ui-checkbox/prepare_runtime.py, which fits the base to the classic box bounds."
+  "preparation": "Connected beige matte removed; one-source-pixel contraction; Lanczos reduction to 256px. Checkbox checkmark composited over the same prepared unchecked base; disabled state desaturates only the checkmark. Transparent RGB normalized to zero. The checkbox sprites are then prepared by docs/art/ui-checkbox/prepare_runtime.py, which composites the approved checkmark over the flat classic box rebuilt at 8x."
 }
