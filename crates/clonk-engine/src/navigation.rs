@@ -51,9 +51,9 @@ pub const MAX_PLAN_WAYPOINTS: usize = 20;
 pub const LANDING_TOLERANCE_X: i32 = 8;
 /// Vertical arrival tolerance: WALK cannot correct height.
 pub const ARRIVAL_TOLERANCE_Y: i32 = 10;
-/// A jump is only planned if taking off this many pixels early or late
-/// still lands in the same place: walking to the takeoff is not exact.
-const JUMP_TAKEOFF_SLACK: i32 = 2;
+/// A jump or drop is only planned if taking off this many pixels off the
+/// planned spot still lands in the same place: WALK is not exact.
+const TAKEOFF_SLACK: i32 = 2;
 
 /// The actor's collision vertices (C4Shape::VtxX/VtxY/VtxCNAT relative to its
 /// position), kept in a fixed array so command snapshots stay allocation-free.
@@ -522,7 +522,7 @@ impl<'a> Search<'a> {
             y: ly,
             frames,
         };
-        (1..=JUMP_TAKEOFF_SLACK)
+        (1..=TAKEOFF_SLACK)
             .all(|late| {
                 self.drop(x + dir * late, y, dir)
                     .is_some_and(|(ox, oy, of)| {
@@ -544,7 +544,7 @@ impl<'a> Search<'a> {
     /// pixels early or late ends the same move.
     fn robust_jump(&self, x: i32, y: i32, dir: i32) -> Option<Landing> {
         let landing = self.jump(x, y, dir)?;
-        (-JUMP_TAKEOFF_SLACK..=JUMP_TAKEOFF_SLACK)
+        (-TAKEOFF_SLACK..=TAKEOFF_SLACK)
             .filter(|&offset| offset != 0 && self.standing(x + offset, y))
             .all(|offset| {
                 self.jump(x + offset, y, dir)
