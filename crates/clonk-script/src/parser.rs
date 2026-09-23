@@ -300,12 +300,25 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
         let params = self.parse_parameter_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
-        self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
+        // Below #strict 2 a head without '{' is only a warning, and C4Aul
+        // compiles its body in legacy mode (C4AulParse.cpp:1698-1704).
+        let legacy_body = self.strict_level < 2 && !self.check_symbol(Symbol::LBrace)?;
+        if legacy_body {
+            let (line, column) = self.peek().map(|token| (token.line, token.column))?;
+            self.non_fatal_diagnostics.push(ParseError::new(
+                "'func': expecting opening block ('{') after func declaration",
+                line,
+                column,
+            ));
+        } else {
+            self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
+        }
         let body_depth = self.brace_depth;
         self.begin_global_local_tracking(access, &params);
 
         let mut description = None;
         let mut body = Vec::new();
+        let mut ended_at_stray_brace = false;
         let error = match self.parse_function_description() {
             Ok(parsed) => {
                 description = parsed;
@@ -337,6 +350,33 @@ impl<'a> Parser<'a> {
                         ));
                         None
                     }
+                    // Parse_Function ends a legacy body at the next '}' with an
+                    // error and keeps the code before it (C4AulParse.cpp:1866-1884).
+                    // The preparser then rejects that brace as a declaration
+                    // without reporting it again, and skips it
+                    // (C4AulParse.cpp:1436-1441, 1549-1560).
+                    None if legacy_body && self.check_symbol(Symbol::RBrace)? => {
+                        let brace = self.consume()?;
+                        ended_at_stray_brace = true;
+                        Some(ParseError::new(
+                            "no '{' found for '}'",
+                            brace.line,
+                            brace.column,
+                        ))
+                    }
+                    // At the end of the script Parse_Function stops without an
+                    // error, so the parser pass keeps every statement and only
+                    // the preparser's Match(ATT_BLCLOSE) fails
+                    // (C4AulParse.cpp:1886-1890, 1712).
+                    None if legacy_body => {
+                        let (line, column) = self.peek().map(|token| (token.line, token.column))?;
+                        self.non_fatal_diagnostics.push(ParseError::new(
+                            "'}' expected, but found end of file",
+                            line,
+                            column,
+                        ));
+                        None
+                    }
                     None => self
                         .expect_symbol(Symbol::RBrace, "expected '}' after function body")
                         .err(),
@@ -346,7 +386,13 @@ impl<'a> Parser<'a> {
         };
 
         if let Some(error) = &error {
-            self.recover_function_body(body_depth);
+            if legacy_body {
+                if !ended_at_stray_brace {
+                    self.recover_old_style_function_body(body_depth);
+                }
+            } else {
+                self.recover_function_body(body_depth);
+            }
             body.push(Stmt::ParseError {
                 message: error.message().to_string(),
                 line: error.line(),
