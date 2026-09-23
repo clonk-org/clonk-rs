@@ -329,3 +329,81 @@
             "an unreachable goal fails within the steering budget, got {failed_at:?}"
         );
     }
+
+    fn loose_rock(id: u64, position: Vector2) -> CommandObjectSnapshot {
+        command_object!(id; definition_id = "ROCK".into(); position = position;
+            ocf = ocf::AVAILABLE | ocf::FULL_CON; collectible = true; construction = FULL_CON)
+    }
+
+    #[test]
+    fn navigation_acquire_prefers_a_reachable_item_over_an_unreachable_nearer_one() {
+        // A rock on a floating island is nearer in a straight line, which is
+        // all C4Command::Acquire compares (C4Command.cpp:2108-2126).
+        let landscape = navigation_terrain(&[(300, NAV_GROUND - 80, 340, NAV_GROUND - 75, true)]);
+        let clonk = navigating_clonk(Vector2::new(360, NAV_GROUND - 10));
+        let island = ObjectId::new(2);
+        let ground = ObjectId::new(3);
+        let objects = command_objects([
+            clonk.clone(),
+            loose_rock(island.as_u64(), Vector2::new(320, NAV_GROUND - 84)),
+            loose_rock(ground.as_u64(), Vector2::new(60, NAV_GROUND - 4)),
+        ]);
+        let ctx = command_context!(command_ctx(&clonk, &objects, 0); landscape: Some(&landscape));
+        let state = AcquireState::from_request(
+            &request!(Acquire, with_data: CommandData::Text("ROCK".into())),
+        )
+        .expect("acquire state");
+        let gravity = crate::PhysicsSettings::default().gravity_as_c4fixed();
+
+        assert_eq!(state.find_candidate(&ctx), Some(island), "native: nearest");
+        assert_eq!(
+            state.find_navigation_candidate(&ctx, gravity, None),
+            Some(ground),
+            "navigation: the one the Clonk can walk to"
+        );
+        assert_eq!(
+            state.find_navigation_candidate(&ctx, gravity, Some(ground)),
+            None,
+            "nothing reachable once the failed candidate is excluded: buy instead"
+        );
+    }
+
+    #[test]
+    fn navigation_acquire_leaves_an_item_another_clonk_is_fetching() {
+        let landscape = navigation_terrain(&[]);
+        let clonk = navigating_clonk(Vector2::new(200, NAV_GROUND - 10));
+        let near = ObjectId::new(2);
+        let far = ObjectId::new(3);
+        let mut other = navigating_clonk(Vector2::new(100, NAV_GROUND - 10));
+        other.id = ObjectId::new(9);
+        other.commands = vec![command_view(CommandId::Get, Some(near))];
+        let rocks = [
+            loose_rock(near.as_u64(), Vector2::new(240, NAV_GROUND - 4)),
+            loose_rock(far.as_u64(), Vector2::new(330, NAV_GROUND - 4)),
+        ];
+        let objects = command_objects([
+            clonk.clone(),
+            other.clone(),
+            rocks[0].clone(),
+            rocks[1].clone(),
+        ]);
+        let ctx = command_context!(command_ctx(&clonk, &objects, 0); landscape: Some(&landscape));
+        let state = AcquireState::from_request(
+            &request!(Acquire, with_data: CommandData::Text("ROCK".into())),
+        )
+        .expect("acquire state");
+        let gravity = crate::PhysicsSettings::default().gravity_as_c4fixed();
+
+        assert_eq!(
+            state.find_navigation_candidate(&ctx, gravity, None),
+            Some(far)
+        );
+
+        // With the free one gone, the claimed rock is still better than none.
+        let objects = command_objects([clonk.clone(), other, rocks[0].clone()]);
+        let ctx = command_context!(command_ctx(&clonk, &objects, 0); landscape: Some(&landscape));
+        assert_eq!(
+            state.find_navigation_candidate(&ctx, gravity, None),
+            Some(near)
+        );
+    }

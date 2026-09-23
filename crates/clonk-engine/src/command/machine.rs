@@ -981,6 +981,13 @@ const PERMIT_STEER_SHIFT: u32 = 8;
 const PERMIT_STEER_MASK: i32 = 0xfff << PERMIT_STEER_SHIFT;
 /// A Jump, Drop or Climb waypoint marks in Permit that its move started.
 const PERMIT_MOVE_STARTED: i32 = 1;
+/// Acquire weighs this many of the nearest candidates by route cost.
+const NAVIGATION_ACQUIRE_CANDIDATES: usize = 8;
+/// Positions each Acquire candidate route may expand.
+const NAVIGATION_ACQUIRE_BUDGET: usize = 12_000;
+/// Get collects within the actor's At rectangle, which reaches about seven
+/// pixels either side of a CLNK (C4Object.cpp:1133-1146).
+const NAVIGATION_PICKUP_RANGE_X: i32 = 7;
 
 impl MoveToState {
     fn navigation_kind(&self) -> Option<(NavigationKind, bool)> {
@@ -5745,6 +5752,107 @@ impl AcquireState {
             .map(|snapshot| snapshot.id)
     }
 
+    /// The navigation AI's choice: of the nearest few candidates, the one
+    /// with the cheapest planned route, skipping `excluded` (the candidate
+    /// whose Get just failed) and preferring one no other object is already
+    /// fetching. `None` when none is reachable, which falls back to Buy.
+    pub(in crate::command) fn find_navigation_candidate(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        excluded: Option<ObjectId>,
+    ) -> Option<ObjectId> {
+        let candidates = self
+            .ranked_candidates(ctx)
+            .into_iter()
+            .filter(|snapshot| Some(snapshot.id) != excluded);
+        let landscape = match ctx.landscape {
+            Some(landscape)
+                if ctx.object.action_procedure == ActionProcedure::Walk
+                    && !ctx.object.nav_body.is_empty() =>
+            {
+                landscape
+            }
+            // Only a standing actor can plan; otherwise keep the native pick.
+            _ => return candidates.map(|snapshot| snapshot.id).next(),
+        };
+        let actor = navigation::NavActor::new(
+            ctx.object.nav_body,
+            &ctx.object.physical,
+            ctx.object.construction,
+            gravity,
+        );
+        let fetched_by_another = |candidate: ObjectId| {
+            ctx.objects.values().any(|other| {
+                other.id != ctx.object.id
+                    && other.commands.iter().any(|command| {
+                        !command.finished
+                            && command.name == "Get"
+                            && command.target == Some(candidate)
+                    })
+            })
+        };
+        candidates
+            .take(NAVIGATION_ACQUIRE_CANDIDATES)
+            .filter_map(|snapshot| {
+                let position = snapshot
+                    .container
+                    .and_then(|container| ctx.resolve_position(container))
+                    .unwrap_or(snapshot.position);
+                // Get's pursuit MoveTo grounds the item position the same way
+                // (C4Command.cpp:1290,1639-1641).
+                let (mut x, mut y) = (position.x, position.y);
+                adjust_move_to_target(landscape, &mut x, &mut y, false, ctx.object.shape_height);
+                let goal = navigation::NavGoal {
+                    x,
+                    y,
+                    range_x: NAVIGATION_PICKUP_RANGE_X,
+                    range_y: NAVIGATION_ARRIVAL_Y,
+                };
+                navigation::plan(
+                    landscape,
+                    &actor,
+                    ctx.position,
+                    goal,
+                    NAVIGATION_ACQUIRE_BUDGET,
+                )
+                .map(|plan| ((fetched_by_another(snapshot.id), plan.cost), snapshot.id))
+            })
+            .min_by_key(|&(key, _)| key)
+            .map(|(_, id)| id)
+    }
+
+    /// C4Command::Acquire under the navigation switch. Permit remembers the
+    /// candidate the last Get went for, so a failed fetch is not retried at
+    /// the same item.
+    pub(in crate::command) fn step_navigation(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        permit: &mut i32,
+    ) -> CommandStepResult {
+        let excluded = u64::try_from(*permit)
+            .ok()
+            .filter(|&number| number > 0)
+            .map(ObjectId::new);
+        let result = self.step_selecting(ctx, |state, ctx| {
+            state.find_navigation_candidate(ctx, gravity, excluded)
+        });
+        if let Some(chosen) = result
+            .operations
+            .iter()
+            .find_map(|operation| match operation {
+                CommandOperation::PushFront(request) if request.id == CommandId::Get => {
+                    request.target
+                }
+                _ => None,
+            })
+        {
+            *permit = i32::try_from(chosen.as_u64()).unwrap_or(0);
+        }
+        result
+    }
+
     pub(in crate::command) fn step(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
@@ -7246,6 +7354,9 @@ impl ActiveCommand {
             CommandState::Sell(state) => state.step(ctx),
             CommandState::Take(state) => state.step(ctx),
             CommandState::Take2(state) => state.step(ctx),
+            CommandState::Acquire(state) if ctx.navigation_ai => {
+                state.step_navigation(ctx, gravity, &mut self.permit)
+            }
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
