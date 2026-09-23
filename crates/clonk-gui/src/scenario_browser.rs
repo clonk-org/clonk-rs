@@ -679,4 +679,37 @@ mod tests {
         assert!(escape.messages.is_empty());
         assert!(browser.selected_entry().is_none());
     }
+
+    #[test]
+    fn a_row_preview_is_produced_only_when_the_info_panel_shows_the_row() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let loads = Arc::new(AtomicUsize::new(0));
+        let preview = {
+            let loads = Arc::clone(&loads);
+            LazyImage::new(move || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Some(ImageData::new(1, 1, vec![1, 2, 3, 255]))
+            })
+        };
+        let entries = ["first", "second"]
+            .map(|identifier| ScenarioEntry {
+                identifier: identifier.into(),
+                title: identifier.into(),
+                description: None,
+                kind: ScenarioKind::Scenario,
+                is_editable: false,
+                is_playable: true,
+                location: None,
+                preview: Some(preview.clone()),
+            })
+            .to_vec();
+
+        let mut browser = ScenarioBrowser::new(entries, test_font()).expect("browser");
+        browser.layout(Size::new(480.0, 720.0));
+        assert_eq!(loads.load(Ordering::SeqCst), 0, "rows read no preview");
+
+        browser.select_entry_by_index(1).expect("select");
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "the shown row's preview");
+    }
 }
