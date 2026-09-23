@@ -369,6 +369,34 @@
     }
 
     #[test]
+    fn navigation_acquire_keeps_the_native_pick_inside_a_building() {
+        // A Clonk inside a workshop stands nowhere in the landscape, so no
+        // route can start there. It still takes the nearest material, as
+        // C4Command::Acquire does (C4Command.cpp:2108-2130), instead of
+        // finding nothing reachable and trying to buy.
+        let landscape = navigation_terrain(&[]);
+        let mut clonk = navigating_clonk(Vector2::new(150, NAV_GROUND - 24));
+        clonk.container = Some(ObjectId::new(9));
+        let rock = ObjectId::new(2);
+        let objects = command_objects([
+            clonk.clone(),
+            loose_rock(rock.as_u64(), Vector2::new(60, NAV_GROUND - 4)),
+        ]);
+        let ctx = command_context!(command_ctx(&clonk, &objects, 0); landscape: Some(&landscape));
+        let state = AcquireState::from_request(
+            &request!(Acquire, with_data: CommandData::Text("ROCK".into())),
+        )
+        .expect("acquire state");
+        let gravity = crate::math::fixed100(100) / 5;
+
+        assert_eq!(state.find_candidate(&ctx), Some(rock), "native: nearest");
+        assert_eq!(
+            state.find_navigation_candidate(&ctx, gravity, None),
+            Some(rock)
+        );
+    }
+
+    #[test]
     fn navigation_acquire_leaves_an_item_another_clonk_is_fetching() {
         let landscape = navigation_terrain(&[]);
         let clonk = navigating_clonk(Vector2::new(200, NAV_GROUND - 10));

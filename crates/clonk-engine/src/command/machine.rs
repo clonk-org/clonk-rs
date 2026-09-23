@@ -5769,11 +5769,13 @@ impl AcquireState {
         let landscape = match ctx.landscape {
             Some(landscape)
                 if ctx.object.action_procedure == ActionProcedure::Walk
+                    && ctx.object.container.is_none()
                     && !ctx.object.nav_body.is_empty() =>
             {
                 landscape
             }
-            // Only a standing actor can plan; otherwise keep the native pick.
+            // Only an actor standing in the landscape can plan; one walking
+            // inside a building, or not walking at all, keeps the native pick.
             _ => return candidates.map(|snapshot| snapshot.id).next(),
         };
         let actor = navigation::NavActor::new(
