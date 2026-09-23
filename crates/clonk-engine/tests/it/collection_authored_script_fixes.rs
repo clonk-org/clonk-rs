@@ -935,3 +935,52 @@ fn a_settlement_goal_answers_for_a_player_without_an_account() {
         assert_eq!(answer.as_c4_int().unwrap_or(0), 0, "{path}");
     }
 }
+
+/// clonk-org/clonk-rs-content#124: ten Metal & Magic scenarios were saved with
+/// `MetalMagicExtra.c4d` loaded but did not name it. An object whose id names
+/// no loaded definition fails to compile (C4Object.cpp:2742-2746), and the
+/// object list skips it (C4ObjectList.cpp:531-537), so their rules, Cultsites,
+/// amulets, priests and Tutorial3's Kanderian palace never existed. Each loads
+/// the pack after `MetalMagic.c4d` now, as the Harkon missions do.
+#[test]
+fn the_metal_magic_scenarios_load_the_extra_pack_their_objects_need() {
+    const MISSIONS: &str = "Collection.c4f/Knights.c4f/MetalMagic.c4f";
+    for (scenario, expected) in [
+        ("Assassination.c4s", &[("CLST", 1)][..]),
+        ("BattleForWedok.c4s", &[("NOUD", 1)][..]),
+        (
+            "CastleConquest.c4s",
+            &[("CLST", 1), ("LFAM", 2), ("SPST", 1)][..],
+        ),
+        // Three saved rules and the one its `[Game]` rules place, since it
+        // initialises (C4Game.cpp:2511-2518, 4016-4026).
+        ("GriffonRace.c4s", &[("CLST", 1), ("NOUD", 4)][..]),
+        // Its `Initialize` empties the chests and puts an amulet back into one.
+        ("Kamteiusvalley.c4s", &[("LFAM", 1), ("SPST", 1)][..]),
+        ("SacredHills.c4s", &[("CLST", 1), ("NOUD", 1)][..]),
+        (
+            "Tutorials.c4f/Tutorial.c4s",
+            &[("CLST", 1), ("PRST", 1)][..],
+        ),
+        ("Tutorials.c4f/Tutorial2.c4s", &[("MYST", 1)][..]),
+        (
+            "Tutorials.c4f/Tutorial3.c4s",
+            &[("KAND", 8), ("PPH1", 2), ("PRFC", 1), ("SCMT", 2)][..],
+        ),
+        ("WarOfCKZ.c4s", &[("SPST", 1)][..]),
+    ] {
+        let path = format!("{MISSIONS}/{scenario}");
+        let engine = load_installed_scenario(&path, 0);
+        let snapshot = engine.snapshot();
+        for (id, count) in expected {
+            let found = snapshot
+                .objects
+                .iter()
+                .filter(|object| {
+                    object.definition_id == *id && object.status != ObjectStatus::Deleted
+                })
+                .count();
+            assert_eq!(found, *count, "{path}: {id}");
+        }
+    }
+}
