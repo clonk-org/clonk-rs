@@ -477,6 +477,57 @@ fn metal_and_magic_names_its_sanctuary_in_the_players_language() {
     }
 }
 
+/// Relaunches a player the way the wagon fights' Clonk does when it dies (its
+/// own Clonk, no relaunches used yet, no killer) and answers the highest
+/// relaunch count among the player's crew afterwards.
+const WAGON_RELAUNCH_PROBE: &str = r#"#strict
+public func Relaunch(int player)
+{
+    GameCallEx("RelaunchPlayer", player, GetCrew(player), 0, NO_OWNER, 0);
+    var most = 0;
+    for (var i = 0; i < GetCrewCount(player); i++)
+        most = Max(most, LocalN("Relaunchs", GetCrew(player, i)));
+    return most;
+}
+"#;
+
+/// clonk-org/clonk-rs-content#149: #72 moved every `"Relaunchs"` literal of
+/// WagonFight_s2mod into its string tables, but it is also the name of the
+/// `local Relaunchs` in the scenario's `CLNK.c4d`. The table is chosen by the
+/// player's language when the script is compiled (C4ScriptHost.cpp:56-57,
+/// 66-75), so an English game asked for a local named `Relaunches`.
+/// `FnLocalN` answers nil for an unknown name (C4Script.cpp:4592-4604), and
+/// `=` needs a reference on its left (C4AulParse.cpp:478), so
+/// `RelaunchPlayer` stopped before the new Clonk's counter was written and no
+/// player ever ran out of relaunches. The name is back, and the relaunch is
+/// counted in either language.
+#[test]
+fn a_wagon_fight_relaunch_is_counted_in_every_language() {
+    for languages in [["US"], ["DE"]] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Knights.c4f/WagonFight_s2mod.c4s",
+            0,
+            &languages,
+        );
+        let player = join_local_player_on_team(&mut engine, "Wagon fighter", 1);
+        engine
+            .register_script_definition("WFRP", "Wagon relaunch probe", WAGON_RELAUNCH_PROBE)
+            .expect("the probe registers");
+        let probe = engine.spawn_test_object(SpawnConfig::new("WFRP"));
+
+        let index = engine.test_object_index(probe);
+        let counted = engine
+            .call_object_function(index, "Relaunch", vec![Value::Int(player)])
+            .unwrap_or_else(|error| panic!("the {languages:?} relaunch runs: {error}"));
+
+        assert_eq!(
+            counted.as_c4_int(),
+            Some(1),
+            "the {languages:?} relaunch is counted"
+        );
+    }
+}
+
 /// Relaunches a player the way the pack's Clonk does from `Destruction`.
 const RELAUNCH_PROBE: &str = r#"#strict
 public func Relaunch(int player)
