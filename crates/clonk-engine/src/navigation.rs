@@ -141,6 +141,9 @@ pub struct NavActor {
     /// 880-921). Unlimited for a water-breather, whose breath the planner
     /// does not model: it breathes in water instead (C4Object.cpp:891-894).
     pub breath_frames: i32,
+    /// Frames of that breath already spent, which a plan starting without
+    /// air cannot spend again.
+    pub breath_held: i32,
     /// Where the actor draws breath, below its position: half its shape's
     /// top offset (C4Object.cpp:897).
     pub breath_offset: i32,
@@ -243,6 +246,7 @@ impl NavActor {
             } else {
                 physical.breath / (2 * C4_MAX_PHYSICAL / 100) * 5
             },
+            breath_held: 0,
             breath_offset: shape_top / 2,
             harmful_liquids: hazards.harmful_to(physical),
             can_scale: physical.can_scale != 0,
@@ -957,7 +961,14 @@ impl<'a> Search<'a> {
         let mut breathless: HashMap<(i32, i32), i32> = HashMap::new();
         let mut open = BinaryHeap::new();
         best.insert(start, 0);
-        breathless.insert(start, 0);
+        breathless.insert(
+            start,
+            if self.breathing(start.0, start.1) {
+                0
+            } else {
+                self.actor.breath_held.saturating_mul(COST_PER_FRAME)
+            },
+        );
         open.push(Reverse((
             self.heuristic(start.0, start.1, goal),
             0,
@@ -1762,6 +1773,20 @@ mod tests {
                 .find(|&(x, y)| !search.swimming(x, y));
             assert_eq!(blocked, None, "{from:?} -> {to:?} in {plan:?}");
         }
+    }
+
+    #[test]
+    fn a_swimmer_nearly_out_of_breath_is_planned_no_dive() {
+        // Planning from under the surface, the breath already spent counts
+        // against the budget (C4Object.cpp:880-921). Deep by the tunnel
+        // mouth, CLNK can surface and then dive through on a full breath,
+        // but not with 20 of its 125 frames of breath left.
+        let short = underwater_tunnel(30);
+        let start = Vector2::new(230, G + 30);
+        let mut actor = clonk(true);
+        assert!(plan(&short, &actor, start, goal(470, G - 10), 40_000).is_some());
+        actor.breath_held = 105;
+        assert!(plan(&short, &actor, start, goal(470, G - 10), 40_000).is_none());
     }
 
     #[test]
