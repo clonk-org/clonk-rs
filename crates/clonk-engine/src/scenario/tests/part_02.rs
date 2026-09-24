@@ -972,6 +972,29 @@
         assert!(head.local_only());
     }
 
+    /// C4SDefinitions::CompileFunc reads each `DefinitionN` with mkStringAdaptA
+    /// (C4Scenario.cpp:491), whose RCT_All skips the leading whitespace and
+    /// keeps every other byte through the line ending (StdCompiler.cpp:998).
+    /// C4Group::Open then converts only backslashes (C4Group.cpp:665-668), so
+    /// a trailing space or quotes are part of the module C++ opens.
+    #[test]
+    fn a_definition_module_keeps_its_trailing_space_and_quotes_like_cpp() {
+        let directory = test_tempdir();
+        write_test_file(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nTitle=Modules\n\n[Definitions]\nDefinition1=  Objects.c4d \n\
+             Definition2=\"Knights.c4d\"\nDefinition3=Folder\\Pack.c4d\n",
+        );
+        let group = Group::open(directory.path()).test_value();
+
+        let head =
+            ScenarioLoaderHead::load_from_group_for_resource_registration(&group).test_value();
+        assert_eq!(
+            head.configured_definition_modules(),
+            ["Objects.c4d ", "\"Knights.c4d\"", "Folder/Pack.c4d"]
+        );
+    }
+
     /// Builds the raw on-disk image of a tiny C4Group. This is intentionally
     /// local to scenario tests so nested DefinitionPath traversal is exercised
     /// through the real packed-group reader rather than a mock resolver.

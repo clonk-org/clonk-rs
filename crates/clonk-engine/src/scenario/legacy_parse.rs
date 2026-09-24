@@ -227,7 +227,7 @@ impl LegacyDefinitions {
                     continue;
                 };
                 reflected_definitions.push(raw.to_string());
-                definitions.push(normalize_definition_path(raw));
+                definitions.push(normalize_scenario_definition_module(raw));
             }
         }
         self.reflected_definitions = Some(reflected_definitions);
@@ -2389,6 +2389,24 @@ pub(in crate::scenario) fn normalize_definition_path(raw: &str) -> String {
     }
     let normalized = trimmed.replace('\\', "/");
     normalized.trim_end_matches('/').to_string()
+}
+
+fn strip_all_prefixes<'a>(text: &'a str, prefix: &str) -> &'a str {
+    std::iter::successors(Some(text), |rest| rest.strip_prefix(prefix))
+        .last()
+        .unwrap_or(text)
+}
+
+/// A `DefinitionN` module as C4GameResList::Load opens it: RCT_All already
+/// skipped the leading whitespace (StdCompiler.cpp:998), and C4Group::Open
+/// converts only backslashes (C4Group.cpp:665-668), so trailing whitespace
+/// and quotes stay part of the name. A leading `./` or `.\` and a trailing
+/// `/` still name the same path.
+pub(in crate::scenario) fn normalize_scenario_definition_module(raw: &str) -> String {
+    strip_all_prefixes(strip_all_prefixes(raw, "./"), ".\\")
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn derive_ground_height_hint(sections: &HashMap<String, Vec<(String, String)>>) -> Option<i32> {
