@@ -3342,7 +3342,10 @@ fn real_mars_full_size_highlight_reaches_host_gui_resources() {
         .assets
         .scensel_assets(app.config.compat_profile)
         .test_value();
-    let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
+    let button_down = app
+        .assets
+        .startup_button_image(app.config.compat_profile, true)
+        .test_value();
     clonk_frontend::startup_scensel::validate_scensel_button_assets(&scensel, &button_down)
         .test_value();
 }

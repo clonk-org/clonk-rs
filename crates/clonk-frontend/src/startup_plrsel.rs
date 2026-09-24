@@ -2960,47 +2960,60 @@ impl PlrSelScreen {
         } else {
             0
         };
-        crate::draw_image_strip(
-            surface,
-            bar.x,
-            bar.y,
-            &assets.book_scroll,
-            top_x,
-            0,
-            16,
-            16,
-            gamma,
-        );
-        let mut y = SCROLLBAR_PART;
-        while y < bar.h - 5 {
-            let tile_height = SCROLLBAR_PART.min(bar.h - 5 - y).max(0) as u32;
-            if tile_height == 0 {
-                break;
+        if (assets.book_scroll.width(), assets.book_scroll.height()) == (384, 384) {
+            crate::startup_scensel::draw_hd_book_vertical_bar(
+                surface,
+                bar.x,
+                bar.y,
+                bar.h,
+                &assets.book_scroll,
+                top_x != 0,
+                bottom_x != 0,
+                gamma,
+            );
+        } else {
+            crate::draw_image_strip(
+                surface,
+                bar.x,
+                bar.y,
+                &assets.book_scroll,
+                top_x,
+                0,
+                16,
+                16,
+                gamma,
+            );
+            let mut y = SCROLLBAR_PART;
+            while y < bar.h - 5 {
+                let tile_height = SCROLLBAR_PART.min(bar.h - 5 - y).max(0) as u32;
+                if tile_height == 0 {
+                    break;
+                }
+                crate::draw_image_strip(
+                    surface,
+                    bar.x,
+                    bar.y + y,
+                    &assets.book_scroll,
+                    0,
+                    16,
+                    16,
+                    tile_height,
+                    gamma,
+                );
+                y += SCROLLBAR_PART;
             }
             crate::draw_image_strip(
                 surface,
                 bar.x,
-                bar.y + y,
+                bar.y + bar.h - SCROLLBAR_PART,
                 &assets.book_scroll,
-                0,
+                bottom_x,
+                32,
                 16,
                 16,
-                tile_height,
                 gamma,
             );
-            y += SCROLLBAR_PART;
         }
-        crate::draw_image_strip(
-            surface,
-            bar.x,
-            bar.y + bar.h - SCROLLBAR_PART,
-            &assets.book_scroll,
-            bottom_x,
-            32,
-            16,
-            16,
-            gamma,
-        );
         if PlrSelController::scrollbar_has_pin(layout) {
             crate::startup_options_dlg::draw_book_scroll_pin(
                 surface,

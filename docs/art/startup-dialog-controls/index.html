@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clonk startup controls — HD review</title>
+  <link rel="stylesheet" href="review.css">
+  <script src="review.js" defer></script>
+</head>
+<body>
+  <main class="page">
+    <header class="intro">
+      <p class="eyebrow">Clonk UI · visual review</p>
+      <h1>The other wooden buttons and the vertical Wipf scrollbar</h1>
+      <p>The captures below come from the game at 1280 × 720. Drag across the button to compare its original texture with the approved HD plank. The scrollbar section shows the original and HD rails, and lets you move the Wipf on both.</p>
+    </header>
+
+    <section class="card" aria-labelledby="back-title">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Options screen · Back</p>
+          <h2 id="back-title">Same button bounds, sharper wood and nailheads</h2>
+        </div>
+        <p class="note">Actual game renders</p>
+      </div>
+      <div class="button-stills">
+        <figure><img src="back-before.png" width="170" height="48" alt="Complete original Back button"><figcaption>Original</figcaption></figure>
+        <figure><img src="back-after.png" width="170" height="48" alt="Complete HD Back button"><figcaption>HD</figcaption></figure>
+      </div>
+      <div class="compare" data-compare style="--split: 50%" aria-label="Drag to compare the original and HD Back button">
+        <img src="back-after.png" width="170" height="48" alt="HD Back button">
+        <img class="before" src="back-before.png" width="170" height="48" alt="Original Back button">
+        <span class="split-line" aria-hidden="true"><span>↔</span></span>
+      </div>
+      <div class="comparison-labels"><span>Original</span><span>HD</span></div>
+      <label class="range-label">Reveal HD <input class="compare-range" type="range" min="0" max="100" value="50" aria-label="Back button comparison position"></label>
+    </section>
+
+    <section class="card" aria-labelledby="scroll-title">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Scenario Selection · vertical scrollbar</p>
+          <h2 id="scroll-title">The approved arrow and rail art, turned upright</h2>
+        </div>
+        <p class="note">Actual game renders</p>
+      </div>
+      <div class="scroll-stills">
+        <figure><img src="scroll-before.png" width="38" height="374" alt="Original vertical scrollbar with Wipf"><figcaption>Original</figcaption></figure>
+        <figure><img src="scroll-after.png" width="38" height="374" alt="HD vertical scrollbar with Wipf"><figcaption>HD</figcaption></figure>
+      </div>
+      <p class="caption">Both images retain the same 16-pixel control width and Wipf position. The HD version samples the full 8× arrow and rail facets and the approved full-body Wipf.</p>
+    </section>
+
+    <section class="card" aria-labelledby="move-title">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Interactive · actual game atlases</p>
+          <h2 id="move-title">Move the Wipf</h2>
+        </div>
+        <p class="note">Both sliders stay synchronized</p>
+      </div>
+      <p>Drag either Wipf, click a rail or arrow, or use the position control. The rail repeats the same facets the game draws.</p>
+      <div class="live-sliders">
+        <figure><div class="slider-stage"><canvas id="classic-scroll" width="48" height="720" aria-label="Original vertical Wipf scrollbar"></canvas></div><figcaption>Original 48 × 48 atlas</figcaption></figure>
+        <figure><div class="slider-stage"><canvas id="hd-scroll" width="48" height="720" aria-label="HD vertical Wipf scrollbar"></canvas></div><figcaption>Approved 384 × 384 atlas</figcaption></figure>
+      </div>
+      <label class="range-label">Wipf position <input id="wipf-position" type="range" min="0" max="192" value="0"></label>
+      <p id="asset-status" class="caption" role="status"></p>
+    </section>
+
+    <section class="card" aria-labelledby="players-title">
+      <div class="section-head"><div><p class="eyebrow">Player Selection · bottom row</p><h2 id="players-title">The same wood treatment on the other startup buttons</h2></div><p class="note">Actual game renders</p></div>
+      <div class="wide-scroll"><div class="compare player-compare" data-compare style="--split: 50%" aria-label="Drag to compare the six original and HD player-selection buttons"><img src="player-buttons-after.png" width="1220" height="52" alt="Six HD player-selection buttons"><img class="before" src="player-buttons-before.png" width="1220" height="52" alt="Six original player-selection buttons"><span class="split-line" aria-hidden="true"><span>↔</span></span></div></div>
+      <div class="comparison-labels"><span>Original</span><span>HD</span></div>
+      <label class="range-label">Reveal HD <input class="compare-range" type="range" min="0" max="100" value="50" aria-label="Player button comparison position"></label>
+    </section>
+  </main>
+</body>
+</html>

@@ -259,6 +259,15 @@ pub fn draw_bar(
     border: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if (image.width(), image.height()) == (2052, 160) {
+        crate::startup_main_menu::draw_hd_button_bar(
+            surface,
+            &GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+            image,
+            gamma,
+        );
+        return;
+    }
     let h = image.height();
     if h == 0 || rect.w <= 0 || rect.h <= 0 || border == 0 || image.width() < 2 * border {
         return;
