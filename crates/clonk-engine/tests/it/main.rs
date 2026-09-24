@@ -119,6 +119,7 @@ shard_modules!(
     global_call,
     goldwipfcaves_breath,
     hazard_death_relaunch,
+    imported_pack_languages,
     literal_zero_strictness,
     manifest_definitions,
     mars_folder_material_landscape,

@@ -5,7 +5,7 @@
   },
   "case_id": "evaluation",
   "comparator": {
-    "binary_sha256": "c873cad9af90e14d67b0237a5f64f0584df3f074bf9af6ffdd6469ff00c39eb0",
+    "binary_sha256": "c186cfe2b729a8471eeaeba2b11de37ed53addd0d42bfeb36d104957d878a43b",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",

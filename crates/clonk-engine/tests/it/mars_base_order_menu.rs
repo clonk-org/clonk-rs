@@ -473,7 +473,7 @@ fn an_unchosen_mode_row_is_blank_rather_than_crossed_out(engine: &mut Engine, cl
     // Menu2 renders an iconless enum item with the whole 64px cell from its
     // sheet: cell 3 is a green check for the chosen one and cell 4 a red cross
     // for the rest (Menu.c4d/Script.c:255-261). They are radio markers, but a
-    // red cross beside "Only Sell" reads as forbidden, not as unselected. A
+    // red cross beside "Sell only" reads as forbidden, not as unselected. A
     // blank symbol says the same thing without the false warning.
     let last =
         crate::support::TestValueExt::test_value(i32::try_from(items(engine, clonk).len())) - 1;
@@ -483,7 +483,9 @@ fn an_unchosen_mode_row_is_blank_rather_than_crossed_out(engine: &mut Engine, cl
     crate::support::TestValueExt::test_value(engine.menu_user_enter(clonk, false));
 
     let rows = items(engine, clonk);
-    assert_eq!(rows[0].caption, "Only Sell");
+    // The base's English table says "Sell only" since
+    // clonk-org/clonk-rs-content#78 (it read "Only Sell").
+    assert_eq!(rows[0].caption, "Sell only");
     assert_eq!(
         rows[0].image,
         clonk_engine::ObjectMenuImage::None,
