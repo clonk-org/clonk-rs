@@ -16,7 +16,10 @@
 //! the open list, and a work budget counted in expansions rather than time.
 
 use crate::math::{self, C4Fixed};
-use crate::{Landscape, ObjectVertex, Vector2, CNAT_BOTTOM, CNAT_LEFT, CNAT_RIGHT, FULL_CON};
+use crate::{
+    Landscape, ObjectVertex, Vector2, ATTACH_RANGE, CNAT_BOTTOM, CNAT_LEFT, CNAT_RIGHT, CNAT_TOP,
+    FULL_CON,
+};
 use clonk_resources::PhysicalInfo;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -34,6 +37,8 @@ const KNEEL_UP_FRAMES: i32 = 10;
 const MAX_FLIGHT_FRAMES: i32 = 240;
 /// Pixels a simulated climb may cover.
 const MAX_CLIMB: i32 = 600;
+/// How far a corner scale reaches across and up (C4Physics.h:24-25).
+const CORNER_RANGE: i32 = ATTACH_RANGE + 2;
 /// Walls a simulated drop may let go of before it counts as no landing.
 const MAX_LET_GOS: usize = 8;
 /// OCF_HitSpeed3: at this |xdir| + |ydir| a flier tumbles off a wall instead
@@ -90,10 +95,6 @@ impl NavBody {
                 u32::from(self.cnat[index]),
             )
         })
-    }
-
-    fn half_width(&self) -> i32 {
-        self.vertices().map(|(x, _, _)| x.abs()).max().unwrap_or(0)
     }
 
     /// The deepest CNAT_Bottom vertex, where the actor meets the floor.
@@ -280,6 +281,15 @@ enum WalkStep {
     Wall,
 }
 
+/// The CNAT of the actor's side that faces `dir`.
+fn facing_side(dir: i32) -> u32 {
+    if dir > 0 {
+        CNAT_RIGHT
+    } else {
+        CNAT_LEFT
+    }
+}
+
 struct Search<'a> {
     landscape: &'a Landscape,
     actor: &'a NavActor,
@@ -288,7 +298,6 @@ struct Search<'a> {
     min_y: i32,
     max_y: i32,
     walk_step: i32,
-    half_width: i32,
     walk_cost: i32,
     climb_cost: i32,
 }
@@ -314,7 +323,6 @@ impl<'a> Search<'a> {
             min_y: (start.y.min(goal.y) - SEARCH_MARGIN_Y).max(0),
             max_y: (start.y.max(goal.y) + SEARCH_MARGIN_Y).min(height - 1),
             walk_step: actor.body.walk_step(),
-            half_width: actor.body.half_width(),
             walk_cost: per_pixel(actor.walk_speed),
             climb_cost: per_pixel(actor.scale_speed),
         }
@@ -346,7 +354,7 @@ impl<'a> Search<'a> {
     /// A side vertex facing `dir` touches solid, the contact that turns a
     /// walker or flier into a scaler (C4Object.cpp:4406-4520).
     fn wall_contact(&self, x: i32, y: i32, dir: i32) -> bool {
-        let side = if dir > 0 { CNAT_RIGHT } else { CNAT_LEFT };
+        let side = facing_side(dir);
         self.actor
             .body
             .vertices()
@@ -553,27 +561,100 @@ impl<'a> Search<'a> {
             .then_some(landing)
     }
 
-    /// Scale up the wall on `dir` from (x, y) until the side vertices lose it,
-    /// then KneelUp onto the ledge (measured two pixels past the face for
-    /// CLNK). Returns the standing position on top and the frames it takes.
+    /// C4Shape::Attach (C4Shape.cpp:196-226) towards the vertices on `side`:
+    /// each, in vertex order, looks along `(dx, dy)` from AttachRange pixels
+    /// short of itself to AttachRange - 1 beyond, and the actor moves to rest
+    /// against the first solid pixel it finds; a later vertex overrides an
+    /// earlier one. `None` when no vertex finds any: the attachment is lost.
+    fn attach(&self, x: i32, y: i32, side: u32, (dx, dy): (i32, i32)) -> Option<(i32, i32)> {
+        let width = self.landscape.width().min(i32::MAX as u32) as i32;
+        self.actor
+            .body
+            .vertices()
+            .filter(|(_, _, cnat)| cnat & side != 0)
+            .fold(None, |attached, (vx, vy, _)| {
+                let (cx, cy) = attached.unwrap_or((x, y));
+                (-ATTACH_RANGE..ATTACH_RANGE)
+                    .find(|&step| {
+                        let ax = cx + vx + (step + 1) * dx;
+                        (0..width).contains(&ax)
+                            && self.landscape.is_solid_at(ax, cy + vy + (step + 1) * dy)
+                    })
+                    .map(|step| (cx + step * dx, cy + step * dy))
+                    .or(attached)
+            })
+    }
+
+    /// Scale up the wall on `dir` from (x, y) as the engine's attached
+    /// movement does (C4Movement.cpp:324-369): every pixel up re-attaches the
+    /// actor to the face, so it follows a face that leans. Where the face
+    /// ends, a corner scale puts it on top. Returns the standing position
+    /// there and the frames it all takes.
     fn climb(&self, x: i32, y: i32, dir: i32) -> Option<(i32, i32, i32)> {
         if !self.actor.can_scale || !self.wall_contact(x, y, dir) {
             return None;
         }
-        let mut cy = y;
-        let mut pixels = 0;
-        while self.wall_contact(x, cy, dir) {
-            if !self.fits(x, cy - 1) || pixels >= MAX_CLIMB || !self.in_bounds(x, cy - 1) {
+        let side = facing_side(dir);
+        let (mut cx, mut cy) = (x, y);
+        for pixels in 0..MAX_CLIMB {
+            let attached = self.attach(cx, cy - 1, side, (dir, 0));
+            let tx = attached.map_or(cx, |(ax, _)| ax);
+            if !self.in_bounds(tx, cy - 1) || !self.fits(tx, cy - 1) {
+                // A contact aborts the step (C4Movement.cpp:355-362) and
+                // ends the climb here. C++ corner-scales a scaler whose foot
+                // meets a ledge (C4Object.cpp:4352-4358); leaving that out
+                // can only miss a route, never invent one.
                 return None;
             }
-            cy -= 1;
-            pixels += 1;
+            (cx, cy) = (tx, cy - 1);
+            if attached.is_none() {
+                return self.corner_scale(cx, cy, dir, pixels + 1);
+            }
         }
-        let top_x = x + dir * (self.half_width + 3);
-        let top_y = ((cy - 2 * self.walk_step)..=(cy + 2 * self.walk_step + 12))
-            .find(|&ty| self.standing(top_x, ty))?;
-        let frames = pixels * self.climb_cost / COST_PER_FRAME + KNEEL_UP_FRAMES;
-        Some((top_x, top_y, frames))
+        None
+    }
+
+    /// ObjectActionCornerScale for a scaler (C4ObjectCom.cpp:167-218): the
+    /// actor moves to the first spot up to CornerRange across and up from
+    /// (x, y), widest and then highest first, where no vertex with a contact
+    /// side is in solid, and KneelUp stands it there. `pixels` is the climb
+    /// so far. Returns the standing position and the frames the climb takes.
+    fn corner_scale(&self, x: i32, y: i32, dir: i32, pixels: i32) -> Option<(i32, i32, i32)> {
+        let (kx, ky) = (1..=CORNER_RANGE)
+            .rev()
+            .flat_map(|across| {
+                (1..=CORNER_RANGE)
+                    .rev()
+                    .map(move |up| (x + dir * across, y - up))
+            })
+            .find(|&(kx, ky)| self.in_bounds(kx, ky) && self.corner_free(kx, ky))?;
+        let (sx, sy) = self.kneel(kx, ky)?;
+        Some((
+            sx,
+            sy,
+            pixels * self.climb_cost / COST_PER_FRAME + KNEEL_UP_FRAMES,
+        ))
+    }
+
+    /// CornerScaleOkay (C4ObjectCom.cpp:167-180) reads only the contact
+    /// sides, so a vertex without one (CLNK's centre) may be in solid.
+    fn corner_free(&self, x: i32, y: i32) -> bool {
+        const SIDES: u32 = CNAT_LEFT | CNAT_RIGHT | CNAT_TOP | CNAT_BOTTOM;
+        self.actor
+            .body
+            .vertices()
+            .filter(|(_, _, cnat)| cnat & SIDES != 0)
+            .all(|(vx, vy, _)| !self.landscape.is_solid_at(x + vx, y + vy))
+    }
+
+    /// KneelUp at (x, y): DFA_KNEEL attaches to the floor (C4Object.cpp:
+    /// 4817-4821). Without a floor in range the engine drops the actor from
+    /// there (C4Object.cpp:4277-4315); past a wall too thin to kneel on, it
+    /// grabs the far face instead of landing, so that is no route.
+    fn kneel(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        self.attach(x, y, CNAT_BOTTOM, (0, 1))
+            .map(|(_, floor)| (x, floor))
+            .filter(|&(x, floor)| self.standing(x, floor))
     }
 
     fn heuristic(&self, x: i32, y: i32, goal: NavGoal) -> i32 {
@@ -809,18 +890,117 @@ mod tests {
         for &(x0, y0, x1, y1, value) in rects {
             set(x0, y0, x1, y1, value);
         }
-        let mut landscape = Landscape::with_default_material(W as u32, vec![G; W], None)
-            .expect("navigation landscape");
-        landscape.set_world_height(H as i32);
+        grid_landscape(W, H, solid, G)
+    }
+
+    /// A `width` x `height` landscape of sky (0), Earth (1) and Water (2)
+    /// pixels, every column's surface at `surface`.
+    fn grid_landscape(width: usize, height: usize, pixels: Vec<u8>, surface: i32) -> Landscape {
+        let mut landscape =
+            Landscape::with_default_material(width as u32, vec![surface; width], None)
+                .expect("navigation landscape");
+        landscape.set_world_height(height as i32);
         landscape.set_pixel_grid(PixelGrid::new(
-            W as u32,
-            H as u32,
-            solid,
-            vec![0, 100],
-            vec![None, Some("Earth".to_owned())],
-            vec![None; 2],
+            width as u32,
+            height as u32,
+            pixels,
+            vec![0, 100, 25],
+            vec![None, Some("Earth".to_owned()), Some("Water".to_owned())],
+            vec![None; 3],
         ));
         landscape
+    }
+
+    /// Frontier's landscape (`Missions.c4f/Frontier.c4s`, seed 0) at x
+    /// 926..=1010, y 340..=400: a basin at the foot of a slope that rises in
+    /// short faces and ledges (clonk-org/clonk-rs#1726). `#` is solid, `~`
+    /// water and `.` sky.
+    const FRONTIER_SLOPE_LEFT: usize = 926;
+    const FRONTIER_SLOPE_TOP: usize = 340;
+    const FRONTIER_SLOPE: [&str; 61] = [
+        ".....................................................................................", // 340
+        ".....................................................................................", // 341
+        ".....................................................................................", // 342
+        ".....................................................................................", // 343
+        ".....................................................................................", // 344
+        ".....................................................................................", // 345
+        ".....................................................................................", // 346
+        ".....................................................................................", // 347
+        ".....................................................................................", // 348
+        "..........................................................................###########", // 349
+        ".........................................................................############", // 350
+        "........................................................................#############", // 351
+        "......................................................................###############", // 352
+        ".....................................................................################", // 353
+        "....................................................................#################", // 354
+        "....................................................................#################", // 355
+        "...................................................................##################", // 356
+        "..................................................................###################", // 357
+        ".................................................................####################", // 358
+        "................................................................#####################", // 359
+        "..............................................................#######################", // 360
+        ".............................................................########################", // 361
+        "............................................................#########################", // 362
+        "...........................................................##########################", // 363
+        "..........................................................###########################", // 364
+        "..........................................................###########################", // 365
+        ".........................................................############################", // 366
+        "................................................###.....#############################", // 367
+        "..............................................########.##############################", // 368
+        "............................................#########################################", // 369
+        "...........................................##########################################", // 370
+        "..........................................###########################################", // 371
+        "........................................#############################################", // 372
+        ".......................................##############################################", // 373
+        "......................................###############################################", // 374
+        "......................................###############################################", // 375
+        ".....................................################################################", // 376
+        "...........................####.....#################################################", // 377
+        ".........................########..##################################################", // 378
+        "........................#############################################################", // 379
+        "........................#############################################################", // 380
+        "........................#############################################################", // 381
+        "........................#############################################################", // 382
+        ".......................##############################################################", // 383
+        ".......................##############################################################", // 384
+        ".......................##############################################################", // 385
+        ".......................##############################################################", // 386
+        "......................###############################################################", // 387
+        "......................###############################################################", // 388
+        ".....................################################################################", // 389
+        ".....................################################################################", // 390
+        "......................###############################################################", // 391
+        "....................#################################################################", // 392
+        "...................##################################################################", // 393
+        "..................###################################################################", // 394
+        "..................###################################################################", // 395
+        ".................####################################################################", // 396
+        "................#####################################################################", // 397
+        "...............######################################################################", // 398
+        "....#####.....#######################################################################", // 399
+        "~~###################################################################################", // 400
+    ];
+
+    /// [`FRONTIER_SLOPE`] at its Frontier coordinates. A pixel outside the
+    /// cut repeats the nearest one inside, so the cut's edges add no wall or
+    /// ledge the real map lacks.
+    fn frontier_slope() -> Landscape {
+        let (columns, rows) = (FRONTIER_SLOPE[0].len(), FRONTIER_SLOPE.len());
+        let width = FRONTIER_SLOPE_LEFT + columns + 10;
+        let height = FRONTIER_SLOPE_TOP + rows + 20;
+        let pixel = |x: usize, y: usize| {
+            let row = y.saturating_sub(FRONTIER_SLOPE_TOP).min(rows - 1);
+            let column = x.saturating_sub(FRONTIER_SLOPE_LEFT).min(columns - 1);
+            match FRONTIER_SLOPE[row].as_bytes()[column] {
+                b'#' => 1,
+                b'~' => 2,
+                _ => 0,
+            }
+        };
+        let pixels = (0..height)
+            .flat_map(|y| (0..width).map(move |x| pixel(x, y)))
+            .collect();
+        grid_landscape(width, height, pixels, FRONTIER_SLOPE_TOP as i32)
     }
 
     /// CLNK's DefCore vertices and physicals (Clonk.c4d/DefCore.txt) under
@@ -876,7 +1056,6 @@ mod tests {
     fn clonk_walks_five_pixel_steps_and_scales_from_seven() {
         let body = clonk(true).body;
         assert_eq!(body.feet(), 9);
-        assert_eq!(body.half_width(), 4);
         assert_eq!(
             body.walk_step(),
             5,
@@ -962,6 +1141,55 @@ mod tests {
             .is_none(),
             "a 60px face is out of jump reach (38px) for a non-scaler"
         );
+    }
+
+    #[test]
+    fn climbs_out_of_a_frontier_basin_up_a_face_that_leans_back() {
+        // Measured with the engine on Frontier (seed 0), ComDir Right held
+        // from the basin floor: SCALE from (942,387) up a face that leans
+        // back, a corner scale to (955,366), KneelUp settling a pixel lower,
+        // then WALK on up the slope through (970,359).
+        let slope = frontier_slope();
+        let plan = plan(
+            &slope,
+            &clonk(true),
+            Vector2::new(936, 390),
+            goal(970, 359),
+            20_000,
+        )
+        .expect("out of the basin");
+        let climb = plan
+            .waypoints
+            .iter()
+            .find(|waypoint| waypoint.movement == NavMove::Climb)
+            .expect("a climb");
+        assert_eq!((climb.x, climb.y), (955, 367), "{plan:?}");
+    }
+
+    #[test]
+    fn a_corner_scale_takes_the_widest_spot_the_top_leaves_free() {
+        // CheckCornerScale starts CornerRange across and narrows until the
+        // body fits (C4ObjectCom.cpp:182-189). A bump five pixels past the
+        // edge leaves five: measured with the engine, KneelUp at (200,G-61)
+        // settles on the top at (200,G-60).
+        let bumped = terrain(&[
+            (200, G - 50, W as i32 - 1, G - 1, true),
+            (205, G - 60, 215, G - 51, true),
+        ]);
+        let plan = plan(
+            &bumped,
+            &clonk(true),
+            Vector2::new(150, G - 10),
+            goal(200, G - 60),
+            20_000,
+        )
+        .expect("onto the top beside the bump");
+        let climb = plan
+            .waypoints
+            .iter()
+            .find(|waypoint| waypoint.movement == NavMove::Climb)
+            .expect("a climb");
+        assert_eq!((climb.x, climb.y), (200, G - 60), "{plan:?}");
     }
 
     #[test]
