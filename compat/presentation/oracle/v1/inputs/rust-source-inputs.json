@@ -30,24 +30,24 @@
       "size_bytes": 1081
     },
     {
-      "git_oid": "a7b2a3c280f077d9c26af9cf8a442a6e2cf50537",
+      "git_oid": "72cc8e618a5f7234045e000b6704275748dabc42",
       "mode": "100644",
       "path": "Cargo.lock",
-      "sha256": "39ad7d98f6d410a4190e5525dfbd6bf4d561f2434d0fc7318c23fa65cdd9bae1",
-      "size_bytes": 157970
+      "sha256": "f0c65966df3e1c882716a40091b833f5afc127294671d6781a634e550d1d66d8",
+      "size_bytes": 157936
     },
     {
-      "git_oid": "065138be534c647c0ee223e36d13932d49833677",
+      "git_oid": "dd5dff67382421ba8305e2269df17da634f0217b",
       "mode": "100644",
       "path": "Cargo.toml",
-      "sha256": "105291049d8fa0cda811661f3ea6fc35d562ebe694de249466f9fc7ab30ef978",
-      "size_bytes": 6160
+      "sha256": "e295b209e2ffd39b2dd8de5bf856021cba2c0f4c20c289c0f48a3f81c0cc83ba",
+      "size_bytes": 6159
     },
     {
-      "git_oid": "74d85a454f6eb788e67b548553d771b419fc33d0",
+      "git_oid": "a981b163b5f5b1523db9787dd4cd6b5d0b333c00",
       "mode": "100644",
       "path": "compat/presentation/case_specs.json",
-      "sha256": "b835ad38eb657a28c34328983f6c6efb1bee569aee4c64279d8491e08589ef7a",
+      "sha256": "60c4da12209a77ec8048d458533048345387ff3bbc150255bb4b29bf15dd32f3",
       "size_bytes": 42653
     },
     {
@@ -2137,11 +2137,11 @@
       "size_bytes": 215248
     },
     {
-      "git_oid": "5e29b5bc0afdbe0e242741e7a4f2cbfd61c248ac",
+      "git_oid": "1a965d073870c030ea2e6e99eb1fc2f885c3de03",
       "mode": "100644",
       "path": "crates/clonk-engine-unit-tests/tests/unit/parts/navigation_corpus.rs",
-      "sha256": "d06e7526f74c4f2f4c7903768dc0b3a8ccc742d502d135d2791b18a2c329fcfe",
-      "size_bytes": 8898
+      "sha256": "6308a1814cb6b252f1e19642c297a153e31fa2a07412806fc80e45638ca4bb1b",
+      "size_bytes": 11483
     },
     {
       "git_oid": "293cad2b17df238413ad3306fcec69f0b585b5ee",
@@ -2256,11 +2256,11 @@
       "size_bytes": 7358
     },
     {
-      "git_oid": "ad65c70d44e4a7bb672f0355b9b374da80c97bcb",
+      "git_oid": "c724754e5fd3008eb93cfa57e45692fec8af3ec8",
       "mode": "100644",
       "path": "crates/clonk-engine/src/command/machine.rs",
-      "sha256": "3198c1a202eb99be237d1f85ea472e390d3269e0e00ebaf9327a16a43433da9e",
-      "size_bytes": 300560
+      "sha256": "537ead53fc0089fc83884acc5239153457434b5613c71db5284b8148e8b7a706",
+      "size_bytes": 302556
     },
     {
       "git_oid": "2fb81e44cb3b126a8545d9be756af8031e3406bb",
@@ -3439,11 +3439,11 @@
       "size_bytes": 26005
     },
     {
-      "git_oid": "4d045854277e7a7892ad481c524e8aa3c8d0e937",
+      "git_oid": "0d8288ce06ecdaf966b848b3d35fe63c7fae5b26",
       "mode": "100644",
       "path": "crates/clonk-engine/src/navigation.rs",
-      "sha256": "d0256ce9b7860e7848e622021db2572199aa4d43882ee69754e1b875963e697d",
-      "size_bytes": 41504
+      "sha256": "12de3c6b2fa449a4428e651983ac12f26b138f75128437b24c0bde9da4f68118",
+      "size_bytes": 54919
     },
     {
       "git_oid": "7079e95316705c42664d06d80f6b695f9dd9fa34",
@@ -7856,10 +7856,10 @@
       "size_bytes": 12565
     },
     {
-      "git_oid": "72175891e8861ee8d2a47c38035023ad2505ed01",
+      "git_oid": "c766270e4e06e3a3da0a4c86878bd915c7590016",
       "mode": "100644",
       "path": "parity/oracle/presentation_capture.patch",
-      "sha256": "c9a25aacbd49af9027229e2dc04e61bc712e306b0d02d8f877da1477b5045788",
+      "sha256": "96f7a64e3fa2104b0115a9bb24368942dfa26deaf1f2b65b82d921d5b6c6f880",
       "size_bytes": 182836
     },
     {
@@ -8724,10 +8724,10 @@
       "size_bytes": 86
     },
     {
-      "git_oid": "68753aa2c71094983c8063f8bdae23f6037bc397",
+      "git_oid": "183bd8afc382bfa7c127c2bb555c904df5c62d13",
       "mode": "100755",
       "path": "scripts/acquire_presentation_oracle.py",
-      "sha256": "f6aabcddb31c75fddba870c2ef9b844d25810502b3314988ad138e498b1d4ad8",
+      "sha256": "7ed230b92210f8e69523ed62fdc25ebf9442582024769b3701304ee64d546bfd",
       "size_bytes": 220521
     },
     {
@@ -8823,5 +8823,5 @@
     }
   ],
   "schema": "clonk-rs/presentation-rust-source-inputs/v1",
-  "sha256": "d0949afa25a8462d488c09a424c2c844ef2b9d2770d1765b346e141d78bf364d"
+  "sha256": "10763986146c501454759fd3aa3e63dedc8136cd40edd957affcd1f08b06d590"
 }
