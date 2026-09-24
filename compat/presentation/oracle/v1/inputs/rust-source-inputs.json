@@ -44,10 +44,10 @@
       "size_bytes": 6160
     },
     {
-      "git_oid": "b442f39c52b22e2c7b6a5bc6373ccd36a4be8bb9",
+      "git_oid": "fc961d1f19ff6069331c6d08a87f773c85b126c0",
       "mode": "100644",
       "path": "compat/presentation/case_specs.json",
-      "sha256": "dc3e58fa6bdeb2af3f92fe6b507ca212fc1fc60a145385485e627f397ef0703e",
+      "sha256": "dd07e2aa3241762fe3508f2ce18778128978d02adc2c97f0ea439d335baf46d6",
       "size_bytes": 42653
     },
     {
@@ -394,11 +394,11 @@
       "size_bytes": 6080
     },
     {
-      "git_oid": "b3f70975f95b67f6591a950e9f095f404028aa1b",
+      "git_oid": "4685b0623ef5f690811a6d59ccbf751a6f6ad0c9",
       "mode": "100644",
       "path": "crates/clonk-app/assets/COPYING",
-      "sha256": "143ea909650bdad5fbe598c302b27c328e2e8c5b85559be7d866664b3b732c29",
-      "size_bytes": 3054
+      "sha256": "9796a253e9ef93876b3665cad19d9c93caa46b79adc22464c904413d70edda6b",
+      "size_bytes": 3177
     },
     {
       "git_oid": "db91e745d8b81c0b9a89508a0e3819afececec4a",
@@ -702,25 +702,25 @@
       "size_bytes": 39727
     },
     {
-      "git_oid": "dfe015ed5c1f8b9837236455c37aad1787737230",
+      "git_oid": "0097afbbab9ce8dafe20fdb077b8f5581c51731a",
       "mode": "100644",
       "path": "crates/clonk-app/assets/ui-icons/checkbox-disabled.png",
-      "sha256": "38969d0657a1e70283c578583e687ff496740a706050cf4e01f9cf1f4c5ae84e",
-      "size_bytes": 30056
+      "sha256": "53e5946c19fa14ed67d01541d6d49d6089e35231ed15ba075cafdc9ee2e6aa43",
+      "size_bytes": 45152
     },
     {
-      "git_oid": "8e3230be89b1889c32d3bb826e8ffca1f4d1a66b",
+      "git_oid": "e0ec0683bcaa4dfd958ff089a4dd967e22eb51c4",
       "mode": "100644",
       "path": "crates/clonk-app/assets/ui-icons/checkbox-off.png",
-      "sha256": "80d3e4208e75436a79f2edd5c43c2b81d97d3e72f3fdbc772989a66886967458",
-      "size_bytes": 10728
+      "sha256": "d6e3a9b83f4f01b706ea3dca8c33440625875100a3a4c422bf3bc16dbd390b06",
+      "size_bytes": 39784
     },
     {
-      "git_oid": "c004a9da20b8dc052b7313c48677c32724f30ee0",
+      "git_oid": "b50c00f45257176ac2bbb7d2126dfef4c3c415f3",
       "mode": "100644",
       "path": "crates/clonk-app/assets/ui-icons/checkbox-on.png",
-      "sha256": "1e097678293fb8185e530dcbf2ec465b64379363848b9248973e7199761e68fb",
-      "size_bytes": 40260
+      "sha256": "94e5c17aca8571db8ec100a982e37be08626d3c47f1b22af57388bf896cd622a",
+      "size_bytes": 61662
     },
     {
       "git_oid": "a18a128ee691fa186c93cef7e96c0ea020d09a7b",
@@ -1171,11 +1171,11 @@
       "size_bytes": 4129
     },
     {
-      "git_oid": "50aa461f3442090f7f33aa2cf521723a7f90aaca",
+      "git_oid": "c3f8cf68b3e2459907da56aadd2c40d5a6a345d6",
       "mode": "100644",
       "path": "crates/clonk-app/src/hd_ui_icons.rs",
-      "sha256": "5877f09dbee4c1aa86ad40776d94d715e780558bdfa2a881e3e7d58ff22d9963",
-      "size_bytes": 11230
+      "sha256": "57861ddbda8eac774ac4e0cc2fd8cb56295145a28bdce9cf5e100785e26a0b2b",
+      "size_bytes": 11226
     },
     {
       "git_oid": "481aeecf9cb805ec34249ea9fd67c97375baf865",
@@ -3824,11 +3824,11 @@
       "size_bytes": 4304
     },
     {
-      "git_oid": "493aa5ecfd184add616c43a8ed23945d6953d45d",
+      "git_oid": "cae5f61fe6ee0a9ff8e2a82519c79dcfcca2bfd4",
       "mode": "100644",
       "path": "crates/clonk-engine/tests/it/collection_authored_script_fixes.rs",
-      "sha256": "3743641924d7e2ba973d7ff98c8ccfd6416ba31bafe666dec66b0a5af6fd3ebb",
-      "size_bytes": 44638
+      "sha256": "000245d3b880951e6b075416e9e84a1b93df368ecc888d76850a164e259ca175",
+      "size_bytes": 46467
     },
     {
       "git_oid": "d966819208d99279f99be0e692e3d4026b11e883",
@@ -7835,10 +7835,10 @@
       "size_bytes": 12565
     },
     {
-      "git_oid": "aa43bebbdf79a965a1448c81ca56057c366588cf",
+      "git_oid": "c09f5dd459995326ea98065f4164a6d1972b1173",
       "mode": "100644",
       "path": "parity/oracle/presentation_capture.patch",
-      "sha256": "f89d661f212296561be80728e83fe2e06f2bbcba60f5367b184c86ea1941d121",
+      "sha256": "05ca3f9be729d397f68252bb85534dd608e6676dc232476eb3e2bf8230ce14bf",
       "size_bytes": 182836
     },
     {
@@ -8689,10 +8689,10 @@
       "size_bytes": 86
     },
     {
-      "git_oid": "f6e92922fd82b085b39cb333382e7fae08e28b83",
+      "git_oid": "47ca16645d0546ba4d1255981e4a3882ef3e4877",
       "mode": "100755",
       "path": "scripts/acquire_presentation_oracle.py",
-      "sha256": "8a214f02a3c6f9a0edfd4aa4212308df2767b0e768c1fb92499dbd5524a13b9d",
+      "sha256": "b4ca8f9b55f9f9cbf1e8f80e443675b4398038be480add811847de4f24106956",
       "size_bytes": 220521
     },
     {
@@ -8788,5 +8788,5 @@
     }
   ],
   "schema": "clonk-rs/presentation-rust-source-inputs/v1",
-  "sha256": "138076c850461686871f52a3b6841308d79fb3ea48d8527cd8ab9743e0e008f8"
+  "sha256": "7ff97a6bdc7851bb88aaba6bad6c4455949a1dea73dd22f26ae7cfe1d9ec1599"
 }
