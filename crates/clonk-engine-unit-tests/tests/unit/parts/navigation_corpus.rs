@@ -93,19 +93,43 @@ enum FetchOutcome {
 fn fetch_for_construction(rects: &[CorpusRect], rocks: &[Vector2]) -> FetchOutcome {
     let (mut engine, owner, clonk) = frontier_crew_engine(true);
     engine.set_landscape(corpus_landscape(rects));
+    fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, CORPUS_GROUND),
+        rocks,
+        CORPUS_FRAMES,
+    )
+}
+
+/// Clear the map down to the crew, place a castle site with its bottom
+/// centre at `site` and the builder on it, then run the Build the site's one
+/// missing rock starts, for up to `frames` frames.
+fn fetch_to_site(
+    engine: &mut Engine,
+    owner: i32,
+    clonk: ObjectId,
+    site: Vector2,
+    rocks: &[Vector2],
+    frames: usize,
+) -> FetchOutcome {
     engine
         .apply_scenario_script_edit("NavigationCorpus", CORPUS_CLEAR_SCRIPT)
         .test_value();
-    corpus_script(&mut engine, "CorpusClear()");
+    corpus_script(engine, "CorpusClear()");
     engine
         .apply_object_update(
             clonk,
-            ObjectUpdate::new().with_position(Vector2::new(CORPUS_SITE_X, CORPUS_GROUND - 10)),
+            ObjectUpdate::new().with_position(Vector2::new(site.x, site.y - 10)),
         )
         .test_value();
     corpus_script(
-        &mut engine,
-        &format!("CreateConstruction(CST1, {CORPUS_SITE_X}, {CORPUS_GROUND}, {owner}, 90, true)"),
+        engine,
+        &format!(
+            "CreateConstruction(CST1, {}, {}, {owner}, 90, true)",
+            site.x, site.y
+        ),
     );
     let site = engine
         .objects
@@ -132,7 +156,7 @@ fn fetch_for_construction(rects: &[CorpusRect], rocks: &[Vector2]) -> FetchOutco
         .test_value();
 
     let mut carried = None;
-    for frame in 0..CORPUS_FRAMES {
+    for frame in 0..frames {
         let snapshot = engine.test_tick();
         carried = carried.or_else(|| {
             rocks.iter().position(|&rock| {
@@ -260,4 +284,57 @@ fn navigation_fetches_the_reachable_rock_over_a_nearer_unreachable_one() {
             "the nearer rock is {name}: {outcome:?}"
         );
     }
+}
+
+/// Frames a fetch on the real Frontier map may take. The stranded builder
+/// of clonk-org/clonk-rs#1727 gave up after about 1800.
+const FRONTIER_FETCH_FRAMES: usize = 2400;
+
+/// A construction fetch on Frontier (seed 0) as shipped: the site on the
+/// ground under `builder` and one rock at `rock`. Returns the outcome and
+/// where the builder ended up.
+fn frontier_fetch(builder: Vector2, rock: Vector2) -> (FetchOutcome, Vector2) {
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    let ground = (builder.y..builder.y + 100)
+        .find(|&y| engine.landscape().test_value().is_solid_at(builder.x, y))
+        .test_value();
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(builder.x, ground),
+        &[rock],
+        FRONTIER_FETCH_FRAMES,
+    );
+    let position = engine.snapshot().object(clonk).test_value().position;
+    (outcome, position)
+}
+
+#[test]
+fn navigation_will_not_follow_material_down_a_drop_it_cannot_climb_back() {
+    // Measured on Frontier: the rock at (970,98) rolls over the edge into a
+    // pit about 230 px below. Pursuing it, the builder jumped down after it,
+    // collected it at (1067,320) and gave up at (964,364), with no way back
+    // up to its site (clonk-org/clonk-rs#1727).
+    let (outcome, builder) = frontier_fetch(Vector2::new(896, 93), Vector2::new(970, 98));
+    assert!(
+        matches!(outcome, FetchOutcome::GaveUp { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        builder.y < 110,
+        "the builder must stay up at its site, got {builder:?}"
+    );
+}
+
+#[test]
+fn navigation_fetches_material_from_a_basin_it_can_climb_back_out_of() {
+    // Down into the basin at (935,399) and back up the face that leans back
+    // (clonk-org/clonk-rs#1726). The way back is a climb, so checking for
+    // one must not refuse this fetch.
+    let (outcome, _) = frontier_fetch(Vector2::new(1045, 329), Vector2::new(935, 399));
+    assert!(
+        matches!(outcome, FetchOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
 }
