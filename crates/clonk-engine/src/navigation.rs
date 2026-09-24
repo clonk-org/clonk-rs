@@ -17,8 +17,8 @@
 
 use crate::math::{self, C4Fixed};
 use crate::{
-    Landscape, ObjectVertex, Vector2, ATTACH_RANGE, CNAT_BOTTOM, CNAT_LEFT, CNAT_RIGHT, CNAT_TOP,
-    FULL_CON,
+    Landscape, MaterialId, ObjectVertex, Vector2, ATTACH_RANGE, CNAT_BOTTOM, CNAT_LEFT, CNAT_RIGHT,
+    CNAT_TOP, FULL_CON,
 };
 use clonk_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
 use std::cmp::Reverse;
@@ -144,11 +144,36 @@ pub struct NavActor {
     /// Where the actor draws breath, below its position: half its shape's
     /// top offset (C4Object.cpp:897).
     pub breath_offset: i32,
+    /// The liquids that harm the actor while its centre is in them, which
+    /// it never swims in (C4Object.cpp:923-938).
+    pub harmful_liquids: MaterialMask,
     pub can_scale: bool,
     /// A flier touching a ceiling hangles instead of falling on
     /// (C4Object.cpp:4382-4421), which no planned move expects.
     pub can_hangle: bool,
     pub gravity: C4Fixed,
+}
+
+/// A set of materials. C4MaxMaterial is 125 (C4Landscape.h:36), so every
+/// material id fits in the bits of a `u128`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaterialMask(u128);
+
+impl MaterialMask {
+    fn bit(material: MaterialId) -> u128 {
+        u32::try_from(material.index())
+            .ok()
+            .and_then(|index| 1u128.checked_shl(index))
+            .unwrap_or(0)
+    }
+
+    pub fn with(self, material: MaterialId) -> Self {
+        Self(self.0 | Self::bit(material))
+    }
+
+    pub fn contains(self, material: MaterialId) -> bool {
+        self.0 & Self::bit(material) != 0
+    }
 }
 
 impl NavActor {
@@ -174,6 +199,7 @@ impl NavActor {
                 physical.breath / (2 * C4_MAX_PHYSICAL / 100) * 5
             },
             breath_offset: shape_top / 2,
+            harmful_liquids: MaterialMask::default(),
             can_scale: physical.can_scale != 0,
             can_hangle: physical.can_hangle != 0,
             gravity,
@@ -397,9 +423,16 @@ impl<'a> Search<'a> {
     }
 
     /// The actor swims where its centre is in liquid (IsInLiquidCheck for
-    /// Float=1, C4Object.cpp:5632-5635) and its body is clear of solid.
+    /// Float=1, C4Object.cpp:5632-5635) that does not harm it and its body is
+    /// clear of solid.
     fn swimming(&self, x: i32, y: i32) -> bool {
-        self.actor.swim_speed.val() > 0 && self.landscape.is_liquid_at(x, y) && self.fits(x, y)
+        self.actor.swim_speed.val() > 0
+            && self.landscape.is_liquid_at(x, y)
+            && !self
+                .landscape
+                .material_at(x, y)
+                .is_some_and(|material| self.actor.harmful_liquids.contains(material))
+            && self.fits(x, y)
     }
 
     /// The actor draws breath at (x, y) while nothing semi-solid, liquid or
@@ -1599,6 +1632,27 @@ mod tests {
             .find(|waypoint| waypoint.movement == NavMove::Climb)
             .expect("a climb out");
         assert_eq!((out.x, out.y), (302, G - 10), "{plan:?}");
+    }
+
+    #[test]
+    fn will_not_swim_through_a_liquid_that_harms_it() {
+        // Every ten frames the material at a swimmer's centre eats its
+        // energy if corrosive, or sets it alight if incendiary
+        // (C4Object.cpp:923-938): the pool CLNK swims across in water is no
+        // route in acid or lava.
+        let mut pool = flooded_terrain(&[], &[(200, G, 299, G + 39)]);
+        let liquid = MaterialId::new(2).expect("material id");
+        pool.resolve_grid_materials(|name| (name == "Water").then_some(liquid));
+        let mut actor = clonk(true);
+        actor.harmful_liquids = MaterialMask::default().with(liquid);
+        assert!(plan(
+            &pool,
+            &actor,
+            Vector2::new(150, G - 10),
+            goal(350, G - 10),
+            20_000
+        )
+        .is_none());
     }
 
     /// A pool from x 150 to 449, 40 deep, split by a barrier from the top of
