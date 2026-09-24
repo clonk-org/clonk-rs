@@ -5,9 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clonk_network::{
     build_host_resource_core, encode_resource_packet, resolve_local_resource,
-    resolve_local_resource_with_group_maker, HostResourceCoreSpec, HostResourceType,
-    LocalResourceResolution, ResourceCatalogAction, ResourceDiscoverPacket, ResourceFileOwnership,
-    ResourcePacket, ResourceTransferBackend, ResourceTransferEvent, PID_NET_RES_STATUS,
+    resolve_local_resource_deferring_verification, resolve_local_resource_with_group_maker,
+    HostResourceCoreSpec, HostResourceType, LocalResourceResolution, ResourceCatalogAction,
+    ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket, ResourceTransferBackend,
+    ResourceTransferEvent, PID_NET_RES_STATUS,
 };
 use clonk_protocol::NetworkResourceCore;
 use clonk_resources::{c4group_file_crc, compress_c4group_image, Group, MutableGroup};
@@ -1080,4 +1081,124 @@ fn cpp_directory_candidate_loads_through_its_packed_image_so_peers_enumerate_ali
     let expected_path = local.path().to_path_buf();
     local.register(&mut backend).unwrap();
     assert_eq!(backend.path(core.id), Some(expected_path.as_path()));
+}
+
+/// A directory written in an order the C4FLS_MATERIAL sort has to undo, as in
+/// `cpp_directory_candidate_loads_through_its_packed_image_so_peers_enumerate_alike`.
+fn material_directory(directory: &TestDirectory) -> PathBuf {
+    let candidate = directory.path().join("Material.c4g");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::write(candidate.join("Water.c4m"), b"[Material]\nName=Water\n").unwrap();
+    fs::write(candidate.join("Acid.c4m"), b"[Material]\nName=Acid\n").unwrap();
+    fs::write(candidate.join("TexMap.txt"), b"1=Water-Liquid\n").unwrap();
+    candidate
+}
+
+#[test]
+fn a_deferred_directory_resolution_loads_its_packed_image_before_verifying_it() {
+    // Packing a directory as the C4Group packer does costs seconds per
+    // resource at its compression level, and a joining client paid them
+    // before it was admitted (clonk-org/clonk-rs#1729). The deferred
+    // resolution loads the same packed image from a fast envelope at once,
+    // and leaves the byte comparison that decides servability for later.
+    let directory = TestDirectory::new();
+    let candidate = material_directory(&directory);
+    let contents_crc = Group::open(&candidate).unwrap().contents_crc().unwrap();
+    let core = core(b"Material.c4g", 1, 0xdead_beef, contents_crc, true);
+
+    let resolution = resolve_local_resource_deferring_verification(
+        &core,
+        [&candidate],
+        directory.path().join("Network"),
+        b"",
+    )
+    .unwrap();
+
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("contents-identical directory must remain local");
+    };
+    assert!(
+        !local.binary_compatible(),
+        "not servable before it is verified"
+    );
+    assert!(local.pending_verification().is_some());
+    assert_ne!(local.path(), candidate, "loaded from a packed image");
+    let names = Group::open(local.path())
+        .unwrap()
+        .entries()
+        .unwrap()
+        .into_iter()
+        .map(|entry| String::from_utf8(entry.name_bytes).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["TexMap.txt", "Acid.c4m", "Water.c4m"]);
+}
+
+#[test]
+fn a_deferred_verification_in_the_hosts_second_yields_the_hosts_standalone() {
+    // GetStandalone serves a directory the client packed only if the bytes
+    // are the announced standalone (src/C4Network2Res.cpp:659-693), which
+    // for a directory means packed in the same second as the host's.
+    let directory = TestDirectory::new();
+    let candidate = material_directory(&directory);
+    for attempt in 0..8 {
+        let before = unix_time_now();
+        let publication = build_host_resource_core(
+            &candidate,
+            directory.path().join(format!("HostNetwork{attempt}")),
+            HostResourceCoreSpec::new(
+                HostResourceType::Material,
+                84,
+                crate::c4(b"Material.c4g"),
+                "Shared Maker",
+            ),
+        )
+        .unwrap();
+        let resolution = resolve_local_resource_deferring_verification(
+            &publication.core,
+            [&candidate],
+            directory.path().join(format!("LocalNetwork{attempt}")),
+            b"Shared Maker",
+        )
+        .unwrap();
+        if unix_time_now() != before {
+            continue;
+        }
+        let LocalResourceResolution::Local(local) = resolution else {
+            panic!("contents-identical directory must remain local");
+        };
+        let verification = local.pending_verification().unwrap();
+
+        let packed = verification.verify().expect("the host's own bytes");
+
+        let host_bytes = fs::read(publication.standalone_path.as_ref().unwrap()).unwrap();
+        assert_eq!(packed, host_bytes);
+        let written = verification.write(&packed).unwrap();
+        assert_ne!(written, local.path(), "beside the image it loads from");
+        assert_eq!(fs::read(written).unwrap(), host_bytes);
+        return;
+    }
+    panic!("could not pack both directories in one timestamp second");
+}
+
+#[test]
+fn a_deferred_verification_refuses_bytes_other_than_the_announced_standalone() {
+    let directory = TestDirectory::new();
+    let candidate = material_directory(&directory);
+    let contents_crc = Group::open(&candidate).unwrap().contents_crc().unwrap();
+    // The host packed the same directory at another time, so its standalone
+    // differs byte-wise while the contents match.
+    let core = core(b"Material.c4g", 1, 0xdead_beef, contents_crc, true);
+
+    let resolution = resolve_local_resource_deferring_verification(
+        &core,
+        [&candidate],
+        directory.path().join("Network"),
+        b"",
+    )
+    .unwrap();
+
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("contents-identical directory must remain local");
+    };
+    assert_eq!(local.pending_verification().unwrap().verify(), None);
 }

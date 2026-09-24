@@ -830,6 +830,25 @@ impl MutableGroup {
 /// Wraps an uncompressed nested-group image in the stock on-disk C4Group
 /// gzip envelope without rewriting its header or entries.
 pub fn compress_c4group_image(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
+    deflate_c4group_image(image, 9, 2)
+}
+
+/// Wraps an image in the on-disk C4Group envelope at zlib's fastest level.
+///
+/// Readers open it like any group and find the same image, but its bytes are
+/// not the ones the C4Group packer writes, so it can never stand in for a
+/// file whose size and checksum another peer announced.
+pub fn compress_c4group_image_fast(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
+    deflate_c4group_image(image, 1, 8)
+}
+
+/// Wraps an image in the on-disk C4Group gzip envelope at the given zlib
+/// compression and memory levels.
+fn deflate_c4group_image(
+    image: &[u8],
+    level: i32,
+    memory_level: i32,
+) -> Result<Vec<u8>, MutableGroupError> {
     let input_length =
         u32::try_from(image.len()).map_err(|_| MutableGroupError::GroupDataTooLarge)?;
     // zlib requires null allocator hooks on input and installs non-null defaults
@@ -843,10 +862,10 @@ pub fn compress_c4group_image(image: &[u8]) -> Result<Vec<u8>, MutableGroupError
     let status = unsafe {
         libz_sys::deflateInit2_(
             stream_pointer,
-            9,
+            level,
             libz_sys::Z_DEFLATED,
             15 + 16,
-            2,
+            memory_level,
             libz_sys::Z_DEFAULT_STRATEGY,
             libz_sys::zlibVersion(),
             std::mem::size_of::<libz_sys::z_stream>() as i32,

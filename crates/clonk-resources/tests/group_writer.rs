@@ -1783,3 +1783,31 @@ fn maker_bytes_reports_what_pack_writes() {
     let packed = Group::from_memory(PathBuf::from("Report.c4g"), group.pack().unwrap()).unwrap();
     assert_eq!(packed.maker_bytes(), Some(group.maker_bytes()));
 }
+
+#[test]
+fn a_fast_envelope_holds_the_same_image_as_the_c4group_one() {
+    // What every peer has to agree on is the packed image a group loads from;
+    // how hard its envelope was compressed is not part of it.
+    let mut group = MutableGroup::new("Fast.c4d");
+    group
+        .add_file_with_metadata("DefCore.txt", b"[DefCore]\n".to_vec(), 7, false)
+        .unwrap();
+    group
+        .add_file_with_metadata("Graphics.png", vec![0x5a; 64 * 1024], 8, false)
+        .unwrap();
+    let image = group.pack_raw().unwrap();
+
+    let fast = clonk_resources::compress_c4group_image_fast(&image).unwrap();
+
+    assert_ne!(
+        fast,
+        clonk_resources::compress_c4group_image(&image).unwrap(),
+        "the fast envelope is not the C4Group packer's bytes"
+    );
+    let opened = Group::from_top_level_memory(PathBuf::from("Fast.c4d"), fast).unwrap();
+    assert_eq!(
+        opened.raw_image().unwrap(),
+        image,
+        "but it holds the same image"
+    );
+}

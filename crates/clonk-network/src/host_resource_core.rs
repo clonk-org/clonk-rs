@@ -868,12 +868,22 @@ pub(crate) fn pack_directory_standalone(
     path: &Path,
     group_maker: &[u8],
 ) -> Result<Vec<u8>, HostResourceCoreError> {
+    let image = pack_directory_raw_image(path, group_maker)?;
+    clonk_resources::compress_c4group_image(&image).map_err(Into::into)
+}
+
+/// The uncompressed C4Group image `C4Group_PackDirectoryTo` would write for
+/// a directory: its entries in packed order, with their packing timestamps.
+pub(crate) fn pack_directory_raw_image(
+    path: &Path,
+    group_maker: &[u8],
+) -> Result<Vec<u8>, HostResourceCoreError> {
     let filename = path
         .file_name()
         .map(|filename| clonk_resources::path_to_legacy_bytes(Path::new(filename)))
         .ok_or_else(|| HostResourceCoreError::NonUtf8EntryName(path.to_path_buf()))?;
     mutable_directory(path, filename, group_maker)?
-        .pack()
+        .pack_raw()
         .map_err(Into::into)
 }
 

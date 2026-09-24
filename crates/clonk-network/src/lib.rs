@@ -209,8 +209,9 @@ pub use live_network_dynamic::{
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use local_resource_resolution::{
-    resolve_local_resource, resolve_local_resource_with_group_maker, LocalResourceMatch,
-    LocalResourceResolution, LocalResourceResolutionError, NonLoadableResourceMismatch,
+    resolve_local_resource, resolve_local_resource_deferring_verification,
+    resolve_local_resource_with_group_maker, LocalResourceMatch, LocalResourceResolution,
+    LocalResourceResolutionError, NonLoadableResourceMismatch, PendingStandaloneVerification,
 };
 pub use name_validation::{validate_name_allow_empty, validate_name_no_empty};
 pub use post_mortem::{PostMortemPacket, RecoverablePacketLog};

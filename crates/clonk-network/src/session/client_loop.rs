@@ -852,6 +852,14 @@ pub(crate) async fn run_client_loop_with_routes(
     let mut tcp_retry_at = None::<tokio::time::Instant>;
     let mesh_epoch = Instant::now();
     let mut pending_mesh_routes = tokio::task::JoinSet::<MeshRouteCompletion>::new();
+    // A deferred directory packing's byte comparison costs seconds at the
+    // C4Group packer's level, so it runs off this thread; the resource loads
+    // from its fast image meanwhile and is served once the bytes agree. Each
+    // runs on a detached thread rather than the runtime's blocking pool,
+    // because dropping a runtime waits for its blocking tasks, and leaving a
+    // game must not wait for a comparison nobody needs any more.
+    let (verified_tx, mut verified_rx) =
+        mpsc::unbounded_channel::<(crate::PendingStandaloneVerification, Vec<u8>)>();
     let mut active_mesh_dials = BTreeSet::<MeshDialKey>::new();
     let mut pending_tcp_sim_open = BTreeMap::<i32, tokio::net::TcpSocket>::new();
     let mesh_udp_handle = mesh_udp_hub
@@ -998,6 +1006,18 @@ pub(crate) async fn run_client_loop_with_routes(
                 known_clients,
             );
         }
+        for verification in resource_state.take_pending_standalone_verifications() {
+            let verified_tx = verified_tx.clone();
+            // A thread that cannot start leaves the resource loadable and
+            // unserved, where it already is.
+            let _ = std::thread::Builder::new()
+                .name("clonk-standalone-verify".to_string())
+                .spawn(move || {
+                    if let Some(packed) = verification.verify() {
+                        let _ = verified_tx.send((verification, packed));
+                    }
+                });
+        }
         let restart_fenced = restart_join_data_pending.is_some() || restart_ack_ready.is_some();
         let has_pending_secondary = !restart_fenced && pending_secondary.is_some();
         let has_pending_tcp = !restart_fenced && pending_tcp.is_some();
@@ -1076,6 +1096,11 @@ pub(crate) async fn run_client_loop_with_routes(
                     Some(Err(_)) => {}
                     None => {}
                 }
+            }
+            Some((verification, packed)) = verified_rx.recv(), if !command_pending => {
+                // A standalone that cannot be written or registered leaves the
+                // resource loadable and unserved, where it already was.
+                let _ = resource_state.apply_verified_standalone(&verification, &packed);
             }
             puncher_event = receive_optional_puncher_event(&mut mesh_puncher_events), if !command_pending && !restart_fenced => {
                 let Some(puncher_event) = puncher_event else {

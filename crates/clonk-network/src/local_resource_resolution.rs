@@ -5,7 +5,9 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clonk_protocol::NetworkResourceCore;
-use clonk_resources::{compress_c4group_image, Group, GroupError, MutableGroupError};
+use clonk_resources::{
+    compress_c4group_image, compress_c4group_image_fast, Group, GroupError, MutableGroupError,
+};
 use thiserror::Error;
 
 use crate::{
@@ -17,6 +19,63 @@ pub struct LocalResourceMatch {
     core: NetworkResourceCore,
     source_path: PathBuf,
     standalone: LocalResourceStandalone,
+    pending_verification: Option<Box<PendingStandaloneVerification>>,
+}
+
+/// How a contents-identical directory candidate is packed while it resolves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DirectoryPacking {
+    /// Pack it as the C4Group packer does and compare the bytes with the
+    /// announced standalone before resolving, as `GetStandalone` does
+    /// (C4Network2Res.cpp:570-693).
+    #[default]
+    Verified,
+    /// Pack it into a fast envelope, which loads the same image, and leave the
+    /// comparison to a [`PendingStandaloneVerification`]. At the C4Group
+    /// packer's compression level that comparison takes seconds per pack, and
+    /// a joining client would otherwise spend them before it is admitted
+    /// (clonk-org/clonk-rs#1729).
+    Deferred,
+}
+
+/// The comparison a [`DirectoryPacking::Deferred`] resolution still owes:
+/// whether the image it loads from, compressed as the C4Group packer would,
+/// is the standalone the core announces. Only such a byte-identical file may
+/// answer a chunk request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingStandaloneVerification {
+    core: NetworkResourceCore,
+    load_image: PathBuf,
+    standalone_directory: PathBuf,
+    standalone_name: Vec<u8>,
+}
+
+impl PendingStandaloneVerification {
+    pub fn core(&self) -> &NetworkResourceCore {
+        &self.core
+    }
+
+    pub fn load_image(&self) -> &Path {
+        &self.load_image
+    }
+
+    /// Compresses the loaded image as the C4Group packer would, and returns
+    /// those bytes only if they are the announced standalone.
+    pub fn verify(&self) -> Option<Vec<u8>> {
+        let envelope = fs::read(&self.load_image).ok()?;
+        let image = Group::from_top_level_memory(self.load_image.clone(), envelope)
+            .and_then(|group| group.raw_image())
+            .ok()?;
+        compress_c4group_image(&image).ok().filter(|packed| {
+            packed.len() as u64 == u64::from(self.core.file_size)
+                && crc32(0, packed) == self.core.file_crc
+        })
+    }
+
+    /// Writes verified bytes as the resource's servable standalone.
+    pub fn write(&self, packed: &[u8]) -> Result<PathBuf, LocalResourceResolutionError> {
+        write_standalone(&self.standalone_directory, &self.standalone_name, packed)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +169,11 @@ impl LocalResourceMatch {
         }
     }
 
+    /// The comparison a deferred directory packing still owes, if any.
+    pub fn pending_verification(&self) -> Option<&PendingStandaloneVerification> {
+        self.pending_verification.as_deref()
+    }
+
     /// Reclassifies the retained image without reopening the mutable directory.
     pub(crate) fn with_completed_core(mut self, core: NetworkResourceCore) -> Self {
         let path = self.path().to_path_buf();
@@ -140,21 +204,22 @@ impl LocalResourceMatch {
         match self {
             Self {
                 core,
-                source_path: _,
                 standalone: LocalResourceStandalone::BinaryCompatible { path, ownership },
+                ..
             } => backend.register_local_complete(core, path, ownership, true),
             // Logical like the Unavailable arm — the catalog clears its chunk
             // set, so it is never advertised or served — but loaded from the
             // packed image rather than the directory it was packed from.
             Self {
                 core,
-                source_path: _,
                 standalone: LocalResourceStandalone::LoadableOnly { path, .. },
+                ..
             } => backend.register_local_logical(core, path),
             Self {
                 core,
                 source_path,
                 standalone: LocalResourceStandalone::Unavailable,
+                ..
             } => backend.register_local_logical(core, source_path),
         }
     }
@@ -219,6 +284,33 @@ where
         &candidates,
         standalone_directory,
         group_maker,
+        DirectoryPacking::Verified,
+    )
+}
+
+/// Resolves a local resource like [`resolve_local_resource_with_group_maker`],
+/// but packs a contents-identical directory with [`DirectoryPacking::Deferred`]:
+/// it loads at once, and servability waits for its pending verification.
+pub fn resolve_local_resource_deferring_verification<I, P>(
+    core: &NetworkResourceCore,
+    candidates: I,
+    standalone_directory: impl AsRef<Path>,
+    group_maker: &[u8],
+) -> Result<LocalResourceResolution, LocalResourceResolutionError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let candidates = candidates
+        .into_iter()
+        .map(|candidate| LocalResourceCandidate::exact(candidate.as_ref().to_path_buf()))
+        .collect::<Vec<_>>();
+    resolve_local_resource_candidates_with_group_maker(
+        core,
+        &candidates,
+        standalone_directory,
+        group_maker,
+        DirectoryPacking::Deferred,
     )
 }
 
@@ -227,6 +319,7 @@ pub(crate) fn resolve_local_resource_candidates_with_group_maker(
     candidates: &[LocalResourceCandidate],
     standalone_directory: impl AsRef<Path>,
     group_maker: &[u8],
+    packing: DirectoryPacking,
 ) -> Result<LocalResourceResolution, LocalResourceResolutionError> {
     let standalone_directory = standalone_directory.as_ref();
     for candidate in candidates {
@@ -252,6 +345,22 @@ pub(crate) fn resolve_local_resource_candidates_with_group_maker(
         }
 
         let from_directory = metadata.as_ref().is_some_and(fs::Metadata::is_dir);
+        // Only a loadable core announces the size and checksum a later
+        // verification compares with, and a player's standalone is further
+        // optimized after packing, so both keep the immediate comparison.
+        if from_directory
+            && packing == DirectoryPacking::Deferred
+            && core.loadable
+            && core.resource_type != HostResourceType::Player as u8
+        {
+            return Ok(LocalResourceResolution::Local(deferred_directory_match(
+                core,
+                path,
+                standalone_directory,
+                &standalone_name,
+                group_maker,
+            )));
+        }
         let standalone_result = if from_directory {
             crate::host_resource_core::pack_directory_standalone(path, group_maker)
                 .ok()
@@ -324,9 +433,51 @@ pub(crate) fn resolve_local_resource_candidates_with_group_maker(
             core: core.clone(),
             source_path: path.to_path_buf(),
             standalone,
+            pending_verification: None,
         }));
     }
     Ok(fallback(core))
+}
+
+/// Resolves a contents-identical directory for [`DirectoryPacking::Deferred`]:
+/// its packed image in a fast envelope to load from at once, and the
+/// comparison with the announced standalone as a pending verification. Like
+/// an immediate packing that fails, one that cannot be written leaves the
+/// directory itself as the only source.
+fn deferred_directory_match(
+    core: &NetworkResourceCore,
+    path: &Path,
+    standalone_directory: &Path,
+    standalone_name: &[u8],
+    group_maker: &[u8],
+) -> LocalResourceMatch {
+    let load_image = crate::host_resource_core::pack_directory_raw_image(path, group_maker)
+        .ok()
+        .and_then(|image| compress_c4group_image_fast(&image).ok())
+        .and_then(|envelope| {
+            write_standalone(standalone_directory, standalone_name, &envelope).ok()
+        });
+    let (standalone, pending_verification) =
+        load_image.map_or((LocalResourceStandalone::Unavailable, None), |load_image| {
+            (
+                LocalResourceStandalone::LoadableOnly {
+                    path: load_image.clone(),
+                    ownership: ResourceFileOwnership::Temporary,
+                },
+                Some(Box::new(PendingStandaloneVerification {
+                    core: core.clone(),
+                    load_image,
+                    standalone_directory: standalone_directory.to_path_buf(),
+                    standalone_name: standalone_name.to_vec(),
+                })),
+            )
+        });
+    LocalResourceMatch {
+        core: core.clone(),
+        source_path: path.to_path_buf(),
+        standalone,
+        pending_verification,
+    }
 }
 
 fn optimize_local_player_standalone(

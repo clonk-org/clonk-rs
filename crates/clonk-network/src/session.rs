@@ -9055,6 +9055,172 @@ mod tests {
         task.await.test_value();
     }
 
+    /// A client that resolved its local `Objects.c4d` directory with the
+    /// deferred resolver, and the core the host published for it. `None` when
+    /// the two packings fell in different seconds, which their packed bytes
+    /// then cannot agree across.
+    fn deferred_objects_directory(
+        directories: &SessionResourceDirectories,
+        attempt: usize,
+    ) -> Option<(clonk_protocol::NetworkResourceCore, ClientResourceState)> {
+        let seconds = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .test_value()
+                .as_secs()
+        };
+        let source = directories.root.join("Objects.c4d");
+        fs::create_dir_all(&source).test_value();
+        fs::write(source.join("Names.txt"), b"objects").test_value();
+        let client_directory = directories.client.join(format!("attempt{attempt}"));
+        let before = seconds();
+        let publication = crate::build_host_resource_core(
+            &source,
+            directories.host.join(format!("attempt{attempt}")),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Definitions,
+                7,
+                c4(b"Objects.c4d"),
+                "",
+            ),
+        )
+        .test_value();
+        let mut state = empty_client_resource_state(1, client_directory.clone());
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(7, vec![source]);
+        let resolver =
+            crate::client_bootstrap::ClientBootstrapResolver::new(&candidates, client_directory)
+                .with_deferred_directory_packing();
+        state
+            .resolve_and_add_bootstrap_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                &publication.core,
+            )
+            .test_value();
+        state.retain_resource_resolver(resolver);
+        (seconds() == before).then_some((publication.core, state))
+    }
+
+    fn same_second_deferred_objects_directory(
+        directories: &SessionResourceDirectories,
+    ) -> (clonk_protocol::NetworkResourceCore, ClientResourceState) {
+        (0..8)
+            .find_map(|attempt| deferred_objects_directory(directories, attempt))
+            .expect("could not pack both directories in one timestamp second")
+    }
+
+    #[test]
+    fn a_deferred_directory_loads_before_the_comparison_it_owes() {
+        // clonk-org/clonk-rs#1729: a joining client packed every local
+        // directory at the C4Group packer's level before it was admitted. The
+        // deferred resolver loads it from a fast image at once and hands out
+        // the byte comparison that decides whether it may be served.
+        let directories = SessionResourceDirectories::new();
+        let (core, mut state) = deferred_objects_directory(&directories, 0)
+            .or_else(|| deferred_objects_directory(&directories, 1))
+            .test_value();
+
+        let verifications = state.take_pending_standalone_verifications();
+
+        assert_eq!(verifications.len(), 1);
+        assert_eq!(
+            state.backend.as_ref().unwrap().path(core.id),
+            Some(verifications[0].load_image())
+        );
+        assert!(
+            state.take_pending_standalone_verifications().is_empty(),
+            "each comparison is handed out once"
+        );
+    }
+
+    #[test]
+    fn a_verified_standalone_is_served_in_place_of_the_image_it_came_from() {
+        // GetStandalone serves a directory the client packed only if its
+        // bytes are the announced standalone (src/C4Network2Res.cpp:659-693).
+        let directories = SessionResourceDirectories::new();
+        let (core, mut state) = same_second_deferred_objects_directory(&directories);
+        let verification = state.take_pending_standalone_verifications().remove(0);
+        let packed = verification.verify().expect("the host's own bytes");
+
+        assert!(state
+            .apply_verified_standalone(&verification, &packed)
+            .test_value());
+
+        let served = state
+            .backend
+            .as_ref()
+            .unwrap()
+            .path(core.id)
+            .unwrap()
+            .to_path_buf();
+        assert_ne!(served, verification.load_image());
+        assert_eq!(fs::read(served).test_value(), packed);
+        assert!(
+            !state
+                .apply_verified_standalone(&verification, &packed)
+                .test_value(),
+            "a comparison the resource has moved past changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_client_loop_serves_a_deferred_directory_once_it_is_verified() {
+        let directories = SessionResourceDirectories::new();
+        let (core, state) = same_second_deferred_objects_directory(&directories);
+        let load_image = state
+            .backend
+            .as_ref()
+            .unwrap()
+            .path(core.id)
+            .unwrap()
+            .to_path_buf();
+        let (stream, _commands, _events, shutdown, task) =
+            start_test_client_loop_with_state(65536, 8, 32, BTreeMap::new(), state);
+        let mut host = crate::ControlTransport::new(stream);
+
+        // The loop verifies off its own thread; the standalone it then writes
+        // beside the load image is what a request is answered from.
+        let standalone_directory = load_image.parent().unwrap().to_path_buf();
+        timeout(EVENT_WAIT, async {
+            while !fs::read_dir(&standalone_directory)
+                .test_value()
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry.path() != load_image
+                        && entry
+                            .metadata()
+                            .is_ok_and(|metadata| metadata.len() == u64::from(core.file_size))
+                })
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .test_value();
+        host.send_message(ControlMessage::Resource(ResourcePacket::Request(
+            crate::ResourceRequestPacket {
+                resource_id: core.id,
+                chunk: 0,
+            },
+        )))
+        .await
+        .test_value();
+        loop {
+            if let ControlMessage::Resource(ResourcePacket::Data(chunk)) =
+                timeout(EVENT_WAIT, host.read_message())
+                    .await
+                    .test_value()
+                    .test_value()
+            {
+                assert_eq!(chunk.resource_id, core.id);
+                break;
+            }
+        }
+        shutdown.send(()).test_value();
+        task.await.test_value();
+    }
+
     #[test]
     fn client_player_publication_reuses_the_same_source_with_different_wire_metadata() {
         // LoadFromLocalFile and AddByFile search the resource list by the
