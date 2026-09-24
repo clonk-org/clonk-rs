@@ -233,16 +233,26 @@ impl InflatingImage {
     /// Up to `range.len()` bytes from `range.start`, fewer where the image ends.
     fn available(&self, range: Range<usize>) -> Result<Vec<u8>, GroupError> {
         if let Some(image) = self.complete.get() {
-            let end = range.end.min(image.len());
-            return Ok(image
-                .get(range.start.min(end)..end)
-                .unwrap_or_default()
-                .to_vec());
+            return Ok(available_in(image, range));
         }
         let mut state = self.lock()?;
+        self.available_locked(&mut state, range)
+    }
+
+    /// [`Self::available`] once the state lock is held. Another reader may have
+    /// finished the image between the unlocked check and the lock, and `finish`
+    /// moves the output into `complete`, so this checks again, as
+    /// [`Self::bytes`] and [`Self::all`] do.
+    fn available_locked(
+        &self,
+        state: &mut InflateState,
+        range: Range<usize>,
+    ) -> Result<Vec<u8>, GroupError> {
+        if let Some(image) = self.complete.get() {
+            return Ok(available_in(image, range));
+        }
         state.inflate_to(range.end)?;
-        let end = range.end.min(state.output.len());
-        Ok(state.output[range.start.min(end)..end].to_vec())
+        Ok(available_in(&state.output, range))
     }
 
     /// The whole image.
@@ -398,6 +408,15 @@ impl InflateState {
         self.input += 8;
         Ok(())
     }
+}
+
+/// Up to `range.len()` bytes of `image` from `range.start`, fewer where it ends.
+fn available_in(image: &[u8], range: Range<usize>) -> Vec<u8> {
+    let end = range.end.min(image.len());
+    image
+        .get(range.start.min(end)..end)
+        .unwrap_or_default()
+        .to_vec()
 }
 
 /// The length of the gzip member header at the start of `bytes`, which may
@@ -2712,6 +2731,29 @@ mod tests {
 
         let error = inflate_all(compressed).unwrap_err();
         assert!(error.to_string().contains("checksum"), "{error}");
+    }
+
+    /// A packed scenario's child groups share one inflating image, which the
+    /// definition loader reads from several threads. Once a reader reaches the
+    /// end of the stream, `finish` moves the output into `complete`. A partial
+    /// read that found the image incomplete and only then got the lock must
+    /// read the finished image. It read the emptied buffer instead, so the
+    /// child group it was opening came back empty and failed to open, and one
+    /// definition went missing from about a quarter of the loads of the same
+    /// scenario (clonk-org/clonk-rs#1779).
+    #[test]
+    fn a_partial_read_that_waited_for_the_lock_reads_the_finished_image() {
+        let payload = (0..=u8::MAX).cycle().take(4096).collect::<Vec<_>>();
+        let image = InflatingImage::new(gzip_member(&payload, GZ_MAGIC));
+        // Another reader reaches the end of the stream and finishes the image,
+        image.all().unwrap();
+        // after this one found it incomplete and before it got the lock.
+        let mut state = image.lock().unwrap();
+
+        assert_eq!(
+            image.available_locked(&mut state, 100..116).unwrap(),
+            payload[100..116]
+        );
     }
 
     fn gzip_group_image(image: &[u8]) -> Vec<u8> {
