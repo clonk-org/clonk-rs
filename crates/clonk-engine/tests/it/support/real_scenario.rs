@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
 use clonk_engine::{Engine, JoinPlayerConfig, JoinedPlayer, ObjectId, Scenario, ScenarioError};
-use clonk_resources::{Group, MaterialLibrary};
+use clonk_resources::{Group, GroupError, MaterialLibrary};
 
 struct ContentResolver {
     roots: Vec<PathBuf>,
@@ -28,6 +28,34 @@ pub fn existing_path_ignoring_ascii_case(root: &Path, relative: &str) -> Option<
                 .or_else(|| names.first())
                 .map(|name| directory.join(name))
         })
+}
+
+/// `relative` below `root`, opened as a group, or `None` where nothing is
+/// there. Folders match as in [`existing_path_ignoring_ascii_case`]; once the
+/// path reaches a packed group, the rest of it opens below that group as child
+/// groups, as C4Group::Open traces a path back to its nearest real file
+/// (C4Group.cpp:697-716) and the app resolver's `Group::open` does too.
+fn open_group_ignoring_ascii_case(
+    root: &Path,
+    relative: &str,
+) -> Result<Option<Group>, GroupError> {
+    let components = relative
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    let mut path = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        if path.is_file() {
+            return Ok(Group::open(&path)?
+                .open_child(components[index..].join("/"))
+                .ok());
+        }
+        let Some(next) = existing_path_ignoring_ascii_case(&path, component) else {
+            return Ok(None);
+        };
+        path = next;
+    }
+    Group::open(path).map(Some)
 }
 
 struct RawContentResolver {
@@ -56,8 +84,8 @@ impl LegacyDefinitionResolver for ContentResolver {
         if let Some(group) = self
             .roots
             .iter()
-            .find_map(|root| existing_path_ignoring_ascii_case(root, &relative))
-            .map(Group::open)
+            .map(|root| open_group_ignoring_ascii_case(root, &relative))
+            .find_map(Result::transpose)
             .transpose()
             .map_err(ScenarioError::Resources)?
         {
@@ -74,10 +102,10 @@ impl LegacyDefinitionResolver for ContentResolver {
                 break;
             }
             if self.roots.iter().any(|root| folder.starts_with(root)) {
-                if let Some(candidate) = existing_path_ignoring_ascii_case(folder, &relative) {
-                    return Group::open(candidate)
-                        .map(|group| vec![group])
-                        .map_err(ScenarioError::Resources);
+                if let Some(group) = open_group_ignoring_ascii_case(folder, &relative)
+                    .map_err(ScenarioError::Resources)?
+                {
+                    return Ok(vec![group]);
                 }
             }
             current = folder.parent();
