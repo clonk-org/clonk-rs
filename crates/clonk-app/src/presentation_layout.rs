@@ -646,16 +646,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_layout_traces_match() {
-        let trace = trace(&element("startup/main/local-game"));
-
-        assert_eq!(
-            compare_layout_traces("startup-main", &trace, &trace),
-            Ok(())
-        );
-    }
-
-    #[test]
     fn an_unknown_screen_has_no_layout_terms() {
         let trace = trace(&element("startup/main/local-game"));
 

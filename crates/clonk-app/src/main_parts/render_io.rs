@@ -3414,42 +3414,8 @@ fn try_load_install_definition(
     };
 
     #[cfg(test)]
-    {
-        // The repository's ordinary sandbox crew is a stable test resource.
-        // Open its canonical group directly before the recursive resolver so
-        // every isolated app test does not walk all of Objects.c4d. Restrict
-        // this shortcut to the stock test install: production and custom
-        // fixture installs retain the resolver's first-match precedence.
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent);
-        if repository == Some(paths.install_root()) && definition_id.eq_ignore_ascii_case("CLNK") {
-            let relative_path = Path::new("Crew.c4d/Clonk.c4d");
-            if let Ok(group) = objects_group.open_child(relative_path) {
-                let eligible = !group.exists("Particle.txt")
-                    && ResourceDefCore::load(&group).is_ok_and(|core| {
-                        core.has_valid_id()
-                            && core.needed_gfx_mode != 2
-                            && core.id.eq_ignore_ascii_case(definition_id)
-                    });
-                if eligible {
-                    match ResourceDefinitionData::load(&group) {
-                        Ok(definition) if definition.graphics_image.is_some() => {
-                            return Some(definition);
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                definition = definition_id,
-                                path = %relative_path.display(),
-                                error = %error,
-                                "canonical install definition lookup failed; using recursive fallback"
-                            );
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(definition) = stock_test_crew(&objects_group, paths, definition_id) {
+        return Some(definition);
     }
 
     match find_definition_in_group(&objects_group, definition_id) {
@@ -3459,6 +3425,64 @@ fn try_load_install_definition(
                 definition = definition_id,
                 error = %err,
                 "error while searching for definition in install data"
+            );
+            None
+        }
+    }
+}
+
+/// The repository's ordinary sandbox crew is a stable test resource. Open its
+/// canonical group directly before the recursive resolver so every isolated
+/// app test does not walk all of Objects.c4d. Restrict this shortcut to the
+/// stock test install: production and custom fixture installs retain the
+/// resolver's first-match precedence.
+#[cfg(test)]
+fn stock_test_crew(
+    objects_group: &Group,
+    paths: &AppPaths,
+    definition_id: &str,
+) -> Option<ResourceDefinitionData> {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent);
+    if repository != Some(paths.install_root()) || !definition_id.eq_ignore_ascii_case("CLNK") {
+        return None;
+    }
+    // Many app tests start a sandbox per case, and each start decoded the same
+    // stock crew graphics again. The stock resource does not change while
+    // tests run, so a test process loads it once and hands each sandbox its
+    // own copy.
+    static STOCK_CREW: std::sync::OnceLock<Option<ResourceDefinitionData>> =
+        std::sync::OnceLock::new();
+    STOCK_CREW
+        .get_or_init(|| load_stock_test_crew(objects_group, definition_id))
+        .clone()
+}
+
+#[cfg(test)]
+fn load_stock_test_crew(
+    objects_group: &Group,
+    definition_id: &str,
+) -> Option<ResourceDefinitionData> {
+    let relative_path = Path::new("Crew.c4d/Clonk.c4d");
+    let group = objects_group.open_child(relative_path).ok()?;
+    let eligible = !group.exists("Particle.txt")
+        && ResourceDefCore::load(&group).is_ok_and(|core| {
+            core.has_valid_id()
+                && core.needed_gfx_mode != 2
+                && core.id.eq_ignore_ascii_case(definition_id)
+        });
+    if !eligible {
+        return None;
+    }
+    match ResourceDefinitionData::load(&group) {
+        Ok(definition) => definition.graphics_image.is_some().then_some(definition),
+        Err(error) => {
+            tracing::debug!(
+                definition = definition_id,
+                path = %relative_path.display(),
+                error = %error,
+                "canonical install definition lookup failed; using recursive fallback"
             );
             None
         }

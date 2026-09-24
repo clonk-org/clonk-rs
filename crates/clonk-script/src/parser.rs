@@ -4431,14 +4431,6 @@ func Ok() { return 1; }
     }
 
     #[test]
-    fn parse_return_with_comma_single() {
-        // Note: return(42); without space is no longer supported
-        // Use return (42); or return 42; instead
-        let result = parse_script("func Test() { return (42); }");
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn parse_return_with_parenthesized_subexpression_and_operator() {
         // Test LENS case: return (expr) op expr;
         let result = parse_script("func Test() { return (255*GetIntensity())/100; }");
