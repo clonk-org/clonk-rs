@@ -614,6 +614,9 @@ pub(crate) struct ClientResourceState {
     pub(crate) local_resource_sources: BTreeMap<PathBuf, clonk_protocol::NetworkResourceCore>,
     pub(crate) host_peer_id: i32,
     pending_local_resources: BTreeMap<i32, crate::LocalResourceMatch>,
+    /// Byte comparisons deferred directory packings still owe, until the
+    /// client loop takes them to run off its thread.
+    pending_standalone_verifications: Vec<crate::PendingStandaloneVerification>,
     pub(crate) deferred_resource_cores: BTreeMap<i32, clonk_protocol::NetworkResourceCore>,
     pub(crate) initial_complete_resources:
         Vec<(clonk_protocol::NetworkResourceCore, PathBuf, bool)>,
@@ -1185,6 +1188,7 @@ impl ClientResourceState {
             local_resource_sources: BTreeMap::new(),
             host_peer_id: 0,
             pending_local_resources: BTreeMap::new(),
+            pending_standalone_verifications: Vec::new(),
             deferred_resource_cores: BTreeMap::new(),
             initial_complete_resources: Vec::new(),
             initial_packets: Vec::new(),
@@ -1229,6 +1233,7 @@ impl ClientResourceState {
             local_resource_sources: BTreeMap::new(),
             host_peer_id,
             pending_local_resources: BTreeMap::new(),
+            pending_standalone_verifications: Vec::new(),
             deferred_resource_cores: BTreeMap::new(),
             initial_complete_resources: Vec::new(),
             initial_packets,
@@ -1555,6 +1560,8 @@ impl ClientResourceState {
                         self.pending_local_resources
                             .insert(resource.core.id, local.clone());
                     }
+                    self.pending_standalone_verifications
+                        .extend(local.pending_verification().cloned());
                     self.initial_complete_resources.push((
                         resource.core.clone(),
                         local.path().to_path_buf(),
@@ -1577,6 +1584,48 @@ impl ClientResourceState {
             }
         }
         Ok(registration)
+    }
+
+    /// Hands out the comparisons deferred directory packings owe, each once.
+    pub(crate) fn take_pending_standalone_verifications(
+        &mut self,
+    ) -> Vec<crate::PendingStandaloneVerification> {
+        std::mem::take(&mut self.pending_standalone_verifications)
+    }
+
+    /// Serves bytes a verification found to be the announced standalone, in
+    /// place of the fast image the resource loads from. A resource that has
+    /// been replaced, upgraded or forgotten since is left as it is.
+    pub(crate) fn apply_verified_standalone(
+        &mut self,
+        verification: &crate::PendingStandaloneVerification,
+        packed: &[u8],
+    ) -> Result<bool, String> {
+        let core = verification.core();
+        let Some(backend) = self.backend.as_mut() else {
+            return Ok(false);
+        };
+        if backend.core(core.id) != Some(core)
+            || backend.path(core.id) != Some(verification.load_image())
+        {
+            return Ok(false);
+        }
+        let standalone = verification
+            .write(packed)
+            .map_err(|error| error.to_string())?;
+        backend
+            .upgrade_local_core(
+                core.clone(),
+                &standalone,
+                crate::ResourceFileOwnership::Temporary,
+                true,
+            )
+            .map_err(|error| error.to_string())?;
+        self.catalog.forget_resource(core.id);
+        self.catalog
+            .register(crate::ResourceRegistration::from_core(core, true, false));
+        self.local_resource_sources.insert(standalone, core.clone());
+        Ok(true)
     }
 
     pub(crate) fn apply_resource_upgrade(

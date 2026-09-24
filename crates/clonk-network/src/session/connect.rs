@@ -134,11 +134,16 @@ impl ClientPostJoinResourceBootstrap {
             .resource_directory
             .as_deref()
             .unwrap_or_else(|| std::path::Path::new("Network"));
+        // Packing each local directory at the C4Group packer's level before
+        // admission kept a joining client waiting seconds per definition pack
+        // (clonk-org/clonk-rs#1729). The client loop verifies those bytes
+        // once it runs.
         let mut resolver = crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
             &config.local_candidates,
             standalone_directory.to_path_buf(),
             config.group_maker,
-        );
+        )
+        .with_deferred_directory_packing();
         if let Some(path) = config.trusted_local_system_path {
             resolver = resolver.with_trusted_local_system_path(path);
         }

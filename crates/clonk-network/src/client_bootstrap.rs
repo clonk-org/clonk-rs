@@ -10,7 +10,7 @@ use clonk_protocol::{
 use thiserror::Error;
 
 use crate::local_resource_resolution::{
-    resolve_local_resource_candidates_with_group_maker, LocalResourceCandidate,
+    resolve_local_resource_candidates_with_group_maker, DirectoryPacking, LocalResourceCandidate,
 };
 use crate::{
     JoinDataEnvelope, LocalResourceMatch, LocalResourceResolution, LocalResourceResolutionError,
@@ -335,6 +335,7 @@ pub(crate) struct ClientBootstrapResolver {
     standalone_directory: PathBuf,
     group_maker: LegacyCString,
     trusted_local_system_path: Option<PathBuf>,
+    directory_packing: DirectoryPacking,
 }
 
 impl ClientBootstrapResolver {
@@ -359,11 +360,19 @@ impl ClientBootstrapResolver {
             standalone_directory: standalone_directory.into(),
             group_maker,
             trusted_local_system_path: None,
+            directory_packing: DirectoryPacking::Verified,
         }
     }
 
     pub(crate) fn with_trusted_local_system_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.trusted_local_system_path = Some(path.into());
+        self
+    }
+
+    /// Resolves local directories with [`DirectoryPacking::Deferred`], leaving
+    /// the comparison of their packed bytes to the caller.
+    pub(crate) fn with_deferred_directory_packing(mut self) -> Self {
+        self.directory_packing = DirectoryPacking::Deferred;
         self
     }
 
@@ -378,6 +387,7 @@ impl ClientBootstrapResolver {
             &self.local_candidates,
             &self.standalone_directory,
             self.group_maker.as_bytes(),
+            self.directory_packing,
         );
         let Err(error) = result else {
             return result;
@@ -454,6 +464,7 @@ impl ClientBootstrapPlanner {
             &self.local_candidates,
             &self.standalone_directory,
             &self.group_maker,
+            DirectoryPacking::Verified,
         )?;
         if !matches!(
             resource.source,
@@ -614,6 +625,7 @@ fn plan_resource(
     local_candidates: &ClientBootstrapLocalCandidates,
     standalone_directory: &Path,
     group_maker: &[u8],
+    packing: DirectoryPacking,
 ) -> Result<ClientBootstrapResourcePlan, ClientBootstrapPlanError> {
     let candidates = local_candidates.for_core(core, standalone_directory);
     let source = match resolve_local_resource_candidates_with_group_maker(
@@ -621,7 +633,7 @@ fn plan_resource(
         &candidates,
         standalone_directory,
         group_maker,
-        crate::local_resource_resolution::DirectoryPacking::Verified,
+        packing,
     )
     .map_err(|source| ClientBootstrapPlanError::LocalResolution {
         resource_id: core.id,
