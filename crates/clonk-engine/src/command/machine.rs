@@ -964,6 +964,23 @@ impl NavigationKind {
     }
 }
 
+/// The commanded object as the navigation planner sees it.
+fn navigation_actor(
+    ctx: &CommandRuntimeContext<'_>,
+    gravity: crate::C4Fixed,
+) -> navigation::NavActor {
+    navigation::NavActor::new(
+        ctx.object.nav_body,
+        &ctx.object.physical,
+        ctx.object.construction,
+        gravity,
+        ctx.object.shape_top,
+        ctx.materials
+            .map(navigation::LiquidHazards::new)
+            .unwrap_or_default(),
+    )
+}
+
 /// The COMD_* direction whose axis steps are (horizontal, vertical).
 fn direction_toward(horizontal: i32, vertical: i32) -> CommandDirection {
     [
@@ -1397,16 +1414,7 @@ impl MoveToState {
         if *retries == 0 {
             *retries = NAVIGATION_GOAL_RETRIES;
         }
-        let actor = navigation::NavActor::new(
-            ctx.object.nav_body,
-            &ctx.object.physical,
-            ctx.object.construction,
-            gravity,
-            ctx.object.shape_top,
-            ctx.materials
-                .map(navigation::LiquidHazards::new)
-                .unwrap_or_default(),
-        );
+        let actor = navigation_actor(ctx, gravity);
         let goal = navigation::NavGoal {
             x: target.x,
             y: target.y,
@@ -5971,16 +5979,7 @@ impl AcquireState {
             // inside a building, or not walking at all, keeps the native pick.
             _ => return candidates.map(|snapshot| snapshot.id).next(),
         };
-        let actor = navigation::NavActor::new(
-            ctx.object.nav_body,
-            &ctx.object.physical,
-            ctx.object.construction,
-            gravity,
-            ctx.object.shape_top,
-            ctx.materials
-                .map(navigation::LiquidHazards::new)
-                .unwrap_or_default(),
-        );
+        let actor = navigation_actor(ctx, gravity);
         let fetched_by_another = |candidate: ObjectId| {
             ctx.objects.values().any(|other| {
                 other.id != ctx.object.id
