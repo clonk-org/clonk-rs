@@ -2260,6 +2260,7 @@ fn install_classic_test_assets(app: &mut GameApp) {
 
 fn apply_test_frontend_assets(app: &mut GameApp, assets: Arc<FrontendAssets>) {
     let mut main_menu = StartupMainMenu::new(assets.font_arc(), assets.button_textures());
+    main_menu.set_hd_button_textures(assets.hd_main_menu_button_textures.clone());
     main_menu.set_highlight_texture(assets.button_highlight.clone());
     main_menu.set_clonk_fonts(assets.clonk_fonts.clone());
     main_menu.set_gamma_ramp(Some(Arc::new(clonk_graphics::GammaRamp::standard())));

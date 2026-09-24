@@ -928,6 +928,24 @@ pub fn draw_image_bilinear(
     draw_image_bilinear_impl(surface, rect, image, gamma, BilinearBlend::AlphaOver, None);
 }
 
+pub(crate) fn draw_image_bilinear_source(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    source: FloatSourceRect,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+) {
+    draw_image_bilinear_source_impl(
+        surface,
+        rect,
+        image,
+        source,
+        gamma,
+        BilinearBlend::AlphaOver,
+        None,
+    );
+}
+
 /// Draws a complete image through `C4Facet::DrawXFloat`: fractional target
 /// edges are cropped inward to integer pixel boundaries and the same margins
 /// are removed proportionally from the source before the regular tiled

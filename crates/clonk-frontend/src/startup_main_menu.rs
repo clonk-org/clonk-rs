@@ -232,6 +232,54 @@ pub fn draw_bar(
     );
 }
 
+fn draw_hd_button_bar(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&clonk_graphics::GammaRamp>,
+) {
+    const SOURCE_CAP: f32 = 200.0;
+    const DISPLAY_CAP: f32 = 40.0;
+    if image.width() < 2 * SOURCE_CAP as u32 {
+        return;
+    }
+
+    let source_width = image.width() as f32;
+    let cap = DISPLAY_CAP.min(rect.size.width / 2.0);
+    let middle_width = (rect.size.width - 2.0 * cap).max(0.0);
+    for (source_x, source_width, target_x, target_width) in [
+        (0.0, SOURCE_CAP, rect.origin.x, cap),
+        (
+            SOURCE_CAP,
+            source_width - 2.0 * SOURCE_CAP,
+            rect.origin.x + cap,
+            middle_width,
+        ),
+        (
+            source_width - SOURCE_CAP,
+            SOURCE_CAP,
+            rect.origin.x + rect.size.width - cap,
+            cap,
+        ),
+    ] {
+        if target_width <= 0.0 {
+            continue;
+        }
+        crate::software_draw::draw_image_bilinear_source(
+            surface,
+            &GuiRect::new(target_x, rect.origin.y, target_width, rect.size.height),
+            image,
+            crate::FloatSourceRect {
+                x: source_x,
+                y: 0.0,
+                width: source_width,
+                height: image.height() as f32,
+            },
+            gamma,
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MainMenuItem {
     LocalGame,
@@ -283,6 +331,7 @@ pub struct StartupMainMenu {
     /// for pixel parity with the C++ engine.
     clonk_fonts: Option<Arc<ClonkFontSet>>,
     textures: Option<ButtonTextures>,
+    hd_button_textures: Option<(ImageData, ImageData)>,
     /// GUIButtonHighlight, blitted additively over focused/hovered buttons
     /// (C4GuiButton.cpp:94-98).
     highlight: Option<ImageData>,
@@ -327,6 +376,7 @@ impl StartupMainMenu {
             font,
             clonk_fonts: None,
             textures,
+            hd_button_textures: None,
             highlight: None,
             gamma: None,
             buttons,
@@ -343,6 +393,10 @@ impl StartupMainMenu {
     /// Sets the GUIButtonHighlight texture for the focus/hover overlay.
     pub fn set_highlight_texture(&mut self, highlight: Option<ImageData>) {
         self.highlight = highlight;
+    }
+
+    pub fn set_hd_button_textures(&mut self, textures: Option<(ImageData, ImageData)>) {
+        self.hd_button_textures = textures;
     }
 
     /// Sets the CStdFont-faithful font set used for pixel-parity text.
@@ -942,11 +996,18 @@ impl StartupMainMenu {
         highlighted: bool,
         include_text: bool,
     ) {
-        // Plank: 3-slice bar of StartupBigButton(Down) at native scale
-        // (Button::DrawElement, C4GuiButton.cpp:81-89). The down state swaps
-        // the texture; disabled/selected do NOT change the plank in C++.
+        // The down state swaps the texture; disabled/selected do not change
+        // the plank (Button::DrawElement, C4GuiButton.cpp:81-89). The HD
+        // strips use scaled end caps and a continuous wood center.
         let pressed = state == ButtonVisualState::Pressed;
-        if let Some(textures) = self.textures.as_ref() {
+        if let Some((normal, down)) = self.hd_button_textures.as_ref() {
+            draw_hd_button_bar(
+                surface,
+                rect,
+                if pressed { down } else { normal },
+                self.gamma.as_deref(),
+            );
+        } else if let Some(textures) = self.textures.as_ref() {
             let image = if pressed {
                 &textures.pressed
             } else {
@@ -1154,6 +1215,43 @@ mod tests {
             column_values(&surface, 0, 7),
             vec![10, 20, 30, 40, 30, 50, 60]
         );
+    }
+
+    #[test]
+    fn hd_button_bar_keeps_fixed_end_caps_and_stretches_wood_middle() {
+        let pixels = (0..160)
+            .flat_map(|_| {
+                (0..600).flat_map(|x| {
+                    let color = if x < 200 {
+                        [200, 0, 0, 255]
+                    } else if x < 400 {
+                        [0, 200, 0, 255]
+                    } else {
+                        [0, 0, 200, 255]
+                    };
+                    color.into_iter()
+                })
+            })
+            .collect();
+        let image = ImageData::new(600, 160, pixels);
+        let mut surface = Surface::new(100, 40, PixelFormat::Rgba8888);
+        draw_hd_button_bar(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 100.0, 40.0),
+            &image,
+            None,
+        );
+
+        for (x, expected) in [
+            (10, [200, 0, 0]),
+            (35, [200, 0, 0]),
+            (50, [0, 200, 0]),
+            (65, [0, 0, 200]),
+            (90, [0, 0, 200]),
+        ] {
+            let pixel = surface.get_pixel(x, 20).expect("button pixel");
+            assert_eq!([pixel.r, pixel.g, pixel.b], expected, "column {x}");
+        }
     }
 
     // Pixel-exact C4StartupMainDlg geometry at 1280x720, derived from
