@@ -809,12 +809,19 @@ mod tests {
         for &(x0, y0, x1, y1, value) in rects {
             set(x0, y0, x1, y1, value);
         }
-        let mut landscape = Landscape::with_default_material(W as u32, vec![G; W], None)
-            .expect("navigation landscape");
-        landscape.set_world_height(H as i32);
+        grid_landscape(W, H, solid, G)
+    }
+
+    /// A `width` x `height` landscape of Earth where `solid` is set and sky
+    /// elsewhere, every column's surface at `surface`.
+    fn grid_landscape(width: usize, height: usize, solid: Vec<u8>, surface: i32) -> Landscape {
+        let mut landscape =
+            Landscape::with_default_material(width as u32, vec![surface; width], None)
+                .expect("navigation landscape");
+        landscape.set_world_height(height as i32);
         landscape.set_pixel_grid(PixelGrid::new(
-            W as u32,
-            H as u32,
+            width as u32,
+            height as u32,
             solid,
             vec![0, 100],
             vec![None, Some("Earth".to_owned())],
