@@ -833,6 +833,15 @@ pub fn compress_c4group_image(image: &[u8]) -> Result<Vec<u8>, MutableGroupError
     deflate_c4group_image(image, 9, 2)
 }
 
+/// Wraps an image in the on-disk C4Group envelope at zlib's fastest level.
+///
+/// Readers open it like any group and find the same image, but its bytes are
+/// not the ones the C4Group packer writes, so it can never stand in for a
+/// file whose size and checksum another peer announced.
+pub fn compress_c4group_image_fast(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
+    deflate_c4group_image(image, 1, 8)
+}
+
 /// Wraps an image in the on-disk C4Group gzip envelope at the given zlib
 /// compression and memory levels.
 fn deflate_c4group_image(
