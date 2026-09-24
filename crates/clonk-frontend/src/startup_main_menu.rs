@@ -232,7 +232,7 @@ pub fn draw_bar(
     );
 }
 
-fn draw_hd_button_bar(
+pub(crate) fn draw_hd_button_bar(
     surface: &mut Surface,
     rect: &GuiRect,
     image: &ImageData,
