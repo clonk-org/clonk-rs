@@ -5,13 +5,13 @@
   },
   "case_id": "startup-options-key-keyboard-reference",
   "comparator": {
-    "binary_sha256": "0f57d5c3e76993e69c1664cb202a6e00246dc1c670d605422af2a7d342ca264d",
+    "binary_sha256": "14fa6360b4aa4376d6f2da1d4a390df533edf3a738697a7ac61784af5d60ff8e",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "pixel",
   "reference": {
     "path": "run-1/cpp/artifacts/startup-options-key-keyboard-reference.png",
-    "sha256": "f71b9592596021399f525aa9605c822325db05ffd7383f82c260480717db2cca"
+    "sha256": "617c84442cb033468cd2ee9b737f841708f26f4e71576a1a3ff989f233bbfcbe"
   },
   "run_id": "run-1",
   "schema": "clonk-rs/presentation-comparison-attestation/v1",

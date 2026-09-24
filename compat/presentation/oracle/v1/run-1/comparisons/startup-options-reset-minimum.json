@@ -5,13 +5,13 @@
   },
   "case_id": "startup-options-reset-minimum",
   "comparator": {
-    "binary_sha256": "0f57d5c3e76993e69c1664cb202a6e00246dc1c670d605422af2a7d342ca264d",
+    "binary_sha256": "14fa6360b4aa4376d6f2da1d4a390df533edf3a738697a7ac61784af5d60ff8e",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "pixel",
   "reference": {
     "path": "run-1/cpp/artifacts/startup-options-reset-minimum.png",
-    "sha256": "1ce48741557f68136dbc059ef00e8e19904dacabbc5e027a026646e4f40d6c90"
+    "sha256": "028feaa712c71c279b08e6cb668d31dbae5f4e8a68a160874e0176efdfc4d629"
   },
   "run_id": "run-1",
   "schema": "clonk-rs/presentation-comparison-attestation/v1",
