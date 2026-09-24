@@ -418,6 +418,28 @@ fn navigation_swims_a_clonk_out_of_a_pool_up_its_beach() {
     );
 }
 
+#[test]
+fn navigation_fetches_construction_material_across_a_pool_with_a_beach() {
+    // The site is past the pool's beach and the rock past its far wall, so
+    // the builder swims across and back, in and out once by the beach and
+    // once by the wall (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(&[], &beach_pool(2)));
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(100, g - 4)],
+        CORPUS_FRAMES,
+    );
+    assert!(
+        matches!(outcome, FetchOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
 /// Frames a fetch on the real Frontier map may take. The stranded builder
 /// of clonk-org/clonk-rs#1727 gave up after about 1800.
 const FRONTIER_FETCH_FRAMES: usize = 2400;
