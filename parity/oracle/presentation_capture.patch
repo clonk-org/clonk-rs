@@ -1168,7 +1168,7 @@ index 9542728ef..d4ff55002 100644
 +	bool InjectingCapturePointer{false};
 +	constexpr uint32_t CaptureSeed = 587;
 +	constexpr std::string_view OracleSourceTree = "3859b3715b7f58d0c461cf45dc226593a2b0d687";
-+	constexpr std::string_view FixtureContentTree = "413eb60182f1c0b72caf75a252e99bfc9d77235a";
++	constexpr std::string_view FixtureContentTree = "ed1015a30d5d378329637090d9bbfb59de79161f";
 +	constexpr std::string_view ConfigSha256 = "8e7351443514744d638c5af2c4d534b85f2791ad1b0759d72822aa257c21e1bb";
 +	constexpr std::string_view PlayerSha256 = "8dcaf794355d1f8d7e8dfa3efa76b8f601a8a911561d161a3da8ead2a40cd5c0";
 +	constexpr std::string_view NetworkReferencesSha256 = "922c7ccf941069bafd38a18e3ed71a747eadaa0c2a037b4e34422ce7312c8bf4";
