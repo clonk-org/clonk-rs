@@ -16,6 +16,12 @@ Generated with OpenAI imagegen for Clonk Rust in 2026, then prepared with
 transparent alpha for the original UI geometry. They use the same CC BY-NC 4.0
 license above. See docs/art/startup-icons.md for the sources and modifications.
 
+StartupTabClipHD.png is a high-resolution adaptation of RedWolf Design's
+StartupTabClip.png, generated with OpenAI imagegen for Clonk Rust in 2026 and
+prepared using the original tab silhouette. It uses the same CC BY-NC 4.0
+license above. See docs/art/startup-tab/README.md for the source, selected
+prompt, preparation, and in-game comparison.
+
 ui-icons/*.png are high-resolution adaptations of GUIIcons.png, GUIIcons2.png
 and GUICheckbox.png by RedWolf Design (GUIIcons.png also credits Jonathan Veit,
 AniProGuy). Generated with OpenAI imagegen and approved for Clonk Rust in 2026.
