@@ -194,6 +194,9 @@ pub enum NavMove {
     Climb,
     /// Swim in a straight line through liquid.
     Swim,
+    /// Swim along the surface into a shore too shallow to swim on, until
+    /// DFA_SWIM's corner scale KneelUps the actor onto it.
+    Ashore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +257,7 @@ enum Edge {
     Climb { right: bool },
     JumpClimb { right: bool, grab: (i32, i32) },
     Swim,
+    Ashore { right: bool },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -802,8 +806,8 @@ impl<'a> Search<'a> {
 
     /// From a swimming position: a step through liquid in any of eight
     /// directions, all equally fast because DFA_SWIM limits each axis on its
-    /// own (C4Object.cpp:4976-4978), or scaling out up a wall the swimmer
-    /// pushes against (C4Object.cpp:4458-4467,4516-4526).
+    /// own (C4Object.cpp:4976-4978), scaling out up a wall the swimmer
+    /// pushes against (C4Object.cpp:4458-4467,4516-4526), or going ashore.
     fn swim_successors(&self, x: i32, y: i32, out: &mut Vec<((i32, i32), Edge, i32)>) {
         for (dx, dy) in [
             (-1, -1),
@@ -827,7 +831,36 @@ impl<'a> Search<'a> {
                     frames * COST_PER_FRAME,
                 ));
             }
+            if let Some((tx, ty)) = self.ashore(x, y, dir) {
+                out.push((
+                    (tx, ty),
+                    Edge::Ashore { right: dir > 0 },
+                    KNEEL_UP_FRAMES * COST_PER_FRAME,
+                ));
+            }
         }
+    }
+
+    /// A swimmer at the surface, with nothing liquid above its centre, whose
+    /// step on in `dir` puts its bottom vertex in solid corner-scales out
+    /// (C4Object.cpp:4375-4379): it moves to the first spot two to
+    /// CornerRange pixels across and as many up, nearest first, where no
+    /// vertex with a contact side is in solid, and KneelUp stands it there
+    /// (C4ObjectCom.cpp:191-218). Returns the standing position.
+    fn ashore(&self, x: i32, y: i32, dir: i32) -> Option<(i32, i32)> {
+        let grounded = self
+            .actor
+            .body
+            .vertices()
+            .filter(|(_, _, cnat)| cnat & CNAT_BOTTOM != 0)
+            .any(|(vx, vy, _)| self.landscape.is_solid_at(x + dir + vx, y + vy));
+        if !grounded || self.landscape.is_liquid_at(x, y - 1) {
+            return None;
+        }
+        let (kx, ky) = (2..=CORNER_RANGE)
+            .map(|range| (x + dir * range, y - range))
+            .find(|&(kx, ky)| self.in_bounds(kx, ky) && self.corner_free(kx, ky))?;
+        self.kneel(kx, ky)
     }
 
     fn run(&self, start: (i32, i32), goal: NavGoal, budget: usize) -> Option<NavPlan> {
@@ -981,6 +1014,16 @@ impl<'a> Search<'a> {
                         x: to.0,
                         y: to.1,
                         movement: NavMove::Climb,
+                        right,
+                        frames,
+                    });
+                }
+                Edge::Ashore { right } => {
+                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
+                    waypoints.push(NavWaypoint {
+                        x: to.0,
+                        y: to.1,
+                        movement: NavMove::Ashore,
                         right,
                         frames,
                     });
@@ -1626,6 +1669,42 @@ mod tests {
             40_000
         )
         .is_none());
+    }
+
+    /// Water from x=150 to x=299 below the ground line, 40 px deep, but for
+    /// a beach at its right end: the floor rises one pixel for every `run`
+    /// across, to meet the ground at x=300.
+    fn beach(run: i32) -> Vec<(i32, i32, i32, i32)> {
+        (150..=299)
+            .map(|x| (x, G, x, G + 40.min((299 - x) / run + 1) - 1))
+            .collect()
+    }
+
+    #[test]
+    fn swims_ashore_up_a_beach_it_cannot_climb() {
+        // Measured with the engine at ground 140: a swimmer pushing right
+        // along the surface meets this beach's floor with its bottom vertex
+        // on the step to x=282, corner-scales out, KneelUps at (283,G-2)
+        // and stands at (283,G-1) (clonk-org/clonk-rs#1728).
+        let pool = flooded_terrain(&[], &beach(2));
+        let plan = plan(
+            &pool,
+            &clonk(false),
+            Vector2::new(120, G - 10),
+            goal(350, G - 10),
+            40_000,
+        )
+        .expect("ashore up the beach");
+        let ashore = plan
+            .waypoints
+            .iter()
+            .find(|waypoint| waypoint.movement == NavMove::Ashore)
+            .expect("an ashore");
+        assert_eq!(
+            (ashore.x, ashore.y, ashore.right),
+            (283, G - 1, true),
+            "{plan:?}"
+        );
     }
 
     #[test]

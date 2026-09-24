@@ -917,18 +917,22 @@ pub(in crate::command) enum NavigationKind {
     Legacy,
     /// A straight swim through liquid, steered along both axes.
     Swim,
+    /// A swim along the surface into the shore, which corner-scales the
+    /// actor out onto it.
+    Ashore,
 }
 
 impl NavigationKind {
     /// Indexed by the kind bits of a MoveTo's Data, which savegames and
     /// runtime joins carry: new kinds are appended, never inserted.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Walk,
         Self::Drop,
         Self::Jump,
         Self::Climb,
         Self::Legacy,
         Self::Swim,
+        Self::Ashore,
     ];
 
     pub(in crate::command) fn from_data(data: i32) -> Option<(Self, bool)> {
@@ -955,6 +959,7 @@ impl NavigationKind {
             navigation::NavMove::Jump => Self::Jump,
             navigation::NavMove::Climb => Self::Climb,
             navigation::NavMove::Swim => Self::Swim,
+            navigation::NavMove::Ashore => Self::Ashore,
         }
     }
 }
@@ -1211,8 +1216,20 @@ impl MoveToState {
                 CommandStepResult::failed(None)
             };
         }
+        if procedure == ActionProcedure::Swim && kind == NavigationKind::Ashore {
+            // Up as well as on: DFA_SWIM holds a swimmer at the surface
+            // (C4Object.cpp:4979-4980), the one place where meeting the
+            // shore with its bottom corner-scales it out (C4Object.cpp:
+            // 4375-4379). Once it kneels up, it finishes like a walk.
+            let up_and_on = if right {
+                CommandDirection::UpRight
+            } else {
+                CommandDirection::UpLeft
+            };
+            return self.steer_toward(ctx, up_and_on);
+        }
         match kind {
-            NavigationKind::Walk | NavigationKind::Legacy => {
+            NavigationKind::Walk | NavigationKind::Legacy | NavigationKind::Ashore => {
                 if arrived {
                     return self.arrive();
                 }
