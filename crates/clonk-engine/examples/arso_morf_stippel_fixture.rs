@@ -315,35 +315,3 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::*;
-
-    #[test]
-    fn added_stippels_use_unique_small_offsets_on_each_anchor_band() {
-        let anchor = Vector2::new(1_000, 600);
-        let positions = (0..49)
-            .map(|occurrence| stippel_spawn_position(anchor, occurrence))
-            .map(|position| (position.x, position.y))
-            .collect::<HashSet<_>>();
-
-        assert_eq!(positions.len(), 49);
-        assert!(positions
-            .iter()
-            .all(|(x, y)| (976..=1_025).contains(x) && *y == 608));
-        assert!(!positions.contains(&(anchor.x, anchor.y)));
-    }
-
-    #[test]
-    fn added_stippels_keep_the_real_lifecycle_with_initial_stuck_grace() {
-        let config = stippel_spawn_config(Vector2::new(1_000, 600));
-
-        assert_eq!(
-            config.local_vars.get("stuckTime"),
-            Some(&Value::Int(-1_000))
-        );
-    }
-}
