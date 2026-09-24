@@ -617,12 +617,12 @@ impl InstallDefinitionResolver {
     }
 
     fn sanitize_identifier(identifier: &str) -> Option<PathBuf> {
-        let mut slice = identifier.trim();
-        if slice.is_empty() {
+        // C4Group::Open converts only backslashes (C4Group.cpp:665-668), so
+        // whitespace and quotes around a module name stay part of it.
+        if identifier.is_empty() {
             return None;
         }
-        slice = slice.trim_matches(|c| c == '"' || c == '\'');
-        let normalized = slice.replace('\\', "/");
+        let normalized = identifier.replace('\\', "/");
         let absolute = path_from_group_name_bytes(&clonk_script::c4_string_bytes(&normalized));
         if absolute.is_absolute() {
             return Some(absolute);
