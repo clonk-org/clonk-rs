@@ -19,11 +19,20 @@ type CorpusRect = (i32, i32, i32, i32, bool);
 /// Vehicle is in the material table, as in all real content, so the site's
 /// SolidMask is baked into the pixel plane the planner reads.
 fn corpus_landscape(rects: &[CorpusRect]) -> Landscape {
-    let mut solid = vec![false; CORPUS_WIDTH * CORPUS_HEIGHT];
-    let mut set = |x0: i32, y0: i32, x1: i32, y1: i32, value: bool| {
+    flooded_corpus_landscape(rects, &[])
+}
+
+/// [`corpus_landscape`], then each (x0, y0, x1, y1) rect of `water` filled
+/// with Water.
+fn flooded_corpus_landscape(rects: &[CorpusRect], water: &[(i32, i32, i32, i32)]) -> Landscape {
+    const SKY: u8 = 0;
+    const EARTH: u8 = 1;
+    const WATER: u8 = 3;
+    let mut pixels = vec![SKY; CORPUS_WIDTH * CORPUS_HEIGHT];
+    let mut set = |x0: i32, y0: i32, x1: i32, y1: i32, pixel: u8| {
         for y in y0.max(0)..=y1.min(CORPUS_HEIGHT as i32 - 1) {
             for x in x0.max(0)..=x1.min(CORPUS_WIDTH as i32 - 1) {
-                solid[y as usize * CORPUS_WIDTH + x as usize] = value;
+                pixels[y as usize * CORPUS_WIDTH + x as usize] = pixel;
             }
         }
     };
@@ -32,25 +41,33 @@ fn corpus_landscape(rects: &[CorpusRect]) -> Landscape {
         CORPUS_GROUND,
         CORPUS_WIDTH as i32 - 1,
         CORPUS_HEIGHT as i32 - 1,
-        true,
+        EARTH,
     );
-    for &(x0, y0, x1, y1, value) in rects {
-        set(x0, y0, x1, y1, value);
+    for &(x0, y0, x1, y1, solid) in rects {
+        set(x0, y0, x1, y1, if solid { EARTH } else { SKY });
+    }
+    for &(x0, y0, x1, y1) in water {
+        set(x0, y0, x1, y1, WATER);
     }
     let heights = (0..CORPUS_WIDTH)
         .map(|x| {
             (0..CORPUS_HEIGHT)
-                .find(|&y| solid[y * CORPUS_WIDTH + x])
+                .find(|&y| pixels[y * CORPUS_WIDTH + x] == EARTH)
                 .unwrap_or(CORPUS_HEIGHT) as i32
         })
         .collect();
     let grid = clonk_engine::landscape::PixelGrid::new(
         CORPUS_WIDTH as u32,
         CORPUS_HEIGHT as u32,
-        solid.iter().map(|&value| u8::from(value)).collect(),
-        vec![0, 80, 100],
-        vec![None, Some("Earth".to_string()), Some("Vehicle".to_string())],
-        vec![None; 3],
+        pixels,
+        vec![0, 80, 100, 25],
+        vec![
+            None,
+            Some("Earth".to_string()),
+            Some("Vehicle".to_string()),
+            Some("Water".to_string()),
+        ],
+        vec![None; 4],
     );
     let mut landscape = Landscape::new(CORPUS_WIDTH as u32, heights).test_value();
     landscape.set_world_height(CORPUS_HEIGHT as i32);
