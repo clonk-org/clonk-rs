@@ -2138,6 +2138,7 @@ where
             return Vec::new();
         };
         let landscape = context.world.landscape_shared();
+        let materials = context.world.materials.clone();
         let runtime = CommandRuntimeContext {
             rng: None,
             frame: context.world.frame,
@@ -2152,6 +2153,7 @@ where
             base_sell_enabled: context.world.base_sell_enabled,
             transfer_zones: &transfers,
             navigation_ai: context.world.navigation_ai,
+            materials: materials.as_deref(),
         };
         let Some(mut result) = context
             .object_scope_mut(actor)
@@ -2359,6 +2361,7 @@ fn preview_build_stop(
             return Vec::new();
         };
         let landscape = context.world.landscape_shared();
+        let materials = context.world.materials.clone();
         let runtime = CommandRuntimeContext {
             rng: None,
             frame: context.world.frame,
@@ -2373,6 +2376,7 @@ fn preview_build_stop(
             base_sell_enabled: context.world.base_sell_enabled,
             transfer_zones: &transfers,
             navigation_ai: context.world.navigation_ai,
+            materials: materials.as_deref(),
         };
         let Some(scope) = context.object_scope_mut(actor) else {
             return Vec::new();

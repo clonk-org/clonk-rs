@@ -19,11 +19,30 @@ type CorpusRect = (i32, i32, i32, i32, bool);
 /// Vehicle is in the material table, as in all real content, so the site's
 /// SolidMask is baked into the pixel plane the planner reads.
 fn corpus_landscape(rects: &[CorpusRect]) -> Landscape {
-    let mut solid = vec![false; CORPUS_WIDTH * CORPUS_HEIGHT];
-    let mut set = |x0: i32, y0: i32, x1: i32, y1: i32, value: bool| {
+    flooded_corpus_landscape(rects, &[])
+}
+
+/// [`corpus_landscape`], then each (x0, y0, x1, y1) rect of `water` filled
+/// with Water.
+fn flooded_corpus_landscape(rects: &[CorpusRect], water: &[(i32, i32, i32, i32)]) -> Landscape {
+    liquid_corpus_landscape(rects, "Water", water)
+}
+
+/// [`corpus_landscape`], then each (x0, y0, x1, y1) rect of `liquid` filled
+/// with the liquid material `name`.
+fn liquid_corpus_landscape(
+    rects: &[CorpusRect],
+    name: &str,
+    liquid: &[(i32, i32, i32, i32)],
+) -> Landscape {
+    const SKY: u8 = 0;
+    const EARTH: u8 = 1;
+    const LIQUID: u8 = 3;
+    let mut pixels = vec![SKY; CORPUS_WIDTH * CORPUS_HEIGHT];
+    let mut set = |x0: i32, y0: i32, x1: i32, y1: i32, pixel: u8| {
         for y in y0.max(0)..=y1.min(CORPUS_HEIGHT as i32 - 1) {
             for x in x0.max(0)..=x1.min(CORPUS_WIDTH as i32 - 1) {
-                solid[y as usize * CORPUS_WIDTH + x as usize] = value;
+                pixels[y as usize * CORPUS_WIDTH + x as usize] = pixel;
             }
         }
     };
@@ -32,25 +51,33 @@ fn corpus_landscape(rects: &[CorpusRect]) -> Landscape {
         CORPUS_GROUND,
         CORPUS_WIDTH as i32 - 1,
         CORPUS_HEIGHT as i32 - 1,
-        true,
+        EARTH,
     );
-    for &(x0, y0, x1, y1, value) in rects {
-        set(x0, y0, x1, y1, value);
+    for &(x0, y0, x1, y1, solid) in rects {
+        set(x0, y0, x1, y1, if solid { EARTH } else { SKY });
+    }
+    for &(x0, y0, x1, y1) in liquid {
+        set(x0, y0, x1, y1, LIQUID);
     }
     let heights = (0..CORPUS_WIDTH)
         .map(|x| {
             (0..CORPUS_HEIGHT)
-                .find(|&y| solid[y * CORPUS_WIDTH + x])
+                .find(|&y| pixels[y * CORPUS_WIDTH + x] == EARTH)
                 .unwrap_or(CORPUS_HEIGHT) as i32
         })
         .collect();
     let grid = clonk_engine::landscape::PixelGrid::new(
         CORPUS_WIDTH as u32,
         CORPUS_HEIGHT as u32,
-        solid.iter().map(|&value| u8::from(value)).collect(),
-        vec![0, 80, 100],
-        vec![None, Some("Earth".to_string()), Some("Vehicle".to_string())],
-        vec![None; 3],
+        pixels,
+        vec![0, 80, 100, 25],
+        vec![
+            None,
+            Some("Earth".to_string()),
+            Some("Vehicle".to_string()),
+            Some(name.to_string()),
+        ],
+        vec![None; 4],
     );
     let mut landscape = Landscape::new(CORPUS_WIDTH as u32, heights).test_value();
     landscape.set_world_height(CORPUS_HEIGHT as i32);
@@ -284,6 +311,179 @@ fn navigation_fetches_the_reachable_rock_over_a_nearer_unreachable_one() {
             "the nearer rock is {name}: {outcome:?}"
         );
     }
+}
+
+#[test]
+fn navigation_fetches_construction_material_across_a_pool() {
+    // A pool 100 px wide and 40 deep, too wide to jump, lies between the
+    // site and the rock. The builder swims it and scales out, both ways
+    // (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(&[], &[(200, g, 299, g + 39)]));
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(150, g - 4)],
+        CORPUS_FRAMES,
+    );
+    assert!(
+        matches!(outcome, FetchOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn navigation_will_not_swim_for_construction_material_through_acid() {
+    // The pool the builder swims across in water holds the content's Acid
+    // here, which costs a swimmer energy every ten frames (C4Object.cpp:
+    // 923-930), so no route crosses it and the builder gives up.
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(liquid_corpus_landscape(
+        &[],
+        "Acid",
+        &[(200, g, 299, g + 39)],
+    ));
+    let energy = engine.snapshot().object(clonk).test_value().energy;
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(150, g - 4)],
+        CORPUS_FRAMES,
+    );
+    let snapshot = engine.snapshot();
+    let builder = snapshot.object(clonk).test_value();
+    assert!(
+        matches!(outcome, FetchOutcome::GaveUp { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        builder.alive && builder.energy == energy,
+        "the builder must stay out of the acid: alive {}, energy {} of {energy} at {:?}",
+        builder.alive,
+        builder.energy,
+        builder.position
+    );
+}
+
+#[test]
+fn navigation_fetches_construction_material_through_an_underwater_tunnel() {
+    // The pool is split by a barrier reaching the top of the map and 15 px
+    // below the surface; the only way past is the tunnel under it, a dive
+    // well within one breath (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(
+        &[(250, 0, 269, g + 15, true)],
+        &[
+            (180, g, 249, g + 35),
+            (270, g, 339, g + 35),
+            (250, g + 16, 269, g + 35),
+        ],
+    ));
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(150, g - 4)],
+        CORPUS_FRAMES,
+    );
+    assert!(
+        matches!(outcome, FetchOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// Water from x=150 to x=299 below the ground line, 40 px deep, but for a
+/// beach at its right end: the floor rises one pixel for every `run` across,
+/// to meet the ground at x=300.
+fn beach_pool(run: i32) -> Vec<(i32, i32, i32, i32)> {
+    let g = CORPUS_GROUND;
+    (150..=299)
+        .map(|x| (x, g, x, g + 40.min((299 - x) / run + 1) - 1))
+        .collect()
+}
+
+/// Clear the map down to the crew, put the Clonk at `from` and order it to
+/// `to` as its player would, then run `frames` frames. Returns where the
+/// Clonk ended up and whether it is still alive.
+fn move_to(
+    engine: &mut Engine,
+    owner: i32,
+    clonk: ObjectId,
+    from: Vector2,
+    to: Vector2,
+    frames: usize,
+) -> (Vector2, bool) {
+    engine
+        .apply_scenario_script_edit("NavigationCorpus", CORPUS_CLEAR_SCRIPT)
+        .test_value();
+    corpus_script(engine, "CorpusClear()");
+    engine
+        .apply_object_update(clonk, ObjectUpdate::new().with_position(from))
+        .test_value();
+    engine
+        .execute_player_command(owner, CommandId::MoveTo as i32, to.x, to.y, 0, 0, 0, 1)
+        .test_value();
+    for _ in 0..frames {
+        engine.test_tick();
+    }
+    let snapshot = engine.snapshot();
+    let clonk = snapshot.object(clonk).test_value();
+    (clonk.position, clonk.alive)
+}
+
+#[test]
+fn navigation_swims_a_clonk_out_of_a_pool_up_its_beach() {
+    // Measured with the LegacyClonk profile's MoveTo: steered at the far
+    // side, the swimmer KneelUps onto the beach where its floor comes within
+    // a body of the surface, at (283,138), and walks on. Ordered from under
+    // the surface, the Clonk must not idle there until it drowns
+    // (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(&[], &beach_pool(2)));
+    let (position, alive) = move_to(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(200, g + 5),
+        Vector2::new(400, g - 10),
+        CORPUS_FRAMES,
+    );
+    assert!(alive, "drowned at {position:?}");
+    assert!(
+        (position.x - 400).abs() <= 3 && (position.y - (g - 10)).abs() <= 3,
+        "{position:?}"
+    );
+}
+
+#[test]
+fn navigation_fetches_construction_material_across_a_pool_with_a_beach() {
+    // The site is past the pool's beach and the rock past its far wall, so
+    // the builder swims across and back, in and out once by the beach and
+    // once by the wall (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(&[], &beach_pool(2)));
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(100, g - 4)],
+        CORPUS_FRAMES,
+    );
+    assert!(
+        matches!(outcome, FetchOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
 }
 
 /// Frames a fetch on the real Frontier map may take. The stranded builder

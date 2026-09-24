@@ -215,6 +215,7 @@
             crew_member: false,
             selected: false,
             alive: true,
+            breath: 0,
             need_energy: false,
             on_fire: false,
             contents: Vec::new(),
@@ -350,6 +351,7 @@
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
             navigation_ai: false,
+            materials: None,
         }
     }
 

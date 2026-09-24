@@ -839,6 +839,7 @@ impl Engine {
             crew_member: object.state.crew_member,
             selected: object.state.selected,
             alive: object.state.alive,
+            breath: object.state.breath,
             need_energy: object.state.need_energy,
             on_fire: object.state.on_fire,
             contents: object.state.contents.clone(),
@@ -1088,6 +1089,7 @@ impl Engine {
             base_sell_enabled: self.base_sell_enabled,
             transfer_zones: &transfer_zones,
             navigation_ai: self.navigation_ai,
+            materials: Some(&self.materials),
         };
         let command_gravity = self.physics.gravity_as_c4fixed();
         let result = match resume {

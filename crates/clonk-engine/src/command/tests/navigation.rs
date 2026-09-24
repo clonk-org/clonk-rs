@@ -229,6 +229,42 @@
     }
 
     #[test]
+    fn navigation_plans_with_the_breath_the_actor_has_left() {
+        // A plan made under water may spend only the breath still left
+        // (C4Object.cpp:880-921): 10000 of CLNK's 50000 Breath lasts 25 of
+        // its 125 frames (clonk-org/clonk-rs#1728).
+        let landscape = navigation_terrain(&[]);
+        let mut swimmer = navigating_clonk(Vector2::new(200, NAV_GROUND - 10));
+        swimmer.physical.breath = 50_000;
+        swimmer.breath = 10_000;
+        let actor = navigation_actor(&nav_jump_ctx(&swimmer, &landscape), crate::C4Fixed::ZERO);
+        assert_eq!(actor.breath_held, 100);
+    }
+
+    #[test]
+    fn navigation_swim_waypoint_walks_a_walker_in() {
+        // A plan that wades in starts its swim on the shore: the walker walks
+        // on until its centre is in the liquid and it swims
+        // (clonk-org/clonk-rs#1728).
+        let landscape = navigation_terrain(&[]);
+        let swim = NavigationKind::Swim.data(false);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(request!(MoveTo, with_tx: Some(180), with_ty: Some(NAV_GROUND - 10), with_data: CommandData::Integer(swim), with_update_interval: 60, with_evaluated: true, with_mode: CommandMode::SilentSub))
+            .expect("waypoint queues");
+
+        let walker = navigating_clonk(Vector2::new(200, NAV_GROUND - 10));
+        let wading = stack
+            .step(&nav_jump_ctx(&walker, &landscape))
+            .expect("walker wades in");
+        assert_eq!(wading.status, CommandStatus::Running);
+        assert_eq!(
+            wading.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Left)
+        );
+    }
+
+    #[test]
     fn navigation_jump_waypoint_launches_once_and_fails_on_a_wrong_landing() {
         let landscape = navigation_terrain(&[]);
         let jump = NavigationKind::Jump.data(true);

@@ -512,6 +512,7 @@ impl Engine {
                                 selected.contains(&object.id)
                             }),
                         alive: object.state.alive,
+                        breath: object.state.breath,
                         need_energy: object.state.need_energy,
                         on_fire: object.state.on_fire,
                         contents: object.state.contents.clone(),
@@ -876,6 +877,7 @@ impl Engine {
                             base_sell_enabled: self.base_sell_enabled,
                             transfer_zones: &self.transfer_zones,
                             navigation_ai: self.navigation_ai,
+                            materials: Some(&self.materials),
                         };
                         let result = object.step_command_stack(command_context, command_gravity);
                         self.rng = command_rng.take();
@@ -2033,6 +2035,7 @@ impl Engine {
                         crew_member: self.objects[idx].state.crew_member,
                         selected: self.objects[idx].state.selected,
                         alive: self.objects[idx].state.alive,
+                        breath: self.objects[idx].state.breath,
                         need_energy: self.objects[idx].state.need_energy,
                         on_fire: self.objects[idx].state.on_fire,
                         contents: self.objects[idx].state.contents.clone(),

@@ -5761,6 +5761,10 @@ impl EffectHostContext {
                         .unwrap_or(false),
                     selected,
                     alive: scope.map(ObjectScopeContext::alive).unwrap_or(object.alive),
+                    breath: scope
+                        .map(ObjectScopeContext::breath)
+                        .or_else(|| object.full_state().map(|state| state.breath))
+                        .unwrap_or(0),
                     need_energy: scope
                         .map(ObjectScopeContext::need_energy)
                         .unwrap_or(object.need_energy),
@@ -5868,6 +5872,7 @@ impl EffectHostContext {
         let (objects, players, definitions, transfers) = command_data;
         let object_snapshot = objects.get(&target)?;
         let landscape = self.world.landscape_shared();
+        let materials = self.world.materials.clone();
         let context = CommandRuntimeContext {
             rng,
             frame: self.world.frame,
@@ -5882,6 +5887,7 @@ impl EffectHostContext {
             base_sell_enabled: self.world.base_sell_enabled,
             transfer_zones: transfers,
             navigation_ai: self.world.navigation_ai,
+            materials: materials.as_deref(),
         };
         let gravity = PHYSICS_CONTEXT.with(|cell| {
             cell.borrow()
@@ -5928,6 +5934,7 @@ impl EffectHostContext {
         let (objects, players, definitions, transfers) = command_data;
         let object_snapshot = objects.get(&target)?;
         let landscape = self.world.landscape_shared();
+        let materials = self.world.materials.clone();
         let context = CommandRuntimeContext {
             rng,
             frame: self.world.frame,
@@ -5942,6 +5949,7 @@ impl EffectHostContext {
             base_sell_enabled: self.world.base_sell_enabled,
             transfer_zones: transfers,
             navigation_ai: self.world.navigation_ai,
+            materials: materials.as_deref(),
         };
         let gravity = PHYSICS_CONTEXT.with(|cell| {
             cell.borrow()
