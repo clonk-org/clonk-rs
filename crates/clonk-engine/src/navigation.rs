@@ -312,6 +312,8 @@ impl Landing {
 
 enum WalkStep {
     Stand(i32),
+    /// The step puts the walker's centre in liquid, where it swims.
+    Wade(i32),
     Ledge,
     Wall,
 }
@@ -458,6 +460,10 @@ impl<'a> Search<'a> {
                 }
                 if self.standing(nx, y + down) {
                     return WalkStep::Stand(y + down);
+                }
+                if self.swimming(nx, y + down) {
+                    // DFA_WALK's InLiquidAction (C4Object.cpp:4758-4763).
+                    return WalkStep::Wade(y + down);
                 }
             }
             return WalkStep::Ledge;
@@ -750,6 +756,9 @@ impl<'a> Search<'a> {
             let mut at_edge = false;
             match self.walk(x, y, dir) {
                 WalkStep::Stand(ny) => out.push(((x + dir, ny), Edge::Walk, self.walk_cost)),
+                // Walking in starts the swim: its first Swim waypoint is
+                // where the walker's centre meets the liquid.
+                WalkStep::Wade(ny) => out.push(((x + dir, ny), Edge::Swim, self.walk_cost)),
                 WalkStep::Ledge => {
                     at_edge = true;
                     if let Some((lx, ly, frames)) = self.robust_drop(x, y, dir) {
@@ -1704,6 +1713,24 @@ mod tests {
             (ashore.x, ashore.y, ashore.right),
             (283, G - 1, true),
             "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn walking_down_a_beach_into_the_water_starts_a_swim() {
+        // Measured with the engine at ground 140: walking left down this
+        // beach, CLNK is on its feet at (283,G-1), steps on to (281,G) with
+        // its centre in the water, and swims from the next frame
+        // (clonk-org/clonk-rs#1728).
+        let pool = flooded_terrain(&[], &beach(2));
+        let actor = clonk(true);
+        let search = Search::new(&pool, &actor, Vector2::new(350, G - 10), goal(100, G - 10));
+        let mut out = Vec::new();
+        search.successors(282, G - 1, &mut out);
+        assert!(
+            out.iter()
+                .any(|&(to, edge, _)| to == (281, G) && edge == Edge::Swim),
+            "{out:?}"
         );
     }
 

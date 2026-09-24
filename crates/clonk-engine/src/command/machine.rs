@@ -1312,10 +1312,11 @@ impl MoveToState {
             }
             NavigationKind::Swim => {
                 if procedure != ActionProcedure::Swim {
-                    // Still falling in, wait; on its feet already, the swim
-                    // ended off plan.
+                    // On its feet, walk on in: DFA_WALK's InLiquidAction
+                    // makes it swim (C4Object.cpp:4758-4763). Still falling
+                    // in, wait.
                     return if procedure == ActionProcedure::Walk {
-                        CommandStepResult::failed(None)
+                        self.steer_toward(ctx, toward_target)
                     } else {
                         CommandStepResult::running(None)
                     };
