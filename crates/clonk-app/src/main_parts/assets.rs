@@ -6465,6 +6465,7 @@ pub(crate) struct FrontendAssets {
     pub(crate) startup_global_tooltip_font: Option<Arc<clonk_graphics::clonk_font::ClonkFont>>,
     pub(crate) logo: Option<ImageData>,
     pub(crate) button_textures: Option<ButtonTextures>,
+    pub(crate) hd_main_menu_button_textures: Option<(ImageData, ImageData)>,
     /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
     /// (C4GraphicsResource.cpp:1089-1093, C4GuiButton.cpp:94-98).
     pub(crate) button_highlight: Option<ImageData>,
@@ -6605,6 +6606,7 @@ impl FrontendAssets {
         let mut about_background = None;
         let mut logo = None;
         let mut button_textures = None;
+        let mut hd_main_menu_button_textures = None;
         let mut sprites = HashMap::new();
         let mut cursor_atlas = CursorAtlas::empty();
         let mut hud_graphics = HudGraphics::default();
@@ -6639,6 +6641,8 @@ impl FrontendAssets {
                         .ok()
                         .map(Self::image_to_data);
                     button_textures = Self::load_button_textures(&graphics);
+                    hd_main_menu_button_textures =
+                        Self::load_hd_main_menu_button_textures(&graphics);
                     if let Ok(sprite) = graphics.load_image("Crew.png") {
                         let image = Self::image_to_data(sprite);
                         sprites.insert(
@@ -6782,6 +6786,7 @@ impl FrontendAssets {
             about_background,
             logo,
             button_textures,
+            hd_main_menu_button_textures,
             button_highlight,
             game_over_button_highlight,
             startup_dialog_images,
@@ -8120,6 +8125,18 @@ impl FrontendAssets {
             selected,
             disabled: Some(disabled),
         })
+    }
+
+    fn load_hd_main_menu_button_textures(
+        graphics: &GraphicsResource,
+    ) -> Option<(ImageData, ImageData)> {
+        let normal = graphics.load_image("StartupBigButtonHD.png").ok()?;
+        let pressed = graphics.load_image("StartupBigButtonDownHD.png").ok()?;
+        (normal.width() == 2052
+            && normal.height() == 160
+            && pressed.width() == 2052
+            && pressed.height() == 160)
+            .then(|| (Self::image_to_data(normal), Self::image_to_data(pressed)))
     }
 
     fn load_cursor_atlas(graphics: &GraphicsResource) -> CursorAtlas {

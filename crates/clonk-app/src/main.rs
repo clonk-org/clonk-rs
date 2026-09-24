@@ -2889,6 +2889,7 @@ impl GameApp {
             .map_err(|err| anyhow!("failed to create startup menu: {err}"))?;
         menu.resize(width as f32, height as f32);
         let mut main_menu = StartupMainMenu::new(assets.font_arc(), button_textures.clone());
+        main_menu.set_hd_button_textures(assets.hd_main_menu_button_textures.clone());
         main_menu.set_highlight_texture(assets.button_highlight.clone());
         main_menu.set_clonk_fonts(assets.clonk_fonts.clone());
         main_menu.set_gamma_ramp(

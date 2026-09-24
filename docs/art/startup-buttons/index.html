@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Clonk main-menu button review</title>
+    <link rel="stylesheet" href="review.css?v=4">
+    <script src="review.js?v=11" defer></script>
+  </head>
+  <body>
+    <main>
+      <header class="intro">
+        <p class="eyebrow">Clonk art review</p>
+        <h1>Main-menu buttons</h1>
+        <p>Higher-resolution wood, trim, and fasteners for the six main-menu buttons. Compare the original and HD artwork at the same size, then drag the divider to inspect details.</p>
+        <p class="review-note">Implemented in the Rust main menu; original artwork retained for comparison.</p>
+      </header>
+
+      <section class="capture" aria-labelledby="implemented-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Implemented result</p>
+            <h2 id="implemented-title">Buttons in the Rust game</h2>
+          </div>
+          <span class="pill">1280 × 720 headless menu render</span>
+        </div>
+        <div class="game-grid">
+          <figure><img src="implemented-buttons-before.png" alt="The six original wooden buttons rendered in the Rust startup menu"><figcaption>Before · original game artwork</figcaption></figure>
+          <figure><img src="implemented-buttons.png" alt="The six HD wooden buttons rendered in the Rust startup menu"><figcaption>After · refined HD artwork</figcaption></figure>
+        </div>
+        <p class="hint">Matching 1280 × 720 game captures, cropped to the button column. <a href="implemented-menu.png">View the full HD frame</a>.</p>
+      </section>
+
+      <section class="capture" aria-labelledby="capture-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Reference</p>
+            <h2 id="capture-title">Current game capture</h2>
+          </div>
+          <span class="pill">Provided screenshot</span>
+        </div>
+        <img src="original-game-capture.png" alt="Original Exit button in the Clonk main menu, with orange wood, four metal fasteners, and yellow lettering">
+      </section>
+
+      <section class="workbench" aria-labelledby="compare-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Interactive comparison</p>
+            <h2 id="compare-title">Before and after</h2>
+          </div>
+          <span class="pill">Same three-slice layout</span>
+        </div>
+
+        <div class="controls">
+          <label class="control">Button label
+            <select id="button-label">
+              <option>Exit</option>
+              <option>Local Game</option>
+              <option>Network Game</option>
+              <option>Player Selection</option>
+              <option>Options</option>
+              <option>About</option>
+            </select>
+          </label>
+          <div class="control">
+            <span>State</span>
+            <div class="segmented" role="group" aria-label="Button state">
+              <button id="normal-state" type="button" aria-pressed="true">Normal</button>
+              <button id="pressed-state" type="button" aria-pressed="false">Pressed</button>
+            </div>
+          </div>
+          <label class="control width-control">Button width <strong id="width-value">414 px</strong>
+            <input id="button-width" type="range" min="224" max="600" value="414">
+          </label>
+        </div>
+
+        <div class="comparison-row">
+          <div class="comparison-label"><span class="status-dot before-dot"></span><strong>Original</strong><small>224 × 40 source</small></div>
+          <div class="button-stage"><canvas id="before-canvas" class="rendered" role="img" aria-label="Original button artwork"></canvas></div>
+        </div>
+        <div class="comparison-row">
+          <div class="comparison-label"><span class="status-dot after-dot"></span><strong>HD in game</strong><small>2052 × 160 source</small></div>
+          <div class="button-stage"><canvas id="after-canvas" class="rendered" role="img" aria-label="Higher-resolution button artwork used in the Rust game"></canvas></div>
+        </div>
+
+        <div class="wipe-area">
+          <div class="wipe-header"><strong>Drag to compare</strong><span>Original <span aria-hidden="true">↔</span> HD in game</span></div>
+          <div id="wipe-stage" class="button-stage wipe-stage" aria-label="Drag horizontally to compare original and HD buttons">
+            <canvas id="wipe-before" aria-hidden="true"></canvas>
+            <canvas id="wipe-after" aria-hidden="true"></canvas>
+            <div id="wipe-divider" class="wipe-divider" aria-hidden="true"><span>↔</span></div>
+          </div>
+          <label class="sr-only" for="compare-range">Before and after divider</label>
+          <input id="compare-range" class="compare-range" type="range" min="0" max="100" value="50">
+        </div>
+        <p class="hint">Change the width to check how the wood adapts. The original tiles its middle; the HD artwork uses a continuous center strip. Click either standalone button to toggle its pressed state.</p>
+      </section>
+
+      <section class="grain-review" aria-labelledby="grain-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Wood surface revision</p>
+            <h2 id="grain-title">Finer, lengthwise grain</h2>
+          </div>
+          <span class="pill">Same shape and nailheads</span>
+        </div>
+        <div class="comparison-row">
+          <div class="comparison-label"><span class="status-dot before-dot"></span><strong>Current HD grain</strong></div>
+          <div class="button-stage"><canvas id="grain-before-canvas" class="rendered" role="img" aria-label="Current higher-resolution button grain"></canvas></div>
+        </div>
+        <div class="comparison-row">
+          <div class="comparison-label"><span class="status-dot after-dot"></span><strong>Refined HD grain</strong></div>
+          <div class="button-stage"><canvas id="grain-after-canvas" class="rendered" role="img" aria-label="Refined higher-resolution button grain"></canvas></div>
+        </div>
+        <div class="wipe-area">
+          <div class="wipe-header"><strong>Drag to compare the grain</strong><span>Current HD <span aria-hidden="true">↔</span> Refined HD</span></div>
+          <div id="grain-wipe-stage" class="button-stage wipe-stage" aria-label="Drag horizontally to compare current and refined wood grain">
+            <canvas id="grain-wipe-before" aria-hidden="true"></canvas>
+            <canvas id="grain-wipe-after" aria-hidden="true"></canvas>
+            <div id="grain-wipe-divider" class="wipe-divider" aria-hidden="true"><span>↔</span></div>
+          </div>
+          <label class="sr-only" for="grain-compare-range">Wood grain comparison divider</label>
+          <input id="grain-compare-range" class="compare-range" type="range" min="0" max="100" value="50">
+        </div>
+        <p class="hint">The width, button label, and pressed-state controls above also update this comparison.</p>
+      </section>
+
+      <section class="detail" aria-labelledby="detail-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Right end</p>
+            <h2 id="detail-title">Nailhead detail</h2>
+          </div>
+          <span class="pill">Normal state · 414 px button</span>
+        </div>
+        <div class="detail-grid">
+          <figure><img src="right-end-original.png" alt="Magnified right end of the original button, with two compact nailheads"><figcaption>Original</figcaption></figure>
+          <figure><img src="right-end-hd.png" alt="Magnified right end of the revised HD button, with square nailheads"><figcaption>HD in game</figcaption></figure>
+        </div>
+      </section>
+
+      <section class="atlas" aria-labelledby="atlas-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Artwork</p>
+            <h2 id="atlas-title">Source strips</h2>
+          </div>
+        </div>
+        <div class="atlas-grid">
+          <figure><img src="../../../planet/Graphics.c4g/StartupBigButton.png" alt="Original normal-state button strip"><figcaption>Original · normal</figcaption></figure>
+          <figure><img src="../../../planet/Graphics.c4g/StartupBigButtonHD.png" alt="Refined higher-resolution normal-state button strip"><figcaption>HD · normal</figcaption></figure>
+          <figure><img src="../../../planet/Graphics.c4g/StartupBigButtonDown.png" alt="Original pressed-state button strip"><figcaption>Original · pressed</figcaption></figure>
+          <figure><img src="../../../planet/Graphics.c4g/StartupBigButtonDownHD.png" alt="Refined higher-resolution pressed-state button strip"><figcaption>HD · pressed</figcaption></figure>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
