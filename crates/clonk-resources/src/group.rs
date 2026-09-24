@@ -233,16 +233,20 @@ impl InflatingImage {
     /// Up to `range.len()` bytes from `range.start`, fewer where the image ends.
     fn available(&self, range: Range<usize>) -> Result<Vec<u8>, GroupError> {
         if let Some(image) = self.complete.get() {
-            let end = range.end.min(image.len());
-            return Ok(image
-                .get(range.start.min(end)..end)
-                .unwrap_or_default()
-                .to_vec());
+            return Ok(available_in(image, range));
         }
         let mut state = self.lock()?;
+        self.available_locked(&mut state, range)
+    }
+
+    /// [`Self::available`] once the state lock is held.
+    fn available_locked(
+        &self,
+        state: &mut InflateState,
+        range: Range<usize>,
+    ) -> Result<Vec<u8>, GroupError> {
         state.inflate_to(range.end)?;
-        let end = range.end.min(state.output.len());
-        Ok(state.output[range.start.min(end)..end].to_vec())
+        Ok(available_in(&state.output, range))
     }
 
     /// The whole image.
@@ -398,6 +402,15 @@ impl InflateState {
         self.input += 8;
         Ok(())
     }
+}
+
+/// Up to `range.len()` bytes of `image` from `range.start`, fewer where it ends.
+fn available_in(image: &[u8], range: Range<usize>) -> Vec<u8> {
+    let end = range.end.min(image.len());
+    image
+        .get(range.start.min(end)..end)
+        .unwrap_or_default()
+        .to_vec()
 }
 
 /// The length of the gzip member header at the start of `bytes`, which may
