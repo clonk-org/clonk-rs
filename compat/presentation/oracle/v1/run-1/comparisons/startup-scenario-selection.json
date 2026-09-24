@@ -5,7 +5,7 @@
   },
   "case_id": "startup-scenario-selection",
   "comparator": {
-    "binary_sha256": "c186cfe2b729a8471eeaeba2b11de37ed53addd0d42bfeb36d104957d878a43b",
+    "binary_sha256": "0f57d5c3e76993e69c1664cb202a6e00246dc1c670d605422af2a7d342ca264d",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",
