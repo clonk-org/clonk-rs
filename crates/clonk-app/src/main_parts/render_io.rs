@@ -3448,6 +3448,22 @@ fn stock_test_crew(
     if repository != Some(paths.install_root()) || !definition_id.eq_ignore_ascii_case("CLNK") {
         return None;
     }
+    // Many app tests start a sandbox per case, and each start decoded the same
+    // stock crew graphics again. The stock resource does not change while
+    // tests run, so a test process loads it once and hands each sandbox its
+    // own copy.
+    static STOCK_CREW: std::sync::OnceLock<Option<ResourceDefinitionData>> =
+        std::sync::OnceLock::new();
+    STOCK_CREW
+        .get_or_init(|| load_stock_test_crew(objects_group, definition_id))
+        .clone()
+}
+
+#[cfg(test)]
+fn load_stock_test_crew(
+    objects_group: &Group,
+    definition_id: &str,
+) -> Option<ResourceDefinitionData> {
     let relative_path = Path::new("Crew.c4d/Clonk.c4d");
     let group = objects_group.open_child(relative_path).ok()?;
     let eligible = !group.exists("Particle.txt")
