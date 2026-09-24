@@ -878,19 +878,31 @@ mod tests {
 
     /// Solid ground below `G`, then each (x0, y0, x1, y1, solid) rectangle.
     fn terrain(rects: &[(i32, i32, i32, i32, bool)]) -> Landscape {
-        let mut solid = vec![0u8; W * H];
-        let mut set = |x0: i32, y0: i32, x1: i32, y1: i32, value: bool| {
+        flooded_terrain(rects, &[])
+    }
+
+    /// [`terrain`], then each (x0, y0, x1, y1) rectangle of `water` filled
+    /// with Water.
+    fn flooded_terrain(
+        rects: &[(i32, i32, i32, i32, bool)],
+        water: &[(i32, i32, i32, i32)],
+    ) -> Landscape {
+        let mut pixels = vec![0u8; W * H];
+        let mut set = |x0: i32, y0: i32, x1: i32, y1: i32, pixel: u8| {
             for y in y0.max(0)..=y1.min(H as i32 - 1) {
                 for x in x0.max(0)..=x1.min(W as i32 - 1) {
-                    solid[y as usize * W + x as usize] = u8::from(value);
+                    pixels[y as usize * W + x as usize] = pixel;
                 }
             }
         };
-        set(0, G, W as i32 - 1, H as i32 - 1, true);
-        for &(x0, y0, x1, y1, value) in rects {
-            set(x0, y0, x1, y1, value);
+        set(0, G, W as i32 - 1, H as i32 - 1, 1);
+        for &(x0, y0, x1, y1, solid) in rects {
+            set(x0, y0, x1, y1, u8::from(solid));
         }
-        grid_landscape(W, H, solid, G)
+        for &(x0, y0, x1, y1) in water {
+            set(x0, y0, x1, y1, 2);
+        }
+        grid_landscape(W, H, pixels, G)
     }
 
     /// A `width` x `height` landscape of sky (0), Earth (1) and Water (2)
