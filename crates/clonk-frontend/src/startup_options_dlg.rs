@@ -4834,8 +4834,9 @@ pub(crate) fn draw_book_scroll_pin(
 /// One vertical-gfx facet of `DrawHBarByVGfx` (C4Gui.cpp:347-361): the 16px
 /// wide facet at `(src_x, src_y, 16, src_h)` rotated -90 degrees about the
 /// bar's left end. Dest pixel `(dest_x + dx, dest_y + dy)` samples texel
-/// `(src_x + 15 - dy, src_y + dx)` — the integer-aligned rotation lands
-/// exactly on texel centers.
+/// `(src_x + 15 - dy, src_y + dx)`. Classic facets land exactly on texel
+/// centers; the high-resolution atlas scales source coordinates and uses
+/// bilinear sampling.
 fn draw_rotated_vfacet(
     surface: &mut Surface,
     image: &ImageData,
@@ -4846,9 +4847,18 @@ fn draw_rotated_vfacet(
     dest_y: i32,
     gamma: Option<&GammaRamp>,
 ) {
+    let scale = if image.width() > 48
+        && image.width() == image.height()
+        && image.width().is_multiple_of(48)
+    {
+        (image.width() / 48) as i32
+    } else {
+        1
+    };
     let renderer_config =
         crate::active_advanced_renderer_config().unwrap_or(crate::AdvancedRendererConfig::DEFAULT);
     if surface.is_gpu_scene_capture_active()
+        || scale > 1
         || renderer_config.tex_indent != 0
         || renderer_config.blit_offset != 0
     {
@@ -4864,10 +4874,10 @@ fn draw_rotated_vfacet(
             image,
             None,
             &crate::FloatSourceRect {
-                x: src_x as f32,
-                y: src_y as f32,
-                width: 16.0,
-                height: src_h as f32,
+                x: (src_x * scale) as f32,
+                y: (src_y * scale) as f32,
+                width: (16 * scale) as f32,
+                height: (src_h * scale) as f32,
             },
             BlitSampling::Linear,
             false,

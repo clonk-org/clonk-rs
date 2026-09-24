@@ -2535,6 +2535,20 @@ fn startup_tab_clip_resolution_follows_compatibility_profile() {
 }
 
 #[test]
+fn startup_slider_atlas_resolution_follows_compatibility_profile() {
+    use crate::settings::CompatProfile;
+
+    let assets = FrontendAssets::load(Some(&test_app_paths()));
+    for (profile, size) in [
+        (CompatProfile::LegacyClonk, (48, 48)),
+        (CompatProfile::Normal, (384, 384)),
+    ] {
+        let options = assets.options_dlg_assets(profile).test_value();
+        main_assert_eq!((options.book_scroll.width(), options.book_scroll.height()) => size);
+    }
+}
+
+#[test]
 fn full_body_wipf_is_shared_by_book_scrollbars_in_normal_profile() {
     use crate::settings::CompatProfile;
     let assets = FrontendAssets::load(Some(&test_app_paths()));
@@ -2554,7 +2568,7 @@ fn full_body_wipf_is_shared_by_book_scrollbars_in_normal_profile() {
 }
 
 #[test]
-fn scaled_options_gpu_frame_keeps_all_eight_high_resolution_sources() {
+fn scaled_options_gpu_frame_keeps_all_nine_high_resolution_sources() {
     use clonk_frontend::startup_options_dlg::OptionsSheet;
 
     let mut app = new_real_menu_app(1280, 720);
@@ -2608,6 +2622,14 @@ fn scaled_options_gpu_frame_keeps_all_eight_high_resolution_sources() {
             .pixels()
             .to_vec(),
     ));
+    sources.push((
+        [384, 384],
+        app.assets
+            .dialog_image("StartupBookScrollHD.png")
+            .test_value()
+            .pixels()
+            .to_vec(),
+    ));
     for (extent, source) in sources {
         main_assert!(
             frame
@@ -2629,6 +2651,9 @@ fn scaled_options_gpu_frame_keeps_all_eight_high_resolution_sources() {
         original
             .startup_dialog_images
             .remove("StartupTabClipHD.png");
+        original
+            .startup_dialog_images
+            .remove("StartupBookScrollHD.png");
         app.assets = Arc::new(original);
         app.invalidate_startup_gpu_damage();
         let before = app.render_retained_gpu_frame(presentation).test_value();
