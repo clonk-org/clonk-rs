@@ -379,7 +379,15 @@ pub fn extract_archive(
                 archive: archive.to_path_buf(),
                 source,
             })
-            .and_then(|mut zip| extract_entries(&mut zip, archive, destination, unpacked_size)),
+            .and_then(|mut zip| {
+                extract_entries(
+                    &mut zip,
+                    archive,
+                    destination,
+                    unpacked_size,
+                    &mut PlatformDurability,
+                )
+            }),
         Err(source) => Err(ExtractError::Malformed {
             archive: archive.to_path_buf(),
             source,
@@ -448,6 +456,7 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
     archive: &Path,
     destination: &Path,
     unpacked_size: u64,
+    durability: &mut impl Durability,
 ) -> Result<ExtractSummary, ExtractError> {
     let too_large = |reached| ExtractError::TooLarge {
         archive: archive.to_path_buf(),
@@ -562,17 +571,22 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
         if written > remaining {
             return Err(too_large(summary.bytes.saturating_add(written)));
         }
-        finalize_extracted_file(&file, &path, entry.unix_mode()).map_err(write_error)?;
+        finalize_extracted_file_with(&file, &path, entry.unix_mode(), |file| {
+            durability.hand_off_file(file)
+        })
+        .map_err(write_error)?;
 
         summary.files += 1;
         summary.bytes = summary.bytes.saturating_add(written);
     }
     sync_extracted_directories_with(&directories, &created_destination_directories, |path| {
-        sync_extracted_directory(path).map_err(|source| ExtractError::Write {
-            archive: archive.to_path_buf(),
-            path: path.to_path_buf(),
-            source,
-        })
+        durability
+            .hand_off_directory(path)
+            .map_err(|source| ExtractError::Write {
+                archive: archive.to_path_buf(),
+                path: path.to_path_buf(),
+                source,
+            })
     })?;
     Ok(summary)
 }
@@ -655,6 +669,27 @@ fn durability_depth(path: &Path) -> usize {
         .count()
 }
 
+/// How extraction makes what it wrote durable before it reports success.
+trait Durability {
+    /// Hands one written file, its final mode already applied, to the device.
+    fn hand_off_file(&mut self, file: &std::fs::File) -> Result<(), std::io::Error>;
+    /// Hands one directory's entries to the device.
+    fn hand_off_directory(&mut self, path: &Path) -> Result<(), std::io::Error>;
+}
+
+/// The durability primitives of the platform the updater runs on.
+struct PlatformDurability;
+
+impl Durability for PlatformDurability {
+    fn hand_off_file(&mut self, file: &std::fs::File) -> Result<(), std::io::Error> {
+        file.sync_all()
+    }
+
+    fn hand_off_directory(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        sync_extracted_directory(path)
+    }
+}
+
 /// Makes directory entries created by extraction durable.
 ///
 /// Windows does not expose a portable directory flush through `std`; file
@@ -668,14 +703,6 @@ fn sync_extracted_directory(path: &Path) -> Result<(), std::io::Error> {
 #[cfg(not(unix))]
 fn sync_extracted_directory(_path: &Path) -> Result<(), std::io::Error> {
     Ok(())
-}
-
-fn finalize_extracted_file(
-    file: &std::fs::File,
-    path: &Path,
-    mode: Option<u32>,
-) -> Result<(), std::io::Error> {
-    finalize_extracted_file_with(file, path, mode, std::fs::File::sync_all)
 }
 
 fn finalize_extracted_file_with<F>(
