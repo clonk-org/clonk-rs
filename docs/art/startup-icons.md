@@ -1,10 +1,17 @@
 # High-resolution startup icons
 
-The options tabs use `crates/clonk-app/assets/StartupOptionIconsHD.png`, a
+The options tab icons use `crates/clonk-app/assets/StartupOptionIconsHD.png`, a
 1536×256 RGBA strip containing six 256×256 cells: Program, Graphics, Audio,
 Keyboard, Gamepad, and Network. The options layout determines the logical icon size (up to 32×32). The GPU
 keeps the larger source texture when the UI is scaled; the software renderer
 samples it with bilinear filtering.
+
+The paper and metal tab backing uses
+`crates/clonk-app/assets/StartupTabClipHD.png`, a 960×640 RGBA adaptation of
+the original 120×80 `StartupTabClip.png`. The high-resolution backing retains
+the original tab geometry and loop opening, and is drawn at the same logical
+120×80 size. [Its source, preparation, and native GPU comparison](startup-tab/README.md)
+are kept separately from the icons.
 
 `crates/clonk-app/assets/StartupWipfHD.png` is a 256×256 RGBA replacement for
 the full-body Wipf scrollbar thumb. It retains the original 16×16 logical
@@ -44,7 +51,8 @@ approved artwork before runtime matting and atlas packing.
 
 Visual review: [before and after textures](startup-icon-comparison.png),
 [native GPU before/after details](startup-icons-gpu-comparison.png), and
-[the rendered Audio options screen](startup-icons-in-game.png). The texture
+[the rendered Audio options screen](startup-icons-in-game.png), plus the
+[tab backing comparison](startup-tab/in-game-comparison.png). The texture
 comparison enlarges original pixels without smoothing and displays both sets
 at the same size. The in-game images come from the live retained GPU renderer
 at 3840×2160 with 3× display scaling, including native fonts. The detail view
@@ -57,7 +65,7 @@ Regenerate the native GPU frames on a machine with a supported GPU using:
 
 ```sh
 CLONK_HD_OPTIONS_CAPTURE=/tmp/options-audio-gpu.png cargo nextest run -p clonk-app \
-  -E 'test(scaled_options_gpu_frame_keeps_all_seven_high_resolution_sources)'
+  -E 'test(scaled_options_gpu_frame_keeps_all_eight_high_resolution_sources)'
 ```
 
 This writes the updated frame to the requested path and the original-art frame

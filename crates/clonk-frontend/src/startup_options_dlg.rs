@@ -5283,7 +5283,7 @@ impl OptionsDlgScreen {
         gamma: Option<&GammaRamp>,
     ) {
         let (cx, cy) = layout.tab_clips[index];
-        if layout.voice.is_some() {
+        if layout.voice.is_some() || assets.tab_clip.width() > 120 {
             draw_image_bilinear(
                 surface,
                 &GuiRect::new(cx as f32, cy as f32, 120.0, layout.tab_height as f32),

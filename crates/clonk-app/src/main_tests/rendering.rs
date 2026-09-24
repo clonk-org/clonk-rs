@@ -2521,6 +2521,20 @@ fn startup_icon_resolution_follows_compatibility_profile() {
 }
 
 #[test]
+fn startup_tab_clip_resolution_follows_compatibility_profile() {
+    use crate::settings::CompatProfile;
+
+    let assets = FrontendAssets::load(Some(&test_app_paths()));
+    for (profile, size) in [
+        (CompatProfile::LegacyClonk, (120, 80)),
+        (CompatProfile::Normal, (960, 640)),
+    ] {
+        let options = assets.options_dlg_assets(profile).test_value();
+        main_assert_eq!((options.tab_clip.width(), options.tab_clip.height()) => size);
+    }
+}
+
+#[test]
 fn full_body_wipf_is_shared_by_book_scrollbars_in_normal_profile() {
     use crate::settings::CompatProfile;
     let assets = FrontendAssets::load(Some(&test_app_paths()));
@@ -2540,7 +2554,7 @@ fn full_body_wipf_is_shared_by_book_scrollbars_in_normal_profile() {
 }
 
 #[test]
-fn scaled_options_gpu_frame_keeps_all_seven_high_resolution_sources() {
+fn scaled_options_gpu_frame_keeps_all_eight_high_resolution_sources() {
     use clonk_frontend::startup_options_dlg::OptionsSheet;
 
     let mut app = new_real_menu_app(1280, 720);
@@ -2565,33 +2579,43 @@ fn scaled_options_gpu_frame_keeps_all_seven_high_resolution_sources() {
         .assets
         .dialog_image("StartupOptionIconsHD.png")
         .test_value();
-    let mut sources: Vec<Vec<u8>> = (0..6)
+    let mut sources: Vec<([u32; 2], Vec<u8>)> = (0..6)
         .map(|cell| {
-            (0..256)
-                .flat_map(|row| {
-                    let start = ((row * atlas.width() + cell * 256) * 4) as usize;
-                    atlas.pixels()[start..start + 256 * 4].iter().copied()
-                })
-                .collect()
+            (
+                [256, 256],
+                (0..256)
+                    .flat_map(|row| {
+                        let start = ((row * atlas.width() + cell * 256) * 4) as usize;
+                        atlas.pixels()[start..start + 256 * 4].iter().copied()
+                    })
+                    .collect(),
+            )
         })
         .collect();
-    sources.push(
+    sources.push((
+        [256, 256],
         app.assets
             .dialog_image("StartupWipfHD.png")
             .test_value()
             .pixels()
             .to_vec(),
-    );
-    for source in sources {
+    ));
+    sources.push((
+        [960, 640],
+        app.assets
+            .dialog_image("StartupTabClipHD.png")
+            .test_value()
+            .pixels()
+            .to_vec(),
+    ));
+    for (extent, source) in sources {
         main_assert!(
             frame
                 .layers
                 .iter()
                 .flat_map(|layer| &layer.scene.textures)
-                .any(|texture| {
-                    texture.extent == [256, 256] && texture.pixels.as_ref() == source
-                }),
-            "the GPU must receive the full 256px source, not a 32px or 16px software raster"
+                .any(|texture| { texture.extent == extent && texture.pixels.as_ref() == source }),
+            "the GPU must receive each full-resolution source, not a software raster"
         );
     }
     if let Some(path) = std::env::var_os("CLONK_HD_OPTIONS_CAPTURE") {
@@ -2602,6 +2626,9 @@ fn scaled_options_gpu_frame_keeps_all_seven_high_resolution_sources() {
             .startup_dialog_images
             .remove("StartupOptionIconsHD.png");
         original.startup_dialog_images.remove("StartupWipfHD.png");
+        original
+            .startup_dialog_images
+            .remove("StartupTabClipHD.png");
         app.assets = Arc::new(original);
         app.invalidate_startup_gpu_damage();
         let before = app.render_retained_gpu_frame(presentation).test_value();

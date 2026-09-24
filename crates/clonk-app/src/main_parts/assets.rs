@@ -6568,6 +6568,10 @@ impl FrontendAssets {
                     include_bytes!("../../assets/StartupOptionIconsHD.png").as_slice(),
                 ),
                 (
+                    "StartupTabClipHD.png",
+                    include_bytes!("../../assets/StartupTabClipHD.png").as_slice(),
+                ),
+                (
                     "StartupWipfHD.png",
                     include_bytes!("../../assets/StartupWipfHD.png").as_slice(),
                 ),
@@ -6936,7 +6940,10 @@ impl FrontendAssets {
         Some(clonk_frontend::startup_options_dlg::OptionsDlgAssets {
             background: self.menu_background()?,
             paper: self.dialog_image("StartupDlgPaper.png")?,
-            tab_clip: self.dialog_image("StartupTabClip.png")?,
+            tab_clip: (profile == CompatProfile::Normal)
+                .then(|| self.dialog_image("StartupTabClipHD.png"))
+                .flatten()
+                .or_else(|| self.dialog_image("StartupTabClip.png"))?,
             option_icons: (profile == CompatProfile::Normal)
                 .then(|| self.dialog_image("StartupOptionIconsHD.png"))
                 .flatten()
