@@ -3,10 +3,10 @@
     "cpp": {
       "binary": {
         "path": "builds/cpp/binary",
-        "sha256": "0e4271d387c7f26ad55529caef75f7ef96c0a35c0223a8771e5b1e73718d7aab",
+        "sha256": "09ef3c254b52cdcd199eea6f985895b75da6aba604e208f3bfb4a5958c2ad1f7",
         "size_bytes": 17265864
       },
-      "capture_patch_sha256": "3f5252305a35b0f6a5d3630535ba64823394cd699be037c5055a0d0095df7855",
+      "capture_patch_sha256": "c9a25aacbd49af9027229e2dc04e61bc712e306b0d02d8f877da1477b5045788",
       "producer": "legacyclonk-capture-patch-v1",
       "profile": "oracle-native",
       "recipe": {
@@ -68,7 +68,7 @@
     "rust": {
       "binary": {
         "path": "builds/rust/binary",
-        "sha256": "c873cad9af90e14d67b0237a5f64f0584df3f074bf9af6ffdd6469ff00c39eb0",
+        "sha256": "c186cfe2b729a8471eeaeba2b11de37ed53addd0d42bfeb36d104957d878a43b",
         "size_bytes": 57615424
       },
       "capture_patch_sha256": null,
@@ -98,7 +98,7 @@
         ],
         "sha256": "5dd31be0efc425f25b94fa67ac7f908edf76c6d36213b4310c7bad49ac0f55a6"
       },
-      "source_tree": "d2119326320c46e42dcaaed77a48b48abba85de0"
+      "source_tree": "875757a44dbf260e56fb0d3ca46b27a59f1b4b04"
     }
   },
   "case_specs": [
@@ -149,7 +149,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -213,7 +213,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -277,7 +277,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -341,7 +341,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -405,7 +405,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -469,7 +469,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -531,7 +531,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": "Tutorial.c4f/Tutorial01.c4s"
       },
       "seeds": {
@@ -593,7 +593,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": "Tutorial.c4f/Tutorial01.c4s"
       },
       "seeds": {
@@ -657,7 +657,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": "Tutorial.c4f/Tutorial01.c4s"
       },
       "seeds": {
@@ -721,7 +721,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": "Tutorial.c4f/Tutorial01.c4s"
       },
       "seeds": {
@@ -785,7 +785,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": "Tutorial.c4f/Tutorial03.c4s"
       },
       "seeds": {
@@ -849,7 +849,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": "Tutorial.c4f/Tutorial02.c4s"
       },
       "seeds": {
@@ -913,7 +913,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": "Tutorial.c4f/Tutorial01.c4s"
       },
       "seeds": {
@@ -975,7 +975,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1037,7 +1037,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1099,7 +1099,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1161,7 +1161,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1223,7 +1223,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1285,7 +1285,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1347,7 +1347,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1409,7 +1409,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1471,7 +1471,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1533,7 +1533,7 @@
         }
       },
       "scenario": {
-        "content_tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21",
+        "content_tree": "9c73054259c45a55925f2f71572b5aec93975e65",
         "path": null
       },
       "seeds": {
@@ -1566,7 +1566,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-1/comparisons/startup-main.json",
-            "sha256": "9df99f2833bf9c5343718108b9679b220edbba868058788f2b8759b2d8144763",
+            "sha256": "85b13f4e55d34554a460b704e7820e459f26ba87720afd17efc7c63a92517531",
             "size_bytes": 776
           },
           "reference": {
@@ -1585,7 +1585,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-scenario-selection.json",
-            "sha256": "47ff5d21d5b280176984cc6d980dcc7a72a8ef391d0491ac69a4a1696904ece5",
+            "sha256": "04a9974d030f561ed8903dff06e9641335279e766a363e2838fd5eff3acc8814",
             "size_bytes": 832
           },
           "reference": {
@@ -1604,7 +1604,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-1/comparisons/startup-network-browser.json",
-            "sha256": "60073b4fae390f63c9495d4247e89a37eab7cf56282826911850913c134b6ea9",
+            "sha256": "751b9d2287ce553e448f64c0cc03b3202814f01ce1d07672c0504257caf911f3",
             "size_bytes": 820
           },
           "reference": {
@@ -1623,7 +1623,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-player-selection.json",
-            "sha256": "3a9b3ff7b3dbd89c3bcc4f6c3e3f88f8b430eef3f471c1a8529eccabccf06121",
+            "sha256": "433cc9d61b4a96e051bd615d1809a130be086b839c4a19612e9ee67eb2255743",
             "size_bytes": 824
           },
           "reference": {
@@ -1642,7 +1642,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-1/comparisons/startup-options.json",
-            "sha256": "074401e44e94f4909bd9a3d0018c26bd6cc21ffa8e4c70b6364e8a4aa8f72271",
+            "sha256": "54e43187cf38f2b7462c0de55d6c11abebf4c7c89a0075283813a2c775ab2911",
             "size_bytes": 788
           },
           "reference": {
@@ -1661,7 +1661,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-1/comparisons/startup-about.json",
-            "sha256": "d0ec26e99c6befad2174633766f956cf0d15209c83c6971ac76c2af2e6c16e68",
+            "sha256": "148228763c18d3f31c1453f34d227dec8adbcf9360957a6778a0471209019c82",
             "size_bytes": 780
           },
           "reference": {
@@ -1680,7 +1680,7 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-1/comparisons/network-lobby.json",
-            "sha256": "53b40f95ef0a66be53607ed9f58e2171b55aa853791a2a50a5979e8eaa7dc57d",
+            "sha256": "eebddbc59b52fa2286f29055b43d848cf02a5ac3cd4aaf537f4e8c72661e1d08",
             "size_bytes": 762
           },
           "reference": {
@@ -1699,7 +1699,7 @@
           "id": "loader",
           "receipt": {
             "path": "run-1/comparisons/loader.json",
-            "sha256": "4337609b6f17ffce4cdffa6df5fc7e539a765920fad5d13874e00c1b7cf38994",
+            "sha256": "d4ec3a4dac46013617002bbf4729a30a8fe12f1b1a259f6d7ffba692c6998180",
             "size_bytes": 734
           },
           "reference": {
@@ -1718,7 +1718,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-1/comparisons/hud.json",
-            "sha256": "f90c52b9a66d08d77ce33ae3416abf56a9bf6074a214c8da57acd3b74243b500",
+            "sha256": "e4b6297a7a4389f1e5bb28251b49864e92ddc52fb7c953c36976e1ac31f40d66",
             "size_bytes": 740
           },
           "reference": {
@@ -1737,7 +1737,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-1/comparisons/ingame-menu.json",
-            "sha256": "4382ea2d92b0c84ec8c2d87cf8f294f9a07c81270210b16a5f02b3448de87d3b",
+            "sha256": "bb90b3858465771525b731d58442260245c22c64144620d95415e47546400397",
             "size_bytes": 772
           },
           "reference": {
@@ -1756,7 +1756,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-1/comparisons/object-menu.json",
-            "sha256": "b5efc0fd8cf559e4989f600832cefd8c445b173815735cf1d7ce5038ac644e86",
+            "sha256": "060383950a9af194659f283bfe8019688e5a47f365111498122d98959043cb65",
             "size_bytes": 772
           },
           "reference": {
@@ -1775,7 +1775,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-1/comparisons/gameplay.json",
-            "sha256": "86b08ca378f4ff46b18e5fddb43362820bb2c61d6b0883e1e7b6012b96739729",
+            "sha256": "b85862d4c3675c2f9263f442106926d620a4f8932a5f804987e4b8af8a44da43",
             "size_bytes": 760
           },
           "reference": {
@@ -1794,7 +1794,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-1/comparisons/evaluation.json",
-            "sha256": "d5a80ceb63916c821ab94e36d02d23c58b2d1aa18159ac4d51a7aa969780e730",
+            "sha256": "25638c5f9ded52009d06670dc7aad27e85c55ab15b846f006b29252cf64dc928",
             "size_bytes": 768
           },
           "reference": {
@@ -1813,7 +1813,7 @@
           "id": "startup-options-scale-initial-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-initial-reference.json",
-            "sha256": "c40cbc89b1c51ec3eb0933763424eb2f154813458ba05fd94a75746c63c84425",
+            "sha256": "c6cffc1597eff87839319cf158389a5449079a34fa6f9e4927d83180b19b4144",
             "size_bytes": 866
           },
           "reference": {
@@ -1832,7 +1832,7 @@
           "id": "startup-options-scale-decremented-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-decremented-reference.json",
-            "sha256": "7a72bc76f89df3b98a6ba8fe7049a3c675edfd033b0c352fe06a3e2578bcb81d",
+            "sha256": "5d95516e2d95104de50b0cea77fa83790a826949741ad7ae36c51c0261e15c85",
             "size_bytes": 882
           },
           "reference": {
@@ -1851,7 +1851,7 @@
           "id": "startup-options-scale-initial-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-initial-minimum.json",
-            "sha256": "dd9579e4a9f509075ca6cc3665abb5d1a9a3da2549741fdda36b170e75f8c4da",
+            "sha256": "58f167f6193a5e1208c28510c639fd7f520f52cc299db5b056653e9c3366e42d",
             "size_bytes": 858
           },
           "reference": {
@@ -1870,7 +1870,7 @@
           "id": "startup-options-scale-decremented-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-decremented-minimum.json",
-            "sha256": "f43ca8c4ed3f3ec187449f0ba8dcac1df41411ba39594289fe802e36e023a2e1",
+            "sha256": "3b6d1fbfa402d1171ab8f17f18ffcc1f6ee78a04941d49c9fba86c8c4167ab3c",
             "size_bytes": 874
           },
           "reference": {
@@ -1889,7 +1889,7 @@
           "id": "startup-options-reset-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-reset-reference.json",
-            "sha256": "d58af2ac0ed012dfa8248d793a3bb68586a9dae6ab218d721f4b05c4f9cab593",
+            "sha256": "1f21affb982b35454c6ee3c7e8c9f83b853f0259cea1205b5decc9fc9dcfa159",
             "size_bytes": 834
           },
           "reference": {
@@ -1908,7 +1908,7 @@
           "id": "startup-options-reset-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-reset-minimum.json",
-            "sha256": "bdaa83dae16c1021f9798c95de676dce09ae4cc15655fa65b724d87c9d4bd639",
+            "sha256": "da7644f1039839de1c2d06f5692a88f64b24ad81fe9f3a137e206f783aef7db2",
             "size_bytes": 826
           },
           "reference": {
@@ -1927,7 +1927,7 @@
           "id": "startup-options-key-keyboard-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-keyboard-reference.json",
-            "sha256": "e4723e50c5968e64f9e55e281cf5d4acec130e15eedfd217658aa49cfb83e9dc",
+            "sha256": "84b1bfee1ff428216c928b4baece0daf76301a3e052e22f910620bc69935a59b",
             "size_bytes": 862
           },
           "reference": {
@@ -1946,7 +1946,7 @@
           "id": "startup-options-key-keyboard-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-keyboard-minimum.json",
-            "sha256": "dfd99390d4b1bd1a88227efc281f5b25f04730fcb065b0a73dce377c6fe0634b",
+            "sha256": "fd2c5bbc836e738407db4344ed1a5fa626a89f010620c335c71dabc7905f5927",
             "size_bytes": 854
           },
           "reference": {
@@ -1965,7 +1965,7 @@
           "id": "startup-options-key-gamepad-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-gamepad-reference.json",
-            "sha256": "4e40af818160ef3af9d8b3e67a5f446e8d434ddfbb7f1e3883e8a6bc0a472666",
+            "sha256": "0892c669041061d82c9d99ae8f4ce8b2eb8cb906830f134742b7a0519c55dac6",
             "size_bytes": 858
           },
           "reference": {
@@ -1984,7 +1984,7 @@
           "id": "startup-options-key-gamepad-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-gamepad-minimum.json",
-            "sha256": "c574966494e78621a5d1c381c48a973beeb17b1a9ca958ae85b01fb740c9d233",
+            "sha256": "258e7344356fd187e9190fbb04b05d0e48437ba9d03bd239a19e4487bc862b00",
             "size_bytes": 850
           },
           "reference": {
@@ -2008,7 +2008,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-2/comparisons/startup-main.json",
-            "sha256": "879a27323cd49e2252fcf21651a9275db0700410c328be8f6236e83bef4e2890",
+            "sha256": "56b3f82cc56a7d402da28d01153cf3bae452b627979a0beef978dc2cb7c98050",
             "size_bytes": 776
           },
           "reference": {
@@ -2027,7 +2027,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-scenario-selection.json",
-            "sha256": "553e8929158c97db2a777fa28c1fdceed0033a4abfe709dd0b1b0420dc886dd4",
+            "sha256": "101577fc577cc34216e0b58a0fa20510dd0c55293085b5755e313fa91f7243ff",
             "size_bytes": 832
           },
           "reference": {
@@ -2046,7 +2046,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-2/comparisons/startup-network-browser.json",
-            "sha256": "7e679c60c16e836f36dba8c4e93e15741540811a73267f1ab8fbbc54e26fe588",
+            "sha256": "efd47e39196c0bc5133c92fb93895d3faf64a30676b262f5a550c61d9c68737b",
             "size_bytes": 820
           },
           "reference": {
@@ -2065,7 +2065,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-player-selection.json",
-            "sha256": "98be97e18d7c9d5b7f83101c869feab160c7c6c126f8223581007ac3d6dff8a8",
+            "sha256": "673243ff5b0bb1c4736a13c8bf956876649e119533dfdc69802c2da3be59334f",
             "size_bytes": 824
           },
           "reference": {
@@ -2084,7 +2084,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-2/comparisons/startup-options.json",
-            "sha256": "6078d547b7067202119b89f21d857c33093e612f0c0d83025ae7dd7deefa5bb1",
+            "sha256": "67796b34692c0894cc1766f3682d9adce00ec020a074be62ce7e7bbd3a5ab395",
             "size_bytes": 788
           },
           "reference": {
@@ -2103,7 +2103,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-2/comparisons/startup-about.json",
-            "sha256": "bdefa978218b535ceb78b1d812d028003daf1d0c800b41ec930743536c190ec9",
+            "sha256": "53b5ab327bd2c7d5b50f456f5cfe98504c38131addcefc3bfed20550da1cb05f",
             "size_bytes": 780
           },
           "reference": {
@@ -2122,7 +2122,7 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-2/comparisons/network-lobby.json",
-            "sha256": "038db6aa717057b580e2f92349bc99ac35d2f2f3886365e0dc19f9cc50b1c674",
+            "sha256": "30b58560f329ea5f7bd2a32003c828afbf921731c58b597e363ef9511e28b21a",
             "size_bytes": 762
           },
           "reference": {
@@ -2141,7 +2141,7 @@
           "id": "loader",
           "receipt": {
             "path": "run-2/comparisons/loader.json",
-            "sha256": "cbe956443617b97af0a1ede099ce2757096bdfd3d2c7d237a27142bde96e0799",
+            "sha256": "7ad5525a0234f4b82225b5dae6153271053aed849f5af3c995e4ed2841f10053",
             "size_bytes": 734
           },
           "reference": {
@@ -2160,7 +2160,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-2/comparisons/hud.json",
-            "sha256": "53f973189d7a8ad4d7f9279d0088e1c7e6999054200aef13f77fd85520ecd7d4",
+            "sha256": "65f8671b80af532bb6f907eabd516e698be2bd839146308ff2a529330df6fa81",
             "size_bytes": 740
           },
           "reference": {
@@ -2179,7 +2179,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-2/comparisons/ingame-menu.json",
-            "sha256": "24f168f34eb0d78c914694d996015e3ec6307e3df75f4b415d7e1b86944f8b96",
+            "sha256": "fd1dcedb417e153b186adbefa5bf816140b414b5210cf1a185c7b3b1ba52e2e3",
             "size_bytes": 772
           },
           "reference": {
@@ -2198,7 +2198,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-2/comparisons/object-menu.json",
-            "sha256": "a9c84bf7892de20ae7c41f5bc2c5d712d4d7064a31e35d41f05c64b9188bdf3b",
+            "sha256": "431564e8197fe773ac8a570bf892e5534a202698e7adc6b70f8eaa5bbacac5b8",
             "size_bytes": 772
           },
           "reference": {
@@ -2217,7 +2217,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-2/comparisons/gameplay.json",
-            "sha256": "adb1d6d6b7c008d3881db1ece9c9782c6a23a42084455aaff9e1f6fa184b6fc0",
+            "sha256": "afa971c8160056e97867a3bf0b58202f78db4bc07bd88de3661a3678902e7582",
             "size_bytes": 760
           },
           "reference": {
@@ -2236,7 +2236,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-2/comparisons/evaluation.json",
-            "sha256": "13ff863c685710e135321d1a016156eb74c9c179c4cca8204ffaf92e2977349a",
+            "sha256": "61c703c51ece26921da39d2e6ec6dd32fff810c93bab11922d0dc4c4d75dd0e7",
             "size_bytes": 768
           },
           "reference": {
@@ -2255,7 +2255,7 @@
           "id": "startup-options-scale-initial-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-initial-reference.json",
-            "sha256": "d7c79077552f7b6b0708e8cd9e076dce95783cd8096bf77eeae6c899c70ff9c8",
+            "sha256": "d22215d1d073e54af0e45f3624770e28d2461207239563d1b7d6ea937c1045f4",
             "size_bytes": 866
           },
           "reference": {
@@ -2274,7 +2274,7 @@
           "id": "startup-options-scale-decremented-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-decremented-reference.json",
-            "sha256": "97afd00bec72bf03f26e93b52e98b6427f2d530c66f1291d4ba8f337f3288932",
+            "sha256": "eb6803119495ec46cc9b60d69f64181c8e61c48deb6366868b7a69d4d72d9a6a",
             "size_bytes": 882
           },
           "reference": {
@@ -2293,7 +2293,7 @@
           "id": "startup-options-scale-initial-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-initial-minimum.json",
-            "sha256": "e9611ddceeefcdbb29ab9854298457cb9a45a9c5ce3edef89e2e5ddff1ea2d35",
+            "sha256": "734c4360499cf7f5097eb2f6f63a40561f12dfb717d02a301098a76a36cf122a",
             "size_bytes": 858
           },
           "reference": {
@@ -2312,7 +2312,7 @@
           "id": "startup-options-scale-decremented-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-decremented-minimum.json",
-            "sha256": "343ff181a103de852b70bf3f263d8a9caac5c9175e93698489b9bc622db3bd3e",
+            "sha256": "48be47d997abb1f9dbdd77827bf19bc0a5573b224cdcc1ac59321c9002a2b348",
             "size_bytes": 874
           },
           "reference": {
@@ -2331,7 +2331,7 @@
           "id": "startup-options-reset-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-reset-reference.json",
-            "sha256": "482d6afeb9dd867ae7d8ae9a37408ebcb644d7d8fd55c296d5d67295796688c8",
+            "sha256": "6507498a2cca9cf8db7706914787b9fa366846c2bf9666855fb149f9ddffb323",
             "size_bytes": 834
           },
           "reference": {
@@ -2350,7 +2350,7 @@
           "id": "startup-options-reset-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-reset-minimum.json",
-            "sha256": "8c663c6edd62e8b3320ac9b385c29e451bfce19b83af57c756680a2b108fe94c",
+            "sha256": "22aeb6ba88bb40d0632d3a0cdb9291998410a7445df816e538a8da9a0316cc6a",
             "size_bytes": 826
           },
           "reference": {
@@ -2369,7 +2369,7 @@
           "id": "startup-options-key-keyboard-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-keyboard-reference.json",
-            "sha256": "584b6a1a568a047cb2f8699914710fbe6419db11dccf3924ea668642ad784fb5",
+            "sha256": "22ea6de03288dfb5b56260cc049ea3918eba82b5c385038c17886a45b27d8d9b",
             "size_bytes": 862
           },
           "reference": {
@@ -2388,7 +2388,7 @@
           "id": "startup-options-key-keyboard-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-keyboard-minimum.json",
-            "sha256": "6f74a4b1d730030127475bb4ca7be96d45f77e4bc84390011ca039c05928a79f",
+            "sha256": "909892295d9fee0f43d922516e547b860215d8db69b0b64b9102e0fac50049ac",
             "size_bytes": 854
           },
           "reference": {
@@ -2407,7 +2407,7 @@
           "id": "startup-options-key-gamepad-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-gamepad-reference.json",
-            "sha256": "5535fe494ec51bfd6a1e4b2fecafb1509e7531597b62d13054a4fd8659224b3f",
+            "sha256": "cd23e7e72f9294d2c5edfcaa4b124877eb87602ef6c577f88d11b52b18a4d0cd",
             "size_bytes": 858
           },
           "reference": {
@@ -2426,7 +2426,7 @@
           "id": "startup-options-key-gamepad-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-gamepad-minimum.json",
-            "sha256": "4c0a87c97aec12da113f8e6590fc48833458b6cc0524b25463ff032007ae01e8",
+            "sha256": "b71652d1c9ac3d40465051c61949c314af325dee6139be1421711c0bbc6ed820",
             "size_bytes": 850
           },
           "reference": {
@@ -2446,10 +2446,10 @@
     },
     "case_specs": {
       "path": "compat/presentation/case_specs.json",
-      "sha256": "92838609c08822f2bf38d9dfb9b8c4c959fe53c3ad9478d373083c7430ee60ec"
+      "sha256": "b1b0429c1688215b5fb9c6eb02a820fa098cb65095a3f8473c1f67f4a505300e"
     },
     "compat_profile": {
-      "contract_sha256": "64205148a57ea45bafd594d3986618814b8880003b9d2c663cd43631312d9145",
+      "contract_sha256": "f865e9988b114ef0beaa3076009dead484e6a612da479ca853fe2debaa261fa9",
       "path": "compat/profile.json"
     },
     "geometry": {
@@ -2501,7 +2501,7 @@
     },
     "launcher": {
       "retained_path": "launcher/acquire_presentation_oracle.py",
-      "sha256": "34ae743a05641c25b75b54921f68ffdf1b99bf944deeffbf9e224c8f5111ea81",
+      "sha256": "f6aabcddb31c75fddba870c2ef9b844d25810502b3314988ad138e498b1d4ad8",
       "source_path": "scripts/acquire_presentation_oracle.py"
     },
     "normalization": {
@@ -2546,14 +2546,14 @@
     },
     "rust_source_inventory": {
       "path": "inputs/rust-source-inputs.json",
-      "sha256": "a285bd6825aa17e018f0d405b35c29c5cd43eb7175becc261aefedabd8e9693f",
-      "size_bytes": 340166
+      "sha256": "370f6fc90509a125ac3f8793c22648582382b827065e84c3ddc1024f34d5814c",
+      "size_bytes": 340446
     }
   },
   "patch": {
     "base_commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
     "retained_path": "inputs/cpp-capture.patch",
-    "sha256": "3f5252305a35b0f6a5d3630535ba64823394cd699be037c5055a0d0095df7855",
+    "sha256": "c9a25aacbd49af9027229e2dc04e61bc712e306b0d02d8f877da1477b5045788",
     "source_path": "parity/oracle/presentation_capture.patch"
   },
   "runs": [
@@ -2574,7 +2574,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2599,7 +2599,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-main.json",
-                "sha256": "6734c6753f9b91fea9d57820395363d5a975fe94087aa5b8b881cc12ffc7e91e",
+                "sha256": "34c2a41989a4120692d5acaecedf2d9a14f6a3bb8d8ad0876870a83e83810abf",
                 "size_bytes": 1846
               }
             },
@@ -2616,7 +2616,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2641,7 +2641,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "ee59720233b54438cdfd1488f9d531560b0bd37b66def4ace76294ab54b167c8",
+                "sha256": "ac72d4c369d49fd75935db8ccb5d3d727cf7693cd8387a0a9f45c96cfdea9a55",
                 "size_bytes": 1902
               }
             },
@@ -2658,7 +2658,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2683,7 +2683,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-network-browser.json",
-                "sha256": "990f41c82ab3a06e626022d26a310a3ab85613e2bf78884a2dfec90f279536ac",
+                "sha256": "3063a2a64eb9c9bd84de9a2ed715ef9ca283f659f85bae43c41b70871875ea68",
                 "size_bytes": 1889
               }
             },
@@ -2700,7 +2700,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2725,7 +2725,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-player-selection.json",
-                "sha256": "986a60265b138150c504831fa3a7e3920e3ff550974fc277e59f78e54fdcd81e",
+                "sha256": "896065e1434a66d210fd9ce081cd6dd44db3c489e237d1f53a45a3642d66750e",
                 "size_bytes": 1893
               }
             },
@@ -2742,7 +2742,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2767,7 +2767,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options.json",
-                "sha256": "6b4c8bcb7f39b0d4a2f869222b9b8bbff78c41ac52d1ce20c4e7737d93e105ba",
+                "sha256": "a09daed84b23119beaea461ab7a6514d5be8f107f59250d8ab03adcc61261ae6",
                 "size_bytes": 1858
               }
             },
@@ -2784,7 +2784,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2809,7 +2809,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-about.json",
-                "sha256": "a2bc23713460646973a85615609c90ee9703de732bb9ca7a81ae720f00bf65ae",
+                "sha256": "1a82b90dd1c39f1de7d6c536bc4ecf65c77de5ab845df72a6e83457a671b63d1",
                 "size_bytes": 1851
               }
             },
@@ -2828,7 +2828,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2853,7 +2853,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/network-lobby.json",
-                "sha256": "aeb0690c3cfc7906e97a67222d7cdbae1b7395bbe7ac75451219b88fd898bfbf",
+                "sha256": "f4e1ccd9b4f8368dd2ec8d1369f77ddc03def414779c05a8588119485c6e1111",
                 "size_bytes": 1730
               }
             },
@@ -2870,7 +2870,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2895,7 +2895,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/loader.json",
-                "sha256": "87374ff0ab97ca0221eedc03244b1d588057fc49d8f29b41223e70dda43af94d",
+                "sha256": "fa7c0b219a436658c82f2d749bf6e3f6e45254e7dc2a22a98031a660c70f944c",
                 "size_bytes": 1716
               }
             },
@@ -2912,7 +2912,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2937,7 +2937,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/hud.json",
-                "sha256": "9bc13f25b5f39ddf8a370a56ace5e9f86e9d85954df56db3dc34b621d4a70529",
+                "sha256": "a7a45fa181e3db602b5fbe01a652a1990311e9767e83c23684a5d3802c15041b",
                 "size_bytes": 1849
               }
             },
@@ -2954,7 +2954,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2979,7 +2979,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/ingame-menu.json",
-                "sha256": "a1f02fbeb727a3f370a378b22c30f2cb093842f74754ce7423a554ff37d98cc0",
+                "sha256": "b91bd56a8bc76b669f0542195da995642b537de0aa484ef76129ebb1d39fb635",
                 "size_bytes": 1886
               }
             },
@@ -2996,7 +2996,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3021,7 +3021,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/object-menu.json",
-                "sha256": "c4a119a410da4efa0b0c13f4d2d6e134131576be6b7f1fedc0016d5d1dde138d",
+                "sha256": "186839b794dec89a75f034ca0e883b04be47efb3099a6a3c60c0f43b2e4c092a",
                 "size_bytes": 1896
               }
             },
@@ -3038,7 +3038,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3063,7 +3063,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/gameplay.json",
-                "sha256": "6dc1a105670f4c3fd63e3fb5587bb7252e0dcfb9703eaa8c53bd8b03472d677d",
+                "sha256": "e90aad8868de8b56c86534dcd5b1c6c1c2eb9537f4eecc1ad8818755d76df29a",
                 "size_bytes": 1866
               }
             },
@@ -3080,7 +3080,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3105,7 +3105,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/evaluation.json",
-                "sha256": "0f3cb0c6405d79b69303fcd85036329c3c0485662271908fb72ae542922f6cbf",
+                "sha256": "ddbe86fbe90460d756b5a3fcbcf3afc6d29672aa424cf6087ecae83b7d9c2ddb",
                 "size_bytes": 1890
               }
             },
@@ -3122,7 +3122,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3147,7 +3147,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "8e081217974599ccd9679b28a3117d6d6543e591b96ffd89b6d47b7ef15a598f",
+                "sha256": "65594e95c943a1dc2d636fd6f295ffc913fd8909f82d3d76f79d8c941960a691",
                 "size_bytes": 1786
               }
             },
@@ -3164,7 +3164,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3189,7 +3189,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "72f507f6be889af8d37a844b3af3c5da1e79ec2891977284ac882784d9318fbe",
+                "sha256": "242297a22ffe9ff4470bb38b10b4eb92d6a56dcb21dbe892c325afb7d4cc3be9",
                 "size_bytes": 1798
               }
             },
@@ -3206,7 +3206,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3231,7 +3231,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "a86bfff5e0a3837a32c56a02290132a2250d7d2cb628e372d2f2cbd605f0e6b8",
+                "sha256": "7fa32573af74c360d47a1679f63e69eaf963b4501d90c06563a98548656d907d",
                 "size_bytes": 1780
               }
             },
@@ -3248,7 +3248,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3273,7 +3273,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "632a397cb9756fc8b1633e2944f201296038ff0d8450a282ae1ff2d4718cab7a",
+                "sha256": "37d34c4e8963061b1ccd03be14b26e8bddf31e5b5bdc8e4f1fff5435ec8c8adf",
                 "size_bytes": 1792
               }
             },
@@ -3290,7 +3290,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3315,7 +3315,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-reset-reference.json",
-                "sha256": "6794278f26cef6d3dd41c36152ea629f5ff545cd894139939721b6b5dcb291ec",
+                "sha256": "12c35ca27f072a6fd6eaec0974c38b74a1a31796116ed9f843625cc9150ed118",
                 "size_bytes": 1762
               }
             },
@@ -3332,7 +3332,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3357,7 +3357,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-reset-minimum.json",
-                "sha256": "3b4aec3fa857a2b44a9c0476d945506c8405e8bf0d731ad671f5c2f8ce8773b8",
+                "sha256": "3403daf3f826921e99cbf844d740d0d6da17444ee0e30358594a2acb1b359a59",
                 "size_bytes": 1756
               }
             },
@@ -3374,7 +3374,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3399,7 +3399,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "31bf9fc6f8814c7485923f38af0a302d39339ec7b62bb1dbb2d1b6e9ff36418d",
+                "sha256": "0f4d16359345419b28e59e4302900f0c7fab2551091ba928c2f81384ab07a217",
                 "size_bytes": 1776
               }
             },
@@ -3416,7 +3416,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3441,7 +3441,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "3afb7588031086c7f53029fc0790a38dad3627c4b54ada53bd78db121a6fcb2c",
+                "sha256": "331621cf58c10aabe234f2b19a7df5fdd096a598894cc17626189834e832f2c7",
                 "size_bytes": 1770
               }
             },
@@ -3458,7 +3458,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3483,7 +3483,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "6ae98dd957797d990023313a6c96c5cbdccfdfbfc3f62e39bf4baef9c8a77ac6",
+                "sha256": "000b86d83ff4430a9065e94f5569c14c29725e5ed0e88e1b7d0ddc8734fd488c",
                 "size_bytes": 1773
               }
             },
@@ -3500,7 +3500,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/cpp/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3525,7 +3525,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "f72cc639c2fe3620d65d1e75b25ab5ad36b3e7f7b5e1deb509af0b55a9dc5290",
+                "sha256": "1faf8ea3bda8d344abbaa0de2ec9b57c2eb36b6bed9b97a4472a5d1be661c2d0",
                 "size_bytes": 1767
               }
             }
@@ -3548,7 +3548,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3574,7 +3574,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-main.json",
-                "sha256": "b164ee784ed5d602958c29b0aeb3e2420e1417adb530952054341bc2f58ded12",
+                "sha256": "742c71703a5b7f0fbe1a8cb4bf2fca5ffc53a4877ca09686114839f247683179",
                 "size_bytes": 1847
               }
             },
@@ -3593,7 +3593,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3619,7 +3619,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-scenario-selection.json",
-                "sha256": "c8e2de395a4dfc7556e5528c7541a32b1796d0cb8a257b142336afbfb65d63c0",
+                "sha256": "29e1963f694415f045f7a7f5350e8d9a5418b3d28d13f27f28d59b4546cad659",
                 "size_bytes": 1903
               }
             },
@@ -3638,7 +3638,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3664,7 +3664,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-network-browser.json",
-                "sha256": "f3fa17339fcb8c84828370bef934c866ff61a1e1923c7dce938a08a2c82d7549",
+                "sha256": "a194013f87da1f868b9d89da13baef78862ef7f46c674913994ce30ef53365ce",
                 "size_bytes": 1890
               }
             },
@@ -3683,7 +3683,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3709,7 +3709,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-player-selection.json",
-                "sha256": "ec647f2cb17a6f66e765d684c682cf7bd3f320f6e1f1bf001a990e530defcb4a",
+                "sha256": "79ae1a18cef7b03581ec314e5b5e2b5d0a8a2b93c54075e8c0e5f177ba22385c",
                 "size_bytes": 1895
               }
             },
@@ -3728,7 +3728,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3754,7 +3754,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options.json",
-                "sha256": "e7af2247a18b5a72023d391ddbf60ef636a808c4055b0fb5dd899fecac464aa6",
+                "sha256": "92c6e62a0ec3fb185c8cfd8d3ae01d5f28817f9af806c2095872ed1b9e0ef9a9",
                 "size_bytes": 1859
               }
             },
@@ -3773,7 +3773,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3799,7 +3799,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-about.json",
-                "sha256": "b588a23174592fbd914b740e255e6e244fedd537085ceeafd6b589f6308ca193",
+                "sha256": "20e6bf31eeb0c9d29ddbb8a41aad03c399cd9820f36e611b8903071ddeb0723c",
                 "size_bytes": 1852
               }
             },
@@ -3818,7 +3818,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3844,7 +3844,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/network-lobby.json",
-                "sha256": "6d71b8cc97cefe736e222472934dd2287f9240b4961cd4cff5a3c2800be4d541",
+                "sha256": "a77eaee88a2e86ca239957a0f76aed3543fc52f0e6470be6df1193f1a97af77b",
                 "size_bytes": 1730
               }
             },
@@ -3863,7 +3863,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3889,7 +3889,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/loader.json",
-                "sha256": "34c11983e6388a6fd56f8e5c775acde6069d46d938ed4601e510e911c255f27f",
+                "sha256": "6d1331ca018f34b8f232b7cb95751c6fb878806bad6405762576f02192d72a9b",
                 "size_bytes": 1716
               }
             },
@@ -3908,7 +3908,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3934,7 +3934,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/hud.json",
-                "sha256": "d0babb6a2f02ae77a07758fd8797675995224ca1e7777c77affc60c31e9d50e0",
+                "sha256": "c2b73c6fbd57557de70f1f6a6b7be86998366162029ba008715bd0dad068ed9f",
                 "size_bytes": 1851
               }
             },
@@ -3953,7 +3953,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3979,7 +3979,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/ingame-menu.json",
-                "sha256": "a9ceace948d3143c906082644d3cb70bf3d3174c179a3cd8a036de95de894963",
+                "sha256": "164bc7f33749f9f47ce72a6dd3abc201907c1acad01cafd9ef6f0a7da53dd12b",
                 "size_bytes": 1888
               }
             },
@@ -3998,7 +3998,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4024,7 +4024,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/object-menu.json",
-                "sha256": "7b16a113aab886213d6bbec9ea53d5bbf6f521e11a4825e56e31441e2fb5749c",
+                "sha256": "42a618522be64048724a99d5d3c60e37eeaa4f9308e986e021cddec74780fcbd",
                 "size_bytes": 1898
               }
             },
@@ -4043,7 +4043,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4069,7 +4069,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/gameplay.json",
-                "sha256": "cd25d67eb2a5aaba8dbe0df53da773a54f5bb26838c57e34d4438dd3267986a5",
+                "sha256": "f643c3b2118138b337439258743ad805cdbc5d0520afbc6fe51db85dd7838d2c",
                 "size_bytes": 1868
               }
             },
@@ -4088,7 +4088,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4114,7 +4114,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/evaluation.json",
-                "sha256": "7bf62966f46ac6b5a3e8f7042676d7cee0daa9763b1e04b7d355bd3a43a570dc",
+                "sha256": "0118930b0ece0fed0d2c15fe83d0017197a366590632ba5c45527cb46f704100",
                 "size_bytes": 1892
               }
             },
@@ -4133,7 +4133,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4159,7 +4159,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "a66f0cbec80f9ef6a489854604325dc2186e297baafaf2e90d09601fa459eb20",
+                "sha256": "9b799020069f4223594111777ece1c2fa031e268e02395c3f9c52729b2594890",
                 "size_bytes": 1786
               }
             },
@@ -4178,7 +4178,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4204,7 +4204,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "0b9084778548ea017581963e80f54691c7d9a8eda63c131734b87f26870da3d7",
+                "sha256": "7eb1051bde54b2dffa69f53c666301653174ae59bd729019ae31728bc63dc3f8",
                 "size_bytes": 1798
               }
             },
@@ -4223,7 +4223,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4249,7 +4249,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "2039a9560f6567c2811a496886563461d5a85839a77d8f92c4ca73b4dd4972de",
+                "sha256": "f87f45c534f3311d03a007d4f17c345950743ad94ae52fb94398828b6d0ee575",
                 "size_bytes": 1780
               }
             },
@@ -4268,7 +4268,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4294,7 +4294,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "fdbf44eed3019f6d4ae7b2723faf06eadb5b0539aa49c9406f5cd2b0d8eb7e7e",
+                "sha256": "143ba47b90fb43bedd99bab335bdc7f1bb0827bdbdb01a9d2e6531308fa38dc3",
                 "size_bytes": 1792
               }
             },
@@ -4313,7 +4313,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4339,7 +4339,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-reset-reference.json",
-                "sha256": "7d5d45db3e0f3c7f36c078748c9b72e6298ed562254aaca713f04ff2c4205e80",
+                "sha256": "9f4e408107de998ee7298c34fc3d739d9871cb73aeafeb449a342bce898aeaf6",
                 "size_bytes": 1762
               }
             },
@@ -4358,7 +4358,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4384,7 +4384,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-reset-minimum.json",
-                "sha256": "0526a3db1d906746ac66e731f75c5eb3f32aaea3373714d58885991b00d9e417",
+                "sha256": "dbeecbb48383cc6defdafcf04c817607a20eab87f1d97301a20094cf266a2935",
                 "size_bytes": 1756
               }
             },
@@ -4403,7 +4403,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4429,7 +4429,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "dcfdee8ee90c28ebf8b462e74d933e424f217571bed3736f18ce4a86c0eb8bad",
+                "sha256": "2766383442be17845ef404009a90f9250efc61b2917d9e9e6db0c0c435c41c8a",
                 "size_bytes": 1776
               }
             },
@@ -4448,7 +4448,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4474,7 +4474,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "9fa99afb5aed00bd51c88d52508d8e58240e44c7d615ed7ac92860fdd82c7b38",
+                "sha256": "8b3d64af55b6aa614985845698ee42a4e76870e680dc3e9946f0b5327e1726fd",
                 "size_bytes": 1770
               }
             },
@@ -4493,7 +4493,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4519,7 +4519,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "ddf70cd5bc37b8a9ff13ded60be720fc0db4dcfb136f58b01bced5c659c5a8d0",
+                "sha256": "b488edba8abe1178c8becc80fb1ac9ed72d18a64e5390409603a9ace60f66944",
                 "size_bytes": 1773
               }
             },
@@ -4538,7 +4538,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285",
+                  "CLONK_PRESENTATION_NONCE": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-1/rust/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4564,7 +4564,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "e3b0967b7b823aee0d4a1ec283c75982993c1404992a1609543ba699e49255fc",
+                "sha256": "03a4fce808434ef54feb27f62bed5175ad89d8b413388b6c1dff089bc0c0d5f2",
                 "size_bytes": 1767
               }
             }
@@ -4574,10 +4574,10 @@
       "id": "run-1",
       "launcher_receipt": {
         "path": "run-1/launcher-receipt.json",
-        "sha256": "13260687fbb9deb7eb25ded810ec96f8c3a9377c7bce8efca74504ef47530895",
+        "sha256": "0bb5cba30bbfcbc8481fecc06a274bfaca40bee9340615afecab505103140160",
         "size_bytes": 7327
       },
-      "nonce": "9f828560c4452c0049ebc28cf022956ea53bc230dcfde817c800d3d69a27e285"
+      "nonce": "6c790a84647abd1c0cc0fda7e7b56de5b46c0682f49e2a422b4e2a7df7408010"
     },
     {
       "engines": {
@@ -4596,7 +4596,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4621,7 +4621,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-main.json",
-                "sha256": "d778fac4e7df6c64a90a32459e5c407c485073d98396340c53248fc9a3084025",
+                "sha256": "6d92ed8034e718ee95996a6dabe09861467dfcd66bd06457acde8e939bb82e1f",
                 "size_bytes": 1846
               }
             },
@@ -4638,7 +4638,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4663,7 +4663,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "e47fd6849b36303e35f074af9648a642b90c2ae13cafbab05d7ae01a5a73dc34",
+                "sha256": "a12a740ba33db68f4ecd319d1f9e1177e5ead407963782ae5593a92ceda10ca9",
                 "size_bytes": 1902
               }
             },
@@ -4680,7 +4680,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4705,7 +4705,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-network-browser.json",
-                "sha256": "61ce770a9c308432ac18edf4547362e523d11b162d4d69531534e271a3be95dd",
+                "sha256": "5341246c7e26f2f586a6a35a0763822d0e740398fbf0c99ea66a2ba639a5b4b0",
                 "size_bytes": 1889
               }
             },
@@ -4722,7 +4722,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4747,7 +4747,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-player-selection.json",
-                "sha256": "d576dfbab5c72516ed2f812f7eee9ac17f1a11fcaeb0e4f3bbdef74463a0917f",
+                "sha256": "f26dd3fa1dc9a4ddf09f935414b309afac6e18009008feba580d0b89bec8833b",
                 "size_bytes": 1893
               }
             },
@@ -4764,7 +4764,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4789,7 +4789,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options.json",
-                "sha256": "e92cd75c061c3ebedc28c58e074ca4548bbd1bc3af19c803c9344d3c4a822235",
+                "sha256": "da6721b90ddc3678f350618f4ebb2ca3345311dc6bd8fe3d8b1cdb8eee2ce105",
                 "size_bytes": 1858
               }
             },
@@ -4806,7 +4806,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4831,7 +4831,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-about.json",
-                "sha256": "f4d66aaced47843dc791d8364240c52c74811be08c26e3704838728601dfbcad",
+                "sha256": "db935f0fdf23ba36dc909c6af61136ed1bd0da0015867d1e58a2dba075aa08b9",
                 "size_bytes": 1851
               }
             },
@@ -4850,7 +4850,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4875,7 +4875,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/network-lobby.json",
-                "sha256": "e8101b2d44bfac13b5d04d065eceb949a33c6ed2817da656777cbfcc0f6303dc",
+                "sha256": "51258c1fcd96a9b6799d076607db646a14216dd4a81ac6ebad0a363eebfad62b",
                 "size_bytes": 1730
               }
             },
@@ -4892,7 +4892,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4917,7 +4917,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/loader.json",
-                "sha256": "4f164b2b66402061240fb375d9d67123ea73ed5ededfb48f810bc9ed55238bfc",
+                "sha256": "286fc7dc57efee06293318cd8ac36c5ca0e605be7159b112e1266cecbfcbed7d",
                 "size_bytes": 1716
               }
             },
@@ -4934,7 +4934,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4959,7 +4959,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/hud.json",
-                "sha256": "9b85bfeda132004d390c803d2d41a274541d8e302ffb58c565b92736eaaaee24",
+                "sha256": "de5ed0b877ccb18140c81ae62d335309874911a194317cb28af5c956ea9e58cf",
                 "size_bytes": 1849
               }
             },
@@ -4976,7 +4976,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5001,7 +5001,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/ingame-menu.json",
-                "sha256": "95be4b50758bb410fb2f39b5fe76494fe89b0ce2e398a8f4034f1f35c905421c",
+                "sha256": "377a239f61107a3a01c5bb1d09d516d4f6c88b1084730948bd8a47928c8b95bc",
                 "size_bytes": 1886
               }
             },
@@ -5018,7 +5018,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5043,7 +5043,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/object-menu.json",
-                "sha256": "3eee67b4dacfab4cbcf0619de598d609e5602f5012b511dbb07cec19f59209ff",
+                "sha256": "2e9c75e91abc1acb0174f1900ed189016417192c5cc919541acae0e5f3aea756",
                 "size_bytes": 1896
               }
             },
@@ -5060,7 +5060,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5085,7 +5085,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/gameplay.json",
-                "sha256": "e05ef110f91c91a46c4cb694e96372b98892bdaac0efe700a83d5f498edcc936",
+                "sha256": "f3569a4ddcdc4a882b6054d14f4f4e6b03266e83b5d539edee20d7d6404ac40e",
                 "size_bytes": 1866
               }
             },
@@ -5102,7 +5102,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5127,7 +5127,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/evaluation.json",
-                "sha256": "75f4a56ad911068fe9a0e33d60327517e56199b384194feb7ba68d4068df78eb",
+                "sha256": "1996bbcafa14ae6216bf70db3bbab930ce9285fc5697ecf88e738f7c89a4ea3a",
                 "size_bytes": 1890
               }
             },
@@ -5144,7 +5144,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5169,7 +5169,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "5afdda9ba7094771c08bd683d020aef0657553bfe625b1cf9c455a166f769d41",
+                "sha256": "cd1fa078b1593d029e25b88ed660bb82fad2887e861ff91c34557e60d7f35085",
                 "size_bytes": 1786
               }
             },
@@ -5186,7 +5186,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5211,7 +5211,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "3d0c4b9d4ed457c9f5f69c4e369b49eab668a91c7db6f9b098870c006b779721",
+                "sha256": "b7a571a57e0f3b19a5a2ada2d6343617ee4cc63388a5b5c2b360747120c23ca8",
                 "size_bytes": 1798
               }
             },
@@ -5228,7 +5228,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5253,7 +5253,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "e5e5370dc879ff9d8dbe2f360925d71b961408d8828286d68b4e40768bd2d22b",
+                "sha256": "cee419cf2f0c580383ff28504181f66ae124f31d92cad24f4360622d175047d6",
                 "size_bytes": 1780
               }
             },
@@ -5270,7 +5270,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5295,7 +5295,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "6ede35fdbff3fab83bc2e266857898efeb323e8ab9df378ea47c18fb823d5761",
+                "sha256": "a500085410c476bee8c92f0a449941c428788b3be286efe5101c4cce3bfd5870",
                 "size_bytes": 1792
               }
             },
@@ -5312,7 +5312,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5337,7 +5337,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-reset-reference.json",
-                "sha256": "4b150ccfd9341c783aea47bae82220094249abb075d4a8cffa94ed44bed1f50c",
+                "sha256": "752489fb1abef5fcd98d843fc67ac87454382dfd670ea26e739ce51ce3dc798c",
                 "size_bytes": 1762
               }
             },
@@ -5354,7 +5354,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5379,7 +5379,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-reset-minimum.json",
-                "sha256": "fb536e93fdf0a6f35e594021af3353e0f2519d932e830b28933680ea53048a9a",
+                "sha256": "5668b84dc5e9dcece569ef41698a5f65da85779c81183f9e233431cedd399637",
                 "size_bytes": 1756
               }
             },
@@ -5396,7 +5396,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5421,7 +5421,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "0e9de51a42db21ae3f9207838db65c796b91571ebed8ce907fee19e0f3614aae",
+                "sha256": "468d1f9cfcfc39f318399686b3b28ff05e819e1e6903dff08ec0709d59ab0341",
                 "size_bytes": 1776
               }
             },
@@ -5438,7 +5438,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5463,7 +5463,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "e8b6f539cd10e25c4297e9ea7e423670a125d50b222dd73a3503bbc92745b8ba",
+                "sha256": "144b67fd016eb7801c47cd2a84a81766fe4b0d17a6b1df8969ba35f50e22bfb8",
                 "size_bytes": 1770
               }
             },
@@ -5480,7 +5480,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5505,7 +5505,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "4c1fe8d574ab35175ec91105f7c86b7b1c19e2024c90d0ebb6df35bfb290c8b2",
+                "sha256": "281c0c9eab12aecc2341ddba524d6f3c0c23ca4d5fde926aecee4d109b8ae87a",
                 "size_bytes": 1773
               }
             },
@@ -5522,7 +5522,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/cpp/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5547,7 +5547,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "de02b5f444831a1ccc2c36ddf391aebe8f1d87fe32be7a176462c17a024c0278",
+                "sha256": "c53b18d9fac8c06fe8344bc0d560119d1de1337b36b1076f6407236c83e176e4",
                 "size_bytes": 1767
               }
             }
@@ -5570,7 +5570,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5596,7 +5596,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-main.json",
-                "sha256": "12306d5b511b486d1a99331ee4a9b6f2d873604f07e49b5e1480a4226841f74c",
+                "sha256": "7002f9db3847e01d3d7f04bb704f664ed2d713f12f7a2c5cc389e97c5cb456d6",
                 "size_bytes": 1847
               }
             },
@@ -5615,7 +5615,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5641,7 +5641,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-scenario-selection.json",
-                "sha256": "615a5002bab3ae75ef3cdbb8660d269f9fdef130a70f36d3b84bea9e389158e6",
+                "sha256": "c33f71f1d6782645c6156d51f9740529dfb2eda507323dfadffd64bd0ed01c38",
                 "size_bytes": 1903
               }
             },
@@ -5660,7 +5660,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5686,7 +5686,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-network-browser.json",
-                "sha256": "d4bf401a053f3ac5c7f52d8af20cb758d563653e5a30cef0678758cc5bbd2aeb",
+                "sha256": "b6aecdd55280679e283c2be0c51d418458a8f29a345b72fd965adfbd7e113f70",
                 "size_bytes": 1890
               }
             },
@@ -5705,7 +5705,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5731,7 +5731,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-player-selection.json",
-                "sha256": "5a6e25367cf31ad3841f342f95d4095ba249b1fa53f5dd4f962b44b5c7e92061",
+                "sha256": "0fc20e23d20e81e68cde98b23aa482a79b9b0fa13e08c0c0c5df7df7dce0c893",
                 "size_bytes": 1895
               }
             },
@@ -5750,7 +5750,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5776,7 +5776,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options.json",
-                "sha256": "26b6b693405eed3b085fcbf4a84ff14daa45ceb8d1dc6ac7b3acc9df529237cf",
+                "sha256": "76056430b74a650012cf2c04430e16451161c4f286508c69e309a8288b08890c",
                 "size_bytes": 1859
               }
             },
@@ -5795,7 +5795,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5821,7 +5821,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-about.json",
-                "sha256": "b5d61765f20e3cecc233e46f188689674719fd83afbd3574febb08d6f1ade92a",
+                "sha256": "8bcd313977bcbef79cabe7872c2fa8c160a52fa6d722bcc4f2e5f94349b81fd0",
                 "size_bytes": 1852
               }
             },
@@ -5840,7 +5840,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5866,7 +5866,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/network-lobby.json",
-                "sha256": "6d8585a23d1ebc02931bda183054c8bb1ee58cf9860b161e7666b03c0c13cd53",
+                "sha256": "ed89a4f139c0457e071cc17ca720086f348071c4fa88b047286a4c5292f74f1c",
                 "size_bytes": 1730
               }
             },
@@ -5885,7 +5885,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5911,7 +5911,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/loader.json",
-                "sha256": "2e48fdbd8a7edcd02a59502f093b5f57a82b6a41671d8122673521737f6fea57",
+                "sha256": "6b877ea2b6c1cba6d7952ba83c373f13d14896bce0e54a43b5d536371e5daf97",
                 "size_bytes": 1716
               }
             },
@@ -5930,7 +5930,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5956,7 +5956,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/hud.json",
-                "sha256": "ecc0d9cf5af89ecc170cba6471de53e70b99d7bbd70c64587775eda1907c0cb3",
+                "sha256": "63202dc86b374ae50055d721ac741a0af5c89d58e38a6d0c49b5041abd3b038e",
                 "size_bytes": 1851
               }
             },
@@ -5975,7 +5975,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6001,7 +6001,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/ingame-menu.json",
-                "sha256": "14b5afb5f10e054918600c242145505367ab41550a440edc2f1b0431a1327ed2",
+                "sha256": "d418cc27a5f4fd1763b830ba0e7f4c32a870e999fd7bcc25083f4ce13b584055",
                 "size_bytes": 1888
               }
             },
@@ -6020,7 +6020,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6046,7 +6046,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/object-menu.json",
-                "sha256": "74daf47da31327f2942f114f84be08a3bdb9e2fdd4309151f7656e29610a983f",
+                "sha256": "c30d381b4929cef5700285150abd9fa19208ae9a26670531138ac62e3b070c47",
                 "size_bytes": 1898
               }
             },
@@ -6065,7 +6065,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6091,7 +6091,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/gameplay.json",
-                "sha256": "f412611ea92ec98fb962685a538083132800c5f4e7f6606cf4e98df016e66112",
+                "sha256": "6fb02d9ceb3ff03ea07ca9abb9e9bb209a93567d2eb8a7769bcedb208ce6efec",
                 "size_bytes": 1868
               }
             },
@@ -6110,7 +6110,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6136,7 +6136,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/evaluation.json",
-                "sha256": "cddd297c38fb1dab8748e2822c6eb3fbf72fedb3aeaa727a118bc83a9b99d543",
+                "sha256": "1e7a85455f2007b145e0bdfc7e61bde6ac13ba7d2be706914abdf5636e2f5de9",
                 "size_bytes": 1892
               }
             },
@@ -6155,7 +6155,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6181,7 +6181,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "5bf488ba9c71f565934c2a83a926c30e9cb1c9cac450d0bc7236c36cd34652f8",
+                "sha256": "baf0748553b96e8aded67bb1ea31f242294447efc5432c75337715e6d677f637",
                 "size_bytes": 1786
               }
             },
@@ -6200,7 +6200,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6226,7 +6226,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "63554c419465944c7238e7965b317d809795af8530f6f029c7d424a7857fdde3",
+                "sha256": "0c05ad47569a21346efef90d478d0e18297dcd00bec79a1d559f0429ee91b2da",
                 "size_bytes": 1798
               }
             },
@@ -6245,7 +6245,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6271,7 +6271,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "ef01133b53630b8d6c7971c314de134b30a22fbbd40d7d48efee92c65df44e33",
+                "sha256": "1fe481ab76a832fdf0927d077936e31c43485fb62578cefd2d21d384d580097d",
                 "size_bytes": 1780
               }
             },
@@ -6290,7 +6290,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6316,7 +6316,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "8b5724698602cfbc0dfb628be820e26e65e7b820119f408b552682b4ecab7984",
+                "sha256": "804fb47e0f69d06620d360dea008ab77f0db4e4429dc139283b0d70b588e21cd",
                 "size_bytes": 1792
               }
             },
@@ -6335,7 +6335,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6361,7 +6361,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-reset-reference.json",
-                "sha256": "46ab8302aff257f10dc17ccd7d5823057238b40e802c52290490c312a59a79fd",
+                "sha256": "6d0caffbb8245fb1664e33e8cdce25233b8588c9af1ac8729d373d4cf9b4c38e",
                 "size_bytes": 1762
               }
             },
@@ -6380,7 +6380,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6406,7 +6406,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-reset-minimum.json",
-                "sha256": "1681af9c0bd0c6ed0fde4a67844228d14c0bc67d1dc270c0f6767bdc7e07d54d",
+                "sha256": "461e57ba60ddae715ac594ef2fc8f5a51e02601e0732371d067947ce375a8037",
                 "size_bytes": 1756
               }
             },
@@ -6425,7 +6425,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6451,7 +6451,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "fe734f88cc27477237a47903c8179d19de824ee31b9e2c9073a22241c0281ebf",
+                "sha256": "1487f477e2c694238abe1cff158d10c61b1ba6d56f9ce3058f762b1c21692558",
                 "size_bytes": 1776
               }
             },
@@ -6470,7 +6470,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6496,7 +6496,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "712367ec983b7ccaebf5df1462601f90124c64a53aea9be878ca60ab101f2193",
+                "sha256": "bbae0fbcb67775e735c4fadd3a67a1d50b38326356eb4948c00b855d8c48a176",
                 "size_bytes": 1770
               }
             },
@@ -6515,7 +6515,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6541,7 +6541,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "3071455bc4713dad9e68dc344a184d1b83732daa5aa6a6b538e968d8e1b9223b",
+                "sha256": "86bdf2d5df73a32b23708d54189d19f949c603cface09fa921f690d722708275",
                 "size_bytes": 1773
               }
             },
@@ -6560,7 +6560,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb",
+                  "CLONK_PRESENTATION_NONCE": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/private/tmp/claude-501/-Users-tyler-Documents-code-apps-clonk-rs--claude-worktrees-polished-launching-conway/b19770b8-30c0-4bc7-a28b-39c4ce844b0e/scratchpad/q/run-2/rust/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6586,7 +6586,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "71897f228f676364439d1c5e14e356d30d80a7538fa2c11cf4007123331fb392",
+                "sha256": "05deeacb7d33589b929e93f93fe71fcfdada9fdf29b01df3cf771a58ac5be0ff",
                 "size_bytes": 1767
               }
             }
@@ -6596,18 +6596,18 @@
       "id": "run-2",
       "launcher_receipt": {
         "path": "run-2/launcher-receipt.json",
-        "sha256": "72e487156a7cfa3dc5ad01cadbe16cbd31c1c344305eae893267101a0f990946",
+        "sha256": "fa0f2259a38ababca67954de75d6420896bfa39d5743cb25ce79c46663c4d30f",
         "size_bytes": 7327
       },
-      "nonce": "4867a9ad0734966e1b4a5d8840c53229943759d8a087360df675e0925e50c0cb"
+      "nonce": "ffca04aa7d93b24fccf08278498eeff95cece0ae26aff512c576dbb0d694055f"
     }
   ],
   "schema": "clonk-rs/presentation-oracle/v2",
   "sources": {
     "effective_system_scripts_sha256": "be61ec80205e16997e7f00af825522783714fff57f534f3d1c328de182e2eb6b",
     "fixture_content": {
-      "commit": "26f10ed8c115d456b0d4846ecdbb52a6171fa7e0",
-      "tree": "f6f5fa0e86a536c41ad9ae3a6615827f5c556b21"
+      "commit": "06d9d284a8fcee7bea63675407edcd94840a5f9e",
+      "tree": "9c73054259c45a55925f2f71572b5aec93975e65"
     },
     "oracle": {
       "commit": "7d43b47b7d789b533f32d005e64596e0a07019cd",
@@ -6639,10 +6639,10 @@
       }
     },
     "rust": {
-      "commit": "55f43c7c75586ddd4efe5df22346e2f371e02853",
+      "commit": "4984bb15dfc58bd113cf42b98656c6a6eb46ad8f",
       "planet_tree": "8bac05fb1db56dec06c6dc3644b3170d81d4ef49",
       "system_tree": "f99775e7f9c3dff0d15e3384f3b8e8ead6b45be2",
-      "tree": "d2119326320c46e42dcaaed77a48b48abba85de0"
+      "tree": "875757a44dbf260e56fb0d3ca46b27a59f1b4b04"
     }
   }
 }
