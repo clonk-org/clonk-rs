@@ -812,9 +812,9 @@ mod tests {
         grid_landscape(W, H, solid, G)
     }
 
-    /// A `width` x `height` landscape of Earth where `solid` is set and sky
-    /// elsewhere, every column's surface at `surface`.
-    fn grid_landscape(width: usize, height: usize, solid: Vec<u8>, surface: i32) -> Landscape {
+    /// A `width` x `height` landscape of sky (0), Earth (1) and Water (2)
+    /// pixels, every column's surface at `surface`.
+    fn grid_landscape(width: usize, height: usize, pixels: Vec<u8>, surface: i32) -> Landscape {
         let mut landscape =
             Landscape::with_default_material(width as u32, vec![surface; width], None)
                 .expect("navigation landscape");
@@ -822,10 +822,10 @@ mod tests {
         landscape.set_pixel_grid(PixelGrid::new(
             width as u32,
             height as u32,
-            solid,
-            vec![0, 100],
-            vec![None, Some("Earth".to_owned())],
-            vec![None; 2],
+            pixels,
+            vec![0, 100, 25],
+            vec![None, Some("Earth".to_owned()), Some("Water".to_owned())],
+            vec![None; 3],
         ));
         landscape
     }
