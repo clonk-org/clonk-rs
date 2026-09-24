@@ -621,6 +621,7 @@ fn plan_resource(
         &candidates,
         standalone_directory,
         group_maker,
+        crate::local_resource_resolution::DirectoryPacking::Verified,
     )
     .map_err(|source| ClientBootstrapPlanError::LocalResolution {
         resource_id: core.id,
