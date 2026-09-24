@@ -1287,6 +1287,15 @@ impl MoveToState {
             NAVIGATION_PLAN_BUDGET,
         ) {
             Some(plan) if !plan.waypoints.is_empty() => {
+                if Self::pursues_acquired_item(ctx)
+                    && !Self::has_way_back(landscape, &actor, &plan, ctx.position, range_x)
+                {
+                    // An item fetched down a one-way route never reaches
+                    // the site and strands its fetcher with it: failing
+                    // the pursuit lets Acquire move on to its next
+                    // candidate (clonk-org/clonk-rs#1727).
+                    return Some(CommandStepResult::failed(None));
+                }
                 *permit &= !(PERMIT_FALLBACK | PERMIT_STEER_MASK);
                 let operations = plan
                     .waypoints
@@ -1318,6 +1327,50 @@ impl MoveToState {
                 Some(self.navigation_fallback(ctx, landscape, target))
             }
         }
+    }
+
+    /// Whether the executing MoveTo is a Get's pursuit of an item an Acquire
+    /// chose (stack MoveTo > Get > Acquire). The MoveTo absorbed the item's
+    /// position at evaluation (C4Command.cpp:1634-1643), so only the stack
+    /// says what it is for.
+    fn pursues_acquired_item(ctx: &CommandRuntimeContext<'_>) -> bool {
+        let mut live = ctx
+            .object
+            .commands
+            .iter()
+            .filter(|command| !command.finished);
+        matches!(
+            (live.next(), live.next(), live.next()),
+            (Some(move_to), Some(get), Some(acquire))
+                if move_to.name == "MoveTo" && get.name == "Get" && acquire.name == "Acquire"
+        )
+    }
+
+    /// Whether the actor can walk, climb or jump back from where `plan` ends
+    /// to `home`.
+    fn has_way_back(
+        landscape: &crate::Landscape,
+        actor: &navigation::NavActor,
+        plan: &navigation::NavPlan,
+        home: Vector2,
+        range_x: i32,
+    ) -> bool {
+        plan.waypoints.last().is_some_and(|end| {
+            let goal = navigation::NavGoal {
+                x: home.x,
+                y: home.y,
+                range_x,
+                range_y: NAVIGATION_ARRIVAL_Y,
+            };
+            navigation::plan(
+                landscape,
+                actor,
+                Vector2::new(end.x, end.y),
+                goal,
+                NAVIGATION_PLAN_BUDGET,
+            )
+            .is_some()
+        })
     }
 
     /// No planned route: try the C4PathFinder route C4Command::MoveTo would
