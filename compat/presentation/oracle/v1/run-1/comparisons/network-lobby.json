@@ -5,13 +5,13 @@
   },
   "case_id": "network-lobby",
   "comparator": {
-    "binary_sha256": "ab18f9fe9d75412fa555e76399e727b775d08ed994fc60f000168610fda2223e",
+    "binary_sha256": "fd1187a21056f9737fde5931f0395cbea0c8cd50b46a4534c3a9015da23c8c95",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "pixel",
   "reference": {
     "path": "run-1/cpp/artifacts/network-lobby.png",
-    "sha256": "b706758453274ec5d7fd110d319c3dfd144e5e21fc37d4b37a7e3ae6b96fb3c7"
+    "sha256": "df7a2cfd7e72541b5299236e0e137298cba6403543b8a247be60a3619bb59529"
   },
   "run_id": "run-1",
   "schema": "clonk-rs/presentation-comparison-attestation/v1",
