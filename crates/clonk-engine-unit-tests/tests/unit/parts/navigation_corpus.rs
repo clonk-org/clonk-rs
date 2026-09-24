@@ -93,19 +93,43 @@ enum FetchOutcome {
 fn fetch_for_construction(rects: &[CorpusRect], rocks: &[Vector2]) -> FetchOutcome {
     let (mut engine, owner, clonk) = frontier_crew_engine(true);
     engine.set_landscape(corpus_landscape(rects));
+    fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, CORPUS_GROUND),
+        rocks,
+        CORPUS_FRAMES,
+    )
+}
+
+/// Clear the map down to the crew, place a castle site with its bottom
+/// centre at `site` and the builder on it, then run the Build the site's one
+/// missing rock starts, for up to `frames` frames.
+fn fetch_to_site(
+    engine: &mut Engine,
+    owner: i32,
+    clonk: ObjectId,
+    site: Vector2,
+    rocks: &[Vector2],
+    frames: usize,
+) -> FetchOutcome {
     engine
         .apply_scenario_script_edit("NavigationCorpus", CORPUS_CLEAR_SCRIPT)
         .test_value();
-    corpus_script(&mut engine, "CorpusClear()");
+    corpus_script(engine, "CorpusClear()");
     engine
         .apply_object_update(
             clonk,
-            ObjectUpdate::new().with_position(Vector2::new(CORPUS_SITE_X, CORPUS_GROUND - 10)),
+            ObjectUpdate::new().with_position(Vector2::new(site.x, site.y - 10)),
         )
         .test_value();
     corpus_script(
-        &mut engine,
-        &format!("CreateConstruction(CST1, {CORPUS_SITE_X}, {CORPUS_GROUND}, {owner}, 90, true)"),
+        engine,
+        &format!(
+            "CreateConstruction(CST1, {}, {}, {owner}, 90, true)",
+            site.x, site.y
+        ),
     );
     let site = engine
         .objects
@@ -132,7 +156,7 @@ fn fetch_for_construction(rects: &[CorpusRect], rocks: &[Vector2]) -> FetchOutco
         .test_value();
 
     let mut carried = None;
-    for frame in 0..CORPUS_FRAMES {
+    for frame in 0..frames {
         let snapshot = engine.test_tick();
         carried = carried.or_else(|| {
             rocks.iter().position(|&rock| {
