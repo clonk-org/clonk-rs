@@ -354,6 +354,70 @@ fn navigation_fetches_construction_material_through_an_underwater_tunnel() {
     );
 }
 
+/// Water from x=150 to x=299 below the ground line, 40 px deep, but for a
+/// beach at its right end: the floor rises one pixel for every `run` across,
+/// to meet the ground at x=300.
+fn beach_pool(run: i32) -> Vec<(i32, i32, i32, i32)> {
+    let g = CORPUS_GROUND;
+    (150..=299)
+        .map(|x| (x, g, x, g + 40.min((299 - x) / run + 1) - 1))
+        .collect()
+}
+
+/// Clear the map down to the crew, put the Clonk at `from` and order it to
+/// `to` as its player would, then run `frames` frames. Returns where the
+/// Clonk ended up and whether it is still alive.
+fn move_to(
+    engine: &mut Engine,
+    owner: i32,
+    clonk: ObjectId,
+    from: Vector2,
+    to: Vector2,
+    frames: usize,
+) -> (Vector2, bool) {
+    engine
+        .apply_scenario_script_edit("NavigationCorpus", CORPUS_CLEAR_SCRIPT)
+        .test_value();
+    corpus_script(engine, "CorpusClear()");
+    engine
+        .apply_object_update(clonk, ObjectUpdate::new().with_position(from))
+        .test_value();
+    engine
+        .execute_player_command(owner, CommandId::MoveTo as i32, to.x, to.y, 0, 0, 0, 1)
+        .test_value();
+    for _ in 0..frames {
+        engine.test_tick();
+    }
+    let snapshot = engine.snapshot();
+    let clonk = snapshot.object(clonk).test_value();
+    (clonk.position, clonk.alive)
+}
+
+#[test]
+fn navigation_swims_a_clonk_out_of_a_pool_up_its_beach() {
+    // Measured with the LegacyClonk profile's MoveTo: steered at the far
+    // side, the swimmer KneelUps onto the beach where its floor comes within
+    // a body of the surface, at (283,138), and walks on. Ordered from under
+    // the surface, the Clonk must not idle there until it drowns
+    // (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(&[], &beach_pool(2)));
+    let (position, alive) = move_to(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(200, g + 5),
+        Vector2::new(400, g - 10),
+        CORPUS_FRAMES,
+    );
+    assert!(alive, "drowned at {position:?}");
+    assert!(
+        (position.x - 400).abs() <= 3 && (position.y - (g - 10)).abs() <= 3,
+        "{position:?}"
+    );
+}
+
 /// Frames a fetch on the real Frontier map may take. The stranded builder
 /// of clonk-org/clonk-rs#1727 gave up after about 1800.
 const FRONTIER_FETCH_FRAMES: usize = 2400;

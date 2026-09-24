@@ -1349,11 +1349,12 @@ impl MoveToState {
         let near = inside(ctx.position.x - target.x, -PATH_RANGE, PATH_RANGE)
             && inside(ctx.position.y - target.y, -PATH_RANGE, PATH_RANGE);
         let steer_frames = (*permit & PERMIT_STEER_MASK) >> PERMIT_STEER_SHIFT;
-        // A plan starts from a stand or a swim.
-        let standing = matches!(
-            ctx.object.action_procedure,
-            ActionProcedure::Walk | ActionProcedure::Swim
-        );
+        // A plan starts from a stand, or from a swim as it begins: a swimmer
+        // the planner finds no route for steers natively until it stands
+        // again, as every swimmer did before routes could swim.
+        let swimming = ctx.object.action_procedure == ActionProcedure::Swim;
+        let standing =
+            ctx.object.action_procedure == ActionProcedure::Walk || (swimming && steer_frames == 0);
         let fallback = *permit & PERMIT_FALLBACK != 0;
         let replan_due = !fallback || steer_frames % NAVIGATION_REPLAN_INTERVAL == 0;
         if near || !standing || !replan_due {
@@ -1433,6 +1434,12 @@ impl MoveToState {
             }
             // Already inside the goal region: native steering finishes.
             Some(_) => None,
+            // No route from the water: swim on natively, as `standing` says.
+            None if swimming => {
+                *permit =
+                    (*permit & !PERMIT_STEER_MASK) | ((steer_frames + 1) << PERMIT_STEER_SHIFT);
+                None
+            }
             None if fallback => Some(CommandStepResult::failed(None)),
             None => {
                 *permit |= PERMIT_FALLBACK;
