@@ -168,6 +168,30 @@ fn the_quiz_tower_has_its_script_in_every_language() {
     }
 }
 
+/// clonk-org/clonk-rs-content#75: the Quiz's joker banners `_JB1` and `_JB2`
+/// shipped only a `ScriptDE.c`, like the tower above, and LanguageEx is just
+/// the player's language (C4Config.cpp:1466-1473, 1492-1507). A US player's
+/// banners therefore never ran their `Initialize` and hung idle instead of
+/// flying. They are `Script.c` now.
+#[test]
+fn the_quiz_joker_banners_fly_in_every_language() {
+    for languages in [["US"], ["DE"]] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Puzzles.c4f/Das_Clonk_Quiz_3_Meister_des_Quiz.c4s",
+            0,
+            &languages,
+        );
+        for banner in ["_JB1", "_JB2"] {
+            let object = engine.spawn_test_object(SpawnConfig::new(banner));
+            let action = engine.test_object_snapshot(object).action;
+            assert_eq!(
+                action.name, "Fly",
+                "the {languages:?} {banner} ran its Initialize"
+            );
+        }
+    }
+}
+
 /// Kills `target` the way a fight does, so the shipped `Death` runs from script
 /// and makes its own typed `GameCallEx`.
 const KILL_PROBE: &str = r#"#strict
