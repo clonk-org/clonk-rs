@@ -965,7 +965,7 @@ impl NavigationKind {
 }
 
 /// The commanded object as the navigation planner sees it.
-fn navigation_actor(
+pub(in crate::command) fn navigation_actor(
     ctx: &CommandRuntimeContext<'_>,
     gravity: crate::C4Fixed,
 ) -> navigation::NavActor {
@@ -979,6 +979,7 @@ fn navigation_actor(
             .map(navigation::LiquidHazards::new)
             .unwrap_or_default(),
     )
+    .with_breath(ctx.object.breath)
 }
 
 /// The COMD_* direction whose axis steps are (horizontal, vertical).

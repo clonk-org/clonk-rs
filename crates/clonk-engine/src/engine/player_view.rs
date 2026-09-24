@@ -839,6 +839,7 @@ impl Engine {
             crew_member: object.state.crew_member,
             selected: object.state.selected,
             alive: object.state.alive,
+            breath: object.state.breath,
             need_energy: object.state.need_energy,
             on_fire: object.state.on_fire,
             contents: object.state.contents.clone(),

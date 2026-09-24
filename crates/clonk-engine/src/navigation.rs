@@ -244,7 +244,7 @@ impl NavActor {
             breath_frames: if physical.breathe_water != 0 {
                 i32::MAX
             } else {
-                physical.breath / (2 * C4_MAX_PHYSICAL / 100) * 5
+                breath_frames(physical.breath)
             },
             breath_held: 0,
             breath_offset: shape_top / 2,
@@ -254,6 +254,26 @@ impl NavActor {
             gravity,
         }
     }
+
+    /// The actor with `breath` left of its Breath physical, the rest of it
+    /// spent.
+    pub fn with_breath(self, breath: i32) -> Self {
+        let breath_held = if self.breath_frames == i32::MAX {
+            0
+        } else {
+            (self.breath_frames - breath_frames(breath)).max(0)
+        };
+        Self {
+            breath_held,
+            ..self
+        }
+    }
+}
+
+/// The frames `breath` lasts without air: 2% of C4MaxPhysical drains every
+/// fifth frame (C4Object.cpp:881,905).
+fn breath_frames(breath: i32) -> i32 {
+    breath / (2 * C4_MAX_PHYSICAL / 100) * 5
 }
 
 /// How the actor reaches a waypoint from the previous one.

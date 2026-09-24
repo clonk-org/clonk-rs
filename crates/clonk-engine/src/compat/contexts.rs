@@ -5761,6 +5761,10 @@ impl EffectHostContext {
                         .unwrap_or(false),
                     selected,
                     alive: scope.map(ObjectScopeContext::alive).unwrap_or(object.alive),
+                    breath: scope
+                        .map(ObjectScopeContext::breath)
+                        .or_else(|| object.full_state().map(|state| state.breath))
+                        .unwrap_or(0),
                     need_energy: scope
                         .map(ObjectScopeContext::need_energy)
                         .unwrap_or(object.need_energy),

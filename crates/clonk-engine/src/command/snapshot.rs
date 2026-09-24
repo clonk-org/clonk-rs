@@ -67,6 +67,8 @@ pub struct CommandObjectSnapshot {
     pub crew_member: bool,
     pub selected: bool,
     pub alive: bool,
+    /// C4Object::Breath: what is left of the Breath physical.
+    pub breath: i32,
     /// Live C4Object::NeedEnergy marker used by C4Command::Energy's
     /// already-supplied completion check.
     pub need_energy: bool,
