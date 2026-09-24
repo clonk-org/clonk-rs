@@ -281,6 +281,15 @@ enum WalkStep {
     Wall,
 }
 
+/// The CNAT of the actor's side that faces `dir`.
+fn facing_side(dir: i32) -> u32 {
+    if dir > 0 {
+        CNAT_RIGHT
+    } else {
+        CNAT_LEFT
+    }
+}
+
 struct Search<'a> {
     landscape: &'a Landscape,
     actor: &'a NavActor,
@@ -345,7 +354,7 @@ impl<'a> Search<'a> {
     /// A side vertex facing `dir` touches solid, the contact that turns a
     /// walker or flier into a scaler (C4Object.cpp:4406-4520).
     fn wall_contact(&self, x: i32, y: i32, dir: i32) -> bool {
-        let side = if dir > 0 { CNAT_RIGHT } else { CNAT_LEFT };
+        let side = facing_side(dir);
         self.actor
             .body
             .vertices()
@@ -585,7 +594,7 @@ impl<'a> Search<'a> {
         if !self.actor.can_scale || !self.wall_contact(x, y, dir) {
             return None;
         }
-        let side = if dir > 0 { CNAT_RIGHT } else { CNAT_LEFT };
+        let side = facing_side(dir);
         let (mut cx, mut cy) = (x, y);
         for pixels in 0..MAX_CLIMB {
             let attached = self.attach(cx, cy - 1, side, (dir, 0));
