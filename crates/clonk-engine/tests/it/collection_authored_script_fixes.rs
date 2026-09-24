@@ -1253,3 +1253,59 @@ fn the_intro_names_its_cook_in_the_players_language() {
         assert_eq!(named(other_cook), Some(0), "{languages:?}: {other_cook}");
     }
 }
+
+/// Counts, from script, the residents of the kinds M_Kathedral's `Objects.txt`
+/// names that carry a given name.
+const CATHEDRAL_NAME_PROBE: &str = r#"#strict
+public func Named(string name)
+{
+    var count = 0;
+    for (var obj in FindObjects(Find_Or(Find_ID(DRF1), Find_ID(BERA), Find_ID(DRF4))))
+        if (GetName(obj) eq name) count++;
+    return count;
+}
+"#;
+
+/// clonk-org/clonk-rs-content#77: M_Kathedral's `Objects.txt` names two
+/// residents, a miner and a villager in German, and the engine reads it without
+/// a string table (C4GameObjects.cpp:535-548), so English players met them
+/// under their German names. The scenario's `Initialize`, which runs after the
+/// objects are loaded (C4Game.cpp:2712, 2733), now names them from its string
+/// table in the player's language.
+#[test]
+fn the_cathedral_names_its_residents_in_the_players_language() {
+    for (languages, names, other) in [
+        (
+            ["US"],
+            [("Resident", 2), ("Miner", 1), ("Villager", 1)],
+            "Bewohner",
+        ),
+        (
+            ["DE"],
+            [("Bewohner", 2), ("Berarbeiter", 1), ("Dorfbewohner", 1)],
+            "Resident",
+        ),
+    ] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Settling.c4f/M_Kathedral.c4s",
+            0,
+            &languages,
+        );
+        engine
+            .register_script_definition("KAPR", "Cathedral name probe", CATHEDRAL_NAME_PROBE)
+            .expect("the probe registers");
+        let probe = engine.spawn_test_object(SpawnConfig::new("KAPR"));
+        let index = engine.test_object_index(probe);
+        let mut named = |name: &str| {
+            engine
+                .call_object_function(index, "Named", vec![name.into()])
+                .unwrap_or_else(|error| panic!("the probe counts {name}: {error}"))
+                .as_c4_int()
+        };
+
+        for (name, count) in names {
+            assert_eq!(named(name), Some(count), "{languages:?}: {name}");
+        }
+        assert_eq!(named(other), Some(0), "{languages:?}: {other}");
+    }
+}
