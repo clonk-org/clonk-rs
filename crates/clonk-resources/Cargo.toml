@@ -36,3 +36,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globali
 
 [dev-dependencies]
 tempfile = "3"
+
+# clonk-rs-content records its rights inventory with this scanner
+# (`tools/rights_inventory.py record --scanner`). Examples are built but not
+# tested by default, so without this its test never ran.
+[[example]]
+name = "rights_inventory"
+test = true
