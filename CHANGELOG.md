@@ -4,6 +4,23 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-09-24
+
+### Features
+
+- Add high-resolution main menu buttons (#1791)
+- Add high-resolution options slider artwork (#1785)
+
+### Performance
+
+- Verify a joining client's packed directories after admission (#1790)
+- Flush the device once per extracted update component on macOS (#1789)
+
+### Testing
+
+- Drop duplicate tests and load the stock test crew once per process (#1788)
+- Drop the examples' dead tests and run the rights inventory scanner's (#1786)
+
 ## [0.31.0] - 2026-09-23
 
 ### Bug fixes
