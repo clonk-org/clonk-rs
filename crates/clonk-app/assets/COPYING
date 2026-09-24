@@ -22,6 +22,14 @@ prepared using the original tab silhouette. It uses the same CC BY-NC 4.0
 license above. See docs/art/startup-tab/README.md for the source, selected
 prompt, preparation, and in-game comparison.
 
+StartupBookScrollHD.png is a high-resolution adaptation of RedWolf Design's
+StartupBookScroll.png. The slider arrow was generated with OpenAI imagegen
+for Clonk Rust in 2026. Its mirror and tail cross-section form the other
+arrow and the rail in the original atlas layout.
+It uses the same CC BY-NC 4.0 license above. See
+docs/art/startup-slider/README.md for source artwork, preparation, and the
+in-game comparison.
+
 ui-icons/*.png are high-resolution adaptations of GUIIcons.png, GUIIcons2.png
 and GUICheckbox.png by RedWolf Design (GUIIcons.png also credits Jonathan Veit,
 AniProGuy). Generated with OpenAI imagegen and approved for Clonk Rust in 2026.

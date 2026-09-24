@@ -6568,6 +6568,10 @@ impl FrontendAssets {
                     include_bytes!("../../assets/StartupOptionIconsHD.png").as_slice(),
                 ),
                 (
+                    "StartupBookScrollHD.png",
+                    include_bytes!("../../assets/StartupBookScrollHD.png").as_slice(),
+                ),
+                (
                     "StartupTabClipHD.png",
                     include_bytes!("../../assets/StartupTabClipHD.png").as_slice(),
                 ),
@@ -6949,7 +6953,10 @@ impl FrontendAssets {
                 .flatten()
                 .or_else(|| self.dialog_image("StartupOptionIcons.png"))?,
             voice_icons: self.dialog_image("GUIIcons2.png"),
-            book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            book_scroll: (profile == CompatProfile::Normal)
+                .then(|| self.dialog_image("StartupBookScrollHD.png"))
+                .flatten()
+                .or_else(|| self.dialog_image("StartupBookScroll.png"))?,
             book_scroll_pin: self.startup_wipf(profile),
             context_arrow: self.dialog_image("StartupContext.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,

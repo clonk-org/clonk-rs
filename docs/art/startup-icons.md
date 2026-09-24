@@ -15,8 +15,10 @@ are kept separately from the icons.
 
 `crates/clonk-app/assets/StartupWipfHD.png` is a 256×256 RGBA replacement for
 the full-body Wipf scrollbar thumb. It retains the original 16×16 logical
-bounds and travel range. The arrows, track, and colored player-color thumbs
-remain the original artwork.
+bounds and travel range. The options sliders also use the 384×384
+`StartupBookScrollHD.png` atlas for their arrows and repeating track. Its
+[source artwork and native GPU comparison](startup-slider/README.md) are kept
+separately. The colored player-color thumbs remain the original artwork.
 
 These assets are embedded in the application and enabled by default in the
 Normal compatibility profile. The LegacyClonk profile uses the original
@@ -65,10 +67,10 @@ Regenerate the native GPU frames on a machine with a supported GPU using:
 
 ```sh
 CLONK_HD_OPTIONS_CAPTURE=/tmp/options-audio-gpu.png cargo nextest run -p clonk-app \
-  -E 'test(scaled_options_gpu_frame_keeps_all_eight_high_resolution_sources)'
+  -E 'test(scaled_options_gpu_frame_keeps_all_nine_high_resolution_sources)'
 ```
 
 This writes the updated frame to the requested path and the original-art frame
 to `/tmp/options-audio-gpu.before.png`. Without the environment variable, the
-test verifies that all seven complete 256×256 sources reach the GPU command
+test verifies that all nine high-resolution sources reach the GPU command
 stream without requiring a GPU or producing files.

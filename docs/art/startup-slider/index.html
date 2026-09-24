@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clonk options slider review</title>
+  <link rel="stylesheet" href="review.css">
+  <script src="review.js" defer></script>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">Clonk · interactive art review</p>
+    <h1>Options sliders</h1>
+    <p class="intro">Drag either Wipf, click its arrows, or use the controls below. The original and revised sliders move together so you can compare their artwork at the same position. This preview draws from the game's original and proposed sprite atlases; the captured Audio options screen is below.</p>
+
+    <section class="controls" aria-label="Slider positions">
+      <label for="music-position">Music</label>
+      <input id="music-position" type="range" min="0" max="100" value="50">
+      <output id="music-value" for="music-position">50%</output>
+      <label for="effects-position">Sound effects</label>
+      <input id="effects-position" type="range" min="0" max="100" value="50">
+      <output id="effects-value" for="effects-position">50%</output>
+      <button id="reset" type="button">Center both</button>
+    </section>
+
+    <section class="comparison" aria-label="Interactive before and after">
+      <article class="version">
+        <div class="version-heading"><span class="tag">Before</span><h2>Original arrows and track</h2></div>
+        <div class="paper">
+          <div class="slider-row">
+            <span class="end-label">quiet</span>
+            <canvas data-variant="before" data-channel="music" width="960" height="72" role="slider" tabindex="0" aria-label="Original music slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></canvas>
+            <span class="end-label">loud</span>
+          </div>
+          <div class="slider-row">
+            <span class="end-label">quiet</span>
+            <canvas data-variant="before" data-channel="effects" width="960" height="72" role="slider" tabindex="0" aria-label="Original sound effects slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></canvas>
+            <span class="end-label">loud</span>
+          </div>
+        </div>
+        <p class="caption">Original 48×48 atlas, with the current high-resolution Wipf thumb.</p>
+      </article>
+
+      <article class="version">
+        <div class="version-heading"><span class="tag after-tag">After</span><h2>Continuous arrow-tail rail</h2></div>
+        <div class="paper">
+          <div class="slider-row">
+            <span class="end-label">quiet</span>
+            <canvas data-variant="after" data-channel="music" width="960" height="72" role="slider" tabindex="0" aria-label="Revised music slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></canvas>
+            <span class="end-label">loud</span>
+          </div>
+          <div class="slider-row">
+            <span class="end-label">quiet</span>
+            <canvas data-variant="after" data-channel="effects" width="960" height="72" role="slider" tabindex="0" aria-label="Revised sound effects slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></canvas>
+            <span class="end-label">loud</span>
+          </div>
+        </div>
+        <p class="caption">Proposed 384×384 atlas. The middle repeats the arrow tails' exact cross-section.</p>
+      </article>
+    </section>
+
+    <p class="hint">Tip: focus a slider and press ← or → for 1%, Page Up or Page Down for 10%, or Home and End for its limits.</p>
+    <section class="capture">
+      <h2>Captured in the game</h2>
+      <p>Both images below are unscaled crops of the actual Audio options screen at 3× display scaling. The Wipf is at the right end in these captures; use the controls above to inspect other positions.</p>
+      <a href="in-game-comparison.png" target="_blank" rel="noopener"><img src="in-game-comparison.png" alt="Original Audio options sliders on the left and revised sliders on the right"></a>
+    </section>
+    <p id="load-error" class="error" role="alert" hidden></p>
+  </main>
+</body>
+</html>
