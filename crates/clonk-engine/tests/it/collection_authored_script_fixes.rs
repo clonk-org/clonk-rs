@@ -1167,3 +1167,89 @@ fn the_metal_magic_scenarios_load_the_extra_pack_their_objects_need() {
         }
     }
 }
+
+/// Asks a goal from script whether it is fulfilled, as the pack's goals ask
+/// each other: a function the goal does not have is an error there, where a
+/// call from the host is fail-safe.
+const GOAL_FULFILLED_PROBE: &str = r#"#strict
+public func Ask(object goal) { return goal->IsFulfilled(); }
+"#;
+
+/// clonk-org/clonk-rs-content#76: 5Arallsee's pollution goal `UMZS` shipped
+/// only a `ScriptDE.c`, and LanguageEx is just the player's language
+/// (C4Config.cpp:1466-1473, 1492-1507), so a US player's goal had no script,
+/// never reported fulfilled (C4RoundResults.cpp:296-299), and the mission
+/// could not be won. It is `Script.c` now. Nothing is polluted yet, so the goal
+/// answers that it is unfulfilled in either language.
+#[test]
+fn the_arallsee_pollution_goal_has_its_script_in_every_language() {
+    for languages in [["US"], ["DE"]] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Settling.c4f/RufDerWipfeRE.c4f/Kampagne.c4f/5Arallsee.c4s",
+            0,
+            &languages,
+        );
+        // The crew's `Initialize` creates the pack's environment object, which
+        // sets the nature total that the goal's percentage divides by.
+        join_local_player(&mut engine, "Arallsee expedition");
+        let goal = object_with_definition(&engine, "UMZS")
+            .unwrap_or_else(|| engine.spawn_test_object(SpawnConfig::new("UMZS")));
+        engine
+            .register_script_definition("UMPR", "Pollution goal probe", GOAL_FULFILLED_PROBE)
+            .expect("the probe registers");
+        let probe = engine.spawn_test_object(SpawnConfig::new("UMPR"));
+
+        let index = engine.test_object_index(probe);
+        let fulfilled = engine
+            .call_object_function(index, "Ask", vec![Value::Object(goal.as_u64())])
+            .unwrap_or_else(|error| panic!("the {languages:?} goal has its script: {error}"));
+        assert_eq!(fulfilled.as_c4_int().unwrap_or(0), 0, "{languages:?}");
+    }
+}
+
+/// Counts, from script, the objects of the kinds 1Intro's `Objects.txt` names
+/// that carry a given name.
+const INTRO_NAME_PROBE: &str = r#"#strict
+public func Named(string name)
+{
+    var count = 0;
+    for (var obj in FindObjects(Find_Or(Find_ID(CCLK), Find_ID(FISH), Find_ID(GIDL))))
+        if (GetName(obj) eq name) count++;
+    return count;
+}
+"#;
+
+/// clonk-org/clonk-rs-content#76: 1Intro's `Objects.txt` names its cook, his
+/// kitchen hand, a fish and a statue in German, and the engine reads it
+/// without a string table (C4GameObjects.cpp:535-548), so the cook's dialogue
+/// named its speakers in German for every player. The scenario's `Initialize`,
+/// which runs after the objects are loaded (C4Game.cpp:2712, 2733), now gives
+/// each of them the name its string table has for the player's language.
+#[test]
+fn the_intro_names_its_cook_in_the_players_language() {
+    for (languages, cook, statue, other_cook) in [
+        (["US"], "Cook", "Crystal statue", "Koch"),
+        (["DE"], "Koch", "Kristallstatue", "Cook"),
+    ] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Settling.c4f/RufDerWipfeRE.c4f/Kampagne.c4f/1Intro.c4s",
+            0,
+            &languages,
+        );
+        engine
+            .register_script_definition("INPR", "Intro name probe", INTRO_NAME_PROBE)
+            .expect("the probe registers");
+        let probe = engine.spawn_test_object(SpawnConfig::new("INPR"));
+        let index = engine.test_object_index(probe);
+        let mut named = |name: &str| {
+            engine
+                .call_object_function(index, "Named", vec![name.into()])
+                .unwrap_or_else(|error| panic!("the probe counts {name}: {error}"))
+                .as_c4_int()
+        };
+
+        assert_eq!(named(cook), Some(1), "{languages:?}: {cook}");
+        assert_eq!(named(statue), Some(1), "{languages:?}: {statue}");
+        assert_eq!(named(other_cook), Some(0), "{languages:?}: {other_cook}");
+    }
+}

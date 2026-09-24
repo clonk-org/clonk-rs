@@ -5,7 +5,7 @@
   },
   "case_id": "ingame-menu",
   "comparator": {
-    "binary_sha256": "e2f4dca9beefe47079b4f5213da7a1f8330395647abf526d91ef97b64a941b16",
+    "binary_sha256": "489bd74c1dd387c5d34d670a659a4271f5ee5384c8235cb941d1f83295107de0",
     "schema": "clonk-rs/presentation-comparison/v1"
   },
   "comparison": "layout",
