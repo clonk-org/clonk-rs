@@ -915,15 +915,20 @@ pub(in crate::command) enum NavigationKind {
     /// A C4PathFinder waypoint queued as the planner's fallback: native
     /// steering without a nested path phase, expiring as success.
     Legacy,
+    /// A straight swim through liquid, steered along both axes.
+    Swim,
 }
 
 impl NavigationKind {
-    const ALL: [Self; 5] = [
+    /// Indexed by the kind bits of a MoveTo's Data, which savegames and
+    /// runtime joins carry: new kinds are appended, never inserted.
+    const ALL: [Self; 6] = [
         Self::Walk,
         Self::Drop,
         Self::Jump,
         Self::Climb,
         Self::Legacy,
+        Self::Swim,
     ];
 
     pub(in crate::command) fn from_data(data: i32) -> Option<(Self, bool)> {
@@ -949,8 +954,26 @@ impl NavigationKind {
             navigation::NavMove::Drop => Self::Drop,
             navigation::NavMove::Jump => Self::Jump,
             navigation::NavMove::Climb => Self::Climb,
+            navigation::NavMove::Swim => Self::Swim,
         }
     }
+}
+
+/// The COMD_* direction whose axis steps are (horizontal, vertical).
+fn direction_toward(horizontal: i32, vertical: i32) -> CommandDirection {
+    [
+        CommandDirection::Up,
+        CommandDirection::UpRight,
+        CommandDirection::Right,
+        CommandDirection::DownRight,
+        CommandDirection::Down,
+        CommandDirection::DownLeft,
+        CommandDirection::Left,
+        CommandDirection::UpLeft,
+    ]
+    .into_iter()
+    .find(|direction| direction.axis_components() == (horizontal, vertical))
+    .unwrap_or(CommandDirection::Stop)
 }
 
 /// Positions a navigation plan may expand (`navigation::plan` budget).
@@ -971,6 +994,13 @@ const NAVIGATION_ARRIVAL_Y: i32 = navigation::ARRIVAL_TOLERANCE_Y;
 /// Landing tolerance for a Jump or Drop waypoint, the one the planner
 /// verified its jumps against.
 const NAVIGATION_LANDING_X: i32 = navigation::LANDING_TOLERANCE_X;
+/// How near in height a swimmer must come to a Swim waypoint: unlike WALK,
+/// DFA_SWIM steers vertically as well (C4Object.cpp:4947-4965), and a
+/// passage the plan threads may leave only a pixel or two to spare.
+const NAVIGATION_SWIM_ARRIVAL_Y: i32 = 2;
+/// Within this many pixels of a Swim waypoint's height the swimmer holds
+/// it, braking whatever vertical speed it still has.
+const NAVIGATION_SWIM_HOLD_Y: i32 = 1;
 
 // A goal MoveTo keeps its navigation bookkeeping in the persisted, otherwise
 // unused C4Command::Permit word (C4Command.h:92; saved at C4Command.cpp:2406):
@@ -1032,6 +1062,25 @@ impl MoveToState {
         })
     }
 
+    fn swim_arrived(&self, ctx: &CommandRuntimeContext<'_>, range_x: i32) -> bool {
+        self.resolve_target_position(ctx).is_some_and(|target| {
+            ctx.object.action_procedure == ActionProcedure::Swim
+                && (ctx.position.x - target.x).abs() <= range_x
+                && (ctx.position.y - target.y).abs() <= NAVIGATION_SWIM_ARRIVAL_Y
+        })
+    }
+
+    /// A waypoint ends with the actor on its feet, except a Swim, which
+    /// ends still swimming.
+    fn waypoint_arrived(&self, ctx: &CommandRuntimeContext<'_>, kind: NavigationKind) -> bool {
+        let range_x = Self::waypoint_range_x(ctx, kind);
+        if kind == NavigationKind::Swim {
+            self.swim_arrived(ctx, range_x)
+        } else {
+            self.navigation_arrived(ctx, range_x)
+        }
+    }
+
     /// Under the navigation switch a lifetime that runs out before arrival
     /// is a failure, so the parent can react instead of retrying the same
     /// route forever (C++ expires every MoveTo as success,
@@ -1046,7 +1095,7 @@ impl MoveToState {
         }
         match self.navigation_kind() {
             Some((NavigationKind::Legacy, _)) => false,
-            Some((kind, _)) => !self.navigation_arrived(ctx, Self::waypoint_range_x(ctx, kind)),
+            Some((kind, _)) => !self.waypoint_arrived(ctx, kind),
             None => {
                 self.navigation_goal_applies(ctx)
                     && !self.navigation_arrived(ctx, Self::navigation_range_x(ctx))
@@ -1118,7 +1167,7 @@ impl MoveToState {
         };
         let procedure = ctx.object.action_procedure;
         let range_x = Self::waypoint_range_x(ctx, kind);
-        let arrived = self.navigation_arrived(ctx, range_x);
+        let arrived = self.waypoint_arrived(ctx, kind);
         let toward_target = if target.x > ctx.position.x {
             CommandDirection::Right
         } else {
@@ -1146,6 +1195,21 @@ impl MoveToState {
                 -1
             };
             return CommandStepResult::running(Some(let_go_update(None, away)));
+        }
+        if procedure == ActionProcedure::Swim
+            && matches!(kind, NavigationKind::Drop | NavigationKind::Jump)
+        {
+            // A fall into liquid ends where the actor starts to swim, its
+            // action's InLiquidAction taking over (C4Object.cpp:4758-4763).
+            // Far from the planned spot, the swim after it no longer fits:
+            // fail, and the goal replans from the water.
+            let near = (ctx.position.x - target.x).abs() <= NAVIGATION_LANDING_X
+                && (ctx.position.y - target.y).abs() <= 2 * NAVIGATION_ARRIVAL_Y;
+            return if near {
+                self.arrive()
+            } else {
+                CommandStepResult::failed(None)
+            };
         }
         match kind {
             NavigationKind::Walk | NavigationKind::Legacy => {
@@ -1210,6 +1274,11 @@ impl MoveToState {
                     *permit |= PERMIT_MOVE_STARTED;
                     return self.steer_toward(ctx, CommandDirection::Up);
                 }
+                if procedure == ActionProcedure::Swim && !started {
+                    // Swimming into the wall with ComDir toward it starts
+                    // SCALE too (C4Object.cpp:4458-4467,4516-4526).
+                    return self.steer_toward(ctx, facing);
+                }
                 if procedure != ActionProcedure::Walk {
                     return CommandStepResult::running(None);
                 }
@@ -1223,6 +1292,44 @@ impl MoveToState {
                 // Walking into the wall with ComDir toward it starts SCALE
                 // (C4Object.cpp:4406-4520).
                 self.steer_toward(ctx, facing)
+            }
+            NavigationKind::Swim => {
+                if procedure != ActionProcedure::Swim {
+                    // Still falling in, wait; on its feet already, the swim
+                    // ended off plan.
+                    return if procedure == ActionProcedure::Walk {
+                        CommandStepResult::failed(None)
+                    } else {
+                        CommandStepResult::running(None)
+                    };
+                }
+                if arrived {
+                    return self.arrive();
+                }
+                let (dx, dy) = (target.x - ctx.position.x, target.y - ctx.position.y);
+                // DFA_SWIM accelerates by SwimAccel along each axis of ComDir
+                // and leaves an axis ComDir lacks alone (C4Object.cpp:
+                // 4947-4965). So swim at the waypoint where it is still off,
+                // and brake where it is reached.
+                let axis = |offset: i32, reached: i32, speed: crate::C4Fixed| {
+                    if offset.abs() > reached {
+                        offset.signum()
+                    } else if speed >= math::SWIM_ACCEL {
+                        -1
+                    } else if speed <= -math::SWIM_ACCEL {
+                        1
+                    } else {
+                        0
+                    }
+                };
+                let velocity = ctx.object.fixed_velocity;
+                self.steer_toward(
+                    ctx,
+                    direction_toward(
+                        axis(dx, range_x, velocity.x),
+                        axis(dy, NAVIGATION_SWIM_HOLD_Y, velocity.y),
+                    ),
+                )
             }
         }
     }
@@ -1242,7 +1349,11 @@ impl MoveToState {
         let near = inside(ctx.position.x - target.x, -PATH_RANGE, PATH_RANGE)
             && inside(ctx.position.y - target.y, -PATH_RANGE, PATH_RANGE);
         let steer_frames = (*permit & PERMIT_STEER_MASK) >> PERMIT_STEER_SHIFT;
-        let standing = ctx.object.action_procedure == ActionProcedure::Walk;
+        // A plan starts from a stand or a swim.
+        let standing = matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Walk | ActionProcedure::Swim
+        );
         let fallback = *permit & PERMIT_FALLBACK != 0;
         let replan_due = !fallback || steer_frames % NAVIGATION_REPLAN_INTERVAL == 0;
         if near || !standing || !replan_due {
@@ -1272,6 +1383,7 @@ impl MoveToState {
             &ctx.object.physical,
             ctx.object.construction,
             gravity,
+            ctx.object.shape_top,
         );
         let goal = navigation::NavGoal {
             x: target.x,
@@ -5836,6 +5948,7 @@ impl AcquireState {
             &ctx.object.physical,
             ctx.object.construction,
             gravity,
+            ctx.object.shape_top,
         );
         let fetched_by_another = |candidate: ObjectId| {
             ctx.objects.values().any(|other| {

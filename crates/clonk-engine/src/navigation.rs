@@ -20,7 +20,7 @@ use crate::{
     Landscape, ObjectVertex, Vector2, ATTACH_RANGE, CNAT_BOTTOM, CNAT_LEFT, CNAT_RIGHT, CNAT_TOP,
     FULL_CON,
 };
-use clonk_resources::PhysicalInfo;
+use clonk_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
@@ -133,6 +133,17 @@ pub struct NavActor {
     pub jump_speed: C4Fixed,
     /// DFA_SCALE's climbing speed, ValByPhysical(200, Scale).
     pub scale_speed: C4Fixed,
+    /// DFA_SWIM's limit on each axis, ValByPhysical(160, Swim)
+    /// (C4Object.cpp:4939,4976-4978).
+    pub swim_speed: C4Fixed,
+    /// Frames the actor can go without air before it loses energy: Breath
+    /// drains by 2% of C4MaxPhysical every fifth frame (C4Object.cpp:
+    /// 880-921). Unlimited for a water-breather, whose breath the planner
+    /// does not model: it breathes in water instead (C4Object.cpp:891-894).
+    pub breath_frames: i32,
+    /// Where the actor draws breath, below its position: half its shape's
+    /// top offset (C4Object.cpp:897).
+    pub breath_offset: i32,
     pub can_scale: bool,
     /// A flier touching a ceiling hangles instead of falling on
     /// (C4Object.cpp:4382-4421), which no planned move expects.
@@ -141,11 +152,14 @@ pub struct NavActor {
 }
 
 impl NavActor {
+    /// `shape_top` is the actor's shape offset above its position
+    /// (C4Shape::y), where its breath point comes from.
     pub fn new(
         body: NavBody,
         physical: &PhysicalInfo,
         construction: i32,
         gravity: C4Fixed,
+        shape_top: i32,
     ) -> Self {
         let con = math::itofix_prec(construction, FULL_CON);
         Self {
@@ -153,6 +167,13 @@ impl NavActor {
             walk_speed: math::val_by_physical(280, physical.walk) * con,
             jump_speed: math::val_by_physical(1000, physical.jump) * con,
             scale_speed: math::val_by_physical(200, physical.scale),
+            swim_speed: math::val_by_physical(160, physical.swim),
+            breath_frames: if physical.breathe_water != 0 {
+                i32::MAX
+            } else {
+                physical.breath / (2 * C4_MAX_PHYSICAL / 100) * 5
+            },
+            breath_offset: shape_top / 2,
             can_scale: physical.can_scale != 0,
             can_hangle: physical.can_hangle != 0,
             gravity,
@@ -171,6 +192,8 @@ pub enum NavMove {
     Jump,
     /// Walk into the wall to start SCALE, climb, and KneelUp on top.
     Climb,
+    /// Swim in a straight line through liquid.
+    Swim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +253,7 @@ enum Edge {
     Jump { right: bool },
     Climb { right: bool },
     JumpClimb { right: bool, grab: (i32, i32) },
+    Swim,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -252,13 +276,20 @@ enum Landing {
         dir: i32,
         frames: i32,
     },
+    /// The flight ends in liquid, where the actor swims.
+    Swim {
+        x: i32,
+        y: i32,
+        frames: i32,
+    },
 }
 
 impl Landing {
     /// Whether two landings end the same planned move.
     fn matches(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Stand { x, y, .. }, Self::Stand { x: ox, y: oy, .. }) => {
+            (Self::Stand { x, y, .. }, Self::Stand { x: ox, y: oy, .. })
+            | (Self::Swim { x, y, .. }, Self::Swim { x: ox, y: oy, .. }) => {
                 (x - ox).abs() <= LANDING_TOLERANCE_X && (y - oy).abs() <= ARRIVAL_TOLERANCE_Y
             }
             (
@@ -300,6 +331,9 @@ struct Search<'a> {
     walk_step: i32,
     walk_cost: i32,
     climb_cost: i32,
+    swim_cost: i32,
+    /// Cost a route may spend without air in one go.
+    breath_budget: i32,
 }
 
 impl<'a> Search<'a> {
@@ -325,6 +359,11 @@ impl<'a> Search<'a> {
             walk_step: actor.body.walk_step(),
             walk_cost: per_pixel(actor.walk_speed),
             climb_cost: per_pixel(actor.scale_speed),
+            swim_cost: per_pixel(actor.swim_speed),
+            // A fifth in hand: breath drains on every fifth frame, whichever
+            // frame the route starts on (C4Object.cpp:881).
+            breath_budget: (actor.breath_frames.saturating_mul(4) / 5)
+                .saturating_mul(COST_PER_FRAME),
         }
     }
 
@@ -349,6 +388,21 @@ impl<'a> Search<'a> {
 
     fn standing(&self, x: i32, y: i32) -> bool {
         self.fits(x, y) && self.supported(x, y) && !self.landscape.is_liquid_at(x, y)
+    }
+
+    /// The actor swims where its centre is in liquid (IsInLiquidCheck for
+    /// Float=1, C4Object.cpp:5632-5635) and its body is clear of solid.
+    fn swimming(&self, x: i32, y: i32) -> bool {
+        self.actor.swim_speed.val() > 0 && self.landscape.is_liquid_at(x, y) && self.fits(x, y)
+    }
+
+    /// The actor draws breath at (x, y) while nothing semi-solid, liquid or
+    /// solid, is at its breath point (C4Object.cpp:895-898). The forcefield
+    /// exception, Vehicle material there giving breath (C4Object.cpp:
+    /// 886-890), is not modelled.
+    fn breathing(&self, x: i32, y: i32) -> bool {
+        let by = y + self.actor.breath_offset;
+        !self.landscape.is_solid_at(x, by) && !self.landscape.is_liquid_at(x, by)
     }
 
     /// A side vertex facing `dir` touches solid, the contact that turns a
@@ -380,11 +434,14 @@ impl<'a> Search<'a> {
         }
     }
 
+    /// Where a plan from (x, y) starts: a standing position within a few
+    /// pixels, or the swimming position itself.
     fn settle(&self, x: i32, y: i32) -> Option<(i32, i32)> {
         [0, 1, -1, 2, -2, 3, -3]
             .into_iter()
             .map(|dy| y + dy)
             .find(|&y| self.standing(x, y))
+            .or_else(|| self.swimming(x, y).then_some(y))
             .map(|y| (x, y))
     }
 
@@ -484,8 +541,17 @@ impl<'a> Search<'a> {
                 }
                 iy += step;
             }
-            if !self.in_bounds(ix, iy) || self.landscape.is_liquid_at(ix, iy) {
+            if !self.in_bounds(ix, iy) {
                 return None;
+            }
+            if self.landscape.is_liquid_at(ix, iy) {
+                // In liquid the flier takes its action's InLiquidAction,
+                // Swim for crew (C4Object.cpp:4758-4763).
+                return self.swimming(ix, iy).then_some(Landing::Swim {
+                    x: ix,
+                    y: iy,
+                    frames: frame,
+                });
             }
         }
         None
@@ -494,14 +560,19 @@ impl<'a> Search<'a> {
     /// Walk off the ledge at (x, y) and fall. A wall met on the way is let go
     /// of again, as the executor does with every grab a Drop did not plan
     /// (ObjectComLetGo: a one pixel per frame xdir away from the wall), so a
-    /// drop can bounce down a shaft. Returns the standing position and the
-    /// frames the fall takes.
+    /// drop can bounce down a shaft. Returns where the fall ends, standing or
+    /// swimming, and the frames it takes.
     fn drop(&self, x: i32, y: i32, dir: i32) -> Option<(i32, i32, i32)> {
         let (mut x, mut y, mut frames) = (x, y, 0);
         let mut vx = self.actor.walk_speed * dir;
         for _ in 0..=MAX_LET_GOS {
             match self.fly(x, y, vx, C4Fixed::ZERO)? {
                 Landing::Stand {
+                    x,
+                    y,
+                    frames: flight,
+                }
+                | Landing::Swim {
                     x,
                     y,
                     frames: flight,
@@ -666,6 +737,10 @@ impl<'a> Search<'a> {
 
     fn successors(&self, x: i32, y: i32, out: &mut Vec<((i32, i32), Edge, i32)>) {
         out.clear();
+        if self.swimming(x, y) {
+            self.swim_successors(x, y, out);
+            return;
+        }
         for dir in [-1, 1] {
             let right = dir > 0;
             let mut at_edge = false;
@@ -686,11 +761,18 @@ impl<'a> Search<'a> {
             }
             if at_edge || x.rem_euclid(4) == 0 {
                 match self.robust_jump(x, y, dir) {
-                    Some(Landing::Stand {
-                        x: lx,
-                        y: ly,
-                        frames,
-                    }) if (lx, ly) != (x, y) => out.push((
+                    Some(
+                        Landing::Stand {
+                            x: lx,
+                            y: ly,
+                            frames,
+                        }
+                        | Landing::Swim {
+                            x: lx,
+                            y: ly,
+                            frames,
+                        },
+                    ) if (lx, ly) != (x, y) => out.push((
                         (lx, ly),
                         Edge::Jump { right },
                         frames * COST_PER_FRAME + JUMP_PENALTY,
@@ -718,11 +800,44 @@ impl<'a> Search<'a> {
         }
     }
 
+    /// From a swimming position: a step through liquid in any of eight
+    /// directions, all equally fast because DFA_SWIM limits each axis on its
+    /// own (C4Object.cpp:4976-4978), or scaling out up a wall the swimmer
+    /// pushes against (C4Object.cpp:4458-4467,4516-4526).
+    fn swim_successors(&self, x: i32, y: i32, out: &mut Vec<((i32, i32), Edge, i32)>) {
+        for (dx, dy) in [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ] {
+            if self.swimming(x + dx, y + dy) {
+                out.push(((x + dx, y + dy), Edge::Swim, self.swim_cost));
+            }
+        }
+        for dir in [-1, 1] {
+            if let Some((tx, ty, frames)) = self.climb(x, y, dir) {
+                out.push((
+                    (tx, ty),
+                    Edge::Climb { right: dir > 0 },
+                    frames * COST_PER_FRAME,
+                ));
+            }
+        }
+    }
+
     fn run(&self, start: (i32, i32), goal: NavGoal, budget: usize) -> Option<NavPlan> {
         let mut best: HashMap<(i32, i32), i32> = HashMap::new();
         let mut links: HashMap<(i32, i32), Link> = HashMap::new();
+        // Cost each position's best route has spent since its last breath.
+        let mut breathless: HashMap<(i32, i32), i32> = HashMap::new();
         let mut open = BinaryHeap::new();
         best.insert(start, 0);
+        breathless.insert(start, 0);
         open.push(Reverse((
             self.heuristic(start.0, start.1, goal),
             0,
@@ -743,8 +858,21 @@ impl<'a> Search<'a> {
                 return None;
             }
             self.successors(x, y, &mut successors);
+            let origin_breathes = self.breathing(x, y);
+            let origin_held = breathless.get(&(x, y)).copied().unwrap_or(0);
             for &(next, edge, cost) in &successors {
                 if !self.in_bounds(next.0, next.1) {
+                    continue;
+                }
+                // A move between two breathing positions takes no breath; any
+                // other counts in full against the budget.
+                let next_breathes = self.breathing(next.0, next.1);
+                let held = match (origin_breathes, next_breathes) {
+                    (true, true) => 0,
+                    (true, false) => cost,
+                    (false, _) => origin_held.saturating_add(cost),
+                };
+                if held > self.breath_budget {
                     continue;
                 }
                 let next_g = g.saturating_add(cost);
@@ -752,6 +880,7 @@ impl<'a> Search<'a> {
                     continue;
                 }
                 best.insert(next, next_g);
+                breathless.insert(next, if next_breathes { 0 } else { held });
                 links.insert(
                     next,
                     Link {
@@ -806,12 +935,25 @@ impl<'a> Search<'a> {
             }
             *walk_cost = 0;
         };
+        // A swim run's positions, each with the cost of the step into it.
+        let mut swim_path: Vec<((i32, i32), i32)> = Vec::new();
         for (from, to, edge, cost) in edges {
             let frames = cost / COST_PER_FRAME;
+            if edge != Edge::Swim && !swim_path.is_empty() {
+                waypoints.extend(self.swim_waypoints(&swim_path));
+                swim_path.clear();
+            }
             match edge {
                 Edge::Walk => {
                     walking_to = Some(to);
                     walk_cost += cost;
+                }
+                Edge::Swim => {
+                    flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
+                    if swim_path.is_empty() {
+                        swim_path.push((from, 0));
+                    }
+                    swim_path.push((to, cost));
                 }
                 Edge::Drop => {
                     flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
@@ -862,8 +1004,48 @@ impl<'a> Search<'a> {
                 }
             }
         }
+        waypoints.extend(self.swim_waypoints(&swim_path));
         flush_walk(&mut waypoints, &mut walking_to, &mut walk_cost);
         NavPlan { waypoints, cost }
+    }
+
+    /// The fewest Swim waypoints along a swim run, each the furthest of its
+    /// positions the swimmer reaches in a straight line from the waypoint
+    /// before: the executor steers straight at each one. Consecutive
+    /// positions are neighbours, so a line always reaches the next.
+    fn swim_waypoints(&self, path: &[((i32, i32), i32)]) -> Vec<NavWaypoint> {
+        let mut waypoints = Vec::new();
+        let mut anchor = 0;
+        while anchor + 1 < path.len() {
+            let from = path[anchor].0;
+            let reach = (anchor + 2..path.len())
+                .rev()
+                .find(|&index| self.swim_line(from, path[index].0))
+                .unwrap_or(anchor + 1);
+            let cost: i32 = path[anchor + 1..=reach].iter().map(|&(_, cost)| cost).sum();
+            let (x, y) = path[reach].0;
+            waypoints.push(NavWaypoint {
+                x,
+                y,
+                movement: NavMove::Swim,
+                right: false,
+                frames: (cost + COST_PER_FRAME - 1) / COST_PER_FRAME,
+            });
+            anchor = reach;
+        }
+        waypoints
+    }
+
+    /// Whether every position on the straight line from `from` to `to` is
+    /// one the actor swims at.
+    fn swim_line(&self, from: (i32, i32), to: (i32, i32)) -> bool {
+        let steps = (to.0 - from.0).abs().max((to.1 - from.1).abs()).max(1);
+        (0..=steps).all(|step| {
+            self.swimming(
+                from.0 + (to.0 - from.0) * step / steps,
+                from.1 + (to.1 - from.1) * step / steps,
+            )
+        })
     }
 }
 
@@ -1015,7 +1197,7 @@ mod tests {
         grid_landscape(width, height, pixels, FRONTIER_SLOPE_TOP as i32)
     }
 
-    /// CLNK's DefCore vertices and physicals (Clonk.c4d/DefCore.txt) under
+    /// CLNK's DefCore vertices, shape and physicals (Clonk.c4d/DefCore.txt) under
     /// the default 0.2 px/frame² gravity.
     fn clonk(can_scale: bool) -> NavActor {
         let vertices = [
@@ -1034,9 +1216,11 @@ mod tests {
             friction: 0,
         });
         let physical = PhysicalInfo {
+            breath: 50_000,
             walk: 70_000,
             jump: 40_000,
             scale: 30_000,
+            swim: 60_000,
             can_scale: i32::from(can_scale),
             ..PhysicalInfo::default()
         };
@@ -1045,6 +1229,7 @@ mod tests {
             &physical,
             FULL_CON,
             C4Fixed::from_raw(13_107),
+            -10,
         )
     }
 
@@ -1338,6 +1523,109 @@ mod tests {
         .expect("across the gap");
         assert!(moves(&plan).contains(&NavMove::Jump), "{plan:?}");
         assert!(!moves(&plan).contains(&NavMove::Drop), "{plan:?}");
+    }
+
+    #[test]
+    fn swims_across_a_pool_too_wide_to_jump() {
+        // Measured with the engine: walking right off the bank, CLNK falls
+        // into the pool, swims to its far wall at about a pixel a frame,
+        // scales it, and KneelUps to stand on the far bank at (302,G-10)
+        // (clonk-org/clonk-rs#1728).
+        let pool = flooded_terrain(&[], &[(200, G, 299, G + 39)]);
+        let plan = plan(
+            &pool,
+            &clonk(true),
+            Vector2::new(150, G - 10),
+            goal(350, G - 10),
+            20_000,
+        )
+        .expect("across the pool");
+        assert!(moves(&plan).contains(&NavMove::Swim), "{plan:?}");
+        let out = plan
+            .waypoints
+            .iter()
+            .find(|waypoint| waypoint.movement == NavMove::Climb)
+            .expect("a climb out");
+        assert_eq!((out.x, out.y), (302, G - 10), "{plan:?}");
+    }
+
+    /// A pool from x 150 to 449, 40 deep, split by a barrier from the top of
+    /// the map down to 20 px below the surface, `thickness` px wide. Only the
+    /// tunnel under it joins the two halves.
+    fn underwater_tunnel(thickness: i32) -> Landscape {
+        let right = 249 + thickness;
+        flooded_terrain(
+            &[(250, 0, right, G + 19, true)],
+            &[
+                (150, G, 249, G + 39),
+                (right + 1, G, 449, G + 39),
+                (250, G + 20, right, G + 39),
+            ],
+        )
+    }
+
+    #[test]
+    fn dives_through_a_tunnel_it_can_hold_its_breath_for() {
+        let short = underwater_tunnel(30);
+        let plan = plan(
+            &short,
+            &clonk(true),
+            Vector2::new(120, G - 10),
+            goal(470, G - 10),
+            40_000,
+        )
+        .expect("through the tunnel");
+        assert!(moves(&plan).contains(&NavMove::Swim), "{plan:?}");
+    }
+
+    #[test]
+    fn swim_waypoints_are_straight_lines_through_water() {
+        // The executor steers a swimmer straight at each Swim waypoint, so
+        // the line to it from the waypoint before must be swimmable all
+        // along; here that means diving under the barrier, not through it.
+        let short = underwater_tunnel(30);
+        let actor = clonk(true);
+        let plan = plan(
+            &short,
+            &actor,
+            Vector2::new(120, G - 10),
+            goal(470, G - 10),
+            40_000,
+        )
+        .expect("through the tunnel");
+        let search = Search::new(&short, &actor, Vector2::new(120, G - 10), goal(470, G - 10));
+        for pair in plan.waypoints.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            if to.movement != NavMove::Swim {
+                continue;
+            }
+            let steps = (to.x - from.x).abs().max((to.y - from.y).abs()).max(1);
+            let blocked = (0..=steps)
+                .map(|step| {
+                    (
+                        from.x + (to.x - from.x) * step / steps,
+                        from.y + (to.y - from.y) * step / steps,
+                    )
+                })
+                .find(|&(x, y)| !search.swimming(x, y));
+            assert_eq!(blocked, None, "{from:?} -> {to:?} in {plan:?}");
+        }
+    }
+
+    #[test]
+    fn a_tunnel_longer_than_a_breath_is_no_route() {
+        // Without air CLNK loses 2% of its 50000 Breath every five frames,
+        // then energy (C4Object.cpp:880-921): 125 frames. The 140 px of
+        // tunnel alone take about 146 at its 0.96 px/frame swim.
+        let long = underwater_tunnel(140);
+        assert!(plan(
+            &long,
+            &clonk(true),
+            Vector2::new(120, G - 10),
+            goal(470, G - 10),
+            40_000
+        )
+        .is_none());
     }
 
     #[test]

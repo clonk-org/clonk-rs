@@ -303,6 +303,57 @@ fn navigation_fetches_the_reachable_rock_over_a_nearer_unreachable_one() {
     }
 }
 
+#[test]
+fn navigation_fetches_construction_material_across_a_pool() {
+    // A pool 100 px wide and 40 deep, too wide to jump, lies between the
+    // site and the rock. The builder swims it and scales out, both ways
+    // (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(&[], &[(200, g, 299, g + 39)]));
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(150, g - 4)],
+        CORPUS_FRAMES,
+    );
+    assert!(
+        matches!(outcome, FetchOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn navigation_fetches_construction_material_through_an_underwater_tunnel() {
+    // The pool is split by a barrier reaching the top of the map and 15 px
+    // below the surface; the only way past is the tunnel under it, a dive
+    // well within one breath (clonk-org/clonk-rs#1728).
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(flooded_corpus_landscape(
+        &[(250, 0, 269, g + 15, true)],
+        &[
+            (180, g, 249, g + 35),
+            (270, g, 339, g + 35),
+            (250, g + 16, 269, g + 35),
+        ],
+    ));
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(150, g - 4)],
+        CORPUS_FRAMES,
+    );
+    assert!(
+        matches!(outcome, FetchOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+}
+
 /// Frames a fetch on the real Frontier map may take. The stranded builder
 /// of clonk-org/clonk-rs#1727 gave up after about 1800.
 const FRONTIER_FETCH_FRAMES: usize = 2400;
