@@ -379,7 +379,15 @@ pub fn extract_archive(
                 archive: archive.to_path_buf(),
                 source,
             })
-            .and_then(|mut zip| extract_entries(&mut zip, archive, destination, unpacked_size)),
+            .and_then(|mut zip| {
+                extract_entries(
+                    &mut zip,
+                    archive,
+                    destination,
+                    unpacked_size,
+                    &mut PlatformDurability,
+                )
+            }),
         Err(source) => Err(ExtractError::Malformed {
             archive: archive.to_path_buf(),
             source,
@@ -448,6 +456,7 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
     archive: &Path,
     destination: &Path,
     unpacked_size: u64,
+    durability: &mut impl Durability,
 ) -> Result<ExtractSummary, ExtractError> {
     let too_large = |reached| ExtractError::TooLarge {
         archive: archive.to_path_buf(),
@@ -562,18 +571,30 @@ fn extract_entries<R: std::io::Read + std::io::Seek>(
         if written > remaining {
             return Err(too_large(summary.bytes.saturating_add(written)));
         }
-        finalize_extracted_file(&file, &path, entry.unix_mode()).map_err(write_error)?;
+        finalize_extracted_file_with(&file, &path, entry.unix_mode(), |file| {
+            durability.hand_off_file(file)
+        })
+        .map_err(write_error)?;
 
         summary.files += 1;
         summary.bytes = summary.bytes.saturating_add(written);
     }
     sync_extracted_directories_with(&directories, &created_destination_directories, |path| {
-        sync_extracted_directory(path).map_err(|source| ExtractError::Write {
-            archive: archive.to_path_buf(),
-            path: path.to_path_buf(),
-            source,
-        })
+        durability
+            .hand_off_directory(path)
+            .map_err(|source| ExtractError::Write {
+                archive: archive.to_path_buf(),
+                path: path.to_path_buf(),
+                source,
+            })
     })?;
+    durability
+        .flush_device(destination)
+        .map_err(|source| ExtractError::Write {
+            archive: archive.to_path_buf(),
+            path: destination.to_path_buf(),
+            source,
+        })?;
     Ok(summary)
 }
 
@@ -655,27 +676,88 @@ fn durability_depth(path: &Path) -> usize {
         .count()
 }
 
-/// Makes directory entries created by extraction durable.
+/// How extraction makes what it wrote durable before it reports success.
+trait Durability {
+    /// Hands one written file, its final mode already applied, to the device.
+    fn hand_off_file(&mut self, file: &std::fs::File) -> Result<(), std::io::Error>;
+    /// Hands one directory's entries to the device.
+    fn hand_off_directory(&mut self, path: &Path) -> Result<(), std::io::Error>;
+    /// Makes everything handed off so far durable, once all of it is.
+    fn flush_device(&mut self, path: &Path) -> Result<(), std::io::Error>;
+}
+
+/// The durability primitives of the platform the updater runs on.
+///
+/// On Apple targets `File::sync_all` is `F_FULLFSYNC`, which also flushes the
+/// device's own write cache: milliseconds a call, paid for each of a content
+/// archive's thirty thousand files and four thousand directories
+/// (clonk-org/clonk-rs#1733). There a plain `fsync` hands each one to the
+/// device, and one `F_FULLFSYNC` once all of them are handed off makes them
+/// durable together, before extraction reports success. Elsewhere a
+/// `sync_all` already makes its file durable on its own, so each hand-off
+/// stays one and nothing is left to flush.
+struct PlatformDurability;
+
+impl Durability for PlatformDurability {
+    fn hand_off_file(&mut self, file: &std::fs::File) -> Result<(), std::io::Error> {
+        hand_off(file)
+    }
+
+    fn hand_off_directory(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        hand_off_directory(path)
+    }
+
+    fn flush_device(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        flush_device(path)
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn hand_off(file: &std::fs::File) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+
+    loop {
+        // SAFETY: the descriptor belongs to `file`, which outlives the call.
+        if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn hand_off(file: &std::fs::File) -> Result<(), std::io::Error> {
+    file.sync_all()
+}
+
+/// Hands the directory entries created by extraction to the device.
 ///
 /// Windows does not expose a portable directory flush through `std`; file
 /// contents and metadata are still synced individually, while its directory
 /// entry durability is left to the filesystem's rename semantics.
 #[cfg(unix)]
-fn sync_extracted_directory(path: &Path) -> Result<(), std::io::Error> {
-    std::fs::File::open(path)?.sync_all()
+fn hand_off_directory(path: &Path) -> Result<(), std::io::Error> {
+    hand_off(&std::fs::File::open(path)?)
 }
 
 #[cfg(not(unix))]
-fn sync_extracted_directory(_path: &Path) -> Result<(), std::io::Error> {
+fn hand_off_directory(_path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn finalize_extracted_file(
-    file: &std::fs::File,
-    path: &Path,
-    mode: Option<u32>,
-) -> Result<(), std::io::Error> {
-    finalize_extracted_file_with(file, path, mode, std::fs::File::sync_all)
+#[cfg(target_vendor = "apple")]
+fn flush_device(path: &Path) -> Result<(), std::io::Error> {
+    // `sync_all` is `F_FULLFSYNC` here. It flushes the device's cache as a
+    // whole, and with it everything the plain hand-offs gave the device.
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn flush_device(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
 }
 
 fn finalize_extracted_file_with<F>(
@@ -1599,6 +1681,84 @@ mod tests {
         .expect("sync directories");
 
         assert_eq!(synced, [PathBuf::from("staged"), PathBuf::from(".")]);
+    }
+
+    /// One durability step extraction took, in the order it took them.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum DurabilityStep {
+        File,
+        Directory(PathBuf),
+        FlushDevice(PathBuf),
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordedDurability {
+        steps: Vec<DurabilityStep>,
+    }
+
+    impl Durability for RecordedDurability {
+        fn hand_off_file(&mut self, _file: &std::fs::File) -> Result<(), std::io::Error> {
+            self.steps.push(DurabilityStep::File);
+            Ok(())
+        }
+
+        fn hand_off_directory(&mut self, path: &Path) -> Result<(), std::io::Error> {
+            self.steps
+                .push(DurabilityStep::Directory(path.to_path_buf()));
+            Ok(())
+        }
+
+        fn flush_device(&mut self, path: &Path) -> Result<(), std::io::Error> {
+            self.steps
+                .push(DurabilityStep::FlushDevice(path.to_path_buf()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn extraction_flushes_the_device_once_after_handing_everything_off() {
+        // A device flush per file made an in-game update of the
+        // thirty-thousand-entry content archive take minutes
+        // (clonk-org/clonk-rs#1733). One flush after every file and directory
+        // has been handed off makes all of it durable before extraction
+        // reports success, which is when the applier may swap it in.
+        let directory = TempDir::new().expect("directory");
+        let archive = write_archive(directory.path(), &plain());
+        let destination = directory.path().join("staged");
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&archive).expect("open archive"))
+            .expect("read archive");
+        let mut durability = RecordedDurability::default();
+
+        extract_entries(&mut zip, &archive, &destination, 1024, &mut durability).expect("extract");
+
+        let steps = &durability.steps;
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| **step == DurabilityStep::File)
+                .count(),
+            2,
+            "each file is handed off: {steps:?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|step| *step == DurabilityStep::Directory(destination.clone())),
+            "and each directory: {steps:?}"
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| matches!(step, DurabilityStep::FlushDevice(_)))
+                .count(),
+            1,
+            "the device is flushed once for the whole component: {steps:?}"
+        );
+        assert_eq!(
+            steps.last(),
+            Some(&DurabilityStep::FlushDevice(destination.clone())),
+            "after everything was handed off: {steps:?}"
+        );
     }
 
     #[cfg(unix)]
