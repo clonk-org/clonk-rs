@@ -4816,6 +4816,46 @@ fn presentation_material_and_texture_overload_chains_stop_independently() {
     reset_cached_app_paths();
 }
 
+/// C++ opens each `DefinitionN` module under the name RCT_All read, trailing
+/// whitespace included (C4Scenario.cpp:491, StdCompiler.cpp:998), and
+/// C4Group::Open converts only backslashes (C4Group.cpp:665-668). A module
+/// named with a trailing space therefore does not exist, and
+/// C4GameResList::Load ends the start with IDS_PRC_DEFNOTFOUND
+/// (C4GameParameters.cpp:201-204).
+#[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]
+#[test]
+fn a_definition_module_with_a_trailing_space_is_not_found_like_cpp() {
+    let root = tempdir();
+    install_network_definition_pack(root.path(), "Objects.c4d", "OBJS");
+    let scenario = root.path().join("Spaced.c4s");
+    fs::create_dir_all(&scenario).test_value();
+    for (definition, found) in [("Objects.c4d", true), ("Objects.c4d ", false)] {
+        fs::write(
+            scenario.join("Scenario.txt"),
+            format!(
+                "[Head]\nTitle=Spaced\nNoInitialize=1\n\n[Definitions]\nDefinition1={definition}\n"
+            ),
+        )
+        .test_value();
+        let loaded = Scenario::load_from_path_with_languages(
+            &scenario,
+            &InstallDefinitionResolver::new(None),
+            &["US"],
+        );
+        if found {
+            loaded.unwrap_or_else(|error| panic!("{definition:?} loads: {error}"));
+        } else {
+            let error = loaded
+                .err()
+                .unwrap_or_else(|| panic!("{definition:?} must not load"));
+            assert!(
+                matches!(&error, ScenarioError::LegacyDefinitionNotFound { path } if path == definition),
+                "{definition:?}: {error}"
+            );
+        }
+    }
+}
+
 fn cleanup_quicksave_file() {
     let dir = resolve_save_directory();
     let path = dir.join(QUICK_SAVE_FILE);
