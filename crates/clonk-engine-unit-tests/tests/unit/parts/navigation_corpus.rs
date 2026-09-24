@@ -25,9 +25,19 @@ fn corpus_landscape(rects: &[CorpusRect]) -> Landscape {
 /// [`corpus_landscape`], then each (x0, y0, x1, y1) rect of `water` filled
 /// with Water.
 fn flooded_corpus_landscape(rects: &[CorpusRect], water: &[(i32, i32, i32, i32)]) -> Landscape {
+    liquid_corpus_landscape(rects, "Water", water)
+}
+
+/// [`corpus_landscape`], then each (x0, y0, x1, y1) rect of `liquid` filled
+/// with the liquid material `name`.
+fn liquid_corpus_landscape(
+    rects: &[CorpusRect],
+    name: &str,
+    liquid: &[(i32, i32, i32, i32)],
+) -> Landscape {
     const SKY: u8 = 0;
     const EARTH: u8 = 1;
-    const WATER: u8 = 3;
+    const LIQUID: u8 = 3;
     let mut pixels = vec![SKY; CORPUS_WIDTH * CORPUS_HEIGHT];
     let mut set = |x0: i32, y0: i32, x1: i32, y1: i32, pixel: u8| {
         for y in y0.max(0)..=y1.min(CORPUS_HEIGHT as i32 - 1) {
@@ -46,8 +56,8 @@ fn flooded_corpus_landscape(rects: &[CorpusRect], water: &[(i32, i32, i32, i32)]
     for &(x0, y0, x1, y1, solid) in rects {
         set(x0, y0, x1, y1, if solid { EARTH } else { SKY });
     }
-    for &(x0, y0, x1, y1) in water {
-        set(x0, y0, x1, y1, WATER);
+    for &(x0, y0, x1, y1) in liquid {
+        set(x0, y0, x1, y1, LIQUID);
     }
     let heights = (0..CORPUS_WIDTH)
         .map(|x| {
@@ -65,7 +75,7 @@ fn flooded_corpus_landscape(rects: &[CorpusRect], water: &[(i32, i32, i32, i32)]
             None,
             Some("Earth".to_string()),
             Some("Vehicle".to_string()),
-            Some("Water".to_string()),
+            Some(name.to_string()),
         ],
         vec![None; 4],
     );
