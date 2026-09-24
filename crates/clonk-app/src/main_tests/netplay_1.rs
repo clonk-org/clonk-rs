@@ -1851,7 +1851,10 @@ fn network_row_colors_disable_errors_but_not_too_few_warning() {
             .assets
             .scensel_assets(app.config.compat_profile)
             .test_value();
-        let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
+        let button_down = app
+            .assets
+            .startup_button_image(app.config.compat_profile, true)
+            .test_value();
         let fonts = app.assets.clonk_fonts.clone().test_value();
         let book = app.assets.book_fonts.clone().test_value();
         let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
@@ -4072,7 +4075,10 @@ fn scale_native_scensel_rows_retain_clipped_book_text() {
         .assets
         .scensel_assets(app.config.compat_profile)
         .test_value();
-    let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
+    let button_down = app
+        .assets
+        .startup_button_image(app.config.compat_profile, true)
+        .test_value();
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let book = app.assets.book_fonts.clone().test_value();
     let expected_titles = app

@@ -28,8 +28,8 @@ pub struct ScenSelAssets {
     /// `StartupScenSelBG.png` (800x600) — fullscreen-stretched parchment book
     /// background (C4Startup.cpp:41-42, C4StartupScenSelDlg.cpp:1412-1419).
     pub background: ImageData,
-    /// `StartupBookScroll.png` (48x48, 16px cells) — book-style scrollbar
-    /// facets (C4Gui.cpp:109-121).
+    /// Book-style scrollbar facets: classic 48x48 or approved HD 384x384
+    /// (`StartupBookScroll.png`, C4Gui.cpp:109-121).
     pub book_scroll: ImageData,
     /// Optional full-body replacement for the 16x16 Wipf scrollbar thumb.
     pub book_scroll_pin: Option<ImageData>,
@@ -39,8 +39,8 @@ pub struct ScenSelAssets {
     /// `GUICaption.png` (192x23, border 32) — wooden 3-slice bar behind the
     /// "Search:" label (C4Gui.cpp:1088).
     pub caption_bar: ImageData,
-    /// `GUIButton.png` (128x32, border 32) — released button plank
-    /// (C4GuiButton.cpp:81-89).
+    /// Released button plank: classic 128x32 or approved HD 2052x160
+    /// (`GUIButton.png`, C4GuiButton.cpp:81-89).
     pub button: ImageData,
     /// `GUICheckbox.png` (128x32, 4 phases of 32x32) — checkbox states
     /// (C4GuiCheckBox.cpp:110-115).
@@ -964,6 +964,10 @@ fn draw_vbar(
     image: &ImageData,
     gamma: Option<&GammaRamp>,
 ) {
+    if (image.width(), image.height()) == (384, 384) {
+        draw_hd_book_vertical_bar(surface, x, y, height, image, false, false, gamma);
+        return;
+    }
     draw_image_strip(surface, x, y, image, 0, 0, 16, 16, gamma);
     let mut iy = 16;
     while iy < height - 5 {
@@ -972,6 +976,77 @@ fn draw_vbar(
         iy += 16;
     }
     draw_image_strip(surface, x, y + height - 16, image, 0, 32, 16, 16, gamma);
+}
+
+/// Draws the 8× book-scroll atlas into the same 16px-wide vertical control.
+/// Arrow phases and the rail keep their classic bounds and repeat cadence.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_hd_book_vertical_bar(
+    surface: &mut Surface,
+    x: i32,
+    y: i32,
+    height: i32,
+    image: &ImageData,
+    up_pressed: bool,
+    down_pressed: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    let facet = |surface: &mut Surface, src_x: i32, src_y: i32, dst_y: i32, h: i32| {
+        crate::software_draw::draw_image_bilinear_source(
+            surface,
+            &GuiRect::new(x as f32, dst_y as f32, 16.0, h as f32),
+            image,
+            crate::FloatSourceRect {
+                x: (src_x * 8) as f32,
+                y: (src_y * 8) as f32,
+                width: 128.0,
+                height: (h * 8) as f32,
+            },
+            gamma,
+        );
+    };
+    facet(surface, if up_pressed { 16 } else { 0 }, 0, y, 16);
+    let mut iy = 16;
+    while iy < height - 5 {
+        let tile_h = 16.min(height - 5 - iy);
+        facet(surface, 0, 16, y + iy, tile_h);
+        iy += 16;
+    }
+    facet(
+        surface,
+        if down_pressed { 16 } else { 0 },
+        32,
+        y + height - 16,
+        16,
+    );
+}
+
+/// Overlays the pressed arrow phase on a vertical book scrollbar.
+pub fn draw_pressed_book_scroll_arrow(
+    surface: &mut Surface,
+    x: i32,
+    y: i32,
+    image: &ImageData,
+    down: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    let source_y = if down { 32 } else { 0 };
+    if (image.width(), image.height()) == (384, 384) {
+        crate::software_draw::draw_image_bilinear_source(
+            surface,
+            &GuiRect::new(x as f32, y as f32, 16.0, 16.0),
+            image,
+            crate::FloatSourceRect {
+                x: 128.0,
+                y: (source_y * 8) as f32,
+                width: 128.0,
+                height: 128.0,
+            },
+            gamma,
+        );
+    } else {
+        draw_image_strip(surface, x, y, image, 16, source_y, 16, 16, gamma);
+    }
 }
 
 /// The zoomed branch of `C4GUI::Element::DrawBar` (C4Gui.cpp:313-329) for
@@ -1670,25 +1745,29 @@ pub fn draw_open_button(
     );
 }
 
-/// Validates the three exact classic resources needed to render a dynamic
-/// Back/Open `C4GUI::CallbackButton`. The down plank is deliberately passed
+/// Validates the matching classic or approved HD planks needed to render a
+/// dynamic Back/Open `C4GUI::CallbackButton`. The down plank is passed
 /// separately so adding dynamic state does not break existing
 /// [`ScenSelAssets`] struct literals and cached reference renderers.
 pub fn validate_scensel_button_assets(
     assets: &ScenSelAssets,
     button_down: &ImageData,
 ) -> Result<()> {
+    let normal_size = (assets.button.width(), assets.button.height());
+    let down_size = (button_down.width(), button_down.height());
     ensure!(
-        (assets.button.width(), assets.button.height()) == (128, 32),
-        "GUIButton.png must be the exact 128x32 classic plank: got {}x{}",
-        assets.button.width(),
-        assets.button.height()
+        matches!(normal_size, (128, 32) | (2052, 160)),
+        "GUIButton.png must be a classic or approved HD plank: got {}x{}",
+        normal_size.0,
+        normal_size.1
     );
     ensure!(
-        (button_down.width(), button_down.height()) == (128, 32),
-        "GUIButtonDown.png must be the exact 128x32 classic plank: got {}x{}",
-        button_down.width(),
-        button_down.height()
+        down_size == normal_size,
+        "GUIButtonDown.png must match the released plank: got {}x{} versus {}x{}",
+        down_size.0,
+        down_size.1,
+        normal_size.0,
+        normal_size.1
     );
     ensure!(
         assets.button_highlight.width() > 0 && assets.button_highlight.height() > 0,
@@ -2126,6 +2205,59 @@ fn wrap_line(text: &str, font: &ClonkFont, width: i32) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::test_support::endeavour_font_set;
+
+    #[test]
+    fn vertical_book_scrollbar_samples_hd_arrow_and_rail_facets() {
+        let pixels = (0..384)
+            .flat_map(|y| {
+                (0..384).flat_map(move |_| {
+                    let color = if y < 128 {
+                        [200, 0, 0, 255]
+                    } else if y < 256 {
+                        [0, 200, 0, 255]
+                    } else {
+                        [0, 0, 200, 255]
+                    };
+                    color.into_iter()
+                })
+            })
+            .collect();
+        let atlas = ImageData::new(384, 384, pixels);
+        let mut surface = Surface::new(16, 100, clonk_graphics::PixelFormat::Rgba8888);
+        draw_vbar(&mut surface, 0, 0, 100, &atlas, None);
+
+        for (y, expected) in [(8, [200, 0, 0]), (50, [0, 200, 0]), (92, [0, 0, 200])] {
+            let pixel = surface.get_pixel(8, y).expect("scrollbar pixel");
+            assert_eq!([pixel.r, pixel.g, pixel.b], expected, "row {y}");
+        }
+    }
+
+    #[test]
+    fn pressed_vertical_book_arrows_sample_hd_second_column() {
+        let pixels = (0..384)
+            .flat_map(|y| {
+                (0..384).flat_map(move |x| {
+                    let color = if (128..256).contains(&x) && y < 128 {
+                        [200, 0, 0, 255]
+                    } else if (128..256).contains(&x) && y >= 256 {
+                        [0, 0, 200, 255]
+                    } else {
+                        [0, 200, 0, 255]
+                    };
+                    color.into_iter()
+                })
+            })
+            .collect();
+        let atlas = ImageData::new(384, 384, pixels);
+        let mut surface = Surface::new(16, 32, clonk_graphics::PixelFormat::Rgba8888);
+        draw_pressed_book_scroll_arrow(&mut surface, 0, 0, &atlas, false, None);
+        draw_pressed_book_scroll_arrow(&mut surface, 0, 16, &atlas, true, None);
+
+        for (y, expected) in [(8, [200, 0, 0]), (24, [0, 0, 200])] {
+            let pixel = surface.get_pixel(8, y).expect("arrow pixel");
+            assert_eq!([pixel.r, pixel.g, pixel.b], expected, "row {y}");
+        }
+    }
 
     #[test]
     fn shared_cp1252_mapping_preserves_legacy_font_bytes() {
@@ -3167,6 +3299,16 @@ mod tests {
         // (src/C4Gui.cpp:1093; src/C4FacetEx.cpp:137-161).
         validate_scensel_button_assets(&assets, &button_down)
             .expect("a 30x30 highlight override is a valid full-size facet");
+    }
+
+    #[test]
+    fn dynamic_button_resources_accept_matching_hd_planks() {
+        let mut assets = test_assets();
+        assets.button = ImageData::new(2052, 160, vec![0; 2052 * 160 * 4]);
+        let down = ImageData::new(2052, 160, vec![0; 2052 * 160 * 4]);
+
+        validate_scensel_button_assets(&assets, &down)
+            .expect("both approved HD plank phases are valid");
     }
 
     #[test]

@@ -737,15 +737,12 @@ pub(crate) fn draw_scensel_dynamic(
             })
             .clamp(0, max_pin_travel);
         let pin_y = bar.y + 16 + pin;
-        clonk_frontend::draw_image_strip(
+        clonk_frontend::startup_options_dlg::draw_book_scroll_pin(
             surface,
             bar.x,
             pin_y,
             &assets.book_scroll,
-            16,
-            16,
-            16,
-            16,
+            assets.book_scroll_pin.as_ref(),
             Some(gamma),
         );
     }
@@ -775,33 +772,27 @@ pub(crate) fn draw_scensel_dynamic(
             && scroll_metrics.max_scroll > 0
             && scensel_scrollbar_pin_travel(bar.h).is_some()
         {
-            clonk_frontend::draw_image_strip(
+            clonk_frontend::startup_options_dlg::draw_book_scroll_pin(
                 surface,
                 bar.x,
                 bar.y + SCENSEL_SCROLLBAR_PART + interaction.pin,
                 &assets.book_scroll,
-                16,
-                16,
-                16,
-                16,
+                assets.book_scroll_pin.as_ref(),
                 Some(gamma),
             );
         }
         if let ScenselScrollbarInteractionKind::Arrow(direction) = interaction.kind {
-            let (destination_y, source_y) = if direction < 0 {
-                (bar.y, 0)
+            let (destination_y, down) = if direction < 0 {
+                (bar.y, false)
             } else {
-                (bar.y + bar.h - SCENSEL_SCROLLBAR_PART, 32)
+                (bar.y + bar.h - SCENSEL_SCROLLBAR_PART, true)
             };
-            clonk_frontend::draw_image_strip(
+            clonk_frontend::startup_scensel::draw_pressed_book_scroll_arrow(
                 surface,
                 bar.x,
                 destination_y,
                 &assets.book_scroll,
-                16,
-                source_y,
-                16,
-                16,
+                down,
                 Some(gamma),
             );
         }
@@ -1026,7 +1017,7 @@ pub(crate) fn render_startup_frame(
             },
             StartupView::ScenarioBrowser => match (
                 assets.scensel_assets(compat_profile),
-                assets.startup_dialog_images.get("GUIButtonDown.png"),
+                assets.startup_button_image(compat_profile, true),
                 assets.clonk_fonts.as_ref(),
                 assets.book_fonts.as_ref(),
             ) {
@@ -1057,7 +1048,7 @@ pub(crate) fn render_startup_frame(
                             surface,
                             scenario_menu,
                             &dlg_assets,
-                            button_down,
+                            &button_down,
                             fonts,
                             book_fonts,
                             gamma,
@@ -1093,7 +1084,7 @@ pub(crate) fn render_startup_frame(
                             scenario_menu,
                             scenario_entry_enabled,
                             &dlg_assets,
-                            button_down,
+                            &button_down,
                             fonts,
                             book_fonts,
                             scenario_loading_label,

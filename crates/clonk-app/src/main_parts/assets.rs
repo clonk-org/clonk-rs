@@ -6970,8 +6970,26 @@ impl FrontendAssets {
             control: self.dialog_image("Control.png"),
             gamepad: self.dialog_image("Gamepad.png"),
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
-            button: self.dialog_image("GUIButton.png")?,
+            button: self.startup_button_image(profile, false)?,
         })
+    }
+
+    pub(crate) fn startup_button_image(
+        &self,
+        profile: CompatProfile,
+        pressed: bool,
+    ) -> Option<ImageData> {
+        self.hd_main_menu_button_textures
+            .as_ref()
+            .filter(|_| profile == CompatProfile::Normal)
+            .map(|(normal, down)| if pressed { down } else { normal }.clone())
+            .or_else(|| {
+                self.dialog_image(if pressed {
+                    "GUIButtonDown.png"
+                } else {
+                    "GUIButton.png"
+                })
+            })
     }
 
     fn startup_wipf(&self, profile: CompatProfile) -> Option<ImageData> {
@@ -7001,10 +7019,13 @@ impl FrontendAssets {
         Some(clonk_frontend::startup_plrsel::PlrSelAssets {
             background: self.dialog_image("StartupPlrSelBG.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
-            button: self.dialog_image("GUIButton.png")?,
-            button_down: self.dialog_image("GUIButtonDown.png")?,
+            button: self.startup_button_image(profile, false)?,
+            button_down: self.startup_button_image(profile, true)?,
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
-            book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            book_scroll: (profile == CompatProfile::Normal)
+                .then(|| self.dialog_image("StartupBookScrollHD.png"))
+                .flatten()
+                .or_else(|| self.dialog_image("StartupBookScroll.png"))?,
             book_scroll_pin: self.startup_wipf(profile),
             player: self.dialog_image("Player.png")?,
         })
@@ -7510,11 +7531,14 @@ impl FrontendAssets {
     ) -> Option<clonk_frontend::startup_scensel::ScenSelAssets> {
         Some(clonk_frontend::startup_scensel::ScenSelAssets {
             background: self.dialog_image("StartupScenSelBG.png")?,
-            book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            book_scroll: (profile == CompatProfile::Normal)
+                .then(|| self.dialog_image("StartupBookScrollHD.png"))
+                .flatten()
+                .or_else(|| self.dialog_image("StartupBookScroll.png"))?,
             book_scroll_pin: self.startup_wipf(profile),
             scen_icons: self.dialog_image("StartupScenSelIcons.png")?,
             caption_bar: self.dialog_image("GUICaption.png")?,
-            button: self.dialog_image("GUIButton.png")?,
+            button: self.startup_button_image(profile, false)?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             icons_ex: self.dialog_image("GUIIcons2.png")?,

@@ -175,17 +175,22 @@ pub fn main_menu_layout(w: i32, h: i32) -> MainMenuLayout {
     }
 }
 
-/// Draws a horizontal three-slice bar from `image` into `rect` at native
+/// Draws a horizontal three-slice bar from the classic image at native
 /// (1:1) pixel scale, mirroring C4GUI::Element::DrawBar's "exact bar" branch
 /// (C4Gui.cpp:283-311) with DynBarFacet slices: begin = left `border` columns,
 /// middle = the remainder tiled, end = right `border` columns drawn last,
 /// where `border` = texture height (C4Gui.cpp:101-107).
+/// The approved HD startup plank uses scaled fixed ends and a continuous center.
 pub fn draw_bar(
     surface: &mut Surface,
     rect: &GuiRect,
     image: &ImageData,
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) {
+    if (image.width(), image.height()) == (2052, 160) {
+        draw_hd_button_bar(surface, rect, image, gamma);
+        return;
+    }
     let border = image.height();
     let mid_w = image.width().saturating_sub(2 * border);
     let (x0, y0) = (rect.origin.x as i32, rect.origin.y as i32);
@@ -232,20 +237,19 @@ pub fn draw_bar(
     );
 }
 
-fn draw_hd_button_bar(
+pub(crate) fn draw_hd_button_bar(
     surface: &mut Surface,
     rect: &GuiRect,
     image: &ImageData,
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) {
     const SOURCE_CAP: f32 = 200.0;
-    const DISPLAY_CAP: f32 = 40.0;
     if image.width() < 2 * SOURCE_CAP as u32 {
         return;
     }
 
     let source_width = image.width() as f32;
-    let cap = DISPLAY_CAP.min(rect.size.width / 2.0);
+    let cap = rect.size.height.min(rect.size.width / 2.0).max(0.0);
     let middle_width = (rect.size.width - 2.0 * cap).max(0.0);
     for (source_x, source_width, target_x, target_width) in [
         (0.0, SOURCE_CAP, rect.origin.x, cap),
@@ -1250,6 +1254,37 @@ mod tests {
             (90, [0, 0, 200]),
         ] {
             let pixel = surface.get_pixel(x, 20).expect("button pixel");
+            assert_eq!([pixel.r, pixel.g, pixel.b], expected, "column {x}");
+        }
+    }
+
+    #[test]
+    fn hd_button_bar_scales_its_end_caps_to_standard_button_height() {
+        let pixels = (0..160)
+            .flat_map(|_| {
+                (0..2052).flat_map(|x| {
+                    let color = if x < 200 {
+                        [200, 0, 0, 255]
+                    } else if x < 1852 {
+                        [0, 200, 0, 255]
+                    } else {
+                        [0, 0, 200, 255]
+                    };
+                    color.into_iter()
+                })
+            })
+            .collect();
+        let image = ImageData::new(2052, 160, pixels);
+        let mut surface = Surface::new(100, 32, PixelFormat::Rgba8888);
+        draw_bar(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 100.0, 32.0),
+            &image,
+            None,
+        );
+
+        for (x, expected) in [(25, [200, 0, 0]), (50, [0, 200, 0]), (75, [0, 0, 200])] {
+            let pixel = surface.get_pixel(x, 16).expect("button pixel");
             assert_eq!([pixel.r, pixel.g, pixel.b], expected, "column {x}");
         }
     }

@@ -4811,7 +4811,7 @@ pub(crate) fn draw_horizontal_book_scrollbar(
 }
 
 /// Replaces only the Wipf artwork; the classic pin bounds and hit area stay 16x16.
-pub(crate) fn draw_book_scroll_pin(
+pub fn draw_book_scroll_pin(
     surface: &mut Surface,
     x: i32,
     y: i32,

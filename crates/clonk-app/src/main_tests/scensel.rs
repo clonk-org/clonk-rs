@@ -246,7 +246,10 @@ fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
         .assets
         .scensel_assets(app.config.compat_profile)
         .test_value();
-    let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
+    let button_down = app
+        .assets
+        .startup_button_image(app.config.compat_profile, true)
+        .test_value();
     let fonts = app.assets.clonk_fonts.clone().test_value();
     let book = app.assets.book_fonts.clone().test_value();
     let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
@@ -2536,7 +2539,10 @@ fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
         .assets
         .scensel_assets(app.config.compat_profile)
         .test_value();
-    let button_down = app.assets.dialog_image("GUIButtonDown.png").test_value();
+    let button_down = app
+        .assets
+        .startup_button_image(app.config.compat_profile, true)
+        .test_value();
     let book = app.assets.book_fonts.clone().test_value();
     app.menu_state.set_search_text("caret");
     app.menu_state.set_search_focused(true);
