@@ -17,8 +17,8 @@
 
 use crate::math::{self, C4Fixed};
 use crate::{
-    Landscape, MaterialId, ObjectVertex, Vector2, ATTACH_RANGE, CNAT_BOTTOM, CNAT_LEFT, CNAT_RIGHT,
-    CNAT_TOP, FULL_CON,
+    Landscape, MaterialId, MaterialSet, ObjectVertex, Vector2, ATTACH_RANGE, CNAT_BOTTOM,
+    CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, FULL_CON,
 };
 use clonk_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
 use std::cmp::Reverse;
@@ -174,6 +174,50 @@ impl MaterialMask {
     pub fn contains(self, material: MaterialId) -> bool {
         self.0 & Self::bit(material) != 0
     }
+
+    fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+/// The materials that harm an object whose centre is in them, from the
+/// material table: every ten frames a corrosive one costs energy unless the
+/// object resists corrosion, and an incendiary one sets alight an object
+/// that catches fire on contact (C4Object.cpp:923-938).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiquidHazards {
+    corrosive: MaterialMask,
+    incendiary: MaterialMask,
+}
+
+impl LiquidHazards {
+    pub fn new(materials: &MaterialSet) -> Self {
+        materials
+            .iter()
+            .fold(Self::default(), |hazards, material| Self {
+                corrosive: if material.corrosive() != 0 {
+                    hazards.corrosive.with(material.id())
+                } else {
+                    hazards.corrosive
+                },
+                incendiary: if material.incindiary() != 0 {
+                    hazards.incendiary.with(material.id())
+                } else {
+                    hazards.incendiary
+                },
+            })
+    }
+
+    /// Incendiary materials count for every actor, though only one with
+    /// ContactIncinerate catches fire: leaving a swim out can only miss a
+    /// route, never invent a deadly one.
+    fn harmful_to(self, physical: &PhysicalInfo) -> MaterialMask {
+        if physical.corrosion_resist != 0 {
+            self.incendiary
+        } else {
+            self.incendiary.union(self.corrosive)
+        }
+    }
 }
 
 impl NavActor {
@@ -185,6 +229,7 @@ impl NavActor {
         construction: i32,
         gravity: C4Fixed,
         shape_top: i32,
+        hazards: LiquidHazards,
     ) -> Self {
         let con = math::itofix_prec(construction, FULL_CON);
         Self {
@@ -199,7 +244,7 @@ impl NavActor {
                 physical.breath / (2 * C4_MAX_PHYSICAL / 100) * 5
             },
             breath_offset: shape_top / 2,
-            harmful_liquids: MaterialMask::default(),
+            harmful_liquids: hazards.harmful_to(physical),
             can_scale: physical.can_scale != 0,
             can_hangle: physical.can_hangle != 0,
             gravity,
@@ -1315,6 +1360,7 @@ mod tests {
             FULL_CON,
             C4Fixed::from_raw(13_107),
             -10,
+            LiquidHazards::default(),
         )
     }
 

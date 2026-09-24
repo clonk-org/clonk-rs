@@ -1158,6 +1158,7 @@
                 transfer_zones: &EMPTY_TRANSFER_ZONES,
                 rng: None,
                 navigation_ai: false,
+                materials: None,
             };
             let mut equal_distance = PutState::from_request(&request).expect("Put state");
             let strict_fallback =
@@ -1194,6 +1195,7 @@
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
             navigation_ai: false,
+            materials: None,
         };
         let mut no_route = PutState::from_request(&request).expect("Put state");
         let no_route = no_route.step_with_gravity(&no_route_ctx, math::fixed100(20));

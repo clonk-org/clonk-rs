@@ -1088,6 +1088,7 @@ impl Engine {
             base_sell_enabled: self.base_sell_enabled,
             transfer_zones: &transfer_zones,
             navigation_ai: self.navigation_ai,
+            materials: Some(&self.materials),
         };
         let command_gravity = self.physics.gravity_as_c4fixed();
         let result = match resume {

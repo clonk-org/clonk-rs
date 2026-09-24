@@ -336,6 +336,42 @@ fn navigation_fetches_construction_material_across_a_pool() {
 }
 
 #[test]
+fn navigation_will_not_swim_for_construction_material_through_acid() {
+    // The pool the builder swims across in water holds the content's Acid
+    // here, which costs a swimmer energy every ten frames (C4Object.cpp:
+    // 923-930), so no route crosses it and the builder gives up.
+    let g = CORPUS_GROUND;
+    let (mut engine, owner, clonk) = frontier_crew_engine(true);
+    engine.set_landscape(liquid_corpus_landscape(
+        &[],
+        "Acid",
+        &[(200, g, 299, g + 39)],
+    ));
+    let energy = engine.snapshot().object(clonk).test_value().energy;
+    let outcome = fetch_to_site(
+        &mut engine,
+        owner,
+        clonk,
+        Vector2::new(CORPUS_SITE_X, g),
+        &[Vector2::new(150, g - 4)],
+        CORPUS_FRAMES,
+    );
+    let snapshot = engine.snapshot();
+    let builder = snapshot.object(clonk).test_value();
+    assert!(
+        matches!(outcome, FetchOutcome::GaveUp { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        builder.alive && builder.energy == energy,
+        "the builder must stay out of the acid: alive {}, energy {} of {energy} at {:?}",
+        builder.alive,
+        builder.energy,
+        builder.position
+    );
+}
+
+#[test]
 fn navigation_fetches_construction_material_through_an_underwater_tunnel() {
     // The pool is split by a barrier reaching the top of the map and 15 px
     // below the surface; the only way past is the tunnel under it, a dive

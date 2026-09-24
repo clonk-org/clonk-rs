@@ -1403,6 +1403,9 @@ impl MoveToState {
             ctx.object.construction,
             gravity,
             ctx.object.shape_top,
+            ctx.materials
+                .map(navigation::LiquidHazards::new)
+                .unwrap_or_default(),
         );
         let goal = navigation::NavGoal {
             x: target.x,
@@ -5974,6 +5977,9 @@ impl AcquireState {
             ctx.object.construction,
             gravity,
             ctx.object.shape_top,
+            ctx.materials
+                .map(navigation::LiquidHazards::new)
+                .unwrap_or_default(),
         );
         let fetched_by_another = |candidate: ObjectId| {
             ctx.objects.values().any(|other| {
@@ -7583,6 +7589,9 @@ pub struct CommandRuntimeContext<'a> {
     /// The synchronized `Engine::navigation_ai` session switch: false
     /// reproduces C4Command and C4PathFinder exactly.
     pub navigation_ai: bool,
+    /// The material table, which tells the navigation planner the liquids
+    /// that harm a swimmer. None in unit fixtures that plan no swims.
+    pub materials: Option<&'a crate::MaterialSet>,
 }
 
 impl<'a> CommandRuntimeContext<'a> {

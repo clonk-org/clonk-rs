@@ -350,6 +350,7 @@
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
             navigation_ai: false,
+            materials: None,
         }
     }
 

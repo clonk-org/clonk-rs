@@ -876,6 +876,7 @@ impl Engine {
                             base_sell_enabled: self.base_sell_enabled,
                             transfer_zones: &self.transfer_zones,
                             navigation_ai: self.navigation_ai,
+                            materials: Some(&self.materials),
                         };
                         let result = object.step_command_stack(command_context, command_gravity);
                         self.rng = command_rng.take();
