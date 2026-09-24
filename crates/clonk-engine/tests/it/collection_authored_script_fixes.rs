@@ -428,6 +428,55 @@ fn the_inexantros_final_act_speaks_the_players_language() {
     }
 }
 
+/// Clears every sanctuary from script, as a team that has lost them all.
+const SANCTUARY_CLEARING_PROBE: &str = r#"#strict
+public func Clear()
+{
+    return RemoveAll(SNHD);
+}
+"#;
+
+/// clonk-org/clonk-rs-content#72: Metal & Magic's English called its
+/// Heiligtum a "sainthood". A definition's name is the `Names.txt` line for
+/// the player's language (C4Def.cpp:637-638), and Occupation's relaunch helper
+/// reports a team without one from its string table, substituted into the
+/// script before it is parsed (C4ScriptHost.cpp:57, 74). Both name a
+/// sanctuary for a US player now, and are unchanged for a German one.
+#[test]
+fn metal_and_magic_names_its_sanctuary_in_the_players_language() {
+    for (languages, name, no_sanctuary) in [
+        (
+            ["US"],
+            "Sanctuary",
+            "Your team has no sanctuary at the moment.",
+        ),
+        (["DE"], "Heiligtum", "Dein Team hat gerade kein Heiligtum."),
+    ] {
+        let mut engine = load_installed_scenario_in_languages(
+            "Collection.c4f/Knights.c4f/MetalMagic.c4f/Occupation.c4s",
+            0,
+            &languages,
+        );
+        assert_eq!(engine.definition_name("SNHD"), Some(name), "{languages:?}");
+
+        engine
+            .register_script_definition(
+                "SNCL",
+                "Sanctuary clearing probe",
+                SANCTUARY_CLEARING_PROBE,
+            )
+            .expect("the probe registers");
+        let probe = engine.spawn_test_object(SpawnConfig::new("SNCL"));
+        call(&mut engine, probe, "Clear");
+        let helper = engine.spawn_test_object(SpawnConfig::new("_RLC"));
+        call(&mut engine, helper, "End");
+        assert!(
+            engine.message_line_contains(no_sanctuary),
+            "the {languages:?} relaunch helper reports no sanctuary"
+        );
+    }
+}
+
 /// Relaunches a player the way the pack's Clonk does from `Destruction`.
 const RELAUNCH_PROBE: &str = r#"#strict
 public func Relaunch(int player)
