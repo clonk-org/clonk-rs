@@ -1,0 +1,16 @@
+date: 2026-09-25T16:26:55Z
+model: Raspberry Pi 4 Model B Rev 1.4
+Linux pi-01 6.12.47+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.12.47-1+rpt1 (2025-09-16) aarch64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+weston 14.0.2
+libegl-mesa0:arm64	26.2.0-1~bpo13+0~rpt2
+libvulkan1:arm64	1.4.309.0-1
+mesa-vulkan-drivers:arm64	26.2.0-1~bpo13+0~rpt2
+commit: aaa33a3382e189ea829b3836c18a1dcecc218cce
+content: 0888b4f3bd10762c976c2fe93aa650d7909c1c6f (gitlink 0888b4f3bd10762c976c2fe93aa650d7909c1c6f)
+binary sha256: 0e9625c5e4b8b55b65c0a83e65204309b8e487c82af062457ca6121f3d0f9acd
+rustc 1.98.1 (48a229cea 2026-09-01)
+governor: ondemand
+throttled: throttled=0x80000
+load: 2.10 3.40 3.14
+hdmi: disconnected disconnected 

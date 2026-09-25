@@ -193,6 +193,17 @@ Earlier schema-2 reference runs passed on:
 These are path-specific reference runs, not a claim about every `softbuffer`
 platform.
 
+**Native Wayland schema-3 automatic fallback passed on 2026-09-25**, on the same
+Raspberry Pi 4, weston 14.0.2 and Debian 13. Source
+`aaa33a3382e189ea829b3836c18a1dcecc218cce`, content
+`0888b4f3bd10762c976c2fe93aa650d7909c1c6f`. The shell was maximized from
+800×600 to 1280×653, and every stage above completed except the opt-in input
+check. The report and captures are
+[retained with the Pi 4 GPU evidence](../docs/evidence/pi4-retained-gpu/README.md).
+The schema-3 probe could not pass on Wayland before its resize became a
+maximize: winit applies a client's own `request_inner_size` there at once and
+sends no resize event.
+
 **Windows schema-3 qualification passed on 2026-09-20:** Windows Server 2025
 (`10.0.26100`), AMD64, Win32, shipped `x86_64-pc-windows-msvc` release build with
 static CRT and LLD ThinLTO. Source `9c774f82275f4595938ad950e7f9b71fc159280d`,

@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "kind": "clonk_headed_surface_smoke",
+  "success": true,
+  "failure": null,
+  "display_backend": "wayland",
+  "wayland_display": "wl-gl",
+  "xdg_session_type": "wayland",
+  "surface_windows": [
+    {
+      "role": "shell",
+      "window_id": "WindowId(367959064288)",
+      "instance_entry_id": 1
+    },
+    {
+      "role": "viewport",
+      "window_id": "WindowId(367960270320)",
+      "instance_entry_id": 1
+    }
+  ],
+  "instance_acquisitions": [
+    {
+      "sequence": 1,
+      "entry_id": 1,
+      "requested_backends": [
+        "vulkan"
+      ],
+      "created": true
+    },
+    {
+      "sequence": 2,
+      "entry_id": 1,
+      "requested_backends": [
+        "vulkan"
+      ],
+      "created": false
+    }
+  ],
+  "retained_registry": [
+    {
+      "entry_id": 1,
+      "requested_backends": [
+        "vulkan"
+      ],
+      "acquisitions": 2,
+      "resident_at_loop_exit": true
+    }
+  ],
+  "shell_adapter": {
+    "name": "V3D 4.2.14.0",
+    "vendor_id": 5348,
+    "device_id": 3192414163,
+    "device_type": "integrated-gpu",
+    "pci_bus_id": "",
+    "driver": "V3DV Mesa",
+    "driver_info": "Mesa 26.2.0-1~bpo13+0~rpt2",
+    "backend": "vulkan",
+    "subgroup_min_size": 16,
+    "subgroup_max_size": 16,
+    "transient_saves_memory": false
+  },
+  "child_adapter": {
+    "name": "V3D 4.2.14.0",
+    "vendor_id": 5348,
+    "device_id": 3192414163,
+    "device_type": "integrated-gpu",
+    "pci_bus_id": "",
+    "driver": "V3DV Mesa",
+    "driver_info": "Mesa 26.2.0-1~bpo13+0~rpt2",
+    "backend": "vulkan",
+    "subgroup_min_size": 16,
+    "subgroup_max_size": 16,
+    "transient_saves_memory": false
+  },
+  "shell_presented_before_close": true,
+  "child_presented_before_close": true,
+  "child_closed_while_shell_survived": true,
+  "child_released_after_close": true,
+  "shell_presented_after_child_close": true,
+  "shell_initial_extent": [
+    800,
+    600
+  ],
+  "shell_resized_extent": [
+    1280,
+    653
+  ],
+  "shell_presented_after_resize": true,
+  "loop_exiting_release_order": [
+    0
+  ],
+  "registry_empty_on_loop_exiting": true,
+  "shell_released_on_loop_exiting": true
+}

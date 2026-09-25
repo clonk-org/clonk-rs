@@ -1,0 +1,1 @@
+2026-09-25T16:27:43.599712Z  WARN clonk_app::main_audio: no surface-compatible hardware adapter was offered; running on a software adapter backends=Backends(VULKAN | METAL | DX12 | BROWSER_WEBGPU) adapter=llvmpipe (LLVM 19.1.7, 128 bits)

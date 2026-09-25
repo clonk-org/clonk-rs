@@ -1,0 +1,141 @@
+{
+  "app_report": {
+    "child_adapter": {
+      "backend": "vulkan",
+      "device_id": 3192414163,
+      "device_type": "integrated-gpu",
+      "driver": "V3DV Mesa",
+      "driver_info": "Mesa 26.2.0-1~bpo13+0~rpt2",
+      "name": "V3D 4.2.14.0",
+      "pci_bus_id": "",
+      "subgroup_max_size": 16,
+      "subgroup_min_size": 16,
+      "transient_saves_memory": false,
+      "vendor_id": 5348
+    },
+    "child_closed_while_shell_survived": true,
+    "child_presented_before_close": true,
+    "child_released_after_close": true,
+    "display_backend": "wayland",
+    "failure": null,
+    "instance_acquisitions": [
+      {
+        "created": true,
+        "entry_id": 1,
+        "requested_backends": [
+          "vulkan"
+        ],
+        "sequence": 1
+      },
+      {
+        "created": false,
+        "entry_id": 1,
+        "requested_backends": [
+          "vulkan"
+        ],
+        "sequence": 2
+      }
+    ],
+    "kind": "clonk_headed_surface_smoke",
+    "loop_exiting_release_order": [
+      0
+    ],
+    "registry_empty_on_loop_exiting": true,
+    "retained_registry": [
+      {
+        "acquisitions": 2,
+        "entry_id": 1,
+        "requested_backends": [
+          "vulkan"
+        ],
+        "resident_at_loop_exit": true
+      }
+    ],
+    "schema_version": 2,
+    "shell_adapter": {
+      "backend": "vulkan",
+      "device_id": 3192414163,
+      "device_type": "integrated-gpu",
+      "driver": "V3DV Mesa",
+      "driver_info": "Mesa 26.2.0-1~bpo13+0~rpt2",
+      "name": "V3D 4.2.14.0",
+      "pci_bus_id": "",
+      "subgroup_max_size": 16,
+      "subgroup_min_size": 16,
+      "transient_saves_memory": false,
+      "vendor_id": 5348
+    },
+    "shell_initial_extent": [
+      800,
+      600
+    ],
+    "shell_presented_after_child_close": true,
+    "shell_presented_after_resize": true,
+    "shell_presented_before_close": true,
+    "shell_released_on_loop_exiting": true,
+    "shell_resized_extent": [
+      1280,
+      653
+    ],
+    "success": true,
+    "surface_windows": [
+      {
+        "instance_entry_id": 1,
+        "role": "shell",
+        "window_id": "WindowId(367959064288)"
+      },
+      {
+        "instance_entry_id": 1,
+        "role": "viewport",
+        "window_id": "WindowId(367960270320)"
+      }
+    ],
+    "wayland_display": "wl-gl",
+    "xdg_session_type": "wayland"
+  },
+  "authoritative": false,
+  "binary": "/home/pi/src/clonk-pi1250-7b6752938/target/release/clonk-app",
+  "binary_sha256_after": "0e9625c5e4b8b55b65c0a83e65204309b8e487c82af062457ca6121f3d0f9acd",
+  "binary_sha256_before": "0e9625c5e4b8b55b65c0a83e65204309b8e487c82af062457ca6121f3d0f9acd",
+  "build_command": null,
+  "build_target_dir": null,
+  "cargo_artifact_sha256": null,
+  "command": [
+    "/home/pi/src/clonk-pi1250-7b6752938/target/release/clonk-app",
+    "--config",
+    "/home/pi/src/qual-1250/run2/headed-smoke/Clonk.ini",
+    "--headed-surface-smoke",
+    "/home/pi/src/qual-1250/run2/headed-smoke/app-report.json"
+  ],
+  "content_commit": null,
+  "controlled_build_environment": null,
+  "controlled_environment": {
+    "LC_CACHE_DIR": "/home/pi/src/qual-1250/run2/headed-smoke/cache",
+    "LC_CONFIG_FILE": null,
+    "LC_CONTENT_DIR": "/home/pi/src/clonk-pi1250-7b6752938/content",
+    "LC_GAME_UPDATE_NOTICE": null,
+    "LC_GAME_UPDATE_RECOVERY_COMPLETE": "1",
+    "LC_INSTALL_ROOT": "/home/pi/src/clonk-pi1250-7b6752938",
+    "LC_LOG": null,
+    "LC_LOGS_DIR": "/home/pi/src/qual-1250/run2/headed-smoke/logs",
+    "LC_TEMP_DIR": "/home/pi/src/qual-1250/run2/headed-smoke/temp",
+    "LC_USER_DATA_DIR": "/home/pi/src/qual-1250/run2/headed-smoke/user-data",
+    "RUST_BACKTRACE": "1",
+    "RUST_LOG": null,
+    "WAYLAND_DISPLAY": "wl-gl",
+    "WGPU_ADAPTER_NAME": null,
+    "WGPU_BACKEND": "vulkan",
+    "WGPU_POWER_PREF": null,
+    "XDG_SESSION_TYPE": "wayland"
+  },
+  "elapsed_seconds": 4.757846815511584,
+  "git_commit": "aaa33a3382e189ea829b3836c18a1dcecc218cce",
+  "kind": "clonk_headed_surface_smoke_qualification",
+  "platform": "Linux-6.12.47+rpt-rpi-v8-aarch64-with-glibc2.41",
+  "process_returncode": 0,
+  "qualification": "real-surface-wiring-only",
+  "schema_version": 1,
+  "source_clean_before_and_after": false,
+  "started_at_utc": "2026-09-25T16:26:57.704454+00:00",
+  "workspace": "/home/pi/src/clonk-pi1250-7b6752938"
+}

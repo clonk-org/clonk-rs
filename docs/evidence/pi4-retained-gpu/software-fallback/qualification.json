@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "kind": "clonk_software_presentation_qualification",
+  "recorded_at": "2026-09-25T16:28:14.503072+00:00",
+  "commit": "aaa33a3382e189ea829b3836c18a1dcecc218cce",
+  "content_commit": "0888b4f3bd10762c976c2fe93aa650d7909c1c6f",
+  "sources_sha256": "2c3285b1cc4d4d3a8f66e74e0e5fbe149299d8a633bd52c0b457779566f36b88",
+  "source_dirty": false,
+  "os": "Linux-6.12.47+rpt-rpi-v8-aarch64-with-glibc2.41",
+  "os_version": "#1 SMP PREEMPT Debian 1:6.12.47-1+rpt1 (2025-09-16)",
+  "architecture": "aarch64",
+  "build_profile": "release",
+  "build_target": null,
+  "rustflags": null,
+  "encoded_rustflags": null,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "binary_sha256": "0e9625c5e4b8b55b65c0a83e65204309b8e487c82af062457ca6121f3d0f9acd",
+  "window_backend": "wayland",
+  "automatic_fallback": true,
+  "native_input_checked": false,
+  "artifacts": {
+    "report.json": "353115f2ec9d42f1aec4ffef34f2a3aac3597593913f8c2f3a941030ba2dba84",
+    "report.screenshot.png": "bf3fe2929e4972f611aca161734bb004d08c2bf11143ca8d80079b10c36095c4",
+    "report.thumbnail.png": "0e8c3c582e905ff017ed79c2cab5db4bdda662bd3b9b9f9b9983a0c23bfc5ca3",
+    "run.log": "cd8fc2c4f94a931daa4bf9cacb9981e48b71ada62e95e15f0e369f5599e675d3"
+  }
+}
