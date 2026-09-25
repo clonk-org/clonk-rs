@@ -4,6 +4,22 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-25
+
+### Bug fixes
+
+- Give up a construction fetch whose route has no way back (#1797)
+- Use HD startup buttons and vertical scrollbars (#1795)
+- Plan climbs up faces that lean back the way the engine scales them (#1793)
+
+### Documentation
+
+- Describe swimming in the navigation AI's profile entry (#1801)
+
+### Features
+
+- Plan crew routes that swim through liquid (#1800)
+
 ## [1.0.0] - 2026-09-24
 
 ### Features
