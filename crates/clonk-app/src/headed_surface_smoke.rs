@@ -593,15 +593,23 @@ fn shell_resize_followed(
         .context("the headed surface probe's shell framebuffer disappeared during resize")?;
     let size = shell.window.inner_size();
     let window = [size.width, size.height];
-    Ok(resize_followed(initial, window, pixels.surface_extent()).then_some(window))
+    Ok(resize_followed(initial, window, &[pixels.surface_extent()]).then_some(window))
 }
 
-/// A resize is done once the window has left its initial extent *and* its
-/// retained surface reports the window's new one: a window that changed size
-/// over a surface that was never reconfigured is precisely what this phase
-/// exists to catch.
-fn resize_followed(initial: [u32; 2], window: [u32; 2], surface: (u32, u32)) -> bool {
-    window != initial && surface == (window[0], window[1])
+/// A resize is done once the window has left its initial extent *and* every
+/// extent that must follow it — a retained surface, or a software drawable and
+/// its frame — reports the window's new one: a window that changed size over a
+/// presenter that was never reconfigured is precisely what a probe's resize
+/// phase exists to catch.
+pub(crate) fn resize_followed(
+    initial: [u32; 2],
+    window: [u32; 2],
+    followers: &[(u32, u32)],
+) -> bool {
+    window != initial
+        && followers
+            .iter()
+            .all(|&extent| extent == (window[0], window[1]))
 }
 
 fn paint_probe_frame(surface: &mut clonk_surface::WindowSurface, color: [u8; 4]) {
@@ -698,13 +706,13 @@ mod tests {
 
     #[test]
     fn a_resize_counts_only_once_the_retained_surface_follows_the_window() {
-        assert!(resize_followed([800, 600], [1280, 688], (1280, 688)));
+        assert!(resize_followed([800, 600], [1280, 688], &[(1280, 688)]));
         assert!(
-            !resize_followed([800, 600], [1280, 688], (800, 600)),
+            !resize_followed([800, 600], [1280, 688], &[(800, 600)]),
             "the window resized but its surface was never reconfigured"
         );
         assert!(
-            !resize_followed([800, 600], [800, 600], (800, 600)),
+            !resize_followed([800, 600], [800, 600], &[(800, 600)]),
             "the window has not resized yet"
         );
     }
