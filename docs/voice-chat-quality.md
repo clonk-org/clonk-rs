@@ -8,6 +8,8 @@ media never enters simulation, lockstep controls or recordings.
   version explicitly and reject older media without interpreting it as controls.
 - [x] Use fullband Opus and acoustic echo cancellation that covers long delays.
 - [x] Limit voice against the headroom remaining after game sound and music.
+- [x] Calibrate voice playback above music, with smooth music attenuation
+  during audible speech and recovery between conversations.
 - [x] Service media independently of game updates, with fair bounded queues and
   capture/receive timestamps that survive every local handoff.
 - [x] Recover microphone devices outside the game and media threads.
@@ -46,6 +48,21 @@ require the user's live opt-in. “UDP voice negotiated” describes capability;
 it does not claim a confirmed direct route or a successful end-to-end call.
 
 ## Timing and signal quality
+
+Voice volume remains a 0–200% control. Its 100% baseline now applies +6 dB
+relative to decoded speech (the old 200% level), and 200% adds another +6 dB.
+Saved percentages are preserved and 0% still mutes received voice. Capture
+processing and the transmitted signal are unchanged; the local microphone
+test uses the same calibrated 100% playback baseline.
+
+Audible received speech lowers music by about 14 dB, with a 10 ms attack time
+constant, a 250 ms hold across word gaps and a 400 ms release time constant.
+The detector measures each speaker after playback volume and positional
+attenuation, so silent, muted and inaudible streams do not lower music.
+Music returns to its selected level afterward. Game sound effects retain
+their existing mix, and voice still respects the remaining output headroom
+and its own peak ceiling when several people speak. These are local playback
+changes and never enter simulation or network controls.
 
 Output recovers on a device worker while a separate render worker advances the
 mixer. Hardware callbacks consume bounded, timestamped PCM; they discard stale

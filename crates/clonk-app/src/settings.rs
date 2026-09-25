@@ -376,7 +376,8 @@ impl AudioOptions {
     }
 
     /// `Config.Voice.Volume`, in the `0..=200` domain the Audio sheet's bar and
-    /// the Advanced editor's row both use. `100` is unity gain.
+    /// the Advanced editor's row both use. `100` is the calibrated speech
+    /// baseline; `clonk_audio::voice_playback_gain` maps it to output gain.
     pub(crate) fn voice_volume_percent(&self) -> i32 {
         normalized_volume_percent(self.voice_volume, MAX_VOICE_VOLUME_PERCENT)
     }

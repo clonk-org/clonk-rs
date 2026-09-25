@@ -398,8 +398,12 @@ impl<S: TestCapture> LocalTestCore<S> {
                     return;
                 }
             };
-            self.audio
-                .queue_voice_stream_with_mix(self.stream_id, samples, 1.0, 0.0);
+            self.audio.queue_voice_stream_with_mix(
+                self.stream_id,
+                samples,
+                crate::voice_playback_gain(1.0),
+                0.0,
+            );
         }
         if self.recorded.is_empty()
             && self.audio.voice_stream_stats(self.stream_id).queued_frames == 0
