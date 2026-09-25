@@ -37,7 +37,7 @@ def nvidia_adapter():
 def authoritative_report():
     adapter = nvidia_adapter()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "clonk_headed_surface_smoke",
         "success": True,
         "failure": None,
@@ -85,6 +85,9 @@ def authoritative_report():
         "child_closed_while_shell_survived": True,
         "child_released_after_close": True,
         "shell_presented_after_child_close": True,
+        "shell_initial_extent": [800, 600],
+        "shell_resized_extent": [1280, 688],
+        "shell_presented_after_resize": True,
         "loop_exiting_release_order": [0],
         "registry_empty_on_loop_exiting": True,
         "shell_released_on_loop_exiting": True,
@@ -154,6 +157,19 @@ class HeadedSurfaceReportTests(unittest.TestCase):
             "survivor not presented": lambda report: report.update(
                 shell_presented_after_child_close=False
             ),
+            "resized survivor not presented": lambda report: report.update(
+                shell_presented_after_resize=False
+            ),
+            "resize changed nothing": lambda report: report.update(
+                shell_resized_extent=[800, 600]
+            ),
+            "fractional extent": lambda report: report.update(
+                shell_resized_extent=[1280.0, 688]
+            ),
+            "extent is not a pair": lambda report: report.update(
+                shell_initial_extent=[800]
+            ),
+            "schema 1 report": lambda report: report.update(schema_version=1),
             "shell not released": lambda report: report.update(
                 shell_released_on_loop_exiting=False
             ),

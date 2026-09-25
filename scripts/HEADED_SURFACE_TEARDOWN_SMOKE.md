@@ -41,16 +41,25 @@ production event-handler closure. It performs this sequence:
 3. Present both surfaces from their real redraw callbacks.
 4. Destroy the viewport through `DeveloperWindows::close`, prove its weak
    window handle died while the shell survived, then present the shell again.
-5. request event-loop exit and let `Event::LoopExiting` reach the ordinary
+5. Ask the window system to maximize the shell. Wait until the window has
+   left its initial extent *and* its retained surface reports the window's
+   new one, which only the ordinary resize event's surface reconfiguration
+   can produce, then present the shell again at that extent. Maximize rather
+   than a requested size because on Wayland winit applies a client's own
+   `request_inner_size` at once and sends no resize event, so the production
+   handler would never run; a maximize is carried out and announced by the
+   compositor, as every size change of the shell in play is.
+6. request event-loop exit and let `Event::LoopExiting` reach the ordinary
    shutdown code unchanged.
-6. Write `app-report.json` only after production
+7. Write `app-report.json` only after production
    `DeveloperWindows::release_all` has returned and the shell weak handle has
    died.
 
 The Python runner independently rejects the report unless the two distinct
 windows used the exact same retained-instance registry entry, the acquisition
 sequence was one creation followed by one reuse, the survivor presented after
-the child closed, and `LoopExiting` released exactly the remaining shell. A
+the child closed, the survivor changed size and presented again, and
+`LoopExiting` released exactly the remaining shell. A
 crash, timeout, stale or partial report, unknown schema, duplicate JSON key,
 missing driver identity, or nonzero process exit fails the run. Removing the
 retained-instance funnel breaks the surface-to-entry evidence; removing the
