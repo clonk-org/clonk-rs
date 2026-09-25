@@ -17,6 +17,7 @@ On Debian or Ubuntu, install the native development dependencies used by CI:
 ```sh
 sudo apt-get update
 sudo apt-get install --yes --no-install-recommends \
+  cmake \
   libasound2-dev \
   libfreetype6-dev \
   libfluidsynth3 \
@@ -24,6 +25,10 @@ sudo apt-get install --yes --no-install-recommends \
   libudev-dev \
   pkg-config
 ```
+
+CMake builds the bundled Opus codec for voice chat (`opusic-sys`). GitHub's
+Ubuntu runners ship it preinstalled, which is why CI installs no package for
+it; a plain Debian system, such as Raspberry Pi OS, does not.
 
 Tracker music and its executable IT/MOD/S3M/XM tests require the libxmp 4
 runtime (`libxmp4` on Debian/Ubuntu, `libxmp` in Homebrew). MIDI music needs
