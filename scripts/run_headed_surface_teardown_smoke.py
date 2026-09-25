@@ -27,7 +27,7 @@ from typing import Any, Mapping, Sequence
 
 
 WORKSPACE = Path(__file__).resolve().parents[1]
-REPORT_SCHEMA = 1
+REPORT_SCHEMA = 2
 REPORT_KIND = "clonk_headed_surface_smoke"
 EVIDENCE_KIND = "clonk_headed_surface_smoke_qualification"
 NVIDIA_VENDOR_ID = 0x10DE
@@ -108,6 +108,9 @@ TOP_LEVEL_KEYS = frozenset(
         "child_closed_while_shell_survived",
         "child_released_after_close",
         "shell_presented_after_child_close",
+        "shell_initial_extent",
+        "shell_resized_extent",
+        "shell_presented_after_resize",
         "loop_exiting_release_order",
         "registry_empty_on_loop_exiting",
         "shell_released_on_loop_exiting",
@@ -174,6 +177,14 @@ def _require_nonempty_string(value: Any, label: str) -> str:
 def _require_integer(value: Any, label: str, *, minimum: int = 0) -> int:
     _require(type(value) is int and value >= minimum, f"{label} must be an integer >= {minimum}")
     return value
+
+
+def _require_extent(value: Any, label: str) -> tuple[int, int]:
+    _require(isinstance(value, list) and len(value) == 2, f"{label} must be [width, height]")
+    return (
+        _require_integer(value[0], f"{label}[0]", minimum=1),
+        _require_integer(value[1], f"{label}[1]", minimum=1),
+    )
 
 
 def _validate_adapter(
@@ -351,10 +362,17 @@ def validate_report(
         "child_closed_while_shell_survived",
         "child_released_after_close",
         "shell_presented_after_child_close",
+        "shell_presented_after_resize",
         "registry_empty_on_loop_exiting",
         "shell_released_on_loop_exiting",
     ):
         _require(value[key] is True, f"lifecycle proof {key} is missing")
+    initial = _require_extent(value["shell_initial_extent"], "shell_initial_extent")
+    resized = _require_extent(value["shell_resized_extent"], "shell_resized_extent")
+    # The probe maximizes the survivor and presents only once the window and
+    # its retained surface agree on the new extent. An unchanged extent means
+    # nothing was reconfigured.
+    _require(resized != initial, f"the survivor never changed size: {initial}")
     release_order = value["loop_exiting_release_order"]
     _require(
         isinstance(release_order, list)

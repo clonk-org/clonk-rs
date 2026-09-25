@@ -32,11 +32,14 @@ isolates configuration, user data, cache, logs and temporary files.
 1. Open the shell window and build a software presenter for it. Record the
    actual selection reason, attempted GPU backends and native window backend.
 2. Paint a full frame and present it through that presenter.
-3. Request a real window resize and wait for the ordinary OS event to resize
-   the software drawable, frame buffer and input presenter. **Shrink** and
-   present again. A shrink rather than a grow: a
-   window manager can silently clamp a grow, which would let the resize phase
-   pass without resizing anything.
+3. Ask the window system to maximize the shell and wait for the ordinary OS
+   resize event to resize the software drawable, frame buffer and input
+   presenter to the window's new extent, then present again. A maximize
+   rather than a requested size: on Wayland winit applies a client's own
+   `request_inner_size` at once and sends no resize event, so the phase
+   could never complete there. A maximize is carried out and announced by the
+   window system on every platform, and the extent is whatever it chose, so
+   nothing can be silently clamped.
 4. With `--check-input`, request a native cursor move to physical `(128, 96)`
    at application scale 2. Require both the OS event and the application's
    mapped `(64, 48)` position. This is opt-in because some compositors prohibit
@@ -189,6 +192,17 @@ Earlier schema-2 reference runs passed on:
 
 These are path-specific reference runs, not a claim about every `softbuffer`
 platform.
+
+**Native Wayland schema-3 automatic fallback passed on 2026-09-25**, on the same
+Raspberry Pi 4, weston 14.0.2 and Debian 13. Source
+`aaa33a3382e189ea829b3836c18a1dcecc218cce`, content
+`0888b4f3bd10762c976c2fe93aa650d7909c1c6f`. The shell was maximized from
+800×600 to 1280×653, and every stage above completed except the opt-in input
+check. The report and captures are
+[retained with the Pi 4 GPU evidence](../docs/evidence/pi4-retained-gpu/README.md).
+The schema-3 probe could not pass on Wayland before its resize became a
+maximize: winit applies a client's own `request_inner_size` there at once and
+sends no resize event.
 
 **Windows schema-3 qualification passed on 2026-09-20:** Windows Server 2025
 (`10.0.26100`), AMD64, Win32, shipped `x86_64-pc-windows-msvc` release build with

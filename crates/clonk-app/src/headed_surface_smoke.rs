@@ -3,8 +3,10 @@
 //! Unit tests can prove the registry rules, but cannot construct winit's
 //! `ActiveEventLoop`. This probe stays inside the shipped event handler: it
 //! opens a second real window through the ordinary framebuffer builder,
-//! presents both, destroys the child, presents the survivor, requests exit,
-//! and writes its report only after the production `LoopExiting` teardown.
+//! presents both, destroys the child, presents the survivor, maximizes the
+//! survivor and presents it again once its surface has followed, requests
+//! exit, and writes its report only after the production `LoopExiting`
+//! teardown.
 
 use crate::developer_host::DeveloperHost;
 use crate::developer_windows::{
@@ -139,6 +141,9 @@ struct HeadedSurfaceSmokeReport {
     child_closed_while_shell_survived: bool,
     child_released_after_close: bool,
     shell_presented_after_child_close: bool,
+    shell_initial_extent: [u32; 2],
+    shell_resized_extent: [u32; 2],
+    shell_presented_after_resize: bool,
     loop_exiting_release_order: Vec<u64>,
     registry_empty_on_loop_exiting: bool,
     shell_released_on_loop_exiting: bool,
@@ -155,6 +160,7 @@ struct SurfaceWindowReport {
 enum SmokePhase {
     PresentBoth,
     PresentSurvivor,
+    ResizeSurvivor,
     AwaitLoopExit,
     Failed,
 }
@@ -181,6 +187,9 @@ pub(crate) struct HeadedSurfaceSmoke {
     child_closed_while_shell_survived: bool,
     child_released_after_close: bool,
     shell_presented_after_child_close: bool,
+    shell_initial_extent: [u32; 2],
+    shell_resized_extent: [u32; 2],
+    shell_presented_after_resize: bool,
     failure: Option<String>,
 }
 
@@ -279,6 +288,9 @@ impl HeadedSurfaceSmoke {
             child_closed_while_shell_survived: false,
             child_released_after_close: false,
             shell_presented_after_child_close: false,
+            shell_initial_extent: [0, 0],
+            shell_resized_extent: [0, 0],
+            shell_presented_after_resize: false,
             failure: None,
         })
     }
@@ -354,6 +366,23 @@ impl HeadedSurfaceSmoke {
                 if os_window_id == self.shell_os_window_id {
                     self.shell_presented_after_child_close |= present_shell(windows)?;
                     if self.shell_presented_after_child_close {
+                        self.shell_initial_extent = shell_extent(windows)?;
+                        maximize_shell(windows)?;
+                        self.phase = SmokePhase::ResizeSurvivor;
+                        windows.request_redraw(SHELL_WINDOW);
+                    }
+                }
+            }
+            SmokePhase::ResizeSurvivor => {
+                let followed = if os_window_id == self.shell_os_window_id {
+                    shell_resize_followed(windows, self.shell_initial_extent)?
+                } else {
+                    None
+                };
+                if let Some(extent) = followed {
+                    self.shell_resized_extent = extent;
+                    self.shell_presented_after_resize |= present_shell(windows)?;
+                    if self.shell_presented_after_resize {
                         self.phase = SmokePhase::AwaitLoopExit;
                         event_loop.exit();
                     }
@@ -414,7 +443,7 @@ impl HeadedSurfaceSmoke {
             })
             .collect();
         let report = HeadedSurfaceSmokeReport {
-            schema_version: 1,
+            schema_version: 2,
             kind: "clonk_headed_surface_smoke",
             success: self.failure.is_none(),
             failure: self.failure.clone(),
@@ -442,6 +471,9 @@ impl HeadedSurfaceSmoke {
             child_closed_while_shell_survived: self.child_closed_while_shell_survived,
             child_released_after_close: self.child_released_after_close,
             shell_presented_after_child_close: self.shell_presented_after_child_close,
+            shell_initial_extent: self.shell_initial_extent,
+            shell_resized_extent: self.shell_resized_extent,
+            shell_presented_after_resize: self.shell_presented_after_resize,
             loop_exiting_release_order: release_order,
             registry_empty_on_loop_exiting: registry_empty,
             shell_released_on_loop_exiting: shell_released,
@@ -515,6 +547,69 @@ fn present_shell(windows: &mut DeveloperWindows<DeveloperHost>) -> Result<bool> 
     present_pixels_frame(pixels)
         .map(|outcome| outcome == RetainedGpuPresentOutcome::Presented)
         .context("failed to present the headed surface probe's shell window")
+}
+
+/// The shell window's current extent.
+fn shell_extent(windows: &mut DeveloperWindows<DeveloperHost>) -> Result<[u32; 2]> {
+    let shell = windows
+        .shell_mut()
+        .and_then(DeveloperHost::as_shell_mut)
+        .context("the headed surface probe's shell disappeared before resize")?;
+    let size = shell.window.inner_size();
+    Ok([size.width, size.height])
+}
+
+/// Ask the window system to maximize the survivor, a resize it carries out and
+/// announces, as it does every size change of the shell in play: a window
+/// drag, or the maximize or fullscreen a display mode asks for. Its ordinary
+/// resize event has to reconfigure the retained surface; nothing here touches
+/// the surface.
+///
+/// Not `request_inner_size`: on Wayland winit applies a client's own request
+/// at once and sends no resize event (winit 0.30
+/// `platform_impl/linux/wayland/window/state.rs`), so the production handler
+/// would never run.
+fn maximize_shell(windows: &mut DeveloperWindows<DeveloperHost>) -> Result<()> {
+    let shell = windows
+        .shell_mut()
+        .and_then(DeveloperHost::as_shell_mut)
+        .context("the headed surface probe's shell disappeared before resize")?;
+    shell.window.set_maximized(true);
+    Ok(())
+}
+
+/// The shell's new extent once its resize has been followed.
+fn shell_resize_followed(
+    windows: &mut DeveloperWindows<DeveloperHost>,
+    initial: [u32; 2],
+) -> Result<Option<[u32; 2]>> {
+    let shell = windows
+        .shell_mut()
+        .and_then(DeveloperHost::as_shell_mut)
+        .context("the headed surface probe's shell disappeared during resize")?;
+    let pixels = shell
+        .pixels
+        .as_ref()
+        .context("the headed surface probe's shell framebuffer disappeared during resize")?;
+    let size = shell.window.inner_size();
+    let window = [size.width, size.height];
+    Ok(resize_followed(initial, window, &[pixels.surface_extent()]).then_some(window))
+}
+
+/// A resize is done once the window has left its initial extent *and* every
+/// extent that must follow it — a retained surface, or a software drawable and
+/// its frame — reports the window's new one: a window that changed size over a
+/// presenter that was never reconfigured is precisely what a probe's resize
+/// phase exists to catch.
+pub(crate) fn resize_followed(
+    initial: [u32; 2],
+    window: [u32; 2],
+    followers: &[(u32, u32)],
+) -> bool {
+    window != initial
+        && followers
+            .iter()
+            .all(|&extent| extent == (window[0], window[1]))
 }
 
 fn paint_probe_frame(surface: &mut clonk_surface::WindowSurface, color: [u8; 4]) {
@@ -600,4 +695,25 @@ fn display_backend(window: &Window) -> Result<&'static str> {
         RawDisplayHandle::Haiku(_) => "haiku",
         _ => "unknown",
     })
+}
+
+#[cfg(all(
+    test,
+    any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5")
+))]
+mod tests {
+    use super::resize_followed;
+
+    #[test]
+    fn a_resize_counts_only_once_the_retained_surface_follows_the_window() {
+        assert!(resize_followed([800, 600], [1280, 688], &[(1280, 688)]));
+        assert!(
+            !resize_followed([800, 600], [1280, 688], &[(800, 600)]),
+            "the window resized but its surface was never reconfigured"
+        );
+        assert!(
+            !resize_followed([800, 600], [800, 600], &[(800, 600)]),
+            "the window has not resized yet"
+        );
+    }
 }

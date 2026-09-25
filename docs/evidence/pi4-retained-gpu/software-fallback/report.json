@@ -1,0 +1,85 @@
+{
+  "schema_version": 3,
+  "kind": "clonk_software_present_smoke",
+  "success": true,
+  "failure": null,
+  "initial_extent": [
+    800,
+    600
+  ],
+  "resized_extent": [
+    1280,
+    653
+  ],
+  "presented_before_resize": true,
+  "presented_after_resize": true,
+  "phases": [
+    {
+      "name": "windowed",
+      "frame_extent": [
+        1280,
+        653
+      ],
+      "drawable_extent": [
+        1280,
+        653
+      ],
+      "scale": 1,
+      "clip_rect": [
+        0,
+        0,
+        1280,
+        653
+      ],
+      "presented": true
+    },
+    {
+      "name": "fullscreen",
+      "frame_extent": [
+        1280,
+        653
+      ],
+      "drawable_extent": [
+        2560,
+        1306
+      ],
+      "scale": 2,
+      "clip_rect": [
+        0,
+        0,
+        2560,
+        1306
+      ],
+      "presented": true
+    },
+    {
+      "name": "windowed-again",
+      "frame_extent": [
+        1280,
+        653
+      ],
+      "drawable_extent": [
+        1280,
+        653
+      ],
+      "scale": 1,
+      "clip_rect": [
+        0,
+        0,
+        1280,
+        653
+      ],
+      "presented": true
+    }
+  ],
+  "registry_empty_at_exit": true,
+  "input_mapping": null,
+  "software_reason": "no-adapter",
+  "gpu_attempt_backends": [
+    [],
+    []
+  ],
+  "display_backend": "wayland",
+  "target_os": "linux",
+  "target_arch": "aarch64"
+}

@@ -31,12 +31,6 @@ use crate::developer_windows::{DeveloperWindows, SHELL_WINDOW};
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(15);
 const SMOKE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How much the probe shrinks the drawable by, in physical pixels.
-///
-/// A shrink rather than a grow: growing can be silently clamped by the window
-/// manager, which would make the resize phase pass without resizing anything.
-const RESIZE_DELTA: u32 = 40;
-
 pub(crate) fn prepare(report_path: &Path) -> Result<()> {
     ensure!(
         !report_path
@@ -251,13 +245,14 @@ impl SoftwarePresentSmoke {
             SmokePhase::PresentInitial => {
                 self.presented_before_resize |= present_shell(windows, [0x2f, 0x6f, 0xa8, 0xff])?;
                 if self.presented_before_resize {
-                    self.resized_extent = resize_shell(windows, self.initial_extent)?;
+                    maximize_shell(windows)?;
                     self.phase = SmokePhase::AwaitWindowResize;
                     windows.request_redraw(SHELL_WINDOW);
                 }
             }
             SmokePhase::AwaitWindowResize => {
-                if shell_resize_completed(windows, self.resized_extent)? {
+                if let Some(extent) = shell_resize_followed(windows, self.initial_extent)? {
+                    self.resized_extent = extent;
                     self.phase = SmokePhase::PresentAfterResize;
                     windows.request_redraw(SHELL_WINDOW);
                 }
@@ -558,26 +553,28 @@ fn record_phase(
     })
 }
 
-/// Ask the window system to resize; its ordinary event must resize the presenter.
-fn resize_shell(windows: &mut DeveloperWindows<DeveloperHost>, from: [u32; 2]) -> Result<[u32; 2]> {
+/// Ask the window system to maximize the shell; its ordinary resize event must
+/// resize the presenter.
+///
+/// A maximize rather than a requested size: on Wayland winit applies a
+/// client's own `request_inner_size` at once and sends no resize event
+/// (winit 0.30 `platform_impl/linux/wayland/window/state.rs`), so the
+/// production handler would never run and the phase could not complete.
+fn maximize_shell(windows: &mut DeveloperWindows<DeveloperHost>) -> Result<()> {
     let shell = windows
         .shell_mut()
         .and_then(DeveloperHost::as_shell_mut)
         .context("the software presentation probe's shell disappeared before resize")?;
-    let resized = [
-        from[0].saturating_sub(RESIZE_DELTA).max(1),
-        from[1].saturating_sub(RESIZE_DELTA).max(1),
-    ];
-    let _ = shell
-        .window
-        .request_inner_size(winit::dpi::PhysicalSize::new(resized[0], resized[1]));
-    Ok(resized)
+    shell.window.set_maximized(true);
+    Ok(())
 }
 
-fn shell_resize_completed(
+/// The shell's new extent once the drawable, the frame and the input
+/// presenter have all followed its resize.
+fn shell_resize_followed(
     windows: &mut DeveloperWindows<DeveloperHost>,
-    expected: [u32; 2],
-) -> Result<bool> {
+    initial: [u32; 2],
+) -> Result<Option<[u32; 2]>> {
     let shell = windows
         .shell_mut()
         .and_then(DeveloperHost::as_shell_mut)
@@ -587,11 +584,13 @@ fn shell_resize_completed(
         .as_ref()
         .context("the software presentation probe's presenter disappeared during resize")?;
     let size = shell.window.inner_size();
-    let extent = (expected[0], expected[1]);
-    Ok((size.width, size.height) == extent
-        && presenter.drawable_extent() == extent
-        && presenter.frame_extent() == extent
-        && shell.presenter.physical_size() == extent)
+    let window = [size.width, size.height];
+    let followers = [
+        presenter.drawable_extent(),
+        presenter.frame_extent(),
+        shell.presenter.physical_size(),
+    ];
+    Ok(crate::headed_surface_smoke::resize_followed(initial, window, &followers).then_some(window))
 }
 
 #[cfg(all(
