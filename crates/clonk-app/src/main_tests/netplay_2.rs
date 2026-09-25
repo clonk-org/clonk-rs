@@ -948,7 +948,8 @@ fn push_to_talk_and_remote_playback_cross_the_game_runtime_voice_seam() {
         &app.snapshot,
         &app.rendering.graphics.active_viewport_projections(),
     );
-    let remote_volume = remote_audibility * app.test_audio_ref().options.voice_volume;
+    // Voice playback's calibrated 100% baseline is +6 dB above decoded PCM.
+    let remote_volume = remote_audibility * app.test_audio_ref().options.voice_volume * 2.0;
     let reference_audio = clonk_audio::AudioSystem::new_manual_with_resampling(
         8,
         clonk_audio::ResamplingMode::Linear,

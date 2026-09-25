@@ -52,20 +52,36 @@ fn sdl_mixer_pan_steps(pan: f32) -> (i32, i32) {
     (left, right)
 }
 
-/// Peak the voice sub-mix is held to. Voice chat is a Rust-side extension with
-/// no C++ counterpart, so it is the one source that may be attenuated: the
-/// sound and music paths keep SDL_mixer's arithmetic, which lets a crowd of
-/// simultaneous sources run straight into the output clamp. Three decibels
-/// below full scale leaves the game's own audio room in the output range even
-/// while several people talk at once.
+/// Peak the voice sub-mix is held to. Three decibels below full scale leaves
+/// room for game audio even while several people talk at once. Music yields
+/// while audible speech plays; without speech its SDL_mixer arithmetic stays
+/// unchanged. Voice remains a presentation-only Rust extension.
 const VOICE_BUS_CEILING: f32 = 0.707_945_8;
-/// Per-stream volume may explicitly boost voice by +6.02 dB while preserving
-/// the established `1.0` unity-gain contract.
-const MAX_VOICE_STREAM_VOLUME: f32 = 2.0;
+/// Allows the calibrated voice baseline plus the user's 200% setting, while
+/// keeping `1.0` as unity gain for raw stream callers.
+const MAX_VOICE_STREAM_VOLUME: f32 = 4.0;
+
+/// Calibrates the voice control (`1.0` = 100%, `2.0` = 200%) for playback.
+/// The +6 dB baseline lifts capture's -18 dBFS speech target to -12 dBFS;
+/// the voice limiter still bounds peaks and overlapping speakers.
+pub fn voice_playback_gain(volume: f32) -> f32 {
+    if volume.is_finite() {
+        volume.clamp(0.0, 2.0) * 2.0
+    } else {
+        0.0
+    }
+}
+
 /// How long the limiter takes to hand most of its gain back once the peak
 /// drops. Short enough to follow the gaps between syllables, long enough that
 /// a speaker joining or leaving does not step the others' level audibly.
 const VOICE_LIMITER_RELEASE_SECONDS: f32 = 0.1;
+
+/// About -14 dB of music attenuation while receiving audible speech.
+const VOICE_MUSIC_GAIN: f32 = 0.2;
+/// Measure after the user's volume and spatial attenuation, so muted or
+/// inaudible streams and very quiet room noise do not lower the music.
+const VOICE_MUSIC_ACTIVITY_FLOOR: f32 = 0.003_16;
 
 /// SDL_mixer pulls music in callback-sized blocks. Keep the Rust music path
 /// similarly bounded instead of retaining one stereo-f32 frame per track
@@ -1021,6 +1037,7 @@ struct MixerState {
     active_music: Option<MusicPlayback>,
     voice_streams: BTreeMap<VoiceStreamId, VoiceStreamPlayback>,
     voice_limiter: VoiceLimiter,
+    music_ducking: VoiceMusicDucking,
     /// Installed the first time a capture asks for an echo reference, and kept
     /// for the rest of the session: it costs one downmix per output frame, and
     /// tearing it down while a microphone still held the other end of it would
@@ -1091,6 +1108,56 @@ struct VoiceStreamPlayback {
 struct VoiceLimiter {
     gain: f32,
     release_coefficient: f32,
+}
+
+/// An output-clock envelope, independent of packets and simulation ticks.
+struct VoiceMusicDucking {
+    // f64 avoids the recovery stalling short of unity at high sample rates.
+    gain: f64,
+    hold_frames: u32,
+    remaining_hold: u32,
+    attack_coefficient: f64,
+    release_coefficient: f64,
+}
+
+impl VoiceMusicDucking {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            gain: 1.0,
+            hold_frames: sample_rate / 4,
+            remaining_hold: 0,
+            attack_coefficient: (f64::from(sample_rate) * 0.01).max(1.0).recip(),
+            release_coefficient: (f64::from(sample_rate) * 0.4).max(1.0).recip(),
+        }
+    }
+
+    fn gain_for_peak(&mut self, peak: f32) -> f32 {
+        if peak > VOICE_MUSIC_ACTIVITY_FLOOR {
+            self.remaining_hold = self.hold_frames;
+        } else {
+            self.remaining_hold = self.remaining_hold.saturating_sub(1);
+        }
+        // Hold across zero crossings and short gaps between words. Smooth
+        // both directions to avoid clicks and music pumping between syllables.
+        if self.remaining_hold > 0 {
+            self.gain += (f64::from(VOICE_MUSIC_GAIN) - self.gain) * self.attack_coefficient;
+        } else {
+            self.gain += (1.0 - self.gain) * self.release_coefficient;
+            if self.gain > 0.999_9 {
+                self.gain = 1.0;
+            }
+        }
+        self.gain as f32
+    }
+
+    fn advance_silence(&mut self, frames: usize) {
+        for _ in 0..frames {
+            if self.gain == 1.0 && self.remaining_hold == 0 {
+                break;
+            }
+            self.gain_for_peak(0.0);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1189,6 +1256,7 @@ impl AudioMixer {
             active_music: None,
             voice_streams: BTreeMap::new(),
             voice_limiter: VoiceLimiter::new(sample_rate),
+            music_ducking: VoiceMusicDucking::new(sample_rate),
             echo_tap: None,
             next_sound_id: 1,
             next_music_id: 1,
@@ -1778,6 +1846,7 @@ impl AudioMixer {
                 active_music,
                 voice_streams,
                 voice_limiter,
+                music_ducking,
                 echo_tap,
                 ..
             } = &mut *state;
@@ -1788,6 +1857,7 @@ impl AudioMixer {
                     .all(|stream| stream.frames.is_empty())
             {
                 voice_limiter.reset();
+                music_ducking.advance_silence(frames);
                 // The output buffer is already zero-filled, and converting
                 // silence into it frame by frame is exactly what this exit
                 // avoids. The echo reference still has to advance: a capture
@@ -1849,12 +1919,18 @@ impl AudioMixer {
 
                 let mut voice_left = 0.0f32;
                 let mut voice_right = 0.0f32;
+                let mut voice_peak = 0.0f32;
                 for stream in voice_streams.values_mut() {
                     if let Some(frame) = stream.next_frame() {
-                        voice_left += frame[0] * stream.left_gain;
-                        voice_right += frame[1] * stream.right_gain;
+                        let stream_left = frame[0] * stream.left_gain;
+                        let stream_right = frame[1] * stream.right_gain;
+                        voice_left += stream_left;
+                        voice_right += stream_right;
+                        // Opposing speakers must not cancel the detector.
+                        voice_peak = voice_peak.max(stream_left.abs()).max(stream_right.abs());
                     }
                 }
+                let music_gain = music_ducking.gain_for_peak(voice_peak);
                 if !finished_music {
                     if let Some(music) = active_music.as_mut() {
                         if let Some(frame) = music.next_frame() {
@@ -1872,16 +1948,16 @@ impl AudioMixer {
                                     finished_music = true;
                                 }
                             }
-                            left += frame[0] * volume;
-                            right += frame[1] * volume;
+                            left += frame[0] * volume * music_gain;
+                            right += frame[1] * volume * music_gain;
                         } else {
                             finished_music = true;
                         }
                     }
                 }
 
-                // Only voice may yield: keep the established sound/music
-                // arithmetic, while reserving actual headroom in both ears.
+                // After music yields to speech, keep voice within the actual
+                // remaining headroom in both ears, including game effects.
                 let voice_gain =
                     voice_limiter.gain_for_mix([voice_left, voice_right], [left, right]);
                 left += voice_left * voice_gain;
@@ -2880,6 +2956,27 @@ mod tests {
     }
 
     #[test]
+    fn voice_volume_calibration_lifts_speech_and_preserves_mute() {
+        assert_eq!(voice_playback_gain(0.0), 0.0);
+        assert_eq!(voice_playback_gain(0.5), 1.0);
+        assert_eq!(voice_playback_gain(1.0), 2.0);
+        assert_eq!(voice_playback_gain(2.0), 4.0);
+        assert_eq!(voice_playback_gain(3.0), 4.0);
+        assert_eq!(voice_playback_gain(-1.0), 0.0);
+        assert_eq!(voice_playback_gain(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn voice_playback_has_headroom_for_calibrated_maximum_volume() {
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 0);
+        mixer.queue_voice_stream_with_mix(76, [2_048; VOICE_FRAME_SAMPLES], 4.0, 0.0);
+        let mut output = [0.0_f32; 2];
+        mixer.mix_f32(&mut output);
+        assert!((output[0] - 0.25).abs() < 0.000_1);
+        assert_eq!(output[0], output[1]);
+    }
+
+    #[test]
     fn keyed_voice_stream_updates_mix_and_removes_buffered_audio() {
         let mixer = Arc::new(AudioMixer::new(VOICE_SAMPLE_RATE, 0));
         assert!(!mixer.update_voice_stream(9, 0.5, 1.0));
@@ -2911,6 +3008,117 @@ mod tests {
         mixer.mix_f32(&mut output);
         assert!((output[0] - 0.125).abs() < 0.000_1);
         assert_eq!(output[1], 0.0);
+    }
+
+    #[test]
+    fn music_ducking_holds_between_words_and_fully_restores_at_each_output_rate() {
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            let mut ducking = VoiceMusicDucking::new(rate);
+            assert_eq!(ducking.gain_for_peak(0.0), 1.0);
+            let attack = ducking.gain_for_peak(0.25);
+            assert!(attack > 0.99 && attack < 1.0, "attack must be smooth");
+            for _ in 0..rate / 5 {
+                ducking.gain_for_peak(0.25);
+            }
+            assert!((ducking.gain_for_peak(0.0) - 0.2).abs() < 0.001);
+            ducking.advance_silence((rate / 5) as usize);
+            assert!((ducking.gain_for_peak(0.0) - 0.2).abs() < 0.001);
+            ducking.advance_silence((rate / 10) as usize);
+            let release = ducking.gain_for_peak(0.0);
+            assert!(release > 0.2 && release < 0.4, "release must be smooth");
+            ducking.advance_silence((rate * 5) as usize);
+            assert_eq!(ducking.gain_for_peak(0.0), 1.0, "output rate {rate}");
+        }
+    }
+
+    #[test]
+    fn audible_voice_lowers_music_without_squeezing_speech_out() {
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 0);
+        let data = float_stereo_wave(VOICE_SAMPLE_RATE, &[[0.95, 0.95]; 960]);
+        let music = mixer.load_music(&data).unwrap();
+        mixer.play_music(music, true).unwrap();
+        let mut output = [0.0_f32; VOICE_FRAME_SAMPLES * 2];
+        // Pan speech right so the left ear isolates the music contribution.
+        for _ in 0..25 {
+            mixer.queue_voice_stream_with_mix(1, [8_192; VOICE_FRAME_SAMPLES], 2.0, 1.0);
+            mixer.mix_f32(&mut output);
+        }
+        let [music, combined] = output[output.len() - 2..] else {
+            unreachable!()
+        };
+        assert!(music < 0.17, "music should yield about 14 dB, got {music}");
+        assert!(
+            combined - music > 0.49,
+            "speech lost its requested level: {}",
+            combined - music
+        );
+        assert!(output.iter().all(|sample| sample.abs() < 1.0));
+    }
+
+    #[test]
+    fn silent_muted_and_inaudible_voice_leave_music_samples_unchanged() {
+        let data = generate_sine_wave(200, 440.0, VOICE_SAMPLE_RATE);
+        let render = |voice: Option<(i16, f32)>| {
+            let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 0);
+            let music = mixer.load_music(&data).unwrap();
+            mixer.play_music(music, true).unwrap();
+            let mut output = Vec::new();
+            for _ in 0..10 {
+                if let Some((sample, volume)) = voice {
+                    mixer.queue_voice_stream_with_mix(
+                        1,
+                        [sample; VOICE_FRAME_SAMPLES],
+                        volume,
+                        1.0,
+                    );
+                }
+                let mut frame = [0.0_f32; VOICE_FRAME_SAMPLES * 2];
+                mixer.mix_f32(&mut frame);
+                output.extend(frame.into_iter().step_by(2));
+            }
+            output
+        };
+        let music = render(None);
+        assert!(music.iter().any(|sample| sample.abs() > 0.1));
+        assert_eq!(render(Some((0, 4.0))), music);
+        assert_eq!(render(Some((i16::MAX, 0.0))), music);
+        assert_eq!(render(Some((8_192, 0.001))), music);
+    }
+
+    #[test]
+    fn ending_voice_restores_music_after_the_hold_and_release() {
+        let mixer = AudioMixer::new(VOICE_SAMPLE_RATE, 0);
+        let data = float_stereo_wave(VOICE_SAMPLE_RATE, &[[0.4, -0.4]; 960]);
+        let music = mixer.load_music(&data).unwrap();
+        mixer.play_music(music, true).unwrap();
+        mixer.music_set_volume(0.6);
+        let mut baseline = [0.0; 2];
+        mixer.mix_f32(&mut baseline);
+        let mut output = vec![0.0; VOICE_FRAME_SAMPLES * 2];
+        for _ in 0..10 {
+            mixer.queue_voice_stream_with_mix(1, [8_192; VOICE_FRAME_SAMPLES], 2.0, 1.0);
+            mixer.mix_f32(&mut output);
+        }
+        assert!(output[0] < baseline[0] / 4.0);
+        mixer.remove_voice_stream(1);
+        mixer.mix_f32(&mut output);
+        assert!(output[0] < baseline[0] / 4.0, "hold through a word gap");
+        output.resize(VOICE_SAMPLE_RATE as usize * 5 * 2, 0.0);
+        mixer.mix_f32(&mut output);
+        assert_eq!(&output[output.len() - 2..], &baseline);
+
+        // Silent fast-path rendering also advances recovery, so a later track
+        // does not inherit stale attenuation after voice and music both stop.
+        mixer.queue_voice_stream_with_mix(1, [8_192; VOICE_FRAME_SAMPLES], 2.0, 0.0);
+        mixer.mix_f32(&mut output[..VOICE_FRAME_SAMPLES * 2]);
+        mixer.remove_voice_stream(1);
+        mixer.halt_music();
+        mixer.mix_f32(&mut output);
+        mixer.play_music(music, true).unwrap();
+        mixer.music_set_volume(0.6);
+        let mut restarted = [0.0; 2];
+        mixer.mix_f32(&mut restarted);
+        assert_eq!(restarted, baseline);
     }
 
     #[test]

@@ -191,7 +191,7 @@ impl GameApp {
         };
         let context = self.voice_chat_context();
         let viewports = self.rendering.graphics.active_viewport_projections();
-        let voice_volume = audio.borrow().options.voice_volume;
+        let voice_volume = clonk_audio::voice_playback_gain(audio.borrow().options.voice_volume);
         let speakers = match context {
             Some(crate::voice_chat::VoiceChatContext::Running) => self
                 .snapshot
