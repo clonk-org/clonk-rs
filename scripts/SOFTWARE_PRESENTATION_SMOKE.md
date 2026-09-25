@@ -32,11 +32,14 @@ isolates configuration, user data, cache, logs and temporary files.
 1. Open the shell window and build a software presenter for it. Record the
    actual selection reason, attempted GPU backends and native window backend.
 2. Paint a full frame and present it through that presenter.
-3. Request a real window resize and wait for the ordinary OS event to resize
-   the software drawable, frame buffer and input presenter. **Shrink** and
-   present again. A shrink rather than a grow: a
-   window manager can silently clamp a grow, which would let the resize phase
-   pass without resizing anything.
+3. Ask the window system to maximize the shell and wait for the ordinary OS
+   resize event to resize the software drawable, frame buffer and input
+   presenter to the window's new extent, then present again. A maximize
+   rather than a requested size: on Wayland winit applies a client's own
+   `request_inner_size` at once and sends no resize event, so the phase
+   could never complete there. A maximize is carried out and announced by the
+   window system on every platform, and the extent is whatever it chose, so
+   nothing can be silently clamped.
 4. With `--check-input`, request a native cursor move to physical `(128, 96)`
    at application scale 2. Require both the OS event and the application's
    mapped `(64, 48)` position. This is opt-in because some compositors prohibit
