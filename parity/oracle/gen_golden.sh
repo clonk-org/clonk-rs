@@ -51,6 +51,20 @@ if [[ ! -f "$oracle_snapshot/.complete" ]]; then
 fi
 src="$oracle_snapshot/src"
 
+# Initial lobby entry must not reach a queued Go/Pause before FinalInit.
+awk '
+  /^enum C4NetGameState$/ { p = 1 }
+  p { print }
+  p && /^};$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Network2.h" > "$gen/network_game_state.inc"
+awk '
+  /^void C4Network2::CheckStatusReached\(bool fFromFinalInit\)$/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Network2.cpp" > "$gen/network_check_status_reached.inc"
+
 # 1. Strip src/Fixed.h into a standalone header: drop the StdCompiler/StdAdaptors
 #    includes and the serialization CompileFunc; the C4Fixed math is unchanged.
 awk '

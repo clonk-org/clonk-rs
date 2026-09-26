@@ -135,6 +135,7 @@
 #include <C4Group.h>         // the real group, linked whole (see gen_golden.sh)
 #include <StdFile.h>         // _MAX_FNAME, for the entry-name scratch buffer
 #include <C4Strings.h>       // real declarations (and defaults) for the S* helpers
+#include "network_lobby_status.h" // complete CheckStatusReached at lobby entry
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
 
@@ -12646,6 +12647,9 @@ static void printPxsExecuteCases()
 int main()
 {
     printf("{\n");
+
+    network_lobby_status::printCases();
+    printf(",\n");
 
     // 1. itofix: whole-integer and precision-denominated construction.
     //    Covers gravity/velocity precision (default 10, FIXED100, FIXED256).

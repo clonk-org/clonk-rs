@@ -490,16 +490,8 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
     event_tx
         .send(NetworkEvent::JoinData(join_data.clone()))
         .test_value();
-    app.test_network_events();
-    let lobby_reached = reference_status.with_target_tick(23);
-    main_assert_eq!(
-        commands.take_framed_status_acknowledgements() => vec![(lobby_reached, 0)]
-    );
-    event_tx
-        .send(NetworkEvent::StatusCommitted(lobby_reached))
-        .test_value();
-    app.test_network_events();
-
+    // The host starts before this client has processed JoinData or finished
+    // downloading: entering the lobby must not acknowledge the queued Go.
     event_tx
         .send(NetworkEvent::StatusRequested(go))
         .test_value();
@@ -510,6 +502,9 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
         })
         .test_value();
     app.test_network_events();
+    main_assert_eq!(app.mode => AppMode::Loading);
+    main_assert!(app.lobby.session.is_none());
+    main_assert!(commands.take_framed_status_acknowledgements().is_empty());
     main_assert_eq!(
         app.netplay.blocking_resource_wait.as_ref().map(|wait| wait.resource_id) => Some(70)
     );
@@ -527,6 +522,7 @@ fn ordinary_client_go_completes_nonpreloaded_resource_merge_before_acknowledging
         app.netplay.blocking_resource_wait.as_ref().map(|wait| wait.resource_id) => Some(71)
     );
 
+    main_assert!(commands.take_framed_status_acknowledgements().is_empty());
     let (removed_tx, removed_rx) = mpsc::channel();
     let removal_observer = thread::spawn(move || {
         let (resource_id, completion) = commands.receive_resource_removal();
