@@ -459,6 +459,12 @@ impl<T: Send + 'static> BackgroundSaveWorker<T> {
         self.result_rx.try_recv().ok()
     }
 
+    /// A panicking job ends the worker thread; a stopped worker delivers no
+    /// completion it has not already sent.
+    pub(crate) fn has_stopped(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
     pub(crate) fn finish(&mut self) -> Vec<T> {
         self.request_tx.take();
         if let Some(worker) = self.worker.take() {

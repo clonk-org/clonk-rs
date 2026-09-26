@@ -2907,6 +2907,126 @@ fn runtime_dynamic_completion_rejects_stale_and_cancelled_generations() {
 }
 
 #[test]
+fn host_holds_its_synchronized_tick_until_the_runtime_join_dynamic_is_published() {
+    // C4Network2::OnGameSynchronized saves the dynamic and sends JoinData
+    // before the synchronized ControlTick can advance, and SendJoinData
+    // rejects a dynamic older than ControlTick (src/C4Network2.cpp:1099-1116,
+    // 1826,1945-1972). Encoding it on the save worker must keep that order.
+    let mut host = new_running_sandbox_app();
+    let (host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
+    let synchronized_tick = host.expected_network_control_tick();
+    let frame = host.engine.frame();
+    let mut pending = PendingRuntimeDynamicRequest::new(7, synchronized_tick);
+    pending.synchronized_control_tick = Some(synchronized_tick);
+    pending.save_generation = Some(1);
+    host.netplay.pending_runtime_dynamic_request = Some(pending);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    host.saves
+        .submit_background_job(Box::new(move || {
+            release_rx.recv().expect("release the runtime-join save");
+            save_worker::BackgroundSaveCompletion::RuntimeDynamic(
+                save_worker::RuntimeDynamicSaveCompletion {
+                    generation: 1,
+                    synchronized_control_tick: synchronized_tick,
+                    dynamic_tick: i32::try_from(synchronized_tick).expect("fixture tick"),
+                    parameters: clonk_network::JoinGameParametersEnvelope::default(),
+                    result: Ok(clonk_network::LiveNetworkDynamic {
+                        group_filename: "DynHold.c4s".to_string(),
+                        maker: Vec::new(),
+                        packed_bytes: Vec::new(),
+                        file_size: 0,
+                        file_crc: 0,
+                        contents_crc: 0,
+                        entries: Vec::new(),
+                    }),
+                },
+            )
+        }))
+        .test_value();
+
+    queue_empty_ready_tick(&host, &host_events);
+    host.test_update();
+    main_assert_eq!(host.engine.frame() => frame, "the host must not run past its synchronized tick while the runtime dynamic is unpublished");
+
+    let publisher = thread::spawn(move || {
+        let (tick, completion) = host_commands.receive_runtime_dynamic_publication();
+        completion
+            .send(Ok(n2_fixture!(resource {
+                resource_type: clonk_network::HostResourceType::Dynamic as u8,
+                id: 17,
+            })))
+            .expect("answer the runtime-dynamic publication");
+        tick
+    });
+    release_tx.send(()).expect("release the runtime-join save");
+    host.finish_background_save_jobs();
+    main_assert_eq!(publisher.join().expect("publisher thread") => synchronized_tick);
+    main_assert!(host.netplay.pending_runtime_dynamic_request.is_none());
+
+    host.test_update();
+    main_assert_eq!(host.engine.frame() => frame + 1, "publication releases the synchronized tick");
+}
+
+#[test]
+fn host_defers_status_reach_until_the_runtime_join_dynamic_is_published() {
+    // The dynamic and its JoinData leave from inside ExecSyncControl, so no
+    // later barrier can complete, and run its sync controls, ahead of that
+    // JoinData (src/C4Network2.cpp:1099-1116,2062-2079).
+    let mut host = new_running_sandbox_app();
+    let (_host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
+    let synchronized_tick = host.expected_network_control_tick();
+    let mut pending = PendingRuntimeDynamicRequest::new(7, synchronized_tick);
+    pending.synchronized_control_tick = Some(synchronized_tick);
+    pending.save_generation = Some(1);
+    host.netplay.pending_runtime_dynamic_request = Some(pending);
+    let pause = n2_fixture!(status: clonk_network::NETWORK_STATE_PAUSE, 1, i32::try_from(synchronized_tick).expect("fixture tick"));
+
+    main_assert!(host.arm_runtime_network_status_barrier(pause));
+    main_assert_eq!(host.check_runtime_network_status_reached() => RuntimeStatusReachOutcome::NotReached);
+    main_assert_eq!(host_commands.take_status_reached() => 0, "an unpublished runtime dynamic must not let a later barrier complete");
+
+    host.netplay.pending_runtime_dynamic_request = None;
+    main_assert_eq!(host.check_runtime_network_status_reached() => RuntimeStatusReachOutcome::Reported);
+    main_assert_eq!(host_commands.take_status_reached() => 1);
+}
+
+#[test]
+fn a_stopped_save_worker_fails_the_held_runtime_join_dynamic() {
+    // A panicking job ends the save worker, so the dynamic this ControlTick is
+    // held for can never publish. Fail it the way OnGameSynchronized fails an
+    // unsaved dynamic, with an emergency kick (src/C4Network2.cpp:1107-1115),
+    // instead of freezing every peer.
+    let mut host = new_running_sandbox_app();
+    let (host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
+    let synchronized_tick = host.expected_network_control_tick();
+    let frame = host.engine.frame();
+    let mut pending = PendingRuntimeDynamicRequest::new(7, synchronized_tick);
+    pending.synchronized_control_tick = Some(synchronized_tick);
+    pending.save_generation = Some(1);
+    host.netplay.pending_runtime_dynamic_request = Some(pending);
+    host.saves
+        .submit_background_job(Box::new(|| {
+            panic!("runtime-join encoder invariant violated");
+        }))
+        .test_value();
+    let responder = thread::spawn(move || {
+        let (_reason, completion) = host_commands.receive_pending_join_data_failure();
+        completion.send(Ok(1)).expect("answer the JoinData failure");
+    });
+
+    queue_empty_ready_tick(&host, &host_events);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host.engine.frame() == frame && Instant::now() < deadline {
+        host.test_update();
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    main_assert_eq!(host.engine.frame() => frame + 1, "a stopped save worker must release the held ControlTick");
+    main_assert!(host.netplay.pending_runtime_dynamic_request.is_none());
+    responder.join().expect("the waiting joiner is removed");
+}
+
+#[test]
 fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     // A fatal application-loop failure makes DoLobby clear the network and
     // return false; Game::Init then fails and QuitGame rebuilds startup

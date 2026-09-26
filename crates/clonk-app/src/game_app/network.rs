@@ -2420,6 +2420,11 @@ impl GameApp {
         else {
             return RuntimeStatusReachOutcome::NotReached;
         };
+        // A later barrier would run its sync controls ahead of the JoinData
+        // that C++ sends from inside the synchronizing ExecSyncControl.
+        if self.runtime_join_dynamic_awaits_publication() {
+            return RuntimeStatusReachOutcome::NotReached;
+        }
         let Some(clock) = self.netplay.control_clock else {
             return RuntimeStatusReachOutcome::NotReached;
         };
@@ -8169,6 +8174,18 @@ impl GameApp {
             .map_err(|error| format!("queue synchronized runtime dynamic: {error:#}"))?;
 
         Ok(None)
+    }
+
+    /// C4Network2::OnGameSynchronized saves the dynamic and sends JoinData
+    /// before the synchronized ControlTick can advance, and SendJoinData
+    /// rejects a dynamic older than ControlTick (src/C4Network2.cpp:1099-1116,
+    /// 1826,1945-1972). The save worker only moves that encoding off this
+    /// thread, so the host holds its control tick until the worker publishes.
+    pub(crate) fn runtime_join_dynamic_awaits_publication(&self) -> bool {
+        self.netplay
+            .pending_runtime_dynamic_request
+            .as_ref()
+            .is_some_and(|pending| pending.save_generation.is_some())
     }
 
     pub(crate) fn finish_runtime_dynamic_save(

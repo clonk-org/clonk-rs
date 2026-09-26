@@ -183,6 +183,12 @@ impl GameApp {
                                 network.reset_client_performance();
                             }
                         }
+                        // Hold the ControlTick until the worker publishes a
+                        // synchronized runtime-join dynamic; a host that
+                        // reaches a later tick first rejects it as stale.
+                        if self.runtime_join_dynamic_awaits_publication() {
+                            return Ok(());
+                        }
                         // ExecQueuedSyncCtrl has now supplied the live deadline
                         // inputs. Arm the host once with the earlier native wait
                         // start so an old TargetFPS cannot expire concurrently
