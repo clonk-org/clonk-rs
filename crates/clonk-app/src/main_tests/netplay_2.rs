@@ -2991,6 +2991,42 @@ fn host_defers_status_reach_until_the_runtime_join_dynamic_is_published() {
 }
 
 #[test]
+fn a_stopped_save_worker_fails_the_held_runtime_join_dynamic() {
+    // A panicking job ends the save worker, so the dynamic this ControlTick is
+    // held for can never publish. Fail it the way OnGameSynchronized fails an
+    // unsaved dynamic, with an emergency kick (src/C4Network2.cpp:1107-1115),
+    // instead of freezing every peer.
+    let mut host = new_running_sandbox_app();
+    let (host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
+    let synchronized_tick = host.expected_network_control_tick();
+    let frame = host.engine.frame();
+    let mut pending = PendingRuntimeDynamicRequest::new(7, synchronized_tick);
+    pending.synchronized_control_tick = Some(synchronized_tick);
+    pending.save_generation = Some(1);
+    host.netplay.pending_runtime_dynamic_request = Some(pending);
+    host.saves
+        .submit_background_job(Box::new(|| {
+            panic!("runtime-join encoder invariant violated");
+        }))
+        .test_value();
+    let responder = thread::spawn(move || {
+        let (_reason, completion) = host_commands.receive_pending_join_data_failure();
+        completion.send(Ok(1)).expect("answer the JoinData failure");
+    });
+
+    queue_empty_ready_tick(&host, &host_events);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host.engine.frame() == frame && Instant::now() < deadline {
+        host.test_update();
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    main_assert_eq!(host.engine.frame() => frame + 1, "a stopped save worker must release the held ControlTick");
+    main_assert!(host.netplay.pending_runtime_dynamic_request.is_none());
+    responder.join().expect("the waiting joiner is removed");
+}
+
+#[test]
 fn fatal_worker_failure_in_network_lobby_restores_startup_error_log() {
     // A fatal application-loop failure makes DoLobby clear the network and
     // return false; Game::Init then fails and QuitGame rebuilds startup

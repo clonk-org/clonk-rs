@@ -3067,6 +3067,26 @@ impl TestNetworkCommands {
         }
     }
 
+    /// Wait for the host to emergency-remove the clients awaiting JoinData,
+    /// skipping the PreSend finalizations a held host keeps submitting.
+    pub fn receive_pending_join_data_failure(
+        &mut self,
+    ) -> (
+        clonk_engine::LegacyCString,
+        Sender<std::result::Result<usize, String>>,
+    ) {
+        loop {
+            match self.command_rx.blocking_recv() {
+                Some(NetworkCommand::FailPendingJoinData { reason, completion }) => {
+                    return (reason, completion)
+                }
+                Some(NetworkCommand::FinalizeTick { .. }) => {}
+                Some(command) => panic!("expected pending-JoinData failure, got {command:?}"),
+                None => panic!("network command channel ended before pending-JoinData failure"),
+            }
+        }
+    }
+
     pub fn receive_graceful_part(&mut self) -> Sender<std::result::Result<(), String>> {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::GracefulPart { completion }) => completion,

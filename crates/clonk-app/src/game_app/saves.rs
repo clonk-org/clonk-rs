@@ -1244,6 +1244,13 @@ impl GameApp {
     }
 
     pub(crate) fn poll_background_save_jobs(&mut self) {
+        // Sampled before draining, so every completion a stopped worker sent
+        // is applied below before its absence counts as a failure.
+        let worker_stopped = self
+            .saves
+            .background_worker
+            .as_ref()
+            .is_none_or(save_worker::BackgroundSaveWorker::has_stopped);
         loop {
             let completion = self
                 .saves
@@ -1254,6 +1261,13 @@ impl GameApp {
                 break;
             };
             self.apply_background_save_completion(completion);
+        }
+        // The held ControlTick would otherwise wait forever for a dynamic
+        // that can no longer publish.
+        if worker_stopped && self.runtime_join_dynamic_awaits_publication() {
+            self.fail_pending_runtime_dynamic_request(
+                "background save worker stopped before the runtime dynamic was encoded".to_string(),
+            );
         }
     }
 
