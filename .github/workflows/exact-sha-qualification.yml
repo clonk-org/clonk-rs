@@ -39,10 +39,16 @@ jobs:
     name: Rust coverage / ${{ matrix.name }}
     runs-on: ubuntu-24.04
     # The twelve rows use their measured budgets rather than one number sized
-    # for the shortest row. The presentation capture cases share one booted
-    # application fixture, so `app 5/12` remains within the common 15-minute
-    # qualification budget instead of paying for 51 redundant application
-    # boots. `landing.yml` carries the same per-entry timeout contract.
+    # for the shortest row. The common 20-minute budget is the slowest green
+    # row seen over the 2026-09-24/25 qualification runs (engine integration
+    # 2+3/3 at 14m55s, app 1+10/12 at 14m32s) plus the five minutes a stalled
+    # first content-fetch attempt below costs before its bounded retry lands.
+    # At 15 minutes those rows were cancelled with their coverage report
+    # already written, and one such cancellation evicted the 1.1.0 release
+    # entry. The presentation capture cases share one booted application
+    # fixture, so `app 5/12` stays inside the common budget instead of paying
+    # for 51 redundant application boots. `landing.yml` carries the same
+    # per-entry timeout contract.
     timeout-minutes: ${{ matrix.timeout || 15 }}
     concurrency:
       group: "main-coverage-${{ matrix.artifact }}-${{ inputs.concurrency-suffix }}"
@@ -63,62 +69,62 @@ jobs:
       matrix:
         include:
           - name: app 1+10/12
-            timeout: 15
+            timeout: 20
             artifact: app-1-10
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-1,app-test-shard-10 --no-fail-fast --locked
           - name: app 2+7/12
-            timeout: 15
+            timeout: 20
             artifact: app-2-7
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
           - name: app 3/12
-            timeout: 15
+            timeout: 20
             artifact: app-3
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-3 --no-fail-fast --locked
           - name: app 4+9/12
-            timeout: 15
+            timeout: 20
             artifact: app-4-9
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
           - name: app 5/12
-            timeout: 15
+            timeout: 20
             artifact: app-5
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
           - name: app 11+12/12
-            timeout: 15
+            timeout: 20
             artifact: app-11-12
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-11,app-test-shard-12 --no-fail-fast --locked
           - name: app 6+8/12
-            timeout: 15
+            timeout: 20
             artifact: app-6-8
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-6,app-test-shard-8 --no-fail-fast --locked
           - name: engine integration 1/3
-            timeout: 15
+            timeout: 20
             artifact: engine-1
             apt: ''
             command: cargo llvm-cov --no-report nextest -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-1 --no-fail-fast --locked
           - name: engine integration 2+3/3
-            timeout: 15
+            timeout: 20
             artifact: engine-2-3
             apt: ''
             command: cargo llvm-cov --no-report nextest -p clonk-engine-integration-tests --test engine_it --features engine-it-shard-2,engine-it-shard-3 --no-fail-fast --locked
           - name: engine and frontend units
-            timeout: 15
+            timeout: 20
             artifact: engine-and-frontend-units
             apt: ''
             command: cargo llvm-cov --no-report nextest -p clonk-engine-unit-tests -p clonk-frontend-unit-tests --no-fail-fast --locked
           - name: remaining workspace 1/2
-            timeout: 15
+            timeout: 20
             artifact: remaining-1
             apt: mesa-vulkan-drivers
             command: cargo llvm-cov --no-report nextest -p clonk-app-core -p clonk-app-netplay -p clonk-app-render -p clonk-frontend -p clonk-launcher-shell -p clonk-launcher-ui -p clonk-surface --no-fail-fast --locked
           - name: remaining workspace 2/2
-            timeout: 15
+            timeout: 20
             artifact: remaining-2
             apt: libasound2-dev libxmp4
             command: cargo llvm-cov --no-report nextest -p clonk-app-menus -p clonk-audio -p clonk-c4group -p clonk-core -p clonk-engine -p clonk-engine-core -p clonk-protocol -p clonk-game -p clonk-graphics -p clonk-gui -p clonk-test-support -p clonk-icon -p clonk-launcher -p clonk-logging -p clonk-network -p clonk-network-integration-tests -p clonk-platform -p clonk-resources -p clonk-scaling -p clonk-script -p clonk-update -p clonk-update-net -p xtask --features xtask/engine-tools --no-fail-fast --locked
