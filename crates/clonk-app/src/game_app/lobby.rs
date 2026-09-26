@@ -166,6 +166,19 @@ impl GameApp {
         {
             return;
         }
+        let Some(network) = self.netplay.manager.as_mut() else {
+            return;
+        };
+        // Polling can already have installed Go from the same batch as JoinData.
+        // Entering the lobby reaches only Lobby; Go waits for local initialization
+        // (C4Network2::CheckStatusReached, src/C4Network2.cpp:2017-2057).
+        let Some(status) = network
+            .client_status_view()
+            .requested
+            .filter(|status| status.state == clonk_network::NETWORK_STATE_LOBBY)
+        else {
+            return;
+        };
         let Some(current_control_tick) = self
             .netplay
             .control_clock
@@ -175,14 +188,15 @@ impl GameApp {
             return;
         };
         let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-        match self.netplay.manager.as_mut().map(|network| {
-            network.acknowledge_requested_status_at_frame(current_control_tick, current_frame)
-        }) {
-            Some(Ok(())) => self.netplay.initial_lobby_status_ack_pending = false,
-            Some(Err(error)) => {
+        match network.acknowledge_expected_status_at_frame(
+            status,
+            current_control_tick,
+            current_frame,
+        ) {
+            Ok(()) => self.netplay.initial_lobby_status_ack_pending = false,
+            Err(error) => {
                 tracing::error!(%error, "failed to acknowledge initial lobby status");
             }
-            None => {}
         }
     }
 

@@ -9251,6 +9251,136 @@ fn ready_check_prompt_sends_no_reply_after_lobby_ends() {
     main_assert!(commands.take_submitted_ready_checks().is_empty());
 }
 
+mod initial_lobby_status_parity {
+    use super::*;
+
+    #[test]
+    fn parity_differential_matches_cpp_golden() {
+        // Execute the same lobby-entry inputs as the complete extracted
+        // C4Network2::CheckStatusReached (7d43b47b src/C4Network2.cpp:2017-2057).
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../parity/golden/parity_golden.json"))
+                .test_value();
+        for case in golden["network_lobby_status_reach"].as_array().test_value() {
+            let (mut app, _events, mut commands) = networked_client_lobby_with_commands(
+                new_state_only_menu_app(320, 200),
+                "Observer",
+                client_lobby_state(),
+            );
+            if !case["lobby_running"].as_bool().test_value() {
+                app.lobby.session = None;
+            }
+            app.startup.view = StartupView::NetworkLobby;
+            app.netplay.initial_lobby_status_ack_pending = true;
+            app.netplay.control_clock = Some(NetworkControlClock::new(
+                case["control_tick"].as_i64().test_value() as i32,
+                1,
+            ));
+            let status =
+                clonk_network::NetworkStatus::new(case["state"].as_u64().test_value() as u8, 2, -1);
+            main_assert!(app
+                .netplay
+                .manager
+                .as_mut()
+                .test_value()
+                .test_receive_client_status_request(status));
+
+            app.acknowledge_initial_lobby_status_if_ready();
+
+            let acknowledgements = commands.take_framed_status_acknowledgements();
+            main_assert_eq!(acknowledgements.len() =>
+                case["acknowledgements"].as_u64().test_value() as usize, "{case}");
+            if let Some((acknowledged, frame)) = acknowledgements.first() {
+                main_assert_eq!(*acknowledged => status.with_target_tick(
+                    case["ack_target"].as_i64().test_value() as i32
+                ));
+                main_assert_eq!(*frame => 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn client_loading_screen_keeps_rendering_after_go_during_resource_download() {
+    // RetrieveScenario keeps pumping application messages while the scenario
+    // and dynamic resources download after DoLobby returns. CheckStatusReached
+    // cannot acknowledge Go before local initialization even if Go arrives
+    // alongside JoinData (7d43b47b src/C4Network2.cpp:475-515,619-671,2017-2057).
+    let mut app = new_menu_app(640, 480);
+    app.loader.screen = Some(
+        LoaderScreen::new(
+            LoaderSelection::startup("LoaderClientGo.png").test_value(),
+            ImageData::new(1, 1, vec![7, 8, 9, 255]),
+            app.assets.loader_resources().test_value(),
+            LoaderState::initial("Loading"),
+        )
+        .test_value(),
+    );
+    app.loader.error = None;
+    app.loader.render_error = None;
+    let (mut app, events, mut commands) =
+        networked_client_lobby_with_commands(app, "Client", client_lobby_state());
+    app.startup.view = StartupView::NetworkLobby;
+    let config = clonk_network::HostConfig::default();
+    let mut snapshot = config.initial_join_snapshot.test_value();
+    snapshot.parameters.scenario = lobby_fixture!(resource {
+        id: 70,
+        resource_type: clonk_network::HostResourceType::Scenario as u8,
+        loadable: true,
+        filename: LegacyCString::from_bytes(b"Savegame.c4s".to_vec()).test_value(),
+    });
+    snapshot.dynamic = lobby_fixture!(resource {
+        id: 71,
+        resource_type: clonk_network::HostResourceType::Dynamic as u8,
+        loadable: true,
+        filename: LegacyCString::from_bytes(b"Dynamic.c4s".to_vec()).test_value(),
+    });
+    snapshot.parameters.game_resources.clear();
+    snapshot
+        .parameters
+        .clients
+        .clients
+        .push(lobby_fixture!(client {
+            client_id: 7,
+            name: LegacyCString::from_bytes(b"Observer".to_vec()).test_value(),
+        }));
+    snapshot.parameters.clients.local_client_id = Some(7);
+    send_network_event(
+        &events,
+        NetworkEvent::JoinData(lobby_fixture!(join_data:
+            7, 0, config.initial_status, snapshot.dynamic, snapshot.parameters
+        )),
+    );
+    send_resource_progress(&events, 70, 40);
+    send_network_event(
+        &events,
+        NetworkEvent::StatusRequested(lobby_fixture!(status:
+            clonk_network::NETWORK_STATE_GO, 2, 0
+        )),
+    );
+    app.test_network_events();
+
+    main_assert!(
+        commands.take_framed_status_acknowledgements().is_empty(),
+        "entering the lobby must not acknowledge Go before resources finish loading"
+    );
+    main_assert_eq!(app.mode => AppMode::Loading);
+    main_assert!(app.lobby.session.is_none());
+    main_assert!(app.netplay.manager.is_some());
+    main_assert_eq!(some(&app.netplay.blocking_resource_wait).resource_id => 70);
+    let mut frame = vec![0x4c; 640 * 480 * 4];
+    main_assert!(app
+        .render(&mut frame)
+        .expect("download wait keeps the loader renderable"));
+    send_resource_progress(&events, 70, 99);
+    app.test_update();
+    main_assert!(app
+        .render(&mut frame)
+        .expect("continued download keeps the loader renderable"));
+    main_assert_eq!(app.mode => AppMode::Loading);
+    main_assert!(app.netplay.manager.is_some());
+}
+
 #[test]
 fn go_status_request_deletes_client_lobby_and_suppresses_stale_ready_reply() {
     // HandleStatus installs GS_Go before resource preparation finishes.
