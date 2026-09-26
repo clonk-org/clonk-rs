@@ -4,6 +4,14 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-09-26
+
+### Bug fixes
+
+- Finish client loading before acknowledging lobby starts (#1816)
+- Keep a refused lobby player join from ending the process (#1814)
+- Hold the host's synchronized tick until its runtime-join dynamic publishes (#1813)
+
 ## [1.1.0] - 2026-09-26
 
 ### Bug fixes
