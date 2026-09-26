@@ -3043,6 +3043,30 @@ impl TestNetworkCommands {
         }
     }
 
+    /// Wait for the host's runtime-dynamic publication, skipping the PreSend
+    /// finalizations a held host keeps submitting meanwhile.
+    pub fn receive_runtime_dynamic_publication(
+        &mut self,
+    ) -> (
+        Tick,
+        Sender<std::result::Result<clonk_engine::NetworkResourceCore, String>>,
+    ) {
+        loop {
+            match self.command_rx.blocking_recv() {
+                Some(NetworkCommand::PublishRuntimeDynamic {
+                    synchronized_control_tick,
+                    completion,
+                    ..
+                }) => return (synchronized_control_tick, completion),
+                Some(NetworkCommand::FinalizeTick { .. }) => {}
+                Some(command) => {
+                    panic!("expected runtime-dynamic publication, got {command:?}")
+                }
+                None => panic!("network command channel ended before runtime-dynamic publication"),
+            }
+        }
+    }
+
     pub fn receive_graceful_part(&mut self) -> Sender<std::result::Result<(), String>> {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::GracefulPart { completion }) => completion,
