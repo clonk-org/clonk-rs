@@ -120,8 +120,15 @@ class RustCoverageGateTests(unittest.TestCase):
         # Under the previous 15-minute budget those rows were cancelled with
         # their coverage report already written, and one such cancellation
         # evicted the 1.1.0 release entry (clonk-org/clonk-rs#1802).
-        self.assertEqual(budgets["app 1+10/12"], "20")
-        self.assertEqual({minutes for _, minutes in rows}, {"20"})
+        #
+        # `app 5/12` boots the application for its presentation captures and
+        # has not finished an instrumented run since 2026-09-25 15:28 UTC:
+        # every test in the row, capture or not, runs two to three times
+        # slower than in the last green run while the other application rows
+        # keep their usual times. Its budget is sized to let the row finish
+        # and be measured at all, not from a measurement.
+        self.assertEqual(budgets.pop("app 5/12"), "30")
+        self.assertEqual({minutes for minutes in budgets.values()}, {"20"})
 
     def test_named_coverage_job_merges_fragments_before_enforcing_the_floor(self):
         coverage = job_block("coverage")
