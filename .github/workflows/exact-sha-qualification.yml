@@ -46,9 +46,13 @@ jobs:
     # At 15 minutes those rows were cancelled with their coverage report
     # already written, and one such cancellation evicted the 1.1.0 release
     # entry. The presentation capture cases share one booted application
-    # fixture, so `app 5/12` stays inside the common budget instead of paying
-    # for 51 redundant application boots. `landing.yml` carries the same
-    # per-entry timeout contract.
+    # fixture instead of paying for 51 redundant application boots, yet
+    # `app 5/12` has not finished an instrumented run since 2026-09-25
+    # 15:28 UTC: every test in the row runs two to three times slower than in
+    # the last green run while the other application rows keep their usual
+    # times. Its 30 minutes let the row finish and be measured at all; they
+    # are not a measurement. `landing.yml` carries the same per-entry timeout
+    # contract.
     timeout-minutes: ${{ matrix.timeout || 15 }}
     concurrency:
       group: "main-coverage-${{ matrix.artifact }}-${{ inputs.concurrency-suffix }}"
@@ -89,7 +93,7 @@ jobs:
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
           - name: app 5/12
-            timeout: 20
+            timeout: 30
             artifact: app-5
             apt: libasound2-dev libudev-dev
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-5 --no-fail-fast --locked
