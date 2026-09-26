@@ -113,10 +113,15 @@ class RustCoverageGateTests(unittest.TestCase):
         self.assertEqual(len(rows), 12)
 
         budgets = dict(rows)
-        # The presentation capture cases share one booted application fixture,
-        # so every qualification row fits the common 15-minute budget.
-        self.assertEqual(budgets["app 5/12"], "15")
-        self.assertEqual({minutes for _, minutes in rows}, {"15"})
+        # The common budget is the slowest green row measured over the
+        # 2026-09-24/25 qualification runs (engine integration 2+3/3 at
+        # 14m55s, app 1+10/12 at 14m32s) plus the five minutes a stalled
+        # first content-fetch attempt costs before its bounded retry lands.
+        # Under the previous 15-minute budget those rows were cancelled with
+        # their coverage report already written, and one such cancellation
+        # evicted the 1.1.0 release entry (clonk-org/clonk-rs#1802).
+        self.assertEqual(budgets["app 1+10/12"], "20")
+        self.assertEqual({minutes for _, minutes in rows}, {"20"})
 
     def test_named_coverage_job_merges_fragments_before_enforcing_the_floor(self):
         coverage = job_block("coverage")
