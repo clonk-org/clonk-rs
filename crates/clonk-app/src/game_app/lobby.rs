@@ -2299,10 +2299,14 @@ impl GameApp {
         }
     }
 
+    /// A lobby error is a red line in the lobby log, where C++'s `Log` output
+    /// lands while the lobby dialog is open, and nothing else. It must never
+    /// touch `status_text`: text left there is a `StartupStatusOverlay` parity
+    /// boundary on the next frame, which the retained presenter treats as
+    /// fatal, so a refused player join ended the process
+    /// (clonk-org/clonk-rs#1812; the same escalation as clonk-org/clonk-rs#196).
     pub(crate) fn report_classic_lobby_error(&mut self, detail: impl Into<String>) {
-        let detail = detail.into();
-        self.status_text.clone_from(&detail);
-        self.append_control_message_log(detail, 0x00ff_1f1f, None);
+        self.append_control_message_log(detail.into(), 0x00ff_1f1f, None);
     }
 
     pub(crate) fn submit_selected_classic_lobby_player(
