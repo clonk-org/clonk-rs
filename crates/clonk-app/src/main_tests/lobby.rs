@@ -6270,6 +6270,38 @@ fn network_lobby_renders_live_without_a_deferred_native_text_pass() {
 }
 
 #[test]
+fn refused_lobby_player_join_lands_in_the_lobby_log_and_keeps_the_lobby_rendering() {
+    let mut app = new_real_classic_menu_app(320, 200);
+    app.startup.view = StartupView::NetworkLobby;
+    app.lobby.session = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
+    app.sync_network_lobby_game_option_state();
+    main_assert!(app.status_text.is_empty());
+
+    // The host drops a duplicate or over-limit join inside
+    // HandlePlayerInfoUpdRequest and the lobby stays open
+    // (src/C4Network2Players.cpp:166-191). The port's refusal belongs in the
+    // lobby log; any text left in `status_text` is a StartupStatusOverlay
+    // parity boundary on the next frame, which the retained presenter treats
+    // as fatal (clonk-org/clonk-rs#1812).
+    let detail = "Unable to add player: host rejected the runtime player request";
+    app.report_classic_lobby_error(detail);
+
+    main_assert!(app.status_text.is_empty());
+    let logs = &some(&app.lobby.session).logs;
+    main_assert!(
+        logs.iter().any(|line| line.text.ends_with(detail)),
+        "the refusal must reach the lobby log: {logs:?}"
+    );
+
+    let sentinel = vec![0x73; 320 * 200 * 4];
+    let mut frame = sentinel.clone();
+    main_assert!(app
+        .render(&mut frame)
+        .expect("the lobby keeps rendering after a refused join"));
+    main_assert_ne!(frame => sentinel, "the live lobby must reach the frame");
+}
+
+#[test]
 fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
     use clonk_frontend::startup_options_dlg::{fair_crew_slider_to_strength, OptionsDlgAction};
 
