@@ -140,11 +140,19 @@ impl GameApp {
         })
     }
 
+    /// The main menu hands the whole screen to the options book, as C++'s
+    /// options dialog does. Every other screen stays in view, dimmed, behind
+    /// settings opened over it.
+    pub(crate) fn settings_cover_screen(&self) -> bool {
+        self.mode == AppMode::Menu && self.startup.view == StartupView::MainMenu
+    }
+
     pub(crate) fn render_unified_settings_to_surface(
         &mut self,
         surface: &mut Surface,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> bool {
+        let cover_screen = self.settings_cover_screen();
         let Some(resources) = self.assets.message_dialog_resources() else {
             return false;
         };
@@ -160,7 +168,7 @@ impl GameApp {
                 &assets,
                 resources.fonts,
                 book,
-                self.mode == AppMode::Menu,
+                cover_screen,
                 gamma,
             );
             true
@@ -184,6 +192,7 @@ impl GameApp {
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> bool {
         let launcher = self.settings_launcher();
+        let cover_screen = self.settings_cover_screen();
         let Some(resources) = self.assets.message_dialog_resources() else {
             return false;
         };
@@ -200,7 +209,7 @@ impl GameApp {
                 &assets,
                 resources.fonts,
                 book,
-                self.mode == AppMode::Menu,
+                cover_screen,
                 gamma,
             );
             true

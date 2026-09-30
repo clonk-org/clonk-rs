@@ -58,6 +58,27 @@ impl OptionsBook<'_> {
             );
         } else {
             draw_engine_box(surface, 0, 0, w - 1, h - 1, 0x80000000, gamma);
+            // Over another screen the book sits on a darker panel, so that
+            // screen's own buttons cannot be mistaken for the book's.
+            let panel = popup_panel(layout);
+            draw_engine_box(
+                surface,
+                panel.x,
+                panel.y,
+                panel.x + panel.w - 1,
+                panel.y + panel.h - 1,
+                0x6010_0c08,
+                gamma,
+            );
+            draw_frame_dw(
+                surface,
+                panel.x,
+                panel.y,
+                panel.x + panel.w - 1,
+                panel.y + panel.h - 1,
+                0x70c0_a060,
+                gamma,
+            );
         }
         self.gui.title.draw_with_gamma(
             surface,
@@ -539,6 +560,17 @@ impl OptionsBook<'_> {
             gamma,
         );
     }
+}
+
+/// The book's footprint when it opens over another screen: tabs, paper,
+/// title and Back button, with a margin.
+fn popup_panel(layout: &OptionsDlgLayout) -> IntRect {
+    let back = layout.back_button;
+    let left = layout.tab_clips[0].0.min(back.x) - 16;
+    let right = (layout.paper.x + layout.paper.w).max(back.x + back.w) + 16;
+    let top = layout.title_center.1 - 8;
+    let bottom = back.y + back.h + 12;
+    IntRect::new(left, top, right - left, bottom - top)
 }
 
 fn gui_rect(rect: IntRect) -> GuiRect {

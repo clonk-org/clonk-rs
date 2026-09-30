@@ -42,9 +42,7 @@ impl GameApp {
                     "Online game continues · Your controls are held while settings are open"
                 }
                 AppMode::Loading => "Loading continues · Settings stay open when the game begins",
-                AppMode::Menu => {
-                    "Settings stay with you · Ctrl+F searches · Tab navigates · Esc returns"
-                }
+                AppMode::Menu => "Esc returns to where you were",
             }
             .into();
         }

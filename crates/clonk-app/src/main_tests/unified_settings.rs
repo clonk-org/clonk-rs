@@ -762,3 +762,30 @@ fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
         "voice entry points keep their own destination"
     );
 }
+
+#[test]
+fn unified_settings_open_as_a_popup_over_screens_other_than_the_main_menu() {
+    let (width, height) = (800_usize, 600_usize);
+    let mut app = new_real_classic_menu_app(width as u32, height as u32);
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    app.apply_classic_startup_screen("scen");
+    let mut screen = vec![0; width * height * 4];
+    app.render(&mut screen).unwrap();
+    app.open_unified_settings_where_left().unwrap();
+    let mut popup = vec![0; width * height * 4];
+    app.render(&mut popup).unwrap();
+    // Beside the options book the scenario list shows through at half
+    // brightness, pixel for pixel, instead of the startup backdrop.
+    let samples: Vec<u64> = (100..500)
+        .step_by(4)
+        .flat_map(|y| (745..795).step_by(2).map(move |x| (y * width + x) * 4))
+        .flat_map(|i| (0..3).map(move |channel| i + channel))
+        .map(|i| (u64::from(screen[i]) * 128 / 255).abs_diff(u64::from(popup[i])))
+        .collect();
+    let deviation = samples.iter().sum::<u64>() / samples.len() as u64;
+    assert!(
+        deviation < 10,
+        "mean deviation {deviation} from the dimmed scenario list"
+    );
+}
