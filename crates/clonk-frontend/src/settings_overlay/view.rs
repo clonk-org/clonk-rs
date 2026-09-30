@@ -16,6 +16,7 @@ pub enum SettingsFocus {
     Search,
     Category(SettingsCategory),
     AudioPage(AudioPage),
+    Group,
     Row(usize),
     Modified,
     Advanced,
@@ -383,7 +384,10 @@ impl SettingsController {
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
                 let backwards = matches!(key, KeyCode::Up | KeyCode::PageUp);
-                if matches!(self.view.focus, SettingsFocus::AudioPage(_)) {
+                if matches!(
+                    self.view.focus,
+                    SettingsFocus::AudioPage(_) | SettingsFocus::Group
+                ) {
                     if backwards {
                         self.set_focus(SettingsFocus::Search);
                     } else if let Some(index) = self.visible_indices().first().copied() {
@@ -431,6 +435,8 @@ impl SettingsController {
                         if key == KeyCode::Up && old == Some(0) {
                             self.set_focus(if self.category == SettingsCategory::Audio {
                                 SettingsFocus::AudioPage(self.audio_page)
+                            } else if !self.groups().is_empty() {
+                                SettingsFocus::Group
                             } else {
                                 SettingsFocus::Category(self.category)
                             });
@@ -478,6 +484,10 @@ impl SettingsController {
                     });
                     return Vec::new();
                 }
+                if self.view.focus == SettingsFocus::Group {
+                    self.cycle_group(if key == KeyCode::Left { -1 } else { 1 });
+                    return Vec::new();
+                }
                 if let SettingsFocus::Row(index) = self.view.focus {
                     return self.adjust(index, if key == KeyCode::Left { -1 } else { 1 });
                 }
@@ -510,6 +520,9 @@ impl SettingsController {
         if self.category == SettingsCategory::Audio {
             order.push(SettingsFocus::AudioPage(self.audio_page));
         }
+        if !self.groups().is_empty() {
+            order.push(SettingsFocus::Group);
+        }
         order.extend([SettingsFocus::Modified, SettingsFocus::Advanced]);
         order.extend(self.visible_indices().into_iter().map(SettingsFocus::Row));
         order.push(SettingsFocus::Pin);
@@ -538,6 +551,22 @@ impl SettingsController {
         ]
         .into_iter()
         .find_map(|(applies, emphasis)| applies.then_some(emphasis))
+    }
+
+    /// Shows the next (`step` 1) or previous (-1) group, wrapping around.
+    pub fn cycle_group(&mut self, step: isize) {
+        let groups = self.groups();
+        if groups.is_empty() {
+            return;
+        }
+        let current = self
+            .current_group()
+            .and_then(|group| groups.iter().position(|candidate| *candidate == group))
+            .unwrap_or(0);
+        let next = (current as isize + step).rem_euclid(groups.len() as isize) as usize;
+        self.group = Some(groups[next].clone());
+        self.view.scroll = 0;
+        self.view.selected = self.visible_indices().first().copied();
     }
 
     pub fn set_focus(&mut self, focus: SettingsFocus) {
@@ -621,6 +650,7 @@ impl SettingsController {
             }
             SettingsFocus::Category(category) => self.select_category(category),
             SettingsFocus::AudioPage(page) => self.select_audio_page(page),
+            SettingsFocus::Group => self.cycle_group(1),
             SettingsFocus::Modified => {
                 self.modified_only = !self.modified_only;
                 self.view.scroll = 0;
@@ -912,7 +942,8 @@ impl SettingsController {
 
     fn targets(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         let audio = self.category == SettingsCategory::Audio;
-        let filters_x = layout.list.x + if audio { 200 } else { 0 };
+        let grouped = !self.groups().is_empty();
+        let filters_x = layout.list.x + if audio || grouped { 200 } else { 0 };
         let mut targets = vec![
             (SettingsFocus::Search, layout.search),
             (
@@ -920,16 +951,20 @@ impl SettingsController {
                 IntRect::new(
                     filters_x,
                     layout.search.y + 32,
-                    if audio { 98 } else { 122 },
+                    if audio || grouped { 98 } else { 122 },
                     20,
                 ),
             ),
             (
                 SettingsFocus::Advanced,
                 IntRect::new(
-                    filters_x + if audio { 104 } else { 130 },
+                    filters_x + if audio || grouped { 104 } else { 130 },
                     layout.search.y + 32,
-                    if audio { layout.list.w - 304 } else { 122 },
+                    if audio || grouped {
+                        layout.list.w - 304
+                    } else {
+                        122
+                    },
                     20,
                 ),
             ),
@@ -945,6 +980,12 @@ impl SettingsController {
                     IntRect::new(layout.list.x + 78, layout.search.y + 30, 108, 26),
                 ),
             ]);
+        }
+        if grouped {
+            targets.push((
+                SettingsFocus::Group,
+                IntRect::new(layout.list.x, layout.search.y + 30, 190, 26),
+            ));
         }
         targets.extend(
             SettingsCategory::ALL
@@ -1104,6 +1145,33 @@ mod tests {
         assert_eq!(value_label(&duration), "12 s");
         duration.value = seconds(30);
         assert!(detail_text(&duration).ends_with("Default: 12 s"));
+    }
+
+    #[test]
+    fn control_bindings_show_one_control_set_at_a_time_and_cycle_between_sets() {
+        let control = |key: &str, group: Option<&str>| {
+            let mut setting = preference(key, AdvancedConfigValue::Bool(true));
+            setting.category = SettingsCategory::Controls;
+            setting.details.group = group.map(Into::into);
+            setting
+        };
+        let mut controller = SettingsController::new(vec![
+            control("GamepadEnabled", None),
+            control("Kbd1Key1", Some("Keyboard 1")),
+            control("Kbd1Key2", Some("Keyboard 1")),
+            control("Kbd2Key1", Some("Keyboard 2")),
+            control("Button1", Some("Controller 1")),
+        ]);
+        controller.select_category(SettingsCategory::Controls);
+        assert_eq!(controller.visible_indices(), vec![0, 1, 2]);
+        controller.set_focus(SettingsFocus::Group);
+        controller.key(KeyCode::Right, false, false);
+        assert_eq!(controller.visible_indices(), vec![0, 3]);
+        controller.key(KeyCode::Left, false, false);
+        controller.key(KeyCode::Left, false, false);
+        assert_eq!(controller.visible_indices(), vec![0, 4], "cycling wraps");
+        controller.query = "Kbd2".into();
+        assert_eq!(controller.visible_indices(), vec![3], "search spans sets");
     }
 
     #[test]

@@ -58,7 +58,7 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
                 ("Voice", "PushToTalkKey") => 7,
                 ("Voice", "ActivationThreshold") => 8,
                 ("Voice", "ActivationHangover") => 9,
-                _ => 10,
+                _ => binding_rank(&setting.id).unwrap_or(10),
             },
             setting.label.clone(),
         )
@@ -155,6 +155,17 @@ fn presentation_settings(config: &Config) -> Vec<Setting> {
     shortcut.details.binding = true;
     rows.push(shortcut);
     rows
+}
+
+/// Keyboard sets before controllers, each set's bindings in the game's own
+/// control order, after the category's other preferences.
+fn binding_rank(id: &SettingId) -> Option<usize> {
+    let rank = |base: usize, (set, binding): (usize, crate::input::ControlBindingId)| {
+        base + set * crate::input::ControlBindingId::ALL.len() + binding as usize
+    };
+    keyboard_binding(id)
+        .map(|found| rank(100, found))
+        .or_else(|| gamepad_binding(id).map(|found| rank(200, found)))
 }
 
 pub(crate) fn keyboard_binding(id: &SettingId) -> Option<(usize, crate::input::ControlBindingId)> {
@@ -490,6 +501,7 @@ fn describe(setting: &mut Setting) {
         setting.details.policy = Live;
         setting.advanced = false;
         setting.details.scope = format!("Keyboard control set {}", set + 1);
+        setting.details.group = Some(format!("Keyboard {}", set + 1));
     }
     if let Some((set, id)) = gamepad_binding(&setting.id) {
         setting.label = format!(
@@ -501,6 +513,7 @@ fn describe(setting: &mut Setting) {
         setting.details.policy = Live;
         setting.advanced = false;
         setting.details.scope = format!("Controller control set {}", set + 1);
+        setting.details.group = Some(format!("Controller {}", set + 1));
     }
     if section == "Voice" && key == "PushToTalkKey" {
         setting.details.binding = true;
@@ -690,6 +703,40 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn unified_catalog_groups_bindings_by_control_set_in_control_order() {
+        let rows = catalog(&Config::new());
+        let group = |name: &str| -> Vec<String> {
+            rows.iter()
+                .filter(|row| row.details.group.as_deref() == Some(name))
+                .map(|row| format!("{}.{}", row.id.section, row.id.key))
+                .collect()
+        };
+        let count = crate::input::ControlBindingId::ALL.len();
+        for set in 1..=4 {
+            assert_eq!(
+                group(&format!("Keyboard {set}")),
+                (1..=count)
+                    .map(|key| format!("Controls.Kbd{set}Key{key}"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                group(&format!("Controller {set}")),
+                (1..=count)
+                    .map(|key| format!("Gamepad{}.Button{key}", set - 1))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let first_binding = rows
+            .iter()
+            .position(|row| row.details.group.is_some())
+            .unwrap();
+        assert_eq!(
+            rows[first_binding].details.group.as_deref(),
+            Some("Keyboard 1")
+        );
+    }
+
     #[test]
     fn unified_catalog_names_the_unit_of_every_measured_preference() {
         let rows = catalog(&Config::new());

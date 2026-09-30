@@ -134,6 +134,9 @@ pub struct SettingDetails {
     pub exclude_from_category_reset: bool,
     /// Appended to whole-number values, such as `"%"` or `" s"`.
     pub unit: String,
+    /// Settings sharing a group are listed one group at a time within their
+    /// category, such as the bindings of one control set.
+    pub group: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +165,7 @@ pub struct SettingsController {
     pub show_advanced: bool,
     pub pinned: Vec<SettingId>,
     pub modified_only: bool,
+    pub group: Option<String>,
     pub view: view::SettingsViewState,
 }
 
@@ -175,6 +179,7 @@ impl SettingsController {
             show_advanced: false,
             pinned: Vec::new(),
             modified_only: false,
+            group: None,
             view: Default::default(),
         }
     }
@@ -182,6 +187,30 @@ impl SettingsController {
     /// Whether the setting differs from the value Reset would restore.
     pub fn is_modified(&self, index: usize) -> bool {
         self.settings.get(index).is_some_and(Setting::is_modified)
+    }
+
+    /// The groups in the current category, in catalog order.
+    pub fn groups(&self) -> Vec<String> {
+        self.settings
+            .iter()
+            .filter(|setting| setting.category == self.category)
+            .filter_map(|setting| setting.details.group.clone())
+            .fold(Vec::new(), |mut groups, group| {
+                if !groups.contains(&group) {
+                    groups.push(group);
+                }
+                groups
+            })
+    }
+
+    /// The group whose settings the category shows: the chosen one while the
+    /// category has it, otherwise the category's first.
+    pub fn current_group(&self) -> Option<String> {
+        let groups = self.groups();
+        self.group
+            .clone()
+            .filter(|group| groups.contains(group))
+            .or_else(|| groups.into_iter().next())
     }
 
     pub fn toggle_pin(&mut self, index: usize) {
@@ -223,6 +252,7 @@ impl SettingsController {
 
     pub fn visible_indices(&self) -> Vec<usize> {
         let query = self.query.trim().to_lowercase();
+        let group = self.current_group();
         let mut indices: Vec<_> = self
             .settings
             .iter()
@@ -236,6 +266,11 @@ impl SettingsController {
                             && (!setting.advanced || self.show_advanced)
                             && (self.category != SettingsCategory::Audio
                                 || self.audio_setting_visible(setting))
+                            && setting
+                                .details
+                                .group
+                                .as_ref()
+                                .is_none_or(|own| Some(own) == group.as_ref())
                     }
                 } else {
                     let searchable = format!(
