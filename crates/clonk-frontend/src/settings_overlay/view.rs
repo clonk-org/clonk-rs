@@ -986,6 +986,60 @@ impl SettingsController {
     }
 }
 
+/// The text a row shows for its value: the application's own label when it
+/// provides one (bindings, current-match rows), otherwise the value itself.
+pub(crate) fn value_label(setting: &Setting) -> String {
+    setting
+        .details
+        .display_value
+        .clone()
+        .unwrap_or_else(|| formatted_value(setting, &setting.value))
+}
+
+pub(crate) fn formatted_value(setting: &Setting, value: &AdvancedConfigValue) -> String {
+    match value {
+        AdvancedConfigValue::Choice { value, choices } => choices
+            .iter()
+            .find(|c| c.value == *value)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| {
+                if value.is_empty() {
+                    "System default".into()
+                } else {
+                    value.clone()
+                }
+            }),
+        _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
+        _ if matches!(setting.id.section.as_str(), "Sound" | "Voice")
+            && setting.id.key.ends_with("Volume") =>
+        {
+            format!("{}%", value.serialized())
+        }
+        _ if setting.id.section == "Voice" && setting.id.key == "ActivationHangover" => {
+            format!("{} ms", value.serialized())
+        }
+        _ => value.serialized(),
+    }
+}
+
+/// The footer's second line: why a setting is unavailable, or where and when
+/// a change takes effect.
+pub(crate) fn detail_text(setting: &Setting) -> String {
+    setting.details.unavailable.clone().unwrap_or_else(|| {
+        let active = setting
+            .details
+            .active_value
+            .as_ref()
+            .map(|value| format!(" · Active: {value}"))
+            .unwrap_or_default();
+        format!(
+            "{} · {}{active}",
+            setting.details.scope,
+            setting.details.policy.label()
+        )
+    })
+}
+
 fn value_rect(row: IntRect) -> IntRect {
     IntRect::new(row.x + row.w - 174, row.y + 2, 174, 26)
 }

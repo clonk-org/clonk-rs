@@ -225,36 +225,7 @@ impl SettingsController {
                 edit.render(surface, body_font, value_rect, gamma);
                 continue;
             }
-            let label =
-                setting
-                    .details
-                    .display_value
-                    .clone()
-                    .unwrap_or_else(|| match &setting.value {
-                        AdvancedConfigValue::Choice { value, choices } => choices
-                            .iter()
-                            .find(|c| c.value == *value)
-                            .map(|c| c.label.clone())
-                            .unwrap_or_else(|| {
-                                if value.is_empty() {
-                                    "System default".into()
-                                } else {
-                                    value.clone()
-                                }
-                            }),
-                        _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
-                        _ if matches!(setting.id.section.as_str(), "Sound" | "Voice")
-                            && setting.id.key.ends_with("Volume") =>
-                        {
-                            format!("{}%", setting.value.serialized())
-                        }
-                        _ if setting.id.section == "Voice"
-                            && setting.id.key == "ActivationHangover" =>
-                        {
-                            format!("{} ms", setting.value.serialized())
-                        }
-                        _ => setting.value.serialized(),
-                    });
+            let label = value_label(setting);
             if let AdvancedConfigValue::Integer { value, min, max } = setting.value {
                 if max > min
                     && max - min <= 1000
@@ -312,19 +283,7 @@ impl SettingsController {
                 setting.details.description.clone()
             };
             if detail.is_empty() {
-                detail = setting.details.unavailable.clone().unwrap_or_else(|| {
-                    let active = setting
-                        .details
-                        .active_value
-                        .as_ref()
-                        .map(|value| format!(" · Active: {value}"))
-                        .unwrap_or_default();
-                    format!(
-                        "{} · {}{active}",
-                        setting.details.scope,
-                        setting.details.policy.label()
-                    )
-                });
+                detail = detail_text(setting);
             }
         }
         if self.category == SettingsCategory::Audio {
