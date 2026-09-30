@@ -1,5 +1,6 @@
 use super::*;
 use crate::classic_gui::{draw_clipped_text_with_markup, draw_engine_box, ClassicButtonState};
+use crate::startup_options_controls::CONTROL_KEY_LABELS;
 use crate::startup_options_dlg::OptionsDlgAssets;
 use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Surface};
@@ -190,8 +191,9 @@ impl SettingsController {
                 // Drawn on its row, above the row's highlight.
                 SettingsFocus::Reset => {}
                 _ => {
+                    let reset = self.page_reset_label();
                     let label = match focus {
-                        SettingsFocus::ResetCategory => "Reset page",
+                        SettingsFocus::ResetCategory => reset.as_str(),
                         SettingsFocus::TestMicrophone if compact => "Test mic",
                         SettingsFocus::TestMicrophone => "Test microphone",
                         SettingsFocus::RefreshDevices => "Refresh devices",
@@ -227,6 +229,10 @@ impl SettingsController {
             let Some(rect) = self.row_rect(&layout, index) else {
                 continue;
             };
+            if self.control_set_page().is_some() {
+                self.render_binding_cell(surface, &book, rect, index, gamma);
+                continue;
+            }
             if let Some(emphasis) = self.row_emphasis(index) {
                 draw_row_emphasis(surface, rect, emphasis, gamma);
             }
@@ -330,7 +336,18 @@ impl SettingsController {
                 detail = detail_text(setting);
             }
         }
-        if self.category == SettingsCategory::Audio {
+        if self.control_set_page().is_some() {
+            // The grid names each command, so one line says what the
+            // selected key does or what just happened.
+            text(
+                surface,
+                small_font,
+                IntRect::new(layout.footer.x, layout.footer.y, layout.footer.w, 20),
+                &detail,
+                [90, 61, 31, 255],
+                gamma,
+            );
+        } else if self.category == SettingsCategory::Audio {
             let help = self
                 .view
                 .selected
@@ -504,6 +521,71 @@ impl SettingsController {
             opening,
             gamma,
         );
+    }
+
+    /// One binding of a control set: the command's key cap from the classic
+    /// control sheets, its name, and the key or button bound to it.
+    fn render_binding_cell(
+        &self,
+        surface: &mut Surface,
+        book: &OptionsBook,
+        cell: IntRect,
+        index: usize,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let setting = &self.settings[index];
+        let Some(binding) = setting.details.control else {
+            return;
+        };
+        let emphasis = self.row_emphasis(index);
+        if let Some(emphasis) = emphasis {
+            draw_row_emphasis(surface, cell, emphasis, gamma);
+        }
+        let capturing = self.view.capturing == Some(index);
+        let size = (cell.h - 6).min(48);
+        let cap = IntRect::new(cell.x + 4, cell.y + (cell.h - size) / 2, size, size);
+        book.command_key(
+            surface,
+            cap,
+            binding.command,
+            capturing,
+            capturing || emphasis.is_some(),
+            gamma,
+        );
+        let font = if cell.h >= 56 {
+            &book.fonts.book
+        } else {
+            &book.fonts.book_small
+        };
+        let x = cap.x + cap.w + 6;
+        let width = cell.x + cell.w - x;
+        let middle = cell.y + cell.h / 2;
+        let ink = if setting.is_modified() {
+            [128, 45, 12, 255]
+        } else {
+            [0, 0, 0, 255]
+        };
+        text(
+            surface,
+            font,
+            IntRect::new(x, middle - font.line_height, width, font.line_height),
+            CONTROL_KEY_LABELS[binding.command],
+            ink,
+            gamma,
+        );
+        let chip = IntRect::new(x + 2, middle + 1, width - 2, font.line_height);
+        let key = value_label(setting);
+        if capturing {
+            let prompt = match binding.set.device {
+                ControlDevice::Keyboard => "Press a key…",
+                ControlDevice::Gamepad => "Press a button…",
+            };
+            book.key_chip(surface, font, chip, prompt, [176, 28, 12, 255], gamma);
+        } else if key == NOT_BOUND {
+            text(surface, font, chip, &key, [140, 124, 100, 255], gamma);
+        } else {
+            book.key_chip(surface, font, chip, &key, ink, gamma);
+        }
     }
 
     /// Names the chosen control set beside the pictures, where it fits.

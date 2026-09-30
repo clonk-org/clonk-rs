@@ -12,6 +12,11 @@ const ROW_HEIGHT: i32 = 36;
 /// The height of a control set's picture from the classic control sheets,
 /// which is 80x36.
 const SET_PICTURE_HEIGHT: i32 = 36;
+/// What a control set's page gains by keeping one line of text in its
+/// footer: the grid needs the height more than a description of it.
+const GRID_FOOTER_LIFT: i32 = 46;
+/// The tallest row of the binding grid; taller pages leave the room below.
+const GRID_ROW_MAX: i32 = 64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsFocus {
@@ -216,6 +221,9 @@ impl SettingsController {
             layout.list.h += row;
         }
         if self.control_set_page().is_some() {
+            layout.footer.y += GRID_FOOTER_LIFT;
+            layout.footer.h -= GRID_FOOTER_LIFT;
+            layout.list.h += GRID_FOOTER_LIFT;
             // The pictures shrink where the page is short.
             let row = if layout.list.h >= 4 * 44 + SET_PICTURE_HEIGHT + 10 {
                 SET_PICTURE_HEIGHT + 10
@@ -547,6 +555,20 @@ impl SettingsController {
                     }
                     return Vec::new();
                 }
+                if let (SettingsFocus::Row(index), Some(_)) =
+                    (self.view.focus, self.control_set_page())
+                {
+                    let next = match self.grid_neighbour(index, (0, if backwards { -1 } else { 1 }))
+                    {
+                        Some(target) => SettingsFocus::Row(target),
+                        None if backwards => {
+                            self.control_set_focus().unwrap_or(SettingsFocus::Search)
+                        }
+                        None => self.page_actions_start(),
+                    };
+                    self.set_focus(next);
+                    return Vec::new();
+                }
                 if matches!(
                     self.view.focus,
                     SettingsFocus::Reset
@@ -590,15 +612,7 @@ impl SettingsController {
                             return Vec::new();
                         }
                         if key == KeyCode::Down && old == Some(visible.len() - 1) {
-                            let layout = self.layout();
-                            let next = self
-                                .row_actions(&layout)
-                                .into_iter()
-                                .chain(self.footer_links(&layout))
-                                .map(|(focus, _)| focus)
-                                .next()
-                                .unwrap_or(SettingsFocus::Close);
-                            self.set_focus(next);
+                            self.set_focus(self.page_actions_start());
                             return Vec::new();
                         }
                         let step = if matches!(key, KeyCode::PageUp | KeyCode::PageDown) {
@@ -643,6 +657,15 @@ impl SettingsController {
                 if matches!(self.view.focus, SettingsFocus::ControlSet(_)) {
                     self.cycle_group(if key == KeyCode::Left { -1 } else { 1 });
                     self.view.focus = self.control_set_focus().unwrap_or(self.view.focus);
+                    return Vec::new();
+                }
+                if let (SettingsFocus::Row(index), Some(_)) =
+                    (self.view.focus, self.control_set_page())
+                {
+                    let step = if key == KeyCode::Left { -1 } else { 1 };
+                    if let Some(target) = self.grid_neighbour(index, (step, 0)) {
+                        self.set_focus(SettingsFocus::Row(target));
+                    }
                     return Vec::new();
                 }
                 if let SettingsFocus::Row(index) = self.view.focus {
@@ -727,6 +750,13 @@ impl SettingsController {
             .collect()
     }
 
+    /// What the page reset is called: after the control set it resets on a
+    /// control set's page.
+    pub fn page_reset_label(&self) -> String {
+        self.control_set_page()
+            .map_or("Reset page".into(), |set| format!("Reset {}", set.label()))
+    }
+
     /// The question an open confirmation asks.
     pub fn confirmation_prompt(&self) -> Option<String> {
         if let Some(seconds) = self.view.display_confirmation {
@@ -736,11 +766,19 @@ impl SettingsController {
         }
         self.view.reset_confirmation.then(|| {
             let count = self.page_reset_candidates().len();
-            let (noun, default) = if count == 1 {
-                ("setting", "its default")
+            let default = if count == 1 {
+                "its default"
             } else {
-                ("settings", "their defaults")
+                "their defaults"
             };
+            if let Some(set) = self.control_set_page() {
+                return format!(
+                    "Reset {count} {} of {} to {default}?",
+                    binding_noun(set.device, count),
+                    set.label()
+                );
+            }
+            let noun = if count == 1 { "setting" } else { "settings" };
             format!(
                 "Reset {count} {noun} on this page to {default}? \
                  Display modes and saved progress are kept."
@@ -786,7 +824,13 @@ impl SettingsController {
         }
         let action = match self.view.focus {
             SettingsFocus::Row(index) => self.settings.get(index).map_or("", |setting| {
-                if setting.details.binding {
+                if setting
+                    .details
+                    .control
+                    .is_some_and(|binding| binding.set.device == ControlDevice::Gamepad)
+                {
+                    "Enter: press a new button"
+                } else if setting.details.binding {
                     "Enter: press a new key"
                 } else {
                     match setting.value {
@@ -846,6 +890,9 @@ impl SettingsController {
     }
 
     fn page_size(&self) -> usize {
+        if self.control_set_page().is_some() {
+            return self.visible_indices().len().max(1);
+        }
         (self.layout().list.h / self.row_height()).max(1) as usize
     }
 
@@ -950,8 +997,14 @@ impl SettingsController {
                 }
                 if self.category != SettingsCategory::Quick {
                     if self.page_reset_candidates().is_empty() {
-                        self.view.message =
-                            "Every setting on this page is already at its default.".into();
+                        self.view.message = match self.control_set_page() {
+                            Some(set) => format!(
+                                "{} already uses its default {}.",
+                                set.label(),
+                                binding_noun(set.device, 2)
+                            ),
+                            None => "Every setting on this page is already at its default.".into(),
+                        };
                     } else {
                         self.view.reset_confirmation = true;
                     }
@@ -1185,7 +1238,43 @@ impl SettingsController {
         Some((track, IntRect::new(track.x, track.y + top, track.w, height)))
     }
 
+    /// The binding one step `(columns, rows)` across the grid from the one
+    /// at `index`; `None` past the grid's edge.
+    fn grid_neighbour(&self, index: usize, (dx, dy): (i32, i32)) -> Option<usize> {
+        let command = self.settings.get(index)?.details.control?.command as i32;
+        let (column, row) = (command % 3 + dx, command / 3 + dy);
+        if !(0..3).contains(&column) || !(0..4).contains(&row) {
+            return None;
+        }
+        let target = (row * 3 + column) as usize;
+        self.visible_indices().into_iter().find(|candidate| {
+            self.settings[*candidate]
+                .details
+                .control
+                .is_some_and(|binding| binding.command == target)
+        })
+    }
+
+    /// Where focus goes below the last setting: the first row or page action.
+    fn page_actions_start(&self) -> SettingsFocus {
+        let layout = self.layout();
+        self.row_actions(&layout)
+            .into_iter()
+            .chain(self.footer_links(&layout))
+            .map(|(focus, _)| focus)
+            .next()
+            .unwrap_or(SettingsFocus::Close)
+    }
+
     fn row_rect(&self, layout: &SettingsLayout, index: usize) -> Option<IntRect> {
+        if self.control_set_page().is_some() {
+            return self
+                .visible_indices()
+                .contains(&index)
+                .then(|| self.settings[index].details.control)
+                .flatten()
+                .map(|binding| grid_cell(layout, binding.command));
+        }
         let position = self.visible_indices().iter().position(|i| *i == index)?;
         (position >= self.view.scroll && position < self.view.scroll + self.page_size()).then(
             || {
@@ -1251,6 +1340,9 @@ impl SettingsController {
 
     /// The reset link a changed, selected row offers just left of its value.
     pub(crate) fn row_actions(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
+        if self.control_set_page().is_some() {
+            return Vec::new();
+        }
         let Some((index, row)) = self
             .view
             .selected
@@ -1282,11 +1374,15 @@ impl SettingsController {
         let y = layout.footer.y
             + if self.category == SettingsCategory::Audio {
                 52
+            } else if self.control_set_page().is_some() {
+                22
             } else {
                 42
             };
         let specs = if self.category == SettingsCategory::Quick {
             Vec::new()
+        } else if self.control_set_page().is_some() {
+            vec![(SettingsFocus::ResetCategory, 150)]
         } else {
             vec![
                 (SettingsFocus::Advanced, if compact { 112 } else { 150 }),
@@ -1380,6 +1476,29 @@ pub(crate) fn detail_text(setting: &Setting) -> String {
             setting.details.policy.label()
         )
     })
+}
+
+/// Where the binding for `command` sits in the classic control sheets' 3x4
+/// grid of commands.
+fn grid_cell(layout: &SettingsLayout, command: usize) -> IntRect {
+    let column_width = layout.list.w / 3;
+    let row_height = (layout.list.h / 4).min(GRID_ROW_MAX);
+    IntRect::new(
+        layout.list.x + (command % 3) as i32 * column_width,
+        layout.list.y + (command / 3) as i32 * row_height,
+        column_width - 8,
+        row_height - 4,
+    )
+}
+
+/// What a control set on `device` binds, for `count` of them.
+fn binding_noun(device: ControlDevice, count: usize) -> &'static str {
+    match (device, count) {
+        (ControlDevice::Keyboard, 1) => "key",
+        (ControlDevice::Keyboard, _) => "keys",
+        (ControlDevice::Gamepad, 1) => "button",
+        (ControlDevice::Gamepad, _) => "buttons",
+    }
 }
 
 /// Where a changed row's reset link sits: just left of its value.
@@ -1504,6 +1623,7 @@ mod tests {
             set: ControlSet { device, index },
             command,
         });
+        setting.details.binding = binding.is_some();
         setting
     }
 
@@ -1647,6 +1767,143 @@ mod tests {
         assert_eq!(
             controller.view.focus,
             SettingsFocus::ControlsPage(ControlsPage::Keyboard)
+        );
+    }
+
+    /// A general setting, then keyboard set 1's twelve bindings.
+    fn keyboard_set() -> SettingsController {
+        SettingsController::new(
+            std::iter::once(control("GamepadEnabled", None))
+                .chain((0..12).map(|command| {
+                    control(
+                        &format!("Kbd1Key{}", command + 1),
+                        Some((ControlDevice::Keyboard, 0, command)),
+                    )
+                }))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_control_sets_bindings_sit_in_the_classic_three_by_four_grid_of_commands() {
+        let mut controller = keyboard_set();
+        controller.select_controls_page(ControlsPage::Keyboard);
+        let layout = controller.layout();
+        let cells: Vec<_> = (1..=12)
+            .map(|index| {
+                controller
+                    .row_rect(&layout, index)
+                    .expect("every key in view")
+            })
+            .collect();
+        for (command, cell) in cells.iter().enumerate() {
+            let (column, row) = (command % 3, command / 3);
+            assert_eq!(cell.y, cells[row * 3].y, "command {command} shares its row");
+            assert_eq!(
+                cell.x, cells[column].x,
+                "command {command} shares its column"
+            );
+            if column > 0 {
+                assert!(cells[command - 1].x + cells[command - 1].w < cell.x);
+            }
+            if row > 0 {
+                assert!(cells[command - 3].y + cells[command - 3].h <= cell.y);
+            }
+            assert!(cell.x + cell.w <= layout.list.x + layout.list.w);
+            assert!(cell.y + cell.h <= layout.list.y + layout.list.h);
+        }
+        assert!(controller.scrollbar().is_none(), "the whole set is in view");
+        assert!(
+            controller.row_actions(&layout).is_empty(),
+            "Delete and the page reset restore defaults"
+        );
+        let dig = cells[5];
+        let centre = GuiPoint::new((dig.x + dig.w / 2) as f32, (dig.y + dig.h / 2) as f32);
+        controller.pointer(centre, true);
+        assert_eq!(
+            controller.pointer(centre, false),
+            vec![SettingsAction::CaptureBinding(6)],
+            "a click waits for the new key"
+        );
+    }
+
+    #[test]
+    fn arrow_keys_move_across_the_binding_grid_and_enter_waits_for_a_new_key() {
+        let mut controller = keyboard_set();
+        controller.select_controls_page(ControlsPage::Keyboard);
+        let key = |controller: &mut SettingsController, key| {
+            controller.key(key, false, false);
+            controller.view.focus
+        };
+        // Index 1 + n is command n: row n / 3, column n % 3.
+        controller.set_focus(SettingsFocus::Row(5));
+        assert_eq!(key(&mut controller, KeyCode::Right), SettingsFocus::Row(6));
+        assert_eq!(
+            key(&mut controller, KeyCode::Right),
+            SettingsFocus::Row(6),
+            "the right edge holds"
+        );
+        assert_eq!(key(&mut controller, KeyCode::Down), SettingsFocus::Row(9));
+        assert_eq!(key(&mut controller, KeyCode::Left), SettingsFocus::Row(8));
+        assert_eq!(key(&mut controller, KeyCode::Up), SettingsFocus::Row(5));
+        assert_eq!(key(&mut controller, KeyCode::Up), SettingsFocus::Row(2));
+        assert_eq!(
+            key(&mut controller, KeyCode::Up),
+            SettingsFocus::ControlSet(0)
+        );
+        controller.set_focus(SettingsFocus::Row(11));
+        assert_eq!(
+            key(&mut controller, KeyCode::Down),
+            SettingsFocus::ResetCategory,
+            "the bottom row leads to the page's actions"
+        );
+        controller.set_focus(SettingsFocus::Row(8));
+        assert!(controller
+            .input_hint()
+            .starts_with("Enter: press a new key"));
+        assert_eq!(
+            controller.key(KeyCode::Enter, false, false),
+            vec![SettingsAction::CaptureBinding(8)]
+        );
+        controller.settings[8].details.control = Some(ControlBinding {
+            set: ControlSet {
+                device: ControlDevice::Gamepad,
+                index: 0,
+            },
+            command: 7,
+        });
+        assert!(
+            controller
+                .input_hint()
+                .starts_with("Enter: press a new button"),
+            "{}",
+            controller.input_hint()
+        );
+    }
+
+    #[test]
+    fn a_control_set_page_keeps_only_a_reset_for_the_set_and_says_what_it_resets() {
+        let mut controller = keyboard_set();
+        controller.select_controls_page(ControlsPage::Keyboard);
+        let layout = controller.layout();
+        let links: Vec<_> = controller
+            .footer_links(&layout)
+            .into_iter()
+            .map(|(focus, _)| focus)
+            .collect();
+        assert_eq!(links, vec![SettingsFocus::ResetCategory]);
+        assert_eq!(controller.page_reset_label(), "Reset Keyboard 1");
+        controller.set_focus(SettingsFocus::ResetCategory);
+        controller.key(KeyCode::Enter, false, false);
+        assert!(controller
+            .view
+            .message
+            .contains("Keyboard 1 already uses its default keys"));
+        controller.settings[4].value = AdvancedConfigValue::Bool(false);
+        controller.key(KeyCode::Enter, false, false);
+        assert_eq!(
+            controller.confirmation_prompt().as_deref(),
+            Some("Reset 1 key of Keyboard 1 to its default?")
         );
     }
 

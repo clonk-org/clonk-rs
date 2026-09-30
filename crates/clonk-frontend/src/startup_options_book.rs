@@ -558,6 +558,95 @@ impl OptionsBook<'_> {
         }
     }
 
+    /// A command's key cap from the classic control sheets: the cap, pressed
+    /// while it waits for a new key, with the command's glyph inset. The
+    /// glyph is dimmed unless the key is `lit`, as on the sheets
+    /// (`C4StartupOptionsDlg.cpp:216-250`).
+    pub fn command_key(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        command: usize,
+        pressed: bool,
+        lit: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let Some(image) = self.assets.control.as_ref() else {
+            self.field(surface, rect, gamma);
+            return;
+        };
+        let facets = key_button_facets(rect, command, pressed);
+        let dimmed;
+        let glyphs = if lit {
+            image
+        } else {
+            dimmed = retained_modulated_image(image, IDLE_COMMAND_MODULATION);
+            &dimmed
+        };
+        for (source, cell, target) in [
+            (
+                image,
+                control_facets::phase_rect(control_facets::KEY, facets.key_phase),
+                rect,
+            ),
+            (
+                glyphs,
+                control_facets::phase_rect(control_facets::COMMAND, facets.command_phase),
+                facets.command_rect,
+            ),
+        ] {
+            crate::classic_gui::draw_facet_stretch(
+                surface,
+                source,
+                (cell.x as f32, cell.y as f32, cell.w as f32, cell.h as f32),
+                (
+                    target.x as f32,
+                    target.y as f32,
+                    target.w as f32,
+                    target.h as f32,
+                ),
+                gamma,
+            );
+        }
+    }
+
+    /// A key or button name on a small cap inked onto the page, as wide as
+    /// the name within `room`.
+    pub fn key_chip(
+        &self,
+        surface: &mut Surface,
+        font: &ClonkFont,
+        room: IntRect,
+        label: &str,
+        ink: [u8; 4],
+        gamma: Option<&GammaRamp>,
+    ) {
+        let width = (font.measure(label, true).0 + 12).clamp(room.h, room.w);
+        let (right, bottom) = (room.x + width - 1, room.y + room.h - 1);
+        draw_engine_box(surface, room.x, room.y, right, bottom, 0xa0ff_f8e8, gamma);
+        draw_frame_dw(
+            surface,
+            room.x,
+            room.y,
+            right,
+            bottom,
+            PAGE_TAB_RULE_INK,
+            gamma,
+        );
+        crate::classic_gui::draw_clipped_text_with_markup(
+            surface,
+            font,
+            room.x + 6,
+            room.y + (room.h - font.line_height) / 2,
+            label,
+            ink,
+            TextAlign::Left,
+            gamma,
+            IntRect::new(room.x + 2, room.y, width - 4, room.h),
+            false,
+        );
+    }
+
     /// The Sound and Voice chat tab icons: the options book's speaker, and the
     /// chat illustration its voice sheet uses where the icon sheet has it.
     pub fn page_icon(&self, voice: bool) -> ImageData {
