@@ -1137,6 +1137,12 @@ impl SettingsController {
         if self.view.microphone_test_open {
             return self.microphone_pointer(point, down);
         }
+        // A press elsewhere keeps the old key, so the next key pressed cannot
+        // land on a binding the press takes out of view.
+        if down && self.view.capturing.is_some() {
+            self.end_capture();
+            self.view.message = "Binding unchanged".into();
+        }
         if self.view.choice.is_some() {
             return self.choice_pointer(point, down);
         }
@@ -2005,6 +2011,33 @@ mod tests {
         );
         controller.select_controls_page(ControlsPage::General);
         assert_eq!(controller.control_set_caption(), None);
+    }
+
+    #[test]
+    fn a_press_elsewhere_while_a_key_is_awaited_keeps_the_old_key() {
+        let mut controller = keyboard_set();
+        controller.select_controls_page(ControlsPage::Keyboard);
+        controller.begin_capture(1);
+        let layout = controller.layout();
+        let tab = controller
+            .targets(&layout)
+            .into_iter()
+            .find(|(focus, _)| *focus == SettingsFocus::ControlsPage(ControlsPage::Controller))
+            .unwrap()
+            .1;
+        let centre = GuiPoint::new((tab.x + tab.w / 2) as f32, (tab.y + tab.h / 2) as f32);
+        controller.pointer(centre, true);
+        assert_eq!(
+            controller.view.capturing, None,
+            "no key lands on a hidden binding"
+        );
+        assert_eq!(controller.view.message, "Binding unchanged");
+        controller.pointer(centre, false);
+        assert_eq!(
+            controller.controls_page,
+            ControlsPage::Controller,
+            "the press still does what it targets"
+        );
     }
 
     #[test]
