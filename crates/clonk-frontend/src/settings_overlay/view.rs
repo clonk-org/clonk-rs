@@ -73,7 +73,7 @@ pub struct SettingsViewState {
     pub(crate) choice: Option<choices::ChoicePicker>,
     pub(crate) dragging: Option<usize>,
     pub(crate) scroll_drag: Option<i32>,
-    pub(crate) hovered: Option<usize>,
+    pub(crate) hover: Option<SettingsFocus>,
     layout: Option<SettingsLayout>,
 }
 
@@ -100,7 +100,7 @@ impl Default for SettingsViewState {
             choice: None,
             dragging: None,
             scroll_drag: None,
-            hovered: None,
+            hover: None,
             layout: None,
         }
     }
@@ -182,7 +182,18 @@ impl SettingsController {
             layout.footer.h -= 16;
             layout.list.h += 16;
         }
+        if !self.has_page_row() {
+            let row = layout.list.y - (layout.search.y + layout.search.h) - 6;
+            layout.list.y -= row;
+            layout.list.h += row;
+        }
         layout
+    }
+
+    /// Whether the page has a row of tabs or a control-set selector under
+    /// the search field.
+    fn has_page_row(&self) -> bool {
+        self.category == SettingsCategory::Audio || !self.groups().is_empty()
     }
 
     pub fn resize(&mut self, width: i32, height: i32) {
@@ -257,9 +268,26 @@ impl SettingsController {
         }
     }
 
-    pub fn edit_command(&mut self, command: &str, control: bool, shift: bool) {
+    /// A text-editing command for the search field or the value being
+    /// typed; on a focused row, Delete and Backspace reset a changed setting.
+    pub fn edit_command(
+        &mut self,
+        command: &str,
+        control: bool,
+        shift: bool,
+    ) -> Vec<SettingsAction> {
         if self.view.microphone_test_open {
-            return;
+            return Vec::new();
+        }
+        if let (None, SettingsFocus::Row(index)) = (&self.view.edit, self.view.focus) {
+            return if matches!(command, "delete" | "backspace") && self.resettable(index) {
+                vec![SettingsAction::Change(
+                    index,
+                    self.settings[index].default.clone(),
+                )]
+            } else {
+                Vec::new()
+            };
         }
         let edit = if let Some((_, edit)) = self.view.edit.as_mut() {
             Some(edit)
@@ -289,6 +317,7 @@ impl SettingsController {
             self.view.scroll = 0;
             self.view.selected = self.visible_indices().first().copied();
         }
+        Vec::new()
     }
 
     pub fn key(&mut self, key: KeyCode, shift: bool, control: bool) -> Vec<SettingsAction> {
@@ -345,10 +374,18 @@ impl SettingsController {
                     }
                     Err(error) => self.view.message = error,
                 },
-                KeyCode::Left => self.edit_command("left", control, shift),
-                KeyCode::Right => self.edit_command("right", control, shift),
-                KeyCode::Home => self.edit_command("home", control, shift),
-                KeyCode::End => self.edit_command("end", control, shift),
+                KeyCode::Left => {
+                    self.edit_command("left", control, shift);
+                }
+                KeyCode::Right => {
+                    self.edit_command("right", control, shift);
+                }
+                KeyCode::Home => {
+                    self.edit_command("home", control, shift);
+                }
+                KeyCode::End => {
+                    self.edit_command("end", control, shift);
+                }
                 _ => {}
             }
             return Vec::new();
@@ -502,12 +539,13 @@ impl SettingsController {
                 }
             }
             KeyCode::Enter | KeyCode::Space => return self.activate(self.view.focus),
-            KeyCode::Home | KeyCode::End if self.view.focus == SettingsFocus::Search => self
-                .edit_command(
+            KeyCode::Home | KeyCode::End if self.view.focus == SettingsFocus::Search => {
+                self.edit_command(
                     if key == KeyCode::Home { "home" } else { "end" },
                     control,
                     shift,
-                ),
+                );
+            }
             _ => {}
         }
         self.ensure_visible();
@@ -523,19 +561,14 @@ impl SettingsController {
         if !self.groups().is_empty() {
             order.push(SettingsFocus::Group);
         }
-        order.extend([SettingsFocus::Modified, SettingsFocus::Advanced]);
         order.extend(self.visible_indices().into_iter().map(SettingsFocus::Row));
-        order.push(SettingsFocus::Pin);
-        if self.category == SettingsCategory::Quick {
-            order.extend([SettingsFocus::PinUp, SettingsFocus::PinDown]);
-        }
-        order.push(SettingsFocus::Reset);
-        if self.category != SettingsCategory::Quick {
-            order.push(SettingsFocus::ResetCategory);
-        }
-        if self.voice_page_selected() {
-            order.push(SettingsFocus::TestMicrophone);
-        }
+        let layout = self.layout();
+        order.extend(
+            self.row_actions(&layout)
+                .into_iter()
+                .chain(self.footer_links(&layout))
+                .map(|(focus, _)| focus),
+        );
         order.push(SettingsFocus::Close);
         order
     }
@@ -547,7 +580,10 @@ impl SettingsController {
                 RowEmphasis::Focused,
             ),
             (self.view.selected == Some(index), RowEmphasis::Selected),
-            (self.view.hovered == Some(index), RowEmphasis::Hovered),
+            (
+                self.view.hover == Some(SettingsFocus::Row(index)),
+                RowEmphasis::Hovered,
+            ),
         ]
         .into_iter()
         .find_map(|(applies, emphasis)| applies.then_some(emphasis))
@@ -587,10 +623,14 @@ impl SettingsController {
             SettingsFocus::AudioPage(_) | SettingsFocus::Group => "Left/Right: switch",
             _ => "Tab: next",
         };
+        let reset = match self.view.focus {
+            SettingsFocus::Row(index) if self.resettable(index) => " · Del: reset",
+            _ => "",
+        };
         if action.is_empty() {
             "Esc: close".into()
         } else {
-            format!("{action} · Esc: close")
+            format!("{action}{reset} · Esc: close")
         }
     }
 
@@ -910,10 +950,11 @@ impl SettingsController {
 
     pub fn pointer_move(&mut self, point: GuiPoint) -> Vec<SettingsAction> {
         let layout = self.layout();
-        self.view.hovered = self.visible_indices().into_iter().find(|index| {
-            self.row_rect(&layout, *index)
-                .is_some_and(|row| contains(row, point))
-        });
+        self.view.hover = self
+            .targets(&layout)
+            .into_iter()
+            .find(|(_, rect)| contains(*rect, point))
+            .map(|(focus, _)| focus);
         if let Some(offset) = self.view.scroll_drag {
             if let Some((track, thumb)) = self.scrollbar() {
                 let maximum = self
@@ -982,47 +1023,13 @@ impl SettingsController {
     }
 
     fn targets(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
-        let audio = self.category == SettingsCategory::Audio;
-        let grouped = !self.groups().is_empty();
-        let (sound_w, voice_w) = if self.page_tab_icons(layout) {
-            (100, 132)
-        } else {
-            (72, 108)
-        };
-        let lead = if audio {
-            sound_w + voice_w + 14
-        } else if grouped {
-            200
-        } else {
-            0
-        };
-        let filters_x = layout.list.x + lead;
-        let mut targets = vec![
-            (SettingsFocus::Search, layout.search),
-            (
-                SettingsFocus::Modified,
-                IntRect::new(
-                    filters_x,
-                    layout.search.y + 32,
-                    if audio || grouped { 98 } else { 122 },
-                    20,
-                ),
-            ),
-            (
-                SettingsFocus::Advanced,
-                IntRect::new(
-                    filters_x + if audio || grouped { 104 } else { 130 },
-                    layout.search.y + 32,
-                    if audio || grouped {
-                        layout.list.w - lead - 104
-                    } else {
-                        122
-                    },
-                    20,
-                ),
-            ),
-        ];
-        if audio {
+        let mut targets = vec![(SettingsFocus::Search, layout.search)];
+        if self.category == SettingsCategory::Audio {
+            let (sound_w, voice_w) = if self.page_tab_icons(layout) {
+                (100, 132)
+            } else {
+                (72, 108)
+            };
             targets.extend([
                 (
                     SettingsFocus::AudioPage(AudioPage::Sound),
@@ -1039,7 +1046,7 @@ impl SettingsController {
                 ),
             ]);
         }
-        if grouped {
+        if !self.groups().is_empty() {
             targets.push((
                 SettingsFocus::Group,
                 IntRect::new(layout.list.x, layout.search.y + 30, 190, 26),
@@ -1051,37 +1058,99 @@ impl SettingsController {
                 .enumerate()
                 .map(|(i, c)| (SettingsFocus::Category(c), layout.tabs[i])),
         );
+        // The selected row's actions sit inside it, so they take the pointer
+        // before the row does.
+        targets.extend(self.row_actions(layout));
         targets.extend(
             self.visible_indices()
                 .into_iter()
                 .filter_map(|i| self.row_rect(layout, i).map(|r| (SettingsFocus::Row(i), r))),
         );
-        let x = layout.footer.x;
-        let y = layout.footer.y + if audio { 52 } else { 42 };
-        targets.push((SettingsFocus::Pin, IntRect::new(x, y, 58, 26)));
-        if self.category == SettingsCategory::Quick {
-            targets.extend([
-                (SettingsFocus::PinUp, IntRect::new(x + 64, y, 32, 26)),
-                (SettingsFocus::PinDown, IntRect::new(x + 102, y, 48, 26)),
-                (SettingsFocus::Reset, IntRect::new(x + 156, y, 98, 26)),
-            ]);
-        } else {
-            targets.extend([
-                (SettingsFocus::Reset, IntRect::new(x + 64, y, 94, 26)),
-                (
-                    SettingsFocus::ResetCategory,
-                    IntRect::new(x + 164, y, 94, 26),
-                ),
-            ]);
-        }
-        if self.voice_page_selected() {
-            targets.push((
-                SettingsFocus::TestMicrophone,
-                IntRect::new(x + layout.footer.w - 148, y, 148, 26),
-            ));
-        }
+        targets.extend(self.footer_links(layout));
         targets.push((SettingsFocus::Close, layout.back));
         targets
+    }
+
+    /// The star that pins the selected row to Quick, and the reset link a
+    /// changed row offers, placed just left of the row's value.
+    pub(crate) fn row_actions(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
+        let Some((index, row)) = self
+            .view
+            .selected
+            .and_then(|index| self.row_rect(layout, index).map(|row| (index, row)))
+        else {
+            return Vec::new();
+        };
+        let star = star_rect(row);
+        let mut actions = vec![(SettingsFocus::Pin, star)];
+        if self.resettable(index) {
+            actions.push((
+                SettingsFocus::Reset,
+                IntRect::new(star.x - 54, row.y + 3, 48, row.h - 6),
+            ));
+        }
+        actions
+    }
+
+    fn resettable(&self, index: usize) -> bool {
+        self.settings.get(index).is_some_and(|setting| {
+            setting.is_modified()
+                && setting.value.is_editable()
+                && setting.details.unavailable.is_none()
+                && setting.details.policy != ApplyPolicy::ReadOnly
+        })
+    }
+
+    /// Page-wide actions, inked along the footer: the view filters and
+    /// Reset page (Quick orders its pins instead), plus the voice page's
+    /// microphone test at the right.
+    pub(crate) fn footer_links(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
+        let compact = layout.footer.w < 480;
+        let y = layout.footer.y
+            + if self.category == SettingsCategory::Audio {
+                52
+            } else {
+                42
+            };
+        let specs = if self.category == SettingsCategory::Quick {
+            vec![(SettingsFocus::PinUp, 64), (SettingsFocus::PinDown, 80)]
+        } else {
+            vec![
+                (SettingsFocus::Advanced, if compact { 112 } else { 150 }),
+                (SettingsFocus::Modified, if compact { 84 } else { 116 }),
+                (SettingsFocus::ResetCategory, if compact { 80 } else { 92 }),
+            ]
+        };
+        let mut x = layout.footer.x;
+        let mut links: Vec<_> = specs
+            .into_iter()
+            .map(|(focus, width)| {
+                let rect = IntRect::new(x, y, width, 26);
+                x += width + 10;
+                (focus, rect)
+            })
+            .collect();
+        if self.voice_page_selected() {
+            let width = if compact { 72 } else { 128 };
+            links.push((
+                SettingsFocus::TestMicrophone,
+                IntRect::new(layout.footer.x + layout.footer.w - width, y, width, 26),
+            ));
+        }
+        links
+    }
+
+    /// Advanced settings the current page would add when shown.
+    pub fn advanced_count(&self) -> usize {
+        self.settings
+            .iter()
+            .filter(|setting| {
+                setting.advanced
+                    && setting.category == self.category
+                    && (self.category != SettingsCategory::Audio
+                        || self.audio_page.contains(setting))
+            })
+            .count()
     }
 }
 
@@ -1141,6 +1210,11 @@ pub(crate) fn detail_text(setting: &Setting) -> String {
             setting.details.policy.label()
         )
     })
+}
+
+/// Where a row's star sits: just left of its value.
+pub(crate) fn star_rect(row: IntRect) -> IntRect {
+    IntRect::new(row.x + row.w - 174 - 28, row.y + (row.h - 20) / 2, 20, 20)
 }
 
 fn value_rect(row: IntRect) -> IntRect {
@@ -1339,7 +1413,55 @@ mod tests {
     }
 
     #[test]
-    fn audio_page_tabs_hold_an_icon_where_the_page_has_room_and_never_crowd_the_filters() {
+    fn delete_resets_the_focused_setting_that_differs_from_its_default() {
+        let percent = |value| AdvancedConfigValue::Integer {
+            value,
+            min: 0,
+            max: 100,
+        };
+        let mut volume = preference("Volume", percent(50));
+        volume.value = percent(80);
+        let mut controller = SettingsController::new(vec![
+            volume,
+            preference("ShowClock", AdvancedConfigValue::Bool(true)),
+        ]);
+        controller.select_category(SettingsCategory::Display);
+        controller.set_focus(SettingsFocus::Row(0));
+        assert_eq!(
+            controller.edit_command("delete", false, false),
+            vec![SettingsAction::Change(0, percent(50))]
+        );
+        controller.set_focus(SettingsFocus::Row(1));
+        assert!(controller
+            .edit_command("backspace", false, false)
+            .is_empty());
+    }
+
+    #[test]
+    fn the_header_holds_only_search_and_page_tabs_and_filters_join_the_footer() {
+        for category in [SettingsCategory::Interface, SettingsCategory::Audio] {
+            let mut controller = SettingsController::new(Vec::new());
+            controller.select_category(category);
+            let layout = controller.layout();
+            let targets = controller.targets(&layout);
+            for filter in [SettingsFocus::Modified, SettingsFocus::Advanced] {
+                let (_, rect) = targets.iter().find(|(focus, _)| *focus == filter).unwrap();
+                assert!(
+                    rect.y >= layout.footer.y,
+                    "{category:?} {filter:?} in the footer"
+                );
+            }
+            let below_search = layout.list.y - (layout.search.y + layout.search.h);
+            if category == SettingsCategory::Audio {
+                assert!(below_search >= 28, "the Audio tabs keep their row");
+            } else {
+                assert!(below_search < 12, "no empty row between search and list");
+            }
+        }
+    }
+
+    #[test]
+    fn audio_page_tabs_hold_an_icon_where_the_page_has_room() {
         for (width, height, icons) in [(640, 480, false), (1280, 720, true)] {
             let mut controller = SettingsController::new(Vec::new());
             controller.resize(width, height);
@@ -1354,12 +1476,9 @@ mod tests {
             let rect = |focus| targets.iter().find(|(f, _)| *f == focus).unwrap().1;
             let sound = rect(SettingsFocus::AudioPage(AudioPage::Sound));
             let voice = rect(SettingsFocus::AudioPage(AudioPage::Voice));
-            let changed = rect(SettingsFocus::Modified);
-            let advanced = rect(SettingsFocus::Advanced);
             assert!(voice.w >= if icons { 132 } else { 108 }, "{width}x{height}");
             assert!(sound.x + sound.w < voice.x);
-            assert!(voice.x + voice.w < changed.x);
-            assert!(advanced.w >= 96 && advanced.x + advanced.w <= layout.list.x + layout.list.w);
+            assert!(voice.x + voice.w <= layout.list.x + layout.list.w);
         }
     }
 
@@ -1492,7 +1611,10 @@ mod tests {
         controller.set_focus(SettingsFocus::Row(0));
         controller.key(KeyCode::Down, false, false);
         assert_eq!(controller.view.focus, SettingsFocus::Pin);
-        for _ in 0..3 {
+        for _ in 0..8 {
+            if controller.view.focus == SettingsFocus::TestMicrophone {
+                break;
+            }
             controller.key(KeyCode::Down, false, false);
         }
         assert_eq!(controller.view.focus, SettingsFocus::TestMicrophone);
@@ -1659,6 +1781,12 @@ mod tests {
                 }
             )]
         );
+        // Reset is offered once the row differs from its default.
+        controller.settings[0].value = AdvancedConfigValue::Integer {
+            value: 75,
+            min: 0,
+            max: 100,
+        };
         let mut visited = Vec::new();
         for _ in 0..30 {
             controller.key(KeyCode::Tab, false, false);

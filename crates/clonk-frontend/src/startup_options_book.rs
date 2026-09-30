@@ -5,6 +5,11 @@ use crate::classic_gui::{draw_engine_box, ClassicButtonState};
 
 /// Dark brown ink for the chosen sub-page tab and its focus underline.
 const PAGE_TAB_INK: u32 = 0x0061_4a32;
+/// Ink for the page's link text: a shade darker than [`PAGE_TAB_INK`] so
+/// the book font's thin strokes stay legible.
+const PAGE_TAB_INK_RGBA: [u8; 4] = [0x4e, 0x3a, 0x26, 255];
+/// Gold of a pinned setting's star.
+const STAR_GOLD: u32 = 0x00e0_b030;
 /// Medium ink for the other tabs and the rule they stand on, darker than the
 /// group-box ink so the strip holds its shape against the parchment.
 const PAGE_TAB_RULE_INK: u32 = 0x0080_6a50;
@@ -265,6 +270,148 @@ impl OptionsBook<'_> {
                     end,
                     y + row,
                     PAGE_TAB_RULE_INK,
+                    gamma,
+                );
+            }
+        }
+    }
+
+    /// Book-font text in the page's ink, underlined while it has focus or the
+    /// pointer: the page's actions read as annotations, not GUI buttons.
+    pub fn ink_link(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        label: &str,
+        emphasized: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let font = &self.fonts.book_small;
+        let width = font.measure(label, true).0;
+        let (x, y) = (rect.x + 2, rect.y + (rect.h - font.line_height) / 2);
+        font.draw_with_gamma(
+            surface,
+            x,
+            y,
+            label,
+            PAGE_TAB_INK_RGBA,
+            TextAlign::Left,
+            true,
+            gamma,
+        );
+        if emphasized {
+            let underline = y + font.line_height - 1;
+            draw_line_dw(
+                surface,
+                x,
+                underline,
+                x + width,
+                underline,
+                PAGE_TAB_INK,
+                gamma,
+            );
+        }
+    }
+
+    /// A check box inked onto the page, ticked when on, with its label.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ink_toggle(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        label: &str,
+        checked: bool,
+        emphasized: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        const SIZE: i32 = 12;
+        let (x, y) = (rect.x + 2, rect.y + (rect.h - SIZE) / 2);
+        for inset in 0..2 {
+            draw_frame_dw(
+                surface,
+                x + inset,
+                y + inset,
+                x + SIZE - 1 - inset,
+                y + SIZE - 1 - inset,
+                PAGE_TAB_INK,
+                gamma,
+            );
+        }
+        if checked {
+            for stroke in 0..2 {
+                draw_line_dw(
+                    surface,
+                    x + 3,
+                    y + 5 + stroke,
+                    x + 5,
+                    y + 8 + stroke,
+                    PAGE_TAB_INK,
+                    gamma,
+                );
+                draw_line_dw(
+                    surface,
+                    x + 5,
+                    y + 8 + stroke,
+                    x + 9,
+                    y + 2 + stroke,
+                    PAGE_TAB_INK,
+                    gamma,
+                );
+            }
+        }
+        self.ink_link(
+            surface,
+            IntRect::new(rect.x + SIZE + 6, rect.y, rect.w - SIZE - 6, rect.h),
+            label,
+            emphasized,
+            gamma,
+        );
+    }
+
+    /// A five-pointed star inked into `rect`: gold for a setting pinned to
+    /// Quick, an outline for one that is not.
+    pub fn ink_star(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        filled: bool,
+        emphasized: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let (cx, cy) = (
+            rect.x as f32 + rect.w as f32 / 2.0,
+            rect.y as f32 + rect.h as f32 / 2.0 + 1.0,
+        );
+        let outer = rect.w.min(rect.h) as f32 / 2.0;
+        let points: Vec<(i32, i32)> = (0..10)
+            .map(|point| {
+                let radius = if point % 2 == 0 { outer } else { outer * 0.45 };
+                let angle =
+                    -std::f32::consts::FRAC_PI_2 + point as f32 * std::f32::consts::PI / 5.0;
+                (
+                    (cx + radius * angle.cos()).round() as i32,
+                    (cy + radius * angle.sin()).round() as i32,
+                )
+            })
+            .collect();
+        let edges = || (0..10).map(|point| (points[point], points[(point + 1) % 10]));
+        // Pinned stars are gold; the others are pale so they read as hollow on
+        // a highlighted row.
+        let center = (cx.round() as i32, cy.round() as i32);
+        let fill = if filled { STAR_GOLD } else { 0x70ff_f8e8 };
+        for (from, to) in edges() {
+            fill_quad_dw(surface, &[center, from, to, to], fill, gamma);
+        }
+        for (from, to) in edges() {
+            draw_line_dw(surface, from.0, from.1, to.0, to.1, PAGE_TAB_INK, gamma);
+            if emphasized {
+                draw_line_dw(
+                    surface,
+                    from.0 + 1,
+                    from.1,
+                    to.0 + 1,
+                    to.1,
+                    PAGE_TAB_INK,
                     gamma,
                 );
             }

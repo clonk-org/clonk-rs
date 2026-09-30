@@ -144,46 +144,44 @@ impl SettingsController {
                 );
                 continue;
             }
-            if matches!(focus, SettingsFocus::Modified | SettingsFocus::Advanced) {
-                let (label, checked) = if focus == SettingsFocus::Modified {
-                    ("Changed", self.modified_only)
-                } else {
-                    ("Advanced", self.show_advanced)
-                };
-                book.checkbox(surface, rect, label, checked, highlighted, gamma);
-                continue;
-            }
-            let label = match focus {
-                SettingsFocus::Pin => {
-                    if self
-                        .view
-                        .selected
-                        .and_then(|i| self.settings.get(i))
-                        .is_some_and(|s| self.pinned.contains(&s.id))
-                    {
-                        "Unpin"
-                    } else {
-                        "Pin"
-                    }
+            let emphasized = highlighted || self.view.hover == Some(focus);
+            let compact = layout.footer.w < 480;
+            match focus {
+                SettingsFocus::Modified => book.ink_toggle(
+                    surface,
+                    rect,
+                    if compact { "Changed" } else { "Only changed" },
+                    self.modified_only,
+                    emphasized,
+                    gamma,
+                ),
+                SettingsFocus::Advanced => book.ink_toggle(
+                    surface,
+                    rect,
+                    &format!(
+                        "{} ({})",
+                        if compact { "Advanced" } else { "Show advanced" },
+                        self.advanced_count()
+                    ),
+                    self.show_advanced,
+                    emphasized,
+                    gamma,
+                ),
+                // Drawn on their row, above the row's highlight.
+                SettingsFocus::Pin | SettingsFocus::Reset => {}
+                _ => {
+                    let label = match focus {
+                        SettingsFocus::PinUp => "Move up",
+                        SettingsFocus::PinDown => "Move down",
+                        SettingsFocus::ResetCategory => "Reset page",
+                        SettingsFocus::TestMicrophone if compact => "Test mic",
+                        SettingsFocus::TestMicrophone => "Test microphone",
+                        SettingsFocus::RefreshDevices => "Refresh devices",
+                        _ => "",
+                    };
+                    book.ink_link(surface, rect, label, emphasized, gamma);
                 }
-                SettingsFocus::PinUp => "Up",
-                SettingsFocus::PinDown => "Down",
-                SettingsFocus::Reset => "Reset value",
-                SettingsFocus::ResetCategory => "Reset page",
-                SettingsFocus::TestMicrophone => "Test microphone",
-                SettingsFocus::RefreshDevices => "Refresh devices",
-                _ => "",
-            };
-            book.button(
-                surface,
-                rect,
-                label,
-                ClassicButtonState {
-                    pressed: self.view.pressed == Some(focus),
-                    highlighted,
-                },
-                gamma,
-            );
+            }
         }
         self.render_input_hint(surface, &layout, small_font, gamma);
         let visible = self.visible_indices();
@@ -226,20 +224,22 @@ impl SettingsController {
             if let AdvancedConfigValue::Bool(checked) = setting.value {
                 let checkbox = IntRect::new(rect.x, rect.y + 4, rect.w, 20);
                 book.checkbox(surface, checkbox, "", checked, focused, gamma);
+                let end = self.label_end(index, rect, rect.x + rect.w);
                 text(
                     surface,
                     body_font,
-                    IntRect::new(rect.x + 24, rect.y + 2, rect.w - 24, 28),
+                    IntRect::new(rect.x + 24, rect.y + 2, (end - rect.x - 24).max(1), 28),
                     &setting.label,
                     color,
                     gamma,
                 );
                 continue;
             }
+            let end = self.label_end(index, rect, rect.x + rect.w - 182);
             text(
                 surface,
                 body_font,
-                IntRect::new(rect.x, rect.y + 2, (rect.w - 182).max(1), 28),
+                IntRect::new(rect.x, rect.y + 2, (end - rect.x).max(1), 28),
                 &setting.label,
                 color,
                 gamma,
@@ -294,6 +294,7 @@ impl SettingsController {
                 text(surface, body_font, value_rect, &label, color, gamma);
             }
         }
+        self.render_row_actions(surface, &book, &layout, gamma);
         if let Some((track, thumb)) = self.scrollbar() {
             book.field(surface, track, gamma);
             box_color(surface, thumb, 0x0094846a, gamma);
@@ -436,6 +437,61 @@ impl SettingsController {
 }
 
 impl SettingsController {
+    /// Where a row's label must stop: short of its star and reset link when
+    /// it shows them, otherwise at `plain`.
+    fn label_end(&self, index: usize, row: IntRect, plain: i32) -> i32 {
+        let star = star_rect(row).x;
+        let pinned = self
+            .settings
+            .get(index)
+            .is_some_and(|setting| self.pinned.contains(&setting.id));
+        match (self.view.selected == Some(index), pinned) {
+            (true, _) if self.resettable(index) => star - 58,
+            (true, _) | (_, true) => star - 4,
+            _ => plain,
+        }
+    }
+
+    /// Stars on pinned rows, and the selected row's pin toggle and reset link.
+    fn render_row_actions(
+        &self,
+        surface: &mut Surface,
+        book: &OptionsBook,
+        layout: &SettingsLayout,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let emphasized = |focus| self.view.focus == focus || self.view.hover == Some(focus);
+        for index in self.visible_indices() {
+            let Some(row) = self.row_rect(layout, index) else {
+                continue;
+            };
+            let pinned = self
+                .settings
+                .get(index)
+                .is_some_and(|setting| self.pinned.contains(&setting.id));
+            let selected = self.view.selected == Some(index);
+            // Every Quick row is pinned, so only its toggle is drawn there.
+            let marked = pinned && self.category != SettingsCategory::Quick;
+            if marked || selected {
+                let focused = selected && emphasized(SettingsFocus::Pin);
+                book.ink_star(surface, star_rect(row), pinned, focused, gamma);
+            }
+        }
+        if let Some((_, rect)) = self
+            .row_actions(layout)
+            .into_iter()
+            .find(|(focus, _)| *focus == SettingsFocus::Reset)
+        {
+            book.ink_link(
+                surface,
+                rect,
+                "Reset",
+                emphasized(SettingsFocus::Reset),
+                gamma,
+            );
+        }
+    }
+
     /// The rule the Audio page's tabs stand on, open under the chosen tab
     /// unless a search has replaced the page.
     fn render_page_tab_rule(
@@ -478,28 +534,18 @@ impl SettingsController {
         font: &ClonkFont,
         gamma: Option<&GammaRamp>,
     ) {
-        let targets = self.targets(layout);
-        let footer_buttons = || {
-            targets.iter().filter(|(focus, _)| {
-                matches!(
-                    focus,
-                    SettingsFocus::Pin
-                        | SettingsFocus::PinUp
-                        | SettingsFocus::PinDown
-                        | SettingsFocus::Reset
-                        | SettingsFocus::ResetCategory
-                )
-            })
-        };
-        let Some(row) = footer_buttons().map(|(_, rect)| *rect).next() else {
+        let links = self.footer_links(layout);
+        let Some(row) = links.first().map(|(_, rect)| *rect) else {
             return;
         };
-        let left = footer_buttons()
+        let left = links
+            .iter()
+            .filter(|(focus, _)| *focus != SettingsFocus::TestMicrophone)
             .map(|(_, rect)| rect.x + rect.w)
             .max()
             .unwrap_or(row.x)
             + 12;
-        let right = targets
+        let right = links
             .iter()
             .find(|(focus, _)| *focus == SettingsFocus::TestMicrophone)
             .map_or(layout.footer.x + layout.footer.w, |(_, rect)| rect.x - 12);

@@ -67,7 +67,7 @@ impl GameApp {
             return Ok(true);
         }
         if key == VirtualKeyCode::Backspace || key == VirtualKeyCode::Delete {
-            settings.controller.edit_command(
+            let actions = settings.controller.edit_command(
                 if key == VirtualKeyCode::Backspace {
                     "backspace"
                 } else {
@@ -76,6 +76,7 @@ impl GameApp {
                 command,
                 modifiers.shift_key(),
             );
+            self.process_unified_settings_actions(actions)?;
         } else if command && key == VirtualKeyCode::KeyA {
             settings.controller.edit_command("all", false, false);
         } else if command && key == VirtualKeyCode::KeyF {
