@@ -7,6 +7,9 @@ pub use crate::startup_options_controls::ControlDevice;
 mod view;
 pub use view::{SettingsAction, SettingsFocus, SettingsLayout};
 
+/// What a binding with no key or button assigned shows.
+pub const NOT_BOUND: &str = "Not bound";
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SettingId {
     pub section: String,

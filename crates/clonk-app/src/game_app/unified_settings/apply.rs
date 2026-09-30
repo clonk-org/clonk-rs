@@ -1,5 +1,5 @@
 use super::*;
-use clonk_frontend::settings_overlay::ApplyPolicy;
+use clonk_frontend::settings_overlay::{ApplyPolicy, NOT_BOUND};
 use clonk_frontend::startup_options_advanced::{AdvancedConfigChange, AdvancedConfigValue};
 
 impl GameApp {
@@ -287,7 +287,7 @@ impl GameApp {
 }
 
 /// A binding as players read it: the key or button name, with a lone symbol
-/// key spelled out beside its glyph, or "Not bound".
+/// key spelled out beside its glyph, or [`NOT_BOUND`].
 fn binding_label(raw: &str, gamepad: bool) -> String {
     raw.parse::<i32>()
         .ok()
@@ -301,7 +301,7 @@ fn binding_label(raw: &str, gamepad: bool) -> String {
             }
         })
         .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| "Not bound".into())
+        .unwrap_or_else(|| NOT_BOUND.into())
 }
 
 fn readable_key_label(key: VirtualKeyCode) -> String {
