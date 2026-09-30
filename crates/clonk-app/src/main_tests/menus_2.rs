@@ -1178,6 +1178,8 @@ fn player_menu_title_close_routes_submenu_back_and_main_closed() {
     // Every C4MainMenu::OnClosed queues one synchronized ClearPressed
     // (C4GuiDialogs.cpp:386-425; C4MainMenu.cpp:313-329).
     let mut app = new_classic_running_sandbox_app();
+    // This test pins the native options UI retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
     app.netplay.manager = Some(manager);
     let tick = app.local_control_submission_tick();

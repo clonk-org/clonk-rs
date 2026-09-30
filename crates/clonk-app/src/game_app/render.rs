@@ -2004,7 +2004,9 @@ impl GameApp {
                         .graphics
                         .surface()
                         .is_gpu_scene_capture_active()
-                    && (self.voice_setup_is_modal()
+                    && (self.unified_settings.is_some()
+                        || self.settings_launcher().is_some()
+                        || self.voice_setup_is_modal()
                         || self.voice_setup_launcher().is_some()
                         || fade_was_active
                         || self.startup.player_properties_dialog.is_some()
@@ -2214,6 +2216,9 @@ impl GameApp {
             if !self.dialogs.messages.is_empty() {
                 self.next_pending_native_overlay();
             }
+            if self.render_unified_settings(Some(gamma)) {
+                self.next_pending_native_overlay();
+            }
             if self.draw_classic_gui_cursor(Some(gamma)) {
                 self.next_pending_native_overlay();
             }
@@ -2263,6 +2268,7 @@ impl GameApp {
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
             self.render_message_dialogs(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
+            self.render_unified_settings(Some(gamma));
             self.draw_classic_gui_cursor(Some(gamma));
             self.render_league_signup_tooltip(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
@@ -2305,6 +2311,7 @@ impl GameApp {
         }
         self.render_loading_league_signup_dialog(&mut surface, gamma)?;
         self.render_loading_message_dialogs(&mut surface, gamma)?;
+        self.render_unified_settings_to_surface(&mut surface, Some(gamma));
         self.draw_classic_gui_cursor_to_surface(&mut surface, Some(gamma));
         self.render_loading_league_signup_tooltip(&mut surface, gamma)?;
         self.render_loading_message_dialog_tooltip(&mut surface, gamma)?;

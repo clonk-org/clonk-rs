@@ -153,6 +153,7 @@ impl GameApp {
     }
 
     pub(crate) fn update_voice_chat_at(&mut self, now: Instant) {
+        self.update_unified_settings(now);
         self.update_voice_setup();
         self.service_voice_media_at(now);
         self.show_lobby_speakers(now);

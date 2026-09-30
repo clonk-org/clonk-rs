@@ -213,6 +213,10 @@ impl AudioOptions {
         options
     }
 
+    pub(crate) fn update_preferences(&mut self, changes: &Config) {
+        self.apply_config(changes);
+    }
+
     fn apply_config(&mut self, config: &Config) {
         if let Some(raw) = config.get_in(Some("Sound"), "Sound") {
             if let Some(parsed) = parse_bool(raw) {
@@ -1279,6 +1283,7 @@ mod tests {
             position: None,
             dirty: true,
             first_run: false,
+            preview_original: None,
         };
         options.write_config(&mut cfg);
         assert_eq!(cfg.get_in(Some("Graphics"), "ResolutionX"), Some("1371"));
@@ -1346,6 +1351,7 @@ pub struct DisplayOptions {
     pub position: Option<(i32, i32)>,
     dirty: bool,
     first_run: bool,
+    preview_original: Option<Box<DisplayOptions>>,
 }
 
 impl Default for DisplayOptions {
@@ -1361,11 +1367,26 @@ impl Default for DisplayOptions {
             position: None,
             dirty: false,
             first_run: false,
+            preview_original: None,
         }
     }
 }
 
 impl DisplayOptions {
+    pub(crate) fn begin_settings_preview(&mut self) {
+        if self.preview_original.is_none() {
+            self.preview_original = Some(Box::new(self.clone()));
+        }
+    }
+
+    pub(crate) fn finish_settings_preview(&mut self, keep: bool) {
+        if let Some(original) = self.preview_original.take() {
+            if !keep {
+                *self = *original;
+            }
+        }
+    }
+
     pub fn load(paths: Option<&AppPaths>) -> Self {
         let mut options = Self::default();
         let Some(paths) = paths else {
@@ -1538,7 +1559,7 @@ impl DisplayOptions {
     }
 
     pub fn persist_if_dirty(&mut self, paths: &AppPaths) {
-        if !self.dirty {
+        if !self.dirty || self.preview_original.is_some() {
             return;
         }
         let config_path = paths.config_file();

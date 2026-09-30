@@ -9427,6 +9427,8 @@ fn ingame_display_toggles_wait_for_shutdown_and_reopen_the_same_selection() {
     // these five persisted keys here; the remaining toggles belong to other
     // save-site audits and must not be written as a side effect.
     let mut app = new_state_only_lightweight_running_sandbox_app();
+    // This test pins the native options UI retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let user_data = tempdir();
     let repository = test_repository_root();
     let (_guard, paths) = guarded_test_app_paths(Some(repository), user_data.path());

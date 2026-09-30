@@ -4935,3 +4935,4 @@ include!("main_tests/presentation_profile.rs");
 include!("main_tests/scenario_frame_profile.rs");
 
 include_main_test_fragment!("app-test-shard-10", "main_tests/voice_setup.rs");
+include_main_test_fragment!("app-test-shard-10", "main_tests/unified_settings.rs");

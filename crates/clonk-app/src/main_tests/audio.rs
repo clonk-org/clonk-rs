@@ -4240,6 +4240,8 @@ fn ingame_options_sound_and_music_toggles_persist_to_config_file() {
     // isolated config writes; this state-only running fixture needs no
     // installed resources or user-data discovery.
     let mut app = new_state_only_lightweight_running_sandbox_app();
+    // This test pins the native submenu retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     {
         let mut audio = app.test_audio_mut();
         audio.options.sound_enabled = true;

@@ -48,6 +48,11 @@ impl GameApp {
     /// accepts text. An always-on IME can consume physical gameplay keys;
     /// disabling it everywhere loses dead-key and composed text on macOS.
     pub(crate) fn platform_ime_allowed(&self) -> bool {
+        if let Some(settings) = self.unified_settings.as_ref() {
+            return self.window_active
+                && settings.binding.is_none()
+                && settings.controller.editing();
+        }
         if !self.window_active
             || self.startup_network_transition_blocks_input()
             || (!self.dialogs.messages.is_empty() && !self.running_chat_active())
@@ -75,7 +80,13 @@ impl GameApp {
     }
 
     pub(crate) fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
-        if self.voice_setup_is_modal() {
+        if let Some(settings) = self.unified_settings.as_mut() {
+            if !character.is_control() {
+                settings.controller.text(character.encode_utf8(&mut [0; 4]));
+            }
+            return Ok(());
+        }
+        if self.unified_settings.is_some() || self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -307,7 +318,15 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
-        if self.voice_setup_is_modal() {
+        if let Some(settings) = self.unified_settings.as_mut() {
+            let delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
+            };
+            settings.controller.scroll((-delta * 3.0).round() as i32);
+            return Ok(());
+        }
+        if self.unified_settings.is_some() || self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -1776,7 +1795,8 @@ impl GameApp {
     }
 
     pub(crate) fn runtime_gui_has_keyboard_focus(&self) -> bool {
-        self.voice_setup_is_modal()
+        self.unified_settings.is_some()
+            || self.voice_setup_is_modal()
             || self.mode == AppMode::Running
                 && (self.running_shared_gui_has_keyboard_focus()
                     || self.game_over_dialog_is_active())
@@ -3858,6 +3878,9 @@ impl GameApp {
         // `C4Player::InCom`.
         self.input_routing.engine_key_repeated =
             self.input_routing.note_physical_engine_key(key, state);
+        if self.unified_settings_key(key, state)? {
+            return Ok(());
+        }
         if self.voice_setup_key(key, state)? || self.handle_voice_key(key, state) {
             self.input_routing.key_event_suppresses_text = true;
             return Ok(());
@@ -5526,7 +5549,7 @@ impl GameApp {
             if let Some(dialog) = self.dialogs.client_list.as_mut() {
                 dialog.note_non_pointer_input();
             }
-            if self.startup_network_transition_blocks_input() {
+            if self.unified_settings.is_none() && self.startup_network_transition_blocks_input() {
                 return Ok(());
             }
         }
@@ -5563,6 +5586,10 @@ impl GameApp {
                 cluster_events.push(events.next().expect("peeked cluster event").event);
             }
 
+            if self.unified_settings.is_some() {
+                self.unified_settings_gamepad_cluster(&cluster_events)?;
+                continue;
+            }
             let game_over_active = self.game_over_dialog_is_active();
             let screen_gamepad_open = gamepad_gui_control && gamepad == 0;
             let options_input_scope =
@@ -6313,6 +6340,9 @@ impl GameApp {
         event: GamepadEvent,
         axis_alias: bool,
     ) -> Result<(), EngineError> {
+        if self.unified_settings.is_some() {
+            return self.unified_settings_gamepad_cluster(&[event]);
+        }
         if self.voice_setup_is_modal() {
             return self.voice_setup_gamepad(event);
         }
@@ -7367,7 +7397,15 @@ impl GameApp {
         let raw_point = gui_point_from_position(position);
         let point = GuiPoint::new(raw_point.x.ceil(), raw_point.y.ceil());
         self.input_routing.live.window_pointer = Some(point);
-        if self.voice_setup_is_modal() {
+        if let Some(settings) = self.unified_settings.as_mut() {
+            let actions = settings.controller.pointer_move(point);
+            self.process_unified_settings_actions(actions)?;
+            self.input_routing.live.pointer_inside_window = true;
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
+
+        if self.unified_settings.is_some() || self.voice_setup_is_modal() {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -8027,18 +8065,19 @@ impl GameApp {
     }
 
     pub(crate) fn classic_gui_cursor_request(&self) -> Option<(GuiPoint, bool)> {
-        let gui_owned = match self.mode {
-            AppMode::Menu => true,
-            AppMode::Loading => {
-                self.lobby
-                    .start_wait
-                    .as_ref()
-                    .is_some_and(|wait| wait.visible)
-                    || self.dialogs.league_signup.is_some()
-                    || !self.dialogs.messages.is_empty()
-            }
-            AppMode::Running => self.input_routing.live.gui_mouse_owned,
-        };
+        let gui_owned = self.unified_settings.is_some()
+            || match self.mode {
+                AppMode::Menu => true,
+                AppMode::Loading => {
+                    self.lobby
+                        .start_wait
+                        .as_ref()
+                        .is_some_and(|wait| wait.visible)
+                        || self.dialogs.league_signup.is_some()
+                        || !self.dialogs.messages.is_empty()
+                }
+                AppMode::Running => self.input_routing.live.gui_mouse_owned,
+            };
         let position =
             (gui_owned && self.window_active && self.input_routing.live.pointer_inside_window)
                 .then_some(self.input_routing.live.window_pointer)
@@ -9483,7 +9522,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        if self.voice_setup_is_modal() {
+        if self.unified_settings.is_some() || self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -9783,7 +9822,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        if self.voice_setup_is_modal() {
+        if self.unified_settings.is_some() || self.voice_setup_is_modal() {
             return Ok(());
         }
         self.guard_classic_global_gui_bootstrap()?;
@@ -10903,10 +10942,12 @@ impl GameApp {
         self.sync_scoreboard_before_running_pointer_input();
         self.input_routing.live.primary_left_down = button_state == ElementState::Pressed;
         if let Some(point) = self.input_routing.live.window_pointer {
-            if self.voice_setup_pointer(point, button_state == ElementState::Pressed)? {
+            if self.unified_settings_pointer(point, button_state == ElementState::Pressed)?
+                || self.voice_setup_pointer(point, button_state == ElementState::Pressed)?
+            {
                 return Ok(());
             }
-        } else if self.voice_setup_is_modal() {
+        } else if self.unified_settings.is_some() || self.voice_setup_is_modal() {
             return Ok(());
         }
         self.context_menus.pointer_dismissed_lobby_team_player = None;
@@ -11823,7 +11864,37 @@ impl GameApp {
         if phase != TouchPhase::Cancelled {
             self.input_routing.live.running_pointer = Some(position);
         }
-        if self.voice_setup_is_modal() {
+        if self.unified_settings.is_some()
+            || (phase == TouchPhase::Started
+                && self.settings_launcher().is_some_and(|r| {
+                    position.x >= r.x as f32
+                        && position.y >= r.y as f32
+                        && position.x < (r.x + r.w) as f32
+                        && position.y < (r.y + r.h) as f32
+                }))
+        {
+            match phase {
+                TouchPhase::Started => {
+                    self.unified_settings_pointer(position, true)?;
+                }
+                TouchPhase::Ended => {
+                    self.unified_settings_pointer(position, false)?;
+                }
+                TouchPhase::Cancelled => {
+                    if let Some(settings) = self.unified_settings.as_mut() {
+                        settings.controller.cancel_interaction();
+                    }
+                }
+                TouchPhase::Moved => {
+                    if let Some(settings) = self.unified_settings.as_mut() {
+                        let actions = settings.controller.pointer_move(position);
+                        self.process_unified_settings_actions(actions)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if self.unified_settings.is_some() || self.voice_setup_is_modal() {
             match phase {
                 TouchPhase::Started => {
                     self.voice_setup_pointer(position, true)?;

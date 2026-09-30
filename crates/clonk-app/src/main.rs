@@ -188,6 +188,7 @@ mod runtime_join_save;
 mod save_worker;
 mod scoreboard_window_host;
 mod settings;
+mod settings_catalog;
 mod shell_window_host;
 mod software_window;
 mod startup_player_files;
@@ -237,6 +238,8 @@ mod game_app_sound;
 mod game_app_startup;
 #[path = "game_app/tick.rs"]
 mod game_app_tick;
+#[path = "game_app/unified_settings.rs"]
+mod game_app_unified_settings;
 #[path = "game_app/update.rs"]
 mod game_app_update;
 #[path = "game_app/voice.rs"]
@@ -3189,6 +3192,8 @@ impl GameApp {
             },
             voice_chat: crate::voice_service::VoiceChatService::new(),
             voice_setup: None,
+            unified_settings: None,
+            settings_key: crate::settings_catalog::shortcut_key(paths),
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,
@@ -4862,6 +4867,11 @@ impl GameApp {
     }
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
+        self.finish_unified_display_preview(false);
+        if let Some(settings) = self.unified_settings.as_mut() {
+            settings.binding = None;
+            settings.controller.cancel_interaction();
+        }
         self.cancel_voice_setup_test();
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
