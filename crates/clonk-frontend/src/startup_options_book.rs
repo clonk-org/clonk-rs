@@ -3,6 +3,12 @@
 use super::*;
 use crate::classic_gui::{draw_engine_box, ClassicButtonState};
 
+/// Dark brown ink for the chosen sub-page tab and its focus underline.
+const PAGE_TAB_INK: u32 = 0x0061_4a32;
+/// Medium ink for the other tabs and the rule they stand on, darker than the
+/// group-box ink so the strip holds its shape against the parchment.
+const PAGE_TAB_RULE_INK: u32 = 0x0080_6a50;
+
 pub(crate) struct OptionsBook<'a> {
     pub assets: &'a OptionsDlgAssets,
     pub gui: &'a ClonkFontSet,
@@ -127,6 +133,159 @@ impl OptionsBook<'_> {
             true,
             gamma,
         );
+    }
+
+    /// A sub-page tab inked onto the page like the book's group boxes: a
+    /// folder tab standing on [`Self::page_tab_rule`]. The chosen tab rises
+    /// lighter and opens into the page; the others sit lower and shaded.
+    /// Keyboard focus underlines the caption.
+    #[allow(clippy::too_many_arguments)]
+    pub fn page_tab(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        label: &str,
+        icon: Option<&ImageData>,
+        active: bool,
+        focused: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        const SLANT: i32 = 6;
+        let (left, right, bottom) = (rect.x, rect.x + rect.w, rect.y + rect.h);
+        let top = rect.y + if active { 0 } else { 3 };
+        let (wash, ink) = if active {
+            (0xa0ff_f8e8, PAGE_TAB_INK)
+        } else {
+            (0xd880_6848, PAGE_TAB_RULE_INK)
+        };
+        fill_quad_dw(
+            surface,
+            &[
+                (left + SLANT, top),
+                (right - SLANT, top),
+                (right, bottom),
+                (left, bottom),
+            ],
+            wash,
+            gamma,
+        );
+        for inset in 0..2 {
+            draw_line_dw(
+                surface,
+                left + inset,
+                bottom - 1,
+                left + SLANT + inset,
+                top + inset,
+                ink,
+                gamma,
+            );
+            draw_line_dw(
+                surface,
+                left + SLANT,
+                top + inset,
+                right - SLANT,
+                top + inset,
+                ink,
+                gamma,
+            );
+            draw_line_dw(
+                surface,
+                right - SLANT - inset,
+                top + inset,
+                right - inset,
+                bottom - 1,
+                ink,
+                gamma,
+            );
+        }
+        let mut x = left + SLANT + 4;
+        if let Some(icon) = icon {
+            let size = bottom - top - 8;
+            crate::startup_plrsel::draw_image_bilinear_modulated(
+                surface,
+                &GuiRect::new(x as f32, (top + 4) as f32, size as f32, size as f32),
+                icon,
+                if active { 0x00ff_ffff } else { 0x00b0_a898 },
+                gamma,
+            );
+            x += size + 4;
+        }
+        let font = &self.fonts.book;
+        let width = font.measure(label, true).0;
+        let text_x = x + (right - SLANT - 4 - x - width).max(0) / 2;
+        let text_y = top + (bottom - top - font.line_height) / 2;
+        font.draw_with_gamma(
+            surface,
+            text_x,
+            text_y,
+            label,
+            if active {
+                STARTUP_FONT_RGBA
+            } else {
+                [78, 64, 46, 255]
+            },
+            TextAlign::Left,
+            true,
+            gamma,
+        );
+        if focused {
+            let underline = text_y + font.line_height - 2;
+            draw_line_dw(
+                surface,
+                text_x,
+                underline,
+                text_x + width,
+                underline,
+                PAGE_TAB_INK,
+                gamma,
+            );
+        }
+    }
+
+    /// The two-pixel rule sub-page tabs stand on, broken under the chosen
+    /// tab so it opens into the page.
+    pub fn page_tab_rule(
+        &self,
+        surface: &mut Surface,
+        (from, to): (i32, i32),
+        y: i32,
+        opening: Option<(i32, i32)>,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let spans = match opening {
+            Some((start, end)) => vec![(from, start), (end, to)],
+            None => vec![(from, to)],
+        };
+        for (start, end) in spans.into_iter().filter(|(start, end)| start < end) {
+            for row in 0..2 {
+                draw_line_dw(
+                    surface,
+                    start,
+                    y + row,
+                    end,
+                    y + row,
+                    PAGE_TAB_RULE_INK,
+                    gamma,
+                );
+            }
+        }
+    }
+
+    /// The Sound and Voice chat tab icons: the options book's speaker, and the
+    /// chat illustration its voice sheet uses where the icon sheet has it.
+    pub fn page_icon(&self, voice: bool) -> ImageData {
+        let icons = &self.assets.option_icons;
+        let cell = icons.height();
+        voice
+            .then(|| {
+                self.assets
+                    .voice_icons
+                    .as_ref()
+                    .filter(|image| image.width() >= 128 && image.height() >= 320)
+                    .map(|image| crop_image(image, 64, 256, 64, 64))
+            })
+            .flatten()
+            .unwrap_or_else(|| crop_image(icons, cell * 2, 0, cell, cell))
     }
 
     pub fn highlight(&self, surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {

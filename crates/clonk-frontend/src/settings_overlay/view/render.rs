@@ -104,6 +104,7 @@ impl SettingsController {
                 gamma,
             );
         }
+        self.render_page_tab_rule(surface, &book, &layout, gamma);
         for (focus, rect) in self.targets(&layout) {
             if matches!(
                 focus,
@@ -117,24 +118,18 @@ impl SettingsController {
             let highlighted = self.view.focus == focus;
             if let SettingsFocus::AudioPage(page) = focus {
                 let selected = self.audio_page == page && self.query.trim().is_empty();
-                book.button(
+                let icon = self
+                    .page_tab_icons(&layout)
+                    .then(|| book.page_icon(page == AudioPage::Voice));
+                book.page_tab(
                     surface,
                     rect,
                     page.label(),
-                    ClassicButtonState {
-                        pressed: selected || self.view.pressed == Some(focus),
-                        highlighted,
-                    },
+                    icon.as_ref(),
+                    selected,
+                    highlighted,
                     gamma,
                 );
-                if selected {
-                    box_color(
-                        surface,
-                        IntRect::new(rect.x + 4, rect.y + rect.h - 3, rect.w - 8, 2),
-                        0x00695035,
-                        gamma,
-                    );
-                }
                 continue;
             }
             if focus == SettingsFocus::Group {
@@ -441,6 +436,39 @@ impl SettingsController {
 }
 
 impl SettingsController {
+    /// The rule the Audio page's tabs stand on, open under the chosen tab
+    /// unless a search has replaced the page.
+    fn render_page_tab_rule(
+        &self,
+        surface: &mut Surface,
+        book: &OptionsBook,
+        layout: &SettingsLayout,
+        gamma: Option<&GammaRamp>,
+    ) {
+        if self.category != SettingsCategory::Audio {
+            return;
+        }
+        let Some((_, chosen)) = self
+            .targets(layout)
+            .into_iter()
+            .find(|(focus, _)| *focus == SettingsFocus::AudioPage(self.audio_page))
+        else {
+            return;
+        };
+        let opening = self
+            .query
+            .trim()
+            .is_empty()
+            .then_some((chosen.x + 2, chosen.x + chosen.w - 2));
+        book.page_tab_rule(
+            surface,
+            (layout.list.x, layout.list.x + layout.list.w),
+            chosen.y + chosen.h,
+            opening,
+            gamma,
+        );
+    }
+
     /// Right-aligns the focused control's keys on the footer's button row,
     /// in whatever room the buttons leave; omitted where it does not fit.
     fn render_input_hint(

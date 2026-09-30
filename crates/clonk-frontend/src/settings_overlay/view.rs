@@ -560,6 +560,11 @@ impl SettingsController {
             .then_some("Search all settings (Ctrl+F)")
     }
 
+    /// Whether sub-page tabs have room for an icon beside their caption.
+    pub(crate) fn page_tab_icons(&self, layout: &SettingsLayout) -> bool {
+        layout.list.w >= 480
+    }
+
     /// The keys that operate the focused control, for the footer.
     pub fn input_hint(&self) -> String {
         let action = match self.view.focus {
@@ -979,7 +984,19 @@ impl SettingsController {
     fn targets(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         let audio = self.category == SettingsCategory::Audio;
         let grouped = !self.groups().is_empty();
-        let filters_x = layout.list.x + if audio || grouped { 200 } else { 0 };
+        let (sound_w, voice_w) = if self.page_tab_icons(layout) {
+            (100, 132)
+        } else {
+            (72, 108)
+        };
+        let lead = if audio {
+            sound_w + voice_w + 14
+        } else if grouped {
+            200
+        } else {
+            0
+        };
+        let filters_x = layout.list.x + lead;
         let mut targets = vec![
             (SettingsFocus::Search, layout.search),
             (
@@ -997,7 +1014,7 @@ impl SettingsController {
                     filters_x + if audio || grouped { 104 } else { 130 },
                     layout.search.y + 32,
                     if audio || grouped {
-                        layout.list.w - 304
+                        layout.list.w - lead - 104
                     } else {
                         122
                     },
@@ -1009,11 +1026,16 @@ impl SettingsController {
             targets.extend([
                 (
                     SettingsFocus::AudioPage(AudioPage::Sound),
-                    IntRect::new(layout.list.x, layout.search.y + 30, 72, 26),
+                    IntRect::new(layout.list.x, layout.search.y + 29, sound_w, 28),
                 ),
                 (
                     SettingsFocus::AudioPage(AudioPage::Voice),
-                    IntRect::new(layout.list.x + 78, layout.search.y + 30, 108, 26),
+                    IntRect::new(
+                        layout.list.x + sound_w + 6,
+                        layout.search.y + 29,
+                        voice_w,
+                        28,
+                    ),
                 ),
             ]);
         }
@@ -1317,11 +1339,41 @@ mod tests {
     }
 
     #[test]
+    fn audio_page_tabs_hold_an_icon_where_the_page_has_room_and_never_crowd_the_filters() {
+        for (width, height, icons) in [(640, 480, false), (1280, 720, true)] {
+            let mut controller = SettingsController::new(Vec::new());
+            controller.resize(width, height);
+            controller.select_category(SettingsCategory::Audio);
+            let layout = controller.layout();
+            assert_eq!(
+                controller.page_tab_icons(&layout),
+                icons,
+                "{width}x{height}"
+            );
+            let targets = controller.targets(&layout);
+            let rect = |focus| targets.iter().find(|(f, _)| *f == focus).unwrap().1;
+            let sound = rect(SettingsFocus::AudioPage(AudioPage::Sound));
+            let voice = rect(SettingsFocus::AudioPage(AudioPage::Voice));
+            let changed = rect(SettingsFocus::Modified);
+            let advanced = rect(SettingsFocus::Advanced);
+            assert!(voice.w >= if icons { 132 } else { 108 }, "{width}x{height}");
+            assert!(sound.x + sound.w < voice.x);
+            assert!(voice.x + voice.w < changed.x);
+            assert!(advanced.w >= 96 && advanced.x + advanced.w <= layout.list.x + layout.list.w);
+        }
+    }
+
+    #[test]
     fn audio_subpages_are_directly_clickable_without_changing_filters() {
         let mut controller = SettingsController::new(Vec::new());
         controller.select_category(SettingsCategory::Audio);
         let layout = controller.layout();
-        let voice = GuiPoint::new((layout.list.x + 100) as f32, (layout.search.y + 40) as f32);
+        let (_, tab) = controller
+            .targets(&layout)
+            .into_iter()
+            .find(|(focus, _)| *focus == SettingsFocus::AudioPage(AudioPage::Voice))
+            .unwrap();
+        let voice = GuiPoint::new((tab.x + tab.w / 2) as f32, (tab.y + tab.h / 2) as f32);
         controller.pointer(voice, true);
         controller.pointer(voice, false);
         assert_eq!(controller.audio_page, AudioPage::Voice);
