@@ -1,11 +1,13 @@
 use super::*;
 use crate::classic_gui::IntRect;
+use crate::clonk_fonts::ClonkFontSet;
 use crate::rename_edit::{RenameEdit, RenameEditCursorOperation};
+use crate::startup_options_dlg::{BookFonts, OptionsBook, OptionsDlgLayout};
 use crate::{GuiPoint, KeyCode};
 
 mod choices;
 mod render;
-const ROW_HEIGHT: i32 = 50;
+const ROW_HEIGHT: i32 = 36;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsFocus {
@@ -53,6 +55,7 @@ pub struct SettingsViewState {
     pub(crate) choice: Option<choices::ChoicePicker>,
     pub(crate) dragging: Option<usize>,
     pub(crate) scroll_drag: Option<i32>,
+    layout: Option<SettingsLayout>,
 }
 
 impl Default for SettingsViewState {
@@ -75,15 +78,19 @@ impl Default for SettingsViewState {
             choice: None,
             dragging: None,
             scroll_drag: None,
+            layout: None,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettingsLayout {
     pub panel: IntRect,
     pub search: IntRect,
     pub list: IntRect,
     pub footer: IntRect,
+    pub tabs: [IntRect; 7],
+    pub back: IntRect,
 }
 
 impl SettingsLayout {
@@ -95,18 +102,66 @@ impl SettingsLayout {
             search: IntRect::new(panel.x + 172, panel.y + 52, w - 184, 30),
             list: IntRect::new(panel.x + 172, panel.y + 118, w - 184, (h - 254).max(1)),
             footer: IntRect::new(panel.x + 12, panel.y + h - 132, w - 24, 120),
+            tabs: std::array::from_fn(|i| {
+                IntRect::new(panel.x + 12, panel.y + 52 + i as i32 * 36, 148, 32)
+            }),
+            back: IntRect::new(panel.x + w - 142, panel.y + h - 44, 130, 30),
             panel,
+        }
+    }
+
+    fn from_book(book: &OptionsDlgLayout) -> Self {
+        let sheet = book.sheet;
+        let margin = if sheet.w < 500 { 8 } else { 32 };
+        let x = (sheet.x + margin).max(book.tab_clips[0].0 + 128);
+        let w = sheet.x + sheet.w - margin - x;
+        let footer = IntRect::new(x, sheet.y + sheet.h - 102, w, 102);
+        Self {
+            panel: book.tabular,
+            search: IntRect::new(x + 60, sheet.y + 2, w - 60, 26),
+            list: IntRect::new(
+                x,
+                sheet.y + 62,
+                w,
+                (footer.y - sheet.y - 66).max(ROW_HEIGHT),
+            ),
+            footer,
+            tabs: std::array::from_fn(|i| {
+                IntRect::new(
+                    book.tab_clips[i].0,
+                    book.tab_clips[i].1,
+                    85,
+                    book.tab_height - 8,
+                )
+            }),
+            back: book.back_button,
         }
     }
 }
 
 impl SettingsController {
+    pub fn resize_book(&mut self, width: i32, height: i32, gui: &ClonkFontSet, book: &BookFonts) {
+        self.resize(width, height);
+        let layout = SettingsLayout::from_book(&OptionsBook::layout(width, height, gui, book));
+        if self.view.layout != Some(layout) {
+            self.view.layout = Some(layout);
+            self.ensure_visible();
+        }
+    }
+
+    pub fn layout(&self) -> SettingsLayout {
+        self.view
+            .layout
+            .unwrap_or_else(|| SettingsLayout::new(self.view.width, self.view.height))
+    }
+
     pub fn resize(&mut self, width: i32, height: i32) {
         if self.view.width == width && self.view.height == height {
             return;
         }
         self.view.width = width;
         self.view.height = height;
+        self.view.layout = None;
         self.ensure_visible();
     }
 
@@ -405,11 +460,7 @@ impl SettingsController {
     }
 
     fn page_size(&self) -> usize {
-        (SettingsLayout::new(self.view.width, self.view.height)
-            .list
-            .h
-            / ROW_HEIGHT)
-            .max(1) as usize
+        (self.layout().list.h / ROW_HEIGHT).max(1) as usize
     }
 
     fn ensure_visible(&mut self) {
@@ -565,10 +616,10 @@ impl SettingsController {
         if self.view.choice.is_some() {
             return self.choice_pointer(point, down);
         }
-        let layout = SettingsLayout::new(self.view.width, self.view.height);
+        let layout = self.layout();
         if self.view.display_confirmation.is_some() || self.view.reset_confirmation {
             if !down {
-                let keep = IntRect::new(layout.footer.x, layout.footer.y + 84, 150, 30);
+                let keep = IntRect::new(layout.footer.x, layout.footer.y + 70, 150, 28);
                 let revert = IntRect::new(keep.x + 160, keep.y, 150, 30);
                 if contains(keep, point) {
                     return self.key(KeyCode::Enter, false, false);
@@ -600,7 +651,7 @@ impl SettingsController {
                 let Some(row) = self.row_rect(&layout, index) else {
                     continue;
                 };
-                let track = IntRect::new(row.x + row.w - 134, row.y + 33, 111, 14);
+                let track = slider_rect(row);
                 let setting = &self.settings[index];
                 if contains(track, point)
                     && !setting.details.binding
@@ -610,6 +661,12 @@ impl SettingsController {
                 {
                     self.view.edit = None;
                     self.set_focus(SettingsFocus::Row(index));
+                    if point.x < (track.x + 16) as f32 {
+                        return self.adjust(index, -1);
+                    }
+                    if point.x >= (track.x + track.w - 16) as f32 {
+                        return self.adjust(index, 1);
+                    }
                     self.view.dragging = Some(index);
                     return self.pointer_move(point);
                 }
@@ -653,19 +710,6 @@ impl SettingsController {
             {
                 return Vec::new();
             }
-            if let SettingsFocus::Row(index) = focus {
-                let row = self.row_rect(&layout, index);
-                if let Some(rect) = row {
-                    if point.x >= (rect.x + rect.w - 30) as f32 {
-                        return self.adjust(index, 1);
-                    }
-                    if point.x >= (rect.x + rect.w - 158) as f32
-                        && point.x < (rect.x + rect.w - 128) as f32
-                    {
-                        return self.adjust(index, -1);
-                    }
-                }
-            }
             return self.activate(focus);
         }
         Vec::new()
@@ -688,7 +732,7 @@ impl SettingsController {
         let Some(index) = self.view.dragging else {
             return Vec::new();
         };
-        let layout = SettingsLayout::new(self.view.width, self.view.height);
+        let layout = self.layout();
         let Some(row) = self.row_rect(&layout, index) else {
             return Vec::new();
         };
@@ -696,7 +740,8 @@ impl SettingsController {
         let AdvancedConfigValue::Integer { value, min, max } = setting.value else {
             return Vec::new();
         };
-        let fraction = ((point.x - (row.x + row.w - 134) as f32) / 110.0).clamp(0.0, 1.0);
+        let track = slider_rect(row);
+        let fraction = ((point.x - (track.x + 24) as f32) / (track.w - 48) as f32).clamp(0.0, 1.0);
         let next = min + ((max - min) as f32 * fraction).round() as i128;
         if next == value {
             return Vec::new();
@@ -717,7 +762,7 @@ impl SettingsController {
         if count <= page {
             return None;
         }
-        let list = SettingsLayout::new(self.view.width, self.view.height).list;
+        let list = self.layout().list;
         let track = IntRect::new(list.x + list.w - 10, list.y, 10, list.h);
         let height = (list.h * page as i32 / count as i32).max(20).min(list.h);
         let top = (list.h - height) * self.view.scroll as i32 / (count - page) as i32;
@@ -743,59 +788,59 @@ impl SettingsController {
             (SettingsFocus::Search, layout.search),
             (
                 SettingsFocus::Modified,
-                IntRect::new(layout.search.x, layout.search.y + 34, 150, 28),
+                IntRect::new(layout.list.x, layout.search.y + 32, 122, 20),
             ),
             (
                 SettingsFocus::Advanced,
-                IntRect::new(layout.search.x + 156, layout.search.y + 34, 150, 28),
+                IntRect::new(layout.list.x + 130, layout.search.y + 32, 122, 20),
             ),
         ];
-        targets.extend(SettingsCategory::ALL.into_iter().enumerate().map(|(i, c)| {
-            (
-                SettingsFocus::Category(c),
-                IntRect::new(
-                    layout.panel.x + 12,
-                    layout.panel.y + 52 + i as i32 * 36,
-                    148,
-                    32,
-                ),
-            )
-        }));
+        targets.extend(
+            SettingsCategory::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| (SettingsFocus::Category(c), layout.tabs[i])),
+        );
         targets.extend(
             self.visible_indices()
                 .into_iter()
                 .filter_map(|i| self.row_rect(layout, i).map(|r| (SettingsFocus::Row(i), r))),
         );
         let x = layout.footer.x;
-        let y = layout.footer.y + 54;
+        let y = layout.footer.y + 42;
         targets.extend([
-            (SettingsFocus::Pin, IntRect::new(x, y, 100, 28)),
-            (SettingsFocus::PinUp, IntRect::new(x + 106, y, 42, 28)),
-            (SettingsFocus::PinDown, IntRect::new(x + 154, y, 42, 28)),
-            (SettingsFocus::Reset, IntRect::new(x + 202, y, 110, 28)),
+            (SettingsFocus::Pin, IntRect::new(x, y, 62, 26)),
+            (SettingsFocus::PinUp, IntRect::new(x + 68, y, 32, 26)),
+            (SettingsFocus::PinDown, IntRect::new(x + 106, y, 48, 26)),
+            (SettingsFocus::Reset, IntRect::new(x + 160, y, 98, 26)),
             (
                 SettingsFocus::ResetCategory,
-                IntRect::new(x + 318, y, 140, 28),
+                IntRect::new(x + 264, y, 102, 26),
             ),
-            (
-                SettingsFocus::Close,
-                IntRect::new(x + layout.footer.w - 130, y + 34, 130, 30),
-            ),
+            (SettingsFocus::Close, layout.back),
         ]);
         if self.category == SettingsCategory::Audio {
             targets.extend([
                 (
                     SettingsFocus::TestMicrophone,
-                    IntRect::new(x, y + 34, 190, 30),
+                    IntRect::new(x, y + 32, 180, 26),
                 ),
                 (
                     SettingsFocus::RefreshDevices,
-                    IntRect::new(x + 196, y + 34, 150, 30),
+                    IntRect::new(x + 186, y + 32, 140, 26),
                 ),
             ]);
         }
         targets
     }
+}
+
+fn value_rect(row: IntRect) -> IntRect {
+    IntRect::new(row.x + row.w - 174, row.y + 2, 174, 26)
+}
+
+fn slider_rect(row: IntRect) -> IntRect {
+    IntRect::new(row.x + row.w - 174, row.y + 9, 128, 16)
 }
 
 fn contains(rect: IntRect, point: GuiPoint) -> bool {
@@ -904,8 +949,9 @@ mod tests {
         controller.category = SettingsCategory::Audio;
         let layout = SettingsLayout::new(800, 600);
         let row = controller.row_rect(&layout, 0).unwrap();
+        let track = slider_rect(row);
         let actions = controller.pointer(
-            GuiPoint::new((row.x + row.w - 24) as f32, (row.y + 40) as f32),
+            GuiPoint::new((track.x + track.w - 24) as f32, (track.y + 8) as f32),
             true,
         );
         assert!(

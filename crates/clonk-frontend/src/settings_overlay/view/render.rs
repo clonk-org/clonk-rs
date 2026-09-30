@@ -1,8 +1,6 @@
 use super::*;
-use crate::classic_gui::{
-    draw_3d_frame, draw_clipped_text_with_markup, draw_engine_box, ClassicButtonState,
-};
-use crate::message_dialog::MessageDialogResources;
+use crate::classic_gui::{draw_clipped_text_with_markup, draw_engine_box, ClassicButtonState};
+use crate::startup_options_dlg::OptionsDlgAssets;
 use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Surface};
 
@@ -10,77 +8,99 @@ impl SettingsController {
     pub fn render(
         &mut self,
         surface: &mut Surface,
-        resources: MessageDialogResources<'_>,
-        book: Option<&crate::startup_options_dlg::BookFonts>,
+        assets: &OptionsDlgAssets,
+        gui: &ClonkFontSet,
+        fonts: &BookFonts,
+        startup_background: bool,
         gamma: Option<&GammaRamp>,
     ) {
-        let body_font = book.map_or(&resources.fonts.text, |fonts| &fonts.book);
-        let small_font = book.map_or(&resources.fonts.main_small, |fonts| &fonts.book_small);
-        self.resize(surface.width() as i32, surface.height() as i32);
-        let layout = SettingsLayout::new(self.view.width, self.view.height);
-        let panel = layout.panel;
-        draw_engine_box(
+        self.resize_book(surface.width() as i32, surface.height() as i32, gui, fonts);
+        let layout = self.layout();
+        let native = OptionsBook::layout(self.view.width, self.view.height, gui, fonts);
+        let book = OptionsBook { assets, gui, fonts };
+        let body_font = &fonts.book;
+        let small_font = &fonts.book_small;
+        let tabs = SettingsCategory::ALL.map(|category| (category.label(), category.book_icon()));
+        let active = SettingsCategory::ALL
+            .iter()
+            .position(|c| *c == self.category)
+            .unwrap_or(0);
+        book.chrome(
             surface,
-            0,
-            0,
-            self.view.width - 1,
-            self.view.height - 1,
-            0x80000000,
+            &native,
+            &tabs,
+            active,
+            self.view.focus == SettingsFocus::Category(self.category),
+            ClassicButtonState {
+                pressed: self.view.pressed == Some(SettingsFocus::Close),
+                highlighted: self.view.focus == SettingsFocus::Close,
+            },
+            startup_background,
             gamma,
         );
-        box_color(surface, panel, 0x00ded0b5, gamma);
-        draw_3d_frame(surface, panel, gamma);
-        resources.skin.draw_caption(
-            surface,
-            IntRect::new(panel.x, panel.y, panel.w, 32),
-            "Settings",
-            &resources.fonts.caption,
-            [255, 255, 190, 255],
-            TextAlign::Center,
-            gamma,
-        );
+        if !startup_background {
+            text(
+                surface,
+                &gui.caption,
+                IntRect::new(
+                    layout.back.x + layout.back.w + 24,
+                    layout.back.y + 2,
+                    self.view.width - layout.back.x - layout.back.w - 48,
+                    28,
+                ),
+                &self.view.context,
+                [255, 255, 190, 255],
+                gamma,
+            );
+        }
         text(
             surface,
-            small_font,
-            IntRect::new(panel.x + 12, panel.y + 32, panel.w - 24, 20),
-            &self.view.context,
-            [55, 45, 32, 255],
+            body_font,
+            IntRect::new(layout.list.x, layout.search.y, 60, 26),
+            "Search:",
+            [0, 0, 0, 255],
             gamma,
         );
         if self.view.focus == SettingsFocus::Search {
             self.view
                 .search_edit
-                .render(surface, &resources.fonts.text, layout.search, gamma);
+                .render(surface, body_font, layout.search, gamma);
         } else {
-            box_color(surface, layout.search, 0x002d2923, gamma);
-            let label = if self.query.is_empty() {
-                "Search all settings..."
-            } else {
-                &self.query
-            };
+            book.field(surface, layout.search, gamma);
             text(
                 surface,
                 body_font,
                 layout.search,
-                label,
-                [245, 240, 223, 255],
+                if self.query.is_empty() {
+                    "All settings (Ctrl+F)"
+                } else {
+                    &self.query
+                },
+                [55, 45, 32, 255],
                 gamma,
             );
         }
-        let count = self.visible_indices().len();
         for (focus, rect) in self.targets(&layout) {
-            if matches!(focus, SettingsFocus::Search | SettingsFocus::Row(_)) {
+            if matches!(
+                focus,
+                SettingsFocus::Search
+                    | SettingsFocus::Row(_)
+                    | SettingsFocus::Category(_)
+                    | SettingsFocus::Close
+            ) {
+                continue;
+            }
+            let highlighted = self.view.focus == focus;
+            if matches!(focus, SettingsFocus::Modified | SettingsFocus::Advanced) {
+                let (label, checked) = if focus == SettingsFocus::Modified {
+                    ("Changed", self.modified_only)
+                } else {
+                    ("Advanced", self.show_advanced)
+                };
+                book.checkbox(surface, rect, label, checked, highlighted, gamma);
                 continue;
             }
             let label = match focus {
-                SettingsFocus::Category(category) => category.label().to_owned(),
-                SettingsFocus::Modified => {
-                    format!("{} Changed", if self.modified_only { "[x]" } else { "[ ]" })
-                }
-                SettingsFocus::Advanced => format!(
-                    "{} Advanced",
-                    if self.show_advanced { "[x]" } else { "[ ]" }
-                ),
                 SettingsFocus::Pin => {
                     if self
                         .view
@@ -88,49 +108,45 @@ impl SettingsController {
                         .and_then(|i| self.settings.get(i))
                         .is_some_and(|s| self.pinned.contains(&s.id))
                     {
-                        "Unpin".into()
+                        "Unpin"
                     } else {
-                        "Pin".into()
+                        "Pin"
                     }
                 }
-                SettingsFocus::PinUp => "Up".into(),
-                SettingsFocus::PinDown => "Dn".into(),
-                SettingsFocus::Reset => "Reset value".into(),
-                SettingsFocus::ResetCategory => "Reset category".into(),
-                SettingsFocus::TestMicrophone => "Record / stop mic test".into(),
-                SettingsFocus::RefreshDevices => "Refresh devices".into(),
-                SettingsFocus::Close => "Back / save".into(),
-                _ => String::new(),
+                SettingsFocus::PinUp => "Up",
+                SettingsFocus::PinDown => "Down",
+                SettingsFocus::Reset => "Reset value",
+                SettingsFocus::ResetCategory => "Reset page",
+                SettingsFocus::TestMicrophone => "Record / stop mic test",
+                SettingsFocus::RefreshDevices => "Refresh devices",
+                _ => "",
             };
-            resources.skin.draw_button(
+            book.button(
                 surface,
                 rect,
-                &label,
-                resources.fonts,
+                label,
                 ClassicButtonState {
                     pressed: self.view.pressed == Some(focus),
-                    highlighted: self.view.focus == focus
-                        || focus == SettingsFocus::Category(self.category),
+                    highlighted,
                 },
                 gamma,
             );
         }
-        if count == 0 {
-            let message = if self.category == SettingsCategory::Quick && self.query.is_empty() {
-                "Pin settings from any category to keep them here."
-            } else {
-                "No matches. Try another term or clear the filters."
-            };
+        let visible = self.visible_indices();
+        if visible.is_empty() {
             text(
                 surface,
                 body_font,
-                IntRect::new(layout.list.x, layout.list.y, layout.list.w, 48),
-                message,
-                [55, 45, 32, 255],
+                layout.list,
+                if self.category == SettingsCategory::Quick && self.query.is_empty() {
+                    "Pin settings from any page to keep them here."
+                } else {
+                    "No matches. Try another term or clear the filters."
+                },
+                [40, 31, 21, 255],
                 gamma,
             );
         }
-        let visible = self.visible_indices();
         for index in visible
             .iter()
             .copied()
@@ -141,51 +157,37 @@ impl SettingsController {
                 continue;
             };
             let setting = &self.settings[index];
-            let selected = self.view.selected == Some(index);
-            box_color(
-                surface,
-                rect,
-                if selected { 0x00c8b58d } else { 0x00e9ddc6 },
-                gamma,
-            );
-            if self.view.focus == SettingsFocus::Row(index) {
-                draw_3d_frame(surface, rect, gamma);
-            }
+            let focused = self.view.focus == SettingsFocus::Row(index);
             let editable = setting.value.is_editable() && setting.details.unavailable.is_none();
             let color = if editable {
-                [40, 31, 21, 255]
+                [0, 0, 0, 255]
             } else {
                 [102, 90, 74, 255]
             };
-            let marker = if self.pinned.contains(&setting.id) {
-                "* "
-            } else {
-                ""
-            };
+            if let AdvancedConfigValue::Bool(checked) = setting.value {
+                let checkbox = IntRect::new(rect.x, rect.y + 4, rect.w, 20);
+                book.checkbox(surface, checkbox, "", checked, focused, gamma);
+                text(
+                    surface,
+                    body_font,
+                    IntRect::new(rect.x + 24, rect.y + 2, rect.w - 24, 28),
+                    &setting.label,
+                    color,
+                    gamma,
+                );
+                continue;
+            }
             text(
                 surface,
                 body_font,
-                IntRect::new(rect.x + 6, rect.y + 3, (rect.w - 170).max(1), 24),
-                &format!("{marker}{}", setting.label),
+                IntRect::new(rect.x, rect.y + 2, (rect.w - 182).max(1), 28),
+                &setting.label,
                 color,
                 gamma,
             );
-            let detail = format!(
-                "{} · {}",
-                setting.category.label(),
-                setting.details.policy.label()
-            );
-            text(
-                surface,
-                small_font,
-                IntRect::new(rect.x + 6, rect.y + 27, (rect.w - 170).max(1), 20),
-                &detail,
-                [89, 73, 48, 255],
-                gamma,
-            );
-            let value_rect = IntRect::new(rect.x + rect.w - 158, rect.y + 6, 158, 34);
+            let value_rect = value_rect(rect);
             if let Some((_, edit)) = self.view.edit.as_mut().filter(|(i, _)| *i == index) {
-                edit.render(surface, &resources.fonts.text, value_rect, gamma);
+                edit.render(surface, body_font, value_rect, gamma);
                 continue;
             }
             let label =
@@ -194,9 +196,6 @@ impl SettingsController {
                     .display_value
                     .clone()
                     .unwrap_or_else(|| match &setting.value {
-                        AdvancedConfigValue::Bool(value) => {
-                            if *value { "On" } else { "Off" }.into()
-                        }
                         AdvancedConfigValue::Choice { value, choices } => choices
                             .iter()
                             .find(|c| c.value == *value)
@@ -211,75 +210,59 @@ impl SettingsController {
                         _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
                         _ => setting.value.serialized(),
                     });
-            let arrows = matches!(
-                setting.value,
-                AdvancedConfigValue::Integer { .. } | AdvancedConfigValue::Choice { .. }
-            ) && !setting.details.binding;
-            if arrows && editable {
-                text(
-                    surface,
-                    body_font,
-                    IntRect::new(value_rect.x, value_rect.y, 24, 28),
-                    "<",
-                    color,
-                    gamma,
-                );
-                text(
-                    surface,
-                    body_font,
-                    IntRect::new(value_rect.x + 134, value_rect.y, 24, 28),
-                    ">",
-                    color,
-                    gamma,
-                );
-            }
-            text(
-                surface,
-                body_font,
-                IntRect::new(value_rect.x + 24, value_rect.y, 110, 28),
-                &label,
-                color,
-                gamma,
-            );
             if let AdvancedConfigValue::Integer { value, min, max } = setting.value {
                 if max > min
                     && max - min <= 1000
                     && !setting.details.binding
                     && setting.details.policy != ApplyPolicy::DisplayPreview
                 {
-                    let track = IntRect::new(value_rect.x + 24, rect.y + 39, 110, 3);
-                    box_color(surface, track, 0x00aa9671, gamma);
-                    let filled = ((value - min) * 110 / (max - min)) as i32;
-                    if filled > 0 {
-                        box_color(
-                            surface,
-                            IntRect::new(track.x, track.y, filled, 3),
-                            0x00665a2d,
-                            gamma,
-                        );
+                    let track = slider_rect(rect);
+                    book.slider(
+                        surface,
+                        track,
+                        (value - min) as f64 / (max - min) as f64,
+                        gamma,
+                    );
+                    let number = IntRect::new(track.x + track.w + 6, value_rect.y, 40, 26);
+                    if focused {
+                        book.field(surface, number, gamma);
                     }
+                    text(surface, body_font, number, &label, color, gamma);
+                    continue;
                 }
             }
+            if matches!(setting.value, AdvancedConfigValue::Choice { .. }) {
+                book.combo(surface, value_rect, focused, gamma);
+                text(
+                    surface,
+                    body_font,
+                    IntRect::new(
+                        value_rect.x + 3,
+                        value_rect.y,
+                        value_rect.w - 24,
+                        value_rect.h,
+                    ),
+                    &label,
+                    color,
+                    gamma,
+                );
+            } else {
+                book.field(surface, value_rect, gamma);
+                if focused {
+                    book.highlight(surface, value_rect, gamma);
+                }
+                text(surface, body_font, value_rect, &label, color, gamma);
+            }
         }
-        let list_bottom = layout.list.y + layout.list.h;
         if let Some((track, thumb)) = self.scrollbar() {
-            box_color(surface, track, 0x00b5a381, gamma);
-            box_color(surface, thumb, 0x00705d3b, gamma);
-            draw_3d_frame(surface, thumb, gamma);
+            book.field(surface, track, gamma);
+            box_color(surface, thumb, 0x0094846a, gamma);
         }
-        text(
-            surface,
-            small_font,
-            IntRect::new(layout.panel.x + 12, list_bottom - 20, 148, 20),
-            &format!("{} settings", count),
-            [70, 58, 37, 255],
-            gamma,
-        );
         let mut description = "Tab: navigate · arrows: adjust · Enter: edit · Esc: back".to_owned();
         let mut detail = self.view.message.clone();
         if let Some(setting) = self.view.selected.and_then(|i| self.settings.get(i)) {
             description = if setting.details.description.is_empty() {
-                format!("{} — {}", setting.label, setting.details.scope)
+                setting.label.clone()
             } else {
                 setting.details.description.clone()
             };
@@ -304,8 +287,8 @@ impl SettingsController {
                 detail = self.view.microphone_status.clone();
             }
             let level = self.view.microphone_level.clamp(0.0, 1.0);
-            let meter = IntRect::new(layout.footer.x, layout.footer.y + 48, layout.footer.w, 3);
-            box_color(surface, meter, 0x00b5a381, gamma);
+            let meter = IntRect::new(layout.footer.x, layout.footer.y + 69, layout.footer.w, 3);
+            box_color(surface, meter, 0x00a4947a, gamma);
             if level > 0.0 {
                 box_color(
                     surface,
@@ -318,7 +301,7 @@ impl SettingsController {
         text(
             surface,
             small_font,
-            IntRect::new(layout.footer.x, layout.footer.y, layout.footer.w, 24),
+            IntRect::new(layout.footer.x, layout.footer.y, layout.footer.w, 20),
             &description,
             [42, 33, 22, 255],
             gamma,
@@ -326,20 +309,18 @@ impl SettingsController {
         text(
             surface,
             small_font,
-            IntRect::new(layout.footer.x, layout.footer.y + 24, layout.footer.w, 22),
+            IntRect::new(layout.footer.x, layout.footer.y + 20, layout.footer.w, 20),
             &detail,
             [90, 61, 31, 255],
             gamma,
         );
         if self.view.display_confirmation.is_some() || self.view.reset_confirmation {
-            box_color(surface, layout.footer, 0x00ded0b5, gamma);
+            box_color(surface, layout.footer, 0x00c7bca9, gamma);
             let prompt = self
                 .view
                 .display_confirmation
                 .map(|seconds| format!("Keep these display settings? Reverting in {seconds}s."))
-                .unwrap_or_else(|| {
-                    "Reset visible category settings? Display and saved progress are kept.".into()
-                });
+                .unwrap_or_else(|| "Reset this page? Display and saved progress are kept.".into());
             text(
                 surface,
                 body_font,
@@ -366,11 +347,10 @@ impl SettingsController {
                     },
                 ),
             ] {
-                resources.skin.draw_button(
+                book.button(
                     surface,
-                    IntRect::new(layout.footer.x + offset, layout.footer.y + 84, 150, 30),
+                    IntRect::new(layout.footer.x + offset, layout.footer.y + 70, 150, 28),
                     label,
-                    resources.fonts,
                     Default::default(),
                     gamma,
                 );
@@ -378,13 +358,13 @@ impl SettingsController {
         }
         if let Some(picker) = self.view.choice.as_ref() {
             let rect = self.choice_rect();
-            box_color(surface, rect, 0x00eee1c9, gamma);
-            draw_3d_frame(surface, rect, gamma);
+            box_color(surface, rect, 0x00d5c9b5, gamma);
+            book.field(surface, rect, gamma);
             text(
                 surface,
                 small_font,
                 IntRect::new(rect.x + 4, rect.y, rect.w - 8, 28),
-                "Choose a value · Enter: select · Esc: cancel",
+                "Enter: select · Esc: cancel",
                 [55, 45, 32, 255],
                 gamma,
             );
@@ -402,7 +382,7 @@ impl SettingsController {
                     28,
                 );
                 if picker.selected == index {
-                    box_color(surface, row, 0x00c8b58d, gamma);
+                    book.highlight(surface, row, gamma);
                 }
                 text(
                     surface,
@@ -430,6 +410,7 @@ fn box_color(surface: &mut Surface, rect: IntRect, color: u32, gamma: Option<&Ga
         );
     }
 }
+
 fn text(
     surface: &mut Surface,
     font: &ClonkFont,

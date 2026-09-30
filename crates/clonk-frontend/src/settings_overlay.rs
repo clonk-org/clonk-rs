@@ -34,23 +34,34 @@ pub enum SettingsCategory {
 
 impl SettingsCategory {
     pub const ALL: [Self; 7] = [
-        Self::Quick,
+        Self::Interface,
+        Self::Display,
         Self::Audio,
         Self::Controls,
-        Self::Display,
-        Self::Interface,
         Self::Game,
         Self::System,
+        Self::Quick,
     ];
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Quick => "Quick settings",
+            Self::Quick => "Quick",
             Self::Audio => "Audio",
             Self::Controls => "Controls",
-            Self::Display => "Display",
-            Self::Interface => "Interface",
+            Self::Display => "Graphics",
+            Self::Interface => "Program",
             Self::Game => "Game",
             Self::System => "System",
+        }
+    }
+
+    fn book_icon(self) -> usize {
+        match self {
+            Self::Interface | Self::Quick => 0,
+            Self::Display => 1,
+            Self::Audio => 2,
+            Self::Controls => 3,
+            Self::Game => 4,
+            Self::System => 5,
         }
     }
 }

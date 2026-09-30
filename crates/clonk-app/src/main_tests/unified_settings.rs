@@ -1,4 +1,97 @@
 #[test]
+fn unified_settings_retains_the_original_options_backdrop_title_paper_and_back_button() {
+    use clonk_frontend::classic_gui::IntRect;
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_dlg::{
+        options_dlg_layout, OptionsDlgScreen, OptionsDlgState, ProgramSheetState,
+    };
+    let mut app = new_real_classic_menu_app(1280, 720);
+    app.app_paths = None;
+    let fonts = app.assets.clonk_fonts.clone().unwrap();
+    let book = app.assets.options_book_fonts.clone().unwrap();
+    let assets = app
+        .assets
+        .options_dlg_assets(crate::settings::CompatProfile::Normal)
+        .unwrap();
+    let mut original = Surface::new(1280, 720, PixelFormat::Rgba8888);
+    OptionsDlgScreen::render_state(
+        &mut original,
+        &assets,
+        &fonts,
+        &book,
+        &OptionsDlgState::new(ProgramSheetState::default()),
+        None,
+    );
+    app.open_unified_settings(SettingsCategory::Interface)
+        .unwrap();
+    let mut unified = Surface::new(1280, 720, PixelFormat::Rgba8888);
+    assert!(app.render_unified_settings_to_surface(&mut unified, None));
+    let layout = options_dlg_layout(1280, 720, &fonts, &book);
+    // C4GuiDialogs.cpp:834-849, C4StartupOptionsDlg.cpp:655-657 and
+    // C4GuiTabular.cpp:455 pin the original title, Back button and paper.
+    for (name, rect) in [
+        ("mine background", IntRect::new(24, 180, 120, 220)),
+        ("Options title", layout.title_label),
+        ("Back button", layout.back_button),
+        (
+            "paper edge",
+            IntRect::new(
+                layout.paper.x + layout.paper.w - 18,
+                layout.paper.y + 24,
+                18,
+                layout.paper.h - 48,
+            ),
+        ),
+    ] {
+        for y in rect.y..rect.y + rect.h {
+            for x in rect.x..rect.x + rect.w {
+                let offset = (y as usize * 1280 + x as usize) * 4;
+                assert_eq!(
+                    &unified.pixels()[offset..offset + 4],
+                    &original.pixels()[offset..offset + 4],
+                    "{name} must retain its native artwork at {x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unified_settings_book_keeps_controls_clear_of_tabs_in_compact_windows() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    let mut app = new_real_classic_menu_app(640, 480);
+    app.app_paths = None;
+    app.open_unified_settings(SettingsCategory::Interface)
+        .unwrap();
+    for (width, height) in [(640, 480), (800, 600), (1280, 720)] {
+        app.resize(width, height).unwrap();
+        let mut frame = vec![0; width as usize * height as usize * 4];
+        app.render(&mut frame).unwrap();
+        let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+        let layout = controller.layout();
+        // StartupTabClip's active metal clasp extends across the paper's edge.
+        assert!(
+            layout.list.x >= layout.tabs[0].x + 120 + 8,
+            "controls must clear the clasp at {width}x{height}"
+        );
+        assert!(
+            layout.list.h >= 4 * 36,
+            "at least four settings remain visible"
+        );
+        assert!(layout.footer.y + layout.footer.h < layout.back.y);
+        for (category, tab) in SettingsCategory::ALL.into_iter().zip(layout.tabs) {
+            let point = GuiPoint::new((tab.x + tab.w / 2) as f32, (tab.y + tab.h / 2) as f32);
+            controller.pointer(point, true);
+            controller.pointer(point, false);
+            assert_eq!(
+                controller.category, category,
+                "every illustrated tab must be clickable"
+            );
+        }
+    }
+}
+
+#[test]
 fn unified_settings_keeps_the_screen_and_releases_only_its_own_offline_pause() {
     use clonk_frontend::settings_overlay::SettingsCategory;
     let mut app = new_classic_running_sandbox_app();
@@ -136,7 +229,7 @@ fn unified_settings_controller_category_button_consumes_all_of_its_aliases() {
             .expect("alias must not close settings")
             .controller
             .category,
-        SettingsCategory::Quick
+        SettingsCategory::Display
     );
 }
 
@@ -326,6 +419,10 @@ fn unified_settings_entry_points_open_the_same_overlay_without_changing_context(
     app.handle_main_menu_activation(MainMenuItem::Options)
         .unwrap();
     assert!(app.unified_settings.is_some());
+    assert_eq!(
+        app.unified_settings.as_ref().unwrap().controller.category,
+        SettingsCategory::Interface
+    );
     assert_eq!(app.startup.view, before);
     capture_unified_settings_fixture(&mut app, "menu");
     app.close_unified_settings();

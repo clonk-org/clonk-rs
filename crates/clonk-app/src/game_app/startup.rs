@@ -4742,7 +4742,7 @@ impl GameApp {
             MainMenuItem::Options => {
                 if self.config.compat_profile == crate::settings::CompatProfile::Normal {
                     return self.open_unified_settings(
-                        clonk_frontend::settings_overlay::SettingsCategory::Quick,
+                        clonk_frontend::settings_overlay::SettingsCategory::Interface,
                     );
                 }
                 self.begin_startup_dialog_fade(StartupDialog::Options);

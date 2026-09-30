@@ -45,7 +45,7 @@ impl SettingsController {
     }
 
     pub(super) fn choice_rect(&self) -> IntRect {
-        let layout = SettingsLayout::new(self.view.width, self.view.height);
+        let layout = self.layout();
         let height = self.choices().len().min(8) as i32 * 28 + 32;
         let top = self
             .view

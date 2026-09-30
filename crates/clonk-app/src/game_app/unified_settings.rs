@@ -103,13 +103,18 @@ impl GameApp {
             return false;
         };
         if let Some(settings) = self.unified_settings.as_mut() {
-            settings
-                .controller
-                .resize(surface.width() as i32, surface.height() as i32);
+            let (Some(assets), Some(book)) = (
+                self.assets.options_dlg_assets(self.config.compat_profile),
+                self.assets.options_book_fonts.as_deref(),
+            ) else {
+                return false;
+            };
             settings.controller.render(
                 surface,
-                resources,
-                self.assets.options_book_fonts.as_deref(),
+                &assets,
+                resources.fonts,
+                book,
+                self.mode == AppMode::Menu,
                 gamma,
             );
             true
@@ -138,13 +143,18 @@ impl GameApp {
         };
         let surface = self.rendering.graphics.surface_mut();
         if let Some(settings) = self.unified_settings.as_mut() {
-            settings
-                .controller
-                .resize(surface.width() as i32, surface.height() as i32);
+            let (Some(assets), Some(book)) = (
+                self.assets.options_dlg_assets(self.config.compat_profile),
+                self.assets.options_book_fonts.as_deref(),
+            ) else {
+                return false;
+            };
             settings.controller.render(
                 surface,
-                resources,
-                self.assets.options_book_fonts.as_deref(),
+                &assets,
+                resources.fonts,
+                book,
+                self.mode == AppMode::Menu,
                 gamma,
             );
             true
@@ -261,6 +271,12 @@ impl GameApp {
         controller.select_category(category);
         let surface = self.rendering.graphics.surface();
         controller.resize(surface.width() as i32, surface.height() as i32);
+        if let (Some(fonts), Some(book)) = (
+            self.assets.clonk_fonts.as_deref(),
+            self.assets.options_book_fonts.as_deref(),
+        ) {
+            controller.resize_book(surface.width() as i32, surface.height() as i32, fonts, book);
+        }
         let owns_pause = self.mode == AppMode::Running
             && self.runtime_network_role() == RuntimeNetworkRole::Offline;
         if owns_pause {

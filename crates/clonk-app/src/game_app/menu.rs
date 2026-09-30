@@ -1331,7 +1331,7 @@ impl GameApp {
             MenuAction::ActivateOptions => {
                 if self.config.compat_profile == crate::settings::CompatProfile::Normal {
                     return self.open_unified_settings_for_player(
-                        clonk_frontend::settings_overlay::SettingsCategory::Quick,
+                        clonk_frontend::settings_overlay::SettingsCategory::Interface,
                         player,
                     );
                 }
@@ -3553,7 +3553,7 @@ impl GameApp {
         } else if screen.eq_ignore_ascii_case("options") {
             if self.config.compat_profile == crate::settings::CompatProfile::Normal {
                 if let Err(error) = self.open_unified_settings(
-                    clonk_frontend::settings_overlay::SettingsCategory::Quick,
+                    clonk_frontend::settings_overlay::SettingsCategory::Interface,
                 ) {
                     tracing::error!(%error, "could not open settings");
                 }
