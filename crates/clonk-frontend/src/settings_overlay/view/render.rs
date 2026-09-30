@@ -122,16 +122,28 @@ impl SettingsController {
                 continue;
             }
             let highlighted = self.view.focus == focus;
-            if let SettingsFocus::AudioPage(page) = focus {
-                let selected = self.audio_page == page && self.query.trim().is_empty();
-                let icon = self
-                    .page_tab_icons(&layout)
-                    .then(|| book.page_icon(page == AudioPage::Voice));
+            if let Some((label, icon)) = match focus {
+                SettingsFocus::AudioPage(page) => {
+                    Some((page.label(), book.page_icon(page == AudioPage::Voice)))
+                }
+                SettingsFocus::ControlsPage(page) => Some((
+                    page.label(),
+                    // The book's own pictures: its keys, gamepad and gears.
+                    book.option_icon(match page {
+                        ControlsPage::Keyboard => 3,
+                        ControlsPage::Controller => 4,
+                        ControlsPage::General => 0,
+                    }),
+                )),
+                _ => None,
+            } {
+                let selected =
+                    self.current_page_tab() == Some(focus) && self.query.trim().is_empty();
                 book.page_tab(
                     surface,
                     rect,
-                    page.label(),
-                    icon.as_ref(),
+                    label,
+                    self.page_tab_icons(&layout).then_some(&icon),
                     selected,
                     highlighted,
                     gamma,
@@ -464,8 +476,8 @@ impl SettingsController {
         }
     }
 
-    /// The rule the Audio page's tabs stand on, open under the chosen tab
-    /// unless a search has replaced the page.
+    /// The rule a page's tabs stand on, open under the chosen tab unless a
+    /// search has replaced the page.
     fn render_page_tab_rule(
         &self,
         surface: &mut Surface,
@@ -473,13 +485,10 @@ impl SettingsController {
         layout: &SettingsLayout,
         gamma: Option<&GammaRamp>,
     ) {
-        if self.category != SettingsCategory::Audio {
-            return;
-        }
         let Some((_, chosen)) = self
-            .targets(layout)
+            .page_tab_rects(layout)
             .into_iter()
-            .find(|(focus, _)| *focus == SettingsFocus::AudioPage(self.audio_page))
+            .find(|(focus, _)| Some(*focus) == self.current_page_tab())
         else {
             return;
         };

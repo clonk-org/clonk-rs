@@ -95,6 +95,41 @@ impl AudioPage {
     }
 }
 
+/// The Controls category's tabs: one for each kind of control set, and one
+/// for its other preferences.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ControlsPage {
+    #[default]
+    Keyboard,
+    Controller,
+    General,
+}
+
+impl ControlsPage {
+    pub const ALL: [Self; 3] = [Self::Keyboard, Self::Controller, Self::General];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Keyboard => "Keyboard",
+            Self::Controller => "Controller",
+            Self::General => "General",
+        }
+    }
+
+    /// The device whose control sets the tab shows.
+    pub const fn device(self) -> Option<ControlDevice> {
+        match self {
+            Self::Keyboard => Some(ControlDevice::Keyboard),
+            Self::Controller => Some(ControlDevice::Gamepad),
+            Self::General => None,
+        }
+    }
+
+    fn contains(self, setting: &Setting) -> bool {
+        setting.details.control.map(|binding| binding.set.device) == self.device()
+    }
+}
+
 /// One of the keyboard or controller control sets players choose between.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlSet {
@@ -191,7 +226,10 @@ pub struct SettingsController {
     pub show_advanced: bool,
     pub pinned: Vec<SettingId>,
     pub modified_only: bool,
-    pub group: Option<ControlSet>,
+    pub controls_page: ControlsPage,
+    /// The control sets the Keyboard and Controller tabs show.
+    pub keyboard_set: usize,
+    pub controller_set: usize,
     pub view: view::SettingsViewState,
 }
 
@@ -205,7 +243,9 @@ impl SettingsController {
             show_advanced: false,
             pinned: Vec::new(),
             modified_only: false,
-            group: None,
+            controls_page: ControlsPage::Keyboard,
+            keyboard_set: 0,
+            controller_set: 0,
             view: Default::default(),
         }
     }
@@ -215,11 +255,11 @@ impl SettingsController {
         self.settings.get(index).is_some_and(Setting::is_modified)
     }
 
-    /// The control sets in the current category, in catalog order.
+    /// The control sets on the current page, in catalog order.
     pub fn groups(&self) -> Vec<ControlSet> {
         self.settings
             .iter()
-            .filter(|setting| setting.category == self.category)
+            .filter(|setting| setting.category == self.category && self.page_contains(setting))
             .filter_map(|setting| setting.details.control.map(|binding| binding.set))
             .fold(Vec::new(), |mut groups, group| {
                 if !groups.contains(&group) {
@@ -229,13 +269,39 @@ impl SettingsController {
             })
     }
 
-    /// The control set whose bindings the category shows: the chosen one
-    /// while the category has it, otherwise the category's first.
+    /// The control set whose bindings the page shows: the one chosen for
+    /// its device while the page has it, otherwise the page's first.
     pub fn current_group(&self) -> Option<ControlSet> {
         let groups = self.groups();
-        self.group
-            .filter(|group| groups.contains(group))
+        self.controls_page
+            .device()
+            .map(|device| ControlSet {
+                device,
+                index: match device {
+                    ControlDevice::Keyboard => self.keyboard_set,
+                    ControlDevice::Gamepad => self.controller_set,
+                },
+            })
+            .filter(|set| groups.contains(set))
             .or_else(|| groups.into_iter().next())
+    }
+
+    /// Shows `set` on its device's tab from now on.
+    pub fn choose_set(&mut self, set: ControlSet) {
+        match set.device {
+            ControlDevice::Keyboard => self.keyboard_set = set.index,
+            ControlDevice::Gamepad => self.controller_set = set.index,
+        }
+    }
+
+    /// Whether a setting of the current category sits on its current tab,
+    /// whatever the filters.
+    fn page_contains(&self, setting: &Setting) -> bool {
+        match self.category {
+            SettingsCategory::Audio => self.audio_page.contains(setting),
+            SettingsCategory::Controls => self.controls_page.contains(setting),
+            _ => true,
+        }
     }
 
     pub fn parse_value(&self, index: usize, text: &str) -> Result<AdvancedConfigValue, String> {
@@ -281,6 +347,8 @@ impl SettingsController {
                             && (!setting.advanced || self.show_advanced)
                             && (self.category != SettingsCategory::Audio
                                 || self.audio_setting_visible(setting))
+                            && (self.category != SettingsCategory::Controls
+                                || self.controls_page.contains(setting))
                             && setting
                                 .details
                                 .control

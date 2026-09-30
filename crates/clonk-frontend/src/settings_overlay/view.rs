@@ -9,6 +9,8 @@ mod choices;
 mod microphone;
 mod render;
 const ROW_HEIGHT: i32 = 36;
+/// The control-set selector's row above a control set's bindings.
+const SET_ROW_HEIGHT: i32 = 34;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsFocus {
@@ -16,6 +18,7 @@ pub enum SettingsFocus {
     Search,
     Category(SettingsCategory),
     AudioPage(AudioPage),
+    ControlsPage(ControlsPage),
     Group,
     Row(usize),
     Modified,
@@ -210,13 +213,49 @@ impl SettingsController {
             layout.list.y -= row;
             layout.list.h += row;
         }
+        if self.current_group().is_some() {
+            layout.list.y += SET_ROW_HEIGHT;
+            layout.list.h -= SET_ROW_HEIGHT;
+        }
         layout
     }
 
-    /// Whether the page has a row of tabs or a control-set selector under
-    /// the search field.
+    /// Whether the page has a row of tabs under the search field.
     fn has_page_row(&self) -> bool {
-        self.category == SettingsCategory::Audio || !self.groups().is_empty()
+        self.current_page_tab().is_some()
+    }
+
+    /// The current category's tabs, in order.
+    fn page_tabs(&self) -> Vec<SettingsFocus> {
+        match self.category {
+            SettingsCategory::Audio => AudioPage::ALL.map(SettingsFocus::AudioPage).to_vec(),
+            SettingsCategory::Controls => {
+                ControlsPage::ALL.map(SettingsFocus::ControlsPage).to_vec()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The tab of the page on show.
+    fn current_page_tab(&self) -> Option<SettingsFocus> {
+        match self.category {
+            SettingsCategory::Audio => Some(SettingsFocus::AudioPage(self.audio_page)),
+            SettingsCategory::Controls => Some(SettingsFocus::ControlsPage(self.controls_page)),
+            _ => None,
+        }
+    }
+
+    /// Where the control-set selector sits: at the top of the page, above
+    /// the bindings.
+    fn set_row(&self, layout: &SettingsLayout) -> Option<IntRect> {
+        self.current_group().map(|_| {
+            IntRect::new(
+                layout.list.x,
+                layout.list.y - SET_ROW_HEIGHT,
+                layout.list.w,
+                SET_ROW_HEIGHT - 6,
+            )
+        })
     }
 
     pub fn resize(&mut self, width: i32, height: i32) {
@@ -247,6 +286,12 @@ impl SettingsController {
         self.audio_page = page;
         self.select_category(SettingsCategory::Audio);
         self.view.focus = SettingsFocus::AudioPage(page);
+    }
+
+    pub fn select_controls_page(&mut self, page: ControlsPage) {
+        self.controls_page = page;
+        self.select_category(SettingsCategory::Controls);
+        self.view.focus = SettingsFocus::ControlsPage(page);
     }
 
     pub fn voice_page_selected(&self) -> bool {
@@ -437,14 +482,25 @@ impl SettingsController {
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
                 let backwards = matches!(key, KeyCode::Up | KeyCode::PageUp);
-                if matches!(
-                    self.view.focus,
-                    SettingsFocus::AudioPage(_) | SettingsFocus::Group
-                ) {
+                let on_tab = Some(self.view.focus) == self.current_page_tab();
+                if on_tab || self.view.focus == SettingsFocus::Group {
+                    let above = if on_tab {
+                        None
+                    } else {
+                        self.current_page_tab()
+                    };
+                    let below = (on_tab && !self.groups().is_empty())
+                        .then_some(SettingsFocus::Group)
+                        .or_else(|| {
+                            self.visible_indices()
+                                .first()
+                                .copied()
+                                .map(SettingsFocus::Row)
+                        });
                     if backwards {
-                        self.set_focus(SettingsFocus::Search);
-                    } else if let Some(index) = self.visible_indices().first().copied() {
-                        self.set_focus(SettingsFocus::Row(index));
+                        self.set_focus(above.unwrap_or(SettingsFocus::Search));
+                    } else if let Some(focus) = below {
+                        self.set_focus(focus);
                     }
                     return Vec::new();
                 }
@@ -483,12 +539,11 @@ impl SettingsController {
                             .iter()
                             .position(|i| self.view.focus == SettingsFocus::Row(*i));
                         if key == KeyCode::Up && old == Some(0) {
-                            self.set_focus(if self.category == SettingsCategory::Audio {
-                                SettingsFocus::AudioPage(self.audio_page)
-                            } else if !self.groups().is_empty() {
+                            self.set_focus(if !self.groups().is_empty() {
                                 SettingsFocus::Group
                             } else {
-                                SettingsFocus::Category(self.category)
+                                self.current_page_tab()
+                                    .unwrap_or(SettingsFocus::Category(self.category))
                             });
                             return Vec::new();
                         }
@@ -534,13 +589,14 @@ impl SettingsController {
                 );
             }
             KeyCode::Left | KeyCode::Right => {
-                if matches!(self.view.focus, SettingsFocus::AudioPage(_)) {
-                    self.select_audio_page(if self.audio_page == AudioPage::Sound {
-                        AudioPage::Voice
+                let tabs = self.page_tabs();
+                if let Some(position) = tabs.iter().position(|tab| *tab == self.view.focus) {
+                    let step = if key == KeyCode::Left {
+                        tabs.len() - 1
                     } else {
-                        AudioPage::Sound
-                    });
-                    return Vec::new();
+                        1
+                    };
+                    return self.activate(tabs[(position + step) % tabs.len()]);
                 }
                 if self.view.focus == SettingsFocus::Group {
                     self.cycle_group(if key == KeyCode::Left { -1 } else { 1 });
@@ -550,8 +606,8 @@ impl SettingsController {
                     return self.adjust(index, if key == KeyCode::Left { -1 } else { 1 });
                 }
                 if let SettingsFocus::Category(_) = self.view.focus {
-                    if self.category == SettingsCategory::Audio {
-                        self.set_focus(SettingsFocus::AudioPage(self.audio_page));
+                    if let Some(tab) = self.current_page_tab() {
+                        self.set_focus(tab);
                     } else if let Some(index) = self.visible_indices().first().copied() {
                         self.set_focus(SettingsFocus::Row(index));
                     }
@@ -576,9 +632,7 @@ impl SettingsController {
     fn focus_order(&self) -> Vec<SettingsFocus> {
         let mut order = SettingsCategory::ALL.map(SettingsFocus::Category).to_vec();
         order.push(SettingsFocus::Search);
-        if self.category == SettingsCategory::Audio {
-            order.push(SettingsFocus::AudioPage(self.audio_page));
-        }
+        order.extend(self.current_page_tab());
         if !self.groups().is_empty() {
             order.push(SettingsFocus::Group);
         }
@@ -706,7 +760,9 @@ impl SettingsController {
             }),
             SettingsFocus::Search => "Type to search · Down: results",
             SettingsFocus::Category(_) => "Up/Down: pages · Right: settings",
-            SettingsFocus::AudioPage(_) | SettingsFocus::Group => "Left/Right: switch",
+            SettingsFocus::AudioPage(_) | SettingsFocus::ControlsPage(_) | SettingsFocus::Group => {
+                "Left/Right: switch"
+            }
             _ => "Tab: next",
         };
         let reset = match self.view.focus {
@@ -731,7 +787,7 @@ impl SettingsController {
             .and_then(|group| groups.iter().position(|candidate| *candidate == group))
             .unwrap_or(0);
         let next = (current as isize + step).rem_euclid(groups.len() as isize) as usize;
-        self.group = Some(groups[next]);
+        self.choose_set(groups[next]);
         self.view.scroll = 0;
         self.view.selected = self.visible_indices().first().copied();
     }
@@ -821,6 +877,7 @@ impl SettingsController {
             }
             SettingsFocus::Category(category) => self.select_category(category),
             SettingsFocus::AudioPage(page) => self.select_audio_page(page),
+            SettingsFocus::ControlsPage(page) => self.select_controls_page(page),
             SettingsFocus::Group => self.cycle_group(1),
             SettingsFocus::Modified => {
                 self.modified_only = !self.modified_only;
@@ -1096,32 +1153,11 @@ impl SettingsController {
 
     fn targets(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         let mut targets = vec![(SettingsFocus::Search, layout.search)];
-        if self.category == SettingsCategory::Audio {
-            let (sound_w, voice_w) = if self.page_tab_icons(layout) {
-                (100, 132)
-            } else {
-                (72, 108)
-            };
-            targets.extend([
-                (
-                    SettingsFocus::AudioPage(AudioPage::Sound),
-                    IntRect::new(layout.list.x, layout.search.y + 29, sound_w, 28),
-                ),
-                (
-                    SettingsFocus::AudioPage(AudioPage::Voice),
-                    IntRect::new(
-                        layout.list.x + sound_w + 6,
-                        layout.search.y + 29,
-                        voice_w,
-                        28,
-                    ),
-                ),
-            ]);
-        }
-        if !self.groups().is_empty() {
+        targets.extend(self.page_tab_rects(layout));
+        if let Some(row) = self.set_row(layout) {
             targets.push((
                 SettingsFocus::Group,
-                IntRect::new(layout.list.x, layout.search.y + 30, 190, 26),
+                IntRect::new(row.x, row.y + (row.h - 26) / 2, 190, 26),
             ));
         }
         targets.extend(
@@ -1141,6 +1177,28 @@ impl SettingsController {
         targets.extend(self.footer_links(layout));
         targets.push((SettingsFocus::Close, layout.back));
         targets
+    }
+
+    /// The current category's tabs, side by side under the search field.
+    fn page_tab_rects(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
+        let icons = self.page_tab_icons(layout);
+        let mut x = layout.list.x;
+        self.page_tabs()
+            .into_iter()
+            .map(|tab| {
+                let (with_icon, plain) = match tab {
+                    SettingsFocus::AudioPage(AudioPage::Sound) => (100, 72),
+                    SettingsFocus::AudioPage(AudioPage::Voice) => (132, 108),
+                    SettingsFocus::ControlsPage(ControlsPage::Keyboard) => (112, 86),
+                    SettingsFocus::ControlsPage(ControlsPage::Controller) => (124, 98),
+                    _ => (104, 80),
+                };
+                let width = if icons { with_icon } else { plain };
+                let rect = IntRect::new(x, layout.search.y + 29, width, 28);
+                x += width + 6;
+                (tab, rect)
+            })
+            .collect()
     }
 
     /// The reset link a changed, selected row offers just left of its value.
@@ -1212,10 +1270,7 @@ impl SettingsController {
         self.settings
             .iter()
             .filter(|setting| {
-                setting.advanced
-                    && setting.category == self.category
-                    && (self.category != SettingsCategory::Audio
-                        || self.audio_page.contains(setting))
+                setting.advanced && setting.category == self.category && self.page_contains(setting)
             })
             .count()
     }
@@ -1393,34 +1448,99 @@ mod tests {
         }
     }
 
+    /// A Controls setting, bound to `(device, set, command)` when given.
+    fn control(key: &str, binding: Option<(ControlDevice, usize, usize)>) -> Setting {
+        let mut setting = preference(key, AdvancedConfigValue::Bool(true));
+        setting.category = SettingsCategory::Controls;
+        setting.details.control = binding.map(|(device, index, command)| ControlBinding {
+            set: ControlSet { device, index },
+            command,
+        });
+        setting
+    }
+
     #[test]
-    fn control_bindings_show_one_control_set_at_a_time_and_cycle_between_sets() {
-        let control = |key: &str, set: Option<(ControlDevice, usize, usize)>| {
-            let mut setting = preference(key, AdvancedConfigValue::Bool(true));
-            setting.category = SettingsCategory::Controls;
-            setting.details.control = set.map(|(device, index, command)| ControlBinding {
-                set: ControlSet { device, index },
-                command,
-            });
-            setting
-        };
+    fn controls_split_into_keyboard_controller_and_general_tabs_that_keep_their_own_set() {
+        use ControlDevice::{Gamepad, Keyboard};
         let mut controller = SettingsController::new(vec![
             control("GamepadEnabled", None),
-            control("Kbd1Key1", Some((ControlDevice::Keyboard, 0, 0))),
-            control("Kbd1Key2", Some((ControlDevice::Keyboard, 0, 1))),
-            control("Kbd2Key1", Some((ControlDevice::Keyboard, 1, 0))),
-            control("Button1", Some((ControlDevice::Gamepad, 0, 0))),
+            control("Kbd1Key1", Some((Keyboard, 0, 0))),
+            control("Kbd1Key2", Some((Keyboard, 0, 1))),
+            control("Kbd2Key1", Some((Keyboard, 1, 0))),
+            control("Pad1Button1", Some((Gamepad, 0, 0))),
+            control("Pad2Button1", Some((Gamepad, 1, 0))),
         ]);
         controller.select_category(SettingsCategory::Controls);
-        assert_eq!(controller.visible_indices(), vec![0, 1, 2]);
+        assert_eq!(controller.controls_page, ControlsPage::Keyboard);
+        assert_eq!(controller.visible_indices(), vec![1, 2]);
         controller.set_focus(SettingsFocus::Group);
         controller.key(KeyCode::Right, false, false);
-        assert_eq!(controller.visible_indices(), vec![0, 3]);
+        assert_eq!(controller.visible_indices(), vec![3]);
+        controller.key(KeyCode::Right, false, false);
+        assert_eq!(
+            controller.visible_indices(),
+            vec![1, 2],
+            "keyboard sets cycle among themselves"
+        );
+        controller.key(KeyCode::Left, false, false);
+        controller.select_controls_page(ControlsPage::Controller);
+        assert_eq!(controller.visible_indices(), vec![4]);
+        controller.cycle_group(1);
+        assert_eq!(controller.visible_indices(), vec![5]);
+        controller.select_controls_page(ControlsPage::General);
+        assert_eq!(controller.visible_indices(), vec![0]);
+        assert_eq!(controller.current_group(), None);
+        controller.select_controls_page(ControlsPage::Keyboard);
+        assert_eq!(
+            controller.visible_indices(),
+            vec![3],
+            "each tab keeps its set"
+        );
+        controller.query = "Kbd1".into();
+        assert_eq!(
+            controller.visible_indices(),
+            vec![1, 2],
+            "search spans every tab and set"
+        );
+    }
+
+    #[test]
+    fn controls_tabs_switch_with_left_and_right_like_the_audio_tabs() {
+        let mut controller = SettingsController::new(vec![control("GamepadEnabled", None)]);
+        controller.select_category(SettingsCategory::Controls);
+        let layout = controller.layout();
+        let tabs: Vec<_> = controller
+            .targets(&layout)
+            .into_iter()
+            .filter(|(focus, _)| matches!(focus, SettingsFocus::ControlsPage(_)))
+            .collect();
+        assert_eq!(
+            tabs.iter().map(|(focus, _)| *focus).collect::<Vec<_>>(),
+            ControlsPage::ALL.map(SettingsFocus::ControlsPage).to_vec()
+        );
+        for pair in tabs.windows(2) {
+            assert!(pair[0].1.x + pair[0].1.w < pair[1].1.x);
+        }
+        assert!(tabs[2].1.x + tabs[2].1.w <= layout.list.x + layout.list.w);
+        controller.set_focus(SettingsFocus::Category(SettingsCategory::Controls));
+        controller.key(KeyCode::Right, false, false);
+        assert_eq!(
+            controller.view.focus,
+            SettingsFocus::ControlsPage(ControlsPage::Keyboard)
+        );
+        controller.key(KeyCode::Right, false, false);
+        assert_eq!(controller.controls_page, ControlsPage::Controller);
+        assert_eq!(
+            controller.view.focus,
+            SettingsFocus::ControlsPage(ControlsPage::Controller)
+        );
         controller.key(KeyCode::Left, false, false);
         controller.key(KeyCode::Left, false, false);
-        assert_eq!(controller.visible_indices(), vec![0, 4], "cycling wraps");
-        controller.query = "Kbd2".into();
-        assert_eq!(controller.visible_indices(), vec![3], "search spans sets");
+        assert_eq!(
+            controller.controls_page,
+            ControlsPage::General,
+            "switching wraps"
+        );
     }
 
     #[test]

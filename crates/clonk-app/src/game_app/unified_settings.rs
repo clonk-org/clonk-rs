@@ -2,7 +2,7 @@
 use super::*;
 use clonk_frontend::settings_overlay::SettingsAction;
 use clonk_frontend::settings_overlay::{
-    AudioPage, ControlSet, SettingId, SettingsCategory, SettingsController,
+    AudioPage, ControlsPage, SettingId, SettingsCategory, SettingsController,
 };
 
 #[path = "unified_settings/apply.rs"]
@@ -30,7 +30,9 @@ pub(crate) struct UnifiedSettings {
 pub(crate) struct SettingsPage {
     category: SettingsCategory,
     audio_page: AudioPage,
-    group: Option<ControlSet>,
+    controls_page: ControlsPage,
+    keyboard_set: usize,
+    controller_set: usize,
 }
 
 impl GameApp {
@@ -51,11 +53,12 @@ impl GameApp {
             return;
         };
         let controller = &mut settings.controller;
-        controller.group = page.group;
-        if page.category == SettingsCategory::Audio {
-            controller.select_audio_page(page.audio_page);
-        } else {
-            controller.select_category(page.category);
+        controller.keyboard_set = page.keyboard_set;
+        controller.controller_set = page.controller_set;
+        match page.category {
+            SettingsCategory::Audio => controller.select_audio_page(page.audio_page),
+            SettingsCategory::Controls => controller.select_controls_page(page.controls_page),
+            category => controller.select_category(category),
         }
     }
 
@@ -401,7 +404,9 @@ impl GameApp {
             self.settings_return_page = Some(SettingsPage {
                 category: settings.controller.category,
                 audio_page: settings.controller.audio_page,
-                group: settings.controller.group,
+                controls_page: settings.controller.controls_page,
+                keyboard_set: settings.controller.keyboard_set,
+                controller_set: settings.controller.controller_set,
             });
             if settings.owns_pause && settings.opened_in == self.mode {
                 self.netplay.offline_halt_count =

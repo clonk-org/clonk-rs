@@ -488,8 +488,6 @@ impl OptionsBook<'_> {
     /// The Sound and Voice chat tab icons: the options book's speaker, and the
     /// chat illustration its voice sheet uses where the icon sheet has it.
     pub fn page_icon(&self, voice: bool) -> ImageData {
-        let icons = &self.assets.option_icons;
-        let cell = icons.height();
         voice
             .then(|| {
                 self.assets
@@ -499,7 +497,14 @@ impl OptionsBook<'_> {
                     .map(|image| crop_image(image, 64, 256, 64, 64))
             })
             .flatten()
-            .unwrap_or_else(|| crop_image(icons, cell * 2, 0, cell, cell))
+            .unwrap_or_else(|| self.option_icon(2))
+    }
+
+    /// One of the square pictures on the book's side tabs.
+    pub fn option_icon(&self, index: u32) -> ImageData {
+        let icons = &self.assets.option_icons;
+        let cell = icons.height();
+        crop_image(icons, cell * index, 0, cell, cell)
     }
 
     pub fn highlight(&self, surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {

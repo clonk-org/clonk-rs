@@ -752,7 +752,7 @@ fn unified_settings_dims_the_running_game_behind_the_book() {
 
 #[test]
 fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
-    use clonk_frontend::settings_overlay::{AudioPage, SettingsCategory};
+    use clonk_frontend::settings_overlay::{AudioPage, ControlsPage, SettingsCategory};
     let mut app = new_classic_running_sandbox_app();
     app.config.compat_profile = crate::settings::CompatProfile::Normal;
     app.app_paths = None;
@@ -762,11 +762,21 @@ fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
     assert_eq!(controller.category, SettingsCategory::Interface);
     controller.select_category(SettingsCategory::Controls);
     controller.cycle_group(1);
+    controller.select_controls_page(ControlsPage::Controller);
+    controller.cycle_group(2);
     app.close_unified_settings();
     app.apply_ingame_menu_action_for_player(0, MenuAction::ActivateOptions)
         .unwrap();
-    let controller = &app.unified_settings.as_ref().unwrap().controller;
-    assert_eq!(controller.category, SettingsCategory::Controls);
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    assert_eq!(
+        (controller.category, controller.controls_page),
+        (SettingsCategory::Controls, ControlsPage::Controller)
+    );
+    assert_eq!(
+        controller.current_group().map(|set| set.label()).as_deref(),
+        Some("Controller 3")
+    );
+    controller.select_controls_page(ControlsPage::Keyboard);
     assert_eq!(
         controller.current_group().map(|set| set.label()).as_deref(),
         Some("Keyboard 2")
