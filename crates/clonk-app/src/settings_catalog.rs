@@ -483,11 +483,12 @@ fn describe(setting: &mut Setting) {
         setting.keywords.push_str(keywords);
         setting.advanced = false;
     }
-    if section == "Voice"
+    if (section == "Voice"
         && matches!(
             key,
             "EchoCancellation" | "NoiseSuppression" | "AutomaticGainControl" | "ActivationHangover"
-        )
+        ))
+        || (section == "Graphics" && matches!(key, "ResolutionX" | "ResolutionY"))
     {
         setting.advanced = true;
     }
@@ -586,6 +587,9 @@ fn describe(setting: &mut Setting) {
             };
         }
     }
+    if (section, key) == ("Graphics", "Scale") {
+        offer_scale_steps(setting);
+    }
     if !setting.value.is_editable() {
         setting.details.policy = ReadOnly;
     }
@@ -596,6 +600,33 @@ fn describe(setting: &mut Setting) {
             setting.label,
             setting.details.policy.label()
         );
+    }
+}
+
+/// Interface scales a player picks from; a saved value off these steps
+/// stays selectable so opening settings never changes it.
+const SCALE_STEPS: [i128; 9] = [100, 125, 150, 175, 200, 250, 300, 350, 400];
+
+fn offer_scale_steps(setting: &mut Setting) {
+    let mut steps: Vec<i128> = [&setting.value, &setting.default]
+        .into_iter()
+        .filter_map(|value| value.serialized().parse().ok())
+        .chain(SCALE_STEPS)
+        .collect();
+    steps.sort_unstable();
+    steps.dedup();
+    let choices: Vec<_> = steps
+        .iter()
+        .map(|step| AdvancedConfigChoice {
+            value: step.to_string(),
+            label: format!("{step}%"),
+        })
+        .collect();
+    for value in [&mut setting.value, &mut setting.default] {
+        *value = AdvancedConfigValue::Choice {
+            value: value.serialized(),
+            choices: choices.clone(),
+        };
     }
 }
 
@@ -703,6 +734,37 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn unified_catalog_offers_interface_scale_in_percentage_steps() {
+        let mut config = Config::new();
+        config.set_in(Some("Graphics"), "Scale", "110");
+        let rows = catalog(&config);
+        let scale = rows
+            .iter()
+            .find(|row| row.id.section == "Graphics" && row.id.key == "Scale")
+            .unwrap();
+        let AdvancedConfigValue::Choice { value, choices } = &scale.value else {
+            panic!("scale is offered as steps: {:?}", scale.value);
+        };
+        assert_eq!(value, "110", "an unlisted saved scale stays selectable");
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.label.as_str())
+                .collect::<Vec<_>>(),
+            ["100%", "110%", "125%", "150%", "175%", "200%", "250%", "300%", "350%", "400%"]
+        );
+        assert_eq!(scale.default.serialized(), "100");
+        assert_eq!(scale.details.policy, ApplyPolicy::DisplayPreview);
+        for key in ["ResolutionX", "ResolutionY"] {
+            let row = rows
+                .iter()
+                .find(|row| row.id.section == "Graphics" && row.id.key == key)
+                .unwrap();
+            assert!(row.advanced, "raw window dimensions sit under Advanced");
+        }
+    }
+
     #[test]
     fn unified_catalog_groups_bindings_by_control_set_in_control_order() {
         let rows = catalog(&Config::new());

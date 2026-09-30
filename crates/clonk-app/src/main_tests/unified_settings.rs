@@ -437,12 +437,14 @@ fn unified_settings_display_preview_reverts_on_timeout_without_saving_the_candid
     let before = app.unified_settings.as_ref().unwrap().controller.settings[index]
         .value
         .clone();
+    let AdvancedConfigValue::Choice { choices, .. } = before.clone() else {
+        panic!("scale is offered as steps");
+    };
     app.process_unified_settings_actions(vec![SettingsAction::Change(
         index,
-        AdvancedConfigValue::Integer {
-            value: 125,
-            min: 100,
-            max: 400,
+        AdvancedConfigValue::Choice {
+            value: "125".into(),
+            choices,
         },
     )])
     .unwrap();
