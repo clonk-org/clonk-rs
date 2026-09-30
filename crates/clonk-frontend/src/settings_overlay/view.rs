@@ -553,6 +553,13 @@ impl SettingsController {
         .find_map(|(applies, emphasis)| applies.then_some(emphasis))
     }
 
+    /// The muted hint an empty search field shows, focused or not.
+    pub fn search_placeholder(&self) -> Option<&'static str> {
+        self.query
+            .is_empty()
+            .then_some("Search all settings (Ctrl+F)")
+    }
+
     /// The keys that operate the focused control, for the footer.
     pub fn input_hint(&self) -> String {
         let action = match self.view.focus {
@@ -1174,6 +1181,19 @@ mod tests {
         assert_eq!(value_label(&duration), "12 s");
         duration.value = seconds(30);
         assert!(detail_text(&duration).ends_with("Default: 12 s"));
+    }
+
+    #[test]
+    fn an_empty_search_shows_a_hint_that_typing_replaces() {
+        let mut controller = SettingsController::new(Vec::new());
+        assert_eq!(
+            controller.search_placeholder(),
+            Some("Search all settings (Ctrl+F)")
+        );
+        controller.focus_search();
+        assert!(controller.search_placeholder().is_some());
+        controller.text("vol");
+        assert_eq!(controller.search_placeholder(), None);
     }
 
     #[test]

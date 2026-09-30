@@ -71,7 +71,8 @@ impl SettingsController {
             [0, 0, 0, 255],
             gamma,
         );
-        if self.view.focus == SettingsFocus::Search {
+        let searching = self.view.focus == SettingsFocus::Search;
+        if searching {
             self.view
                 .search_edit
                 .render(surface, body_font, layout.search, gamma);
@@ -81,12 +82,25 @@ impl SettingsController {
                 surface,
                 body_font,
                 layout.search,
-                if self.query.is_empty() {
-                    "All settings (Ctrl+F)"
-                } else {
-                    &self.query
-                },
+                &self.query,
                 [55, 45, 32, 255],
+                gamma,
+            );
+        }
+        if let Some(hint) = self.search_placeholder() {
+            // Beside the caret while focused, as text fields do elsewhere.
+            let inset = if searching { 6 } else { 0 };
+            text(
+                surface,
+                body_font,
+                IntRect::new(
+                    layout.search.x + inset,
+                    layout.search.y,
+                    layout.search.w - inset,
+                    layout.search.h,
+                ),
+                hint,
+                [140, 124, 100, 255],
                 gamma,
             );
         }
