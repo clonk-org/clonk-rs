@@ -242,10 +242,7 @@ impl SettingsController {
                         .split_whitespace()
                         .all(|word| searchable.contains(word))
                 };
-                (matches
-                    && (!self.modified_only
-                        || setting.value.serialized() != setting.default.serialized()))
-                .then_some(index)
+                (matches && (!self.modified_only || setting.is_modified())).then_some(index)
             })
             .collect();
         if query.is_empty() && self.category == SettingsCategory::Quick {
