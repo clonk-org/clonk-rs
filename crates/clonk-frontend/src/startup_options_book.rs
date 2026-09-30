@@ -8,8 +8,6 @@ const PAGE_TAB_INK: u32 = 0x0061_4a32;
 /// Ink for the page's link text: a shade darker than [`PAGE_TAB_INK`] so
 /// the book font's thin strokes stay legible.
 const PAGE_TAB_INK_RGBA: [u8; 4] = [0x4e, 0x3a, 0x26, 255];
-/// Gold of a pinned setting's star.
-const STAR_GOLD: u32 = 0x00e0_b030;
 /// The popup window's dark wooden frame and the gilt line inside it.
 const WINDOW_FRAME_WOOD: u32 = 0x0030_1c0c;
 const WINDOW_FRAME_GILT: u32 = 0x40c0_a060;
@@ -488,56 +486,6 @@ impl OptionsBook<'_> {
             emphasized,
             gamma,
         );
-    }
-
-    /// A five-pointed star inked into `rect`: gold for a setting pinned to
-    /// Quick, an outline for one that is not.
-    pub fn ink_star(
-        &self,
-        surface: &mut Surface,
-        rect: IntRect,
-        filled: bool,
-        emphasized: bool,
-        gamma: Option<&GammaRamp>,
-    ) {
-        let (cx, cy) = (
-            rect.x as f32 + rect.w as f32 / 2.0,
-            rect.y as f32 + rect.h as f32 / 2.0 + 1.0,
-        );
-        let outer = rect.w.min(rect.h) as f32 / 2.0;
-        let points: Vec<(i32, i32)> = (0..10)
-            .map(|point| {
-                let radius = if point % 2 == 0 { outer } else { outer * 0.45 };
-                let angle =
-                    -std::f32::consts::FRAC_PI_2 + point as f32 * std::f32::consts::PI / 5.0;
-                (
-                    (cx + radius * angle.cos()).round() as i32,
-                    (cy + radius * angle.sin()).round() as i32,
-                )
-            })
-            .collect();
-        let edges = || (0..10).map(|point| (points[point], points[(point + 1) % 10]));
-        // Pinned stars are gold; the others are pale so they read as hollow on
-        // a highlighted row.
-        let center = (cx.round() as i32, cy.round() as i32);
-        let fill = if filled { STAR_GOLD } else { 0x70ff_f8e8 };
-        for (from, to) in edges() {
-            fill_quad_dw(surface, &[center, from, to, to], fill, gamma);
-        }
-        for (from, to) in edges() {
-            draw_line_dw(surface, from.0, from.1, to.0, to.1, PAGE_TAB_INK, gamma);
-            if emphasized {
-                draw_line_dw(
-                    surface,
-                    from.0 + 1,
-                    from.1,
-                    to.0 + 1,
-                    to.1,
-                    PAGE_TAB_INK,
-                    gamma,
-                );
-            }
-        }
     }
 
     /// The Sound and Voice chat tab icons: the options book's speaker, and the

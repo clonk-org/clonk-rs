@@ -22,7 +22,6 @@ pub(crate) struct UnifiedSettings {
     config: Config,
     owns_pause: bool,
     opened_in: AppMode,
-    initial_pins: Vec<SettingId>,
     pub(crate) binding: Option<usize>,
     preview: Option<settings_display::DisplayPreview>,
     owner: i32,
@@ -376,7 +375,6 @@ impl GameApp {
         }
         .into();
         self.unified_settings = Some(UnifiedSettings {
-            initial_pins: controller.pinned.clone(),
             controller,
             config,
             owns_pause,
@@ -394,21 +392,6 @@ impl GameApp {
     }
     pub(crate) fn close_unified_settings(&mut self) {
         self.finish_unified_display_preview(false);
-        if let Some(settings) = self.unified_settings.as_ref() {
-            if settings.initial_pins != settings.controller.pinned {
-                self.config.deferred.set(
-                    "Settings",
-                    "Favorites",
-                    settings
-                        .controller
-                        .pinned
-                        .iter()
-                        .map(|id| format!("{}:{}", id.section, id.key))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
-            }
-        }
         if let Err(error) = self.save_unified_settings() {
             if let Some(settings) = self.unified_settings.as_mut() {
                 settings.controller.view.message =

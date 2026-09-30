@@ -213,16 +213,6 @@ impl SettingsController {
             .or_else(|| groups.into_iter().next())
     }
 
-    pub fn toggle_pin(&mut self, index: usize) {
-        if let Some(setting) = self.settings.get(index) {
-            if let Some(position) = self.pinned.iter().position(|id| *id == setting.id) {
-                self.pinned.remove(position);
-            } else {
-                self.pinned.push(setting.id.clone());
-            }
-        }
-    }
-
     pub fn parse_value(&self, index: usize, text: &str) -> Result<AdvancedConfigValue, String> {
         let setting = self.settings.get(index).ok_or("Setting unavailable")?;
         match &setting.value {
@@ -356,7 +346,7 @@ mod tests {
         assert_eq!(controller.visible_indices(), vec![0, 2]);
         controller.query = "PushToTalkKey".into();
         assert_eq!(controller.visible_indices(), vec![1]);
-        controller.toggle_pin(1);
+        controller.pinned.push(controller.settings[1].id.clone());
         controller.select_category(SettingsCategory::Quick);
         assert_eq!(controller.visible_indices(), vec![1]);
     }
@@ -411,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_settings_share_values_and_preserve_personal_order() {
+    fn quick_settings_share_values_in_their_listed_order() {
         let value = AdvancedConfigValue::Bool(true);
         let setting = |key: &str| Setting {
             id: SettingId::new("Sound", key),
@@ -424,14 +414,14 @@ mod tests {
             details: Default::default(),
         };
         let mut controller = SettingsController::new(vec![setting("Music"), setting("Sound")]);
-        controller.toggle_pin(1);
-        controller.toggle_pin(0);
+        controller.pinned = vec![
+            SettingId::new("Sound", "Sound"),
+            SettingId::new("Sound", "Music"),
+        ];
         assert_eq!(controller.visible_indices(), vec![1, 0]);
         controller.settings[0].value = AdvancedConfigValue::Bool(false);
         controller.modified_only = true;
         assert_eq!(controller.visible_indices(), vec![0]);
-        controller.toggle_pin(0);
-        assert!(controller.visible_indices().is_empty());
     }
 
     #[test]

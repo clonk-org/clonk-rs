@@ -173,12 +173,10 @@ impl SettingsController {
                     emphasized,
                     gamma,
                 ),
-                // Drawn on their row, above the row's highlight.
-                SettingsFocus::Pin | SettingsFocus::Reset => {}
+                // Drawn on its row, above the row's highlight.
+                SettingsFocus::Reset => {}
                 _ => {
                     let label = match focus {
-                        SettingsFocus::PinUp => "Move up",
-                        SettingsFocus::PinDown => "Move down",
                         SettingsFocus::ResetCategory => "Reset page",
                         SettingsFocus::TestMicrophone if compact => "Test mic",
                         SettingsFocus::TestMicrophone => "Test microphone",
@@ -197,7 +195,7 @@ impl SettingsController {
                 body_font,
                 layout.list,
                 if self.category == SettingsCategory::Quick && self.query.is_empty() {
-                    "Pin settings from any page to keep them here."
+                    "No quick settings are set up."
                 } else {
                     "No matches. Try another term or clear the filters."
                 },
@@ -441,22 +439,17 @@ impl SettingsController {
 }
 
 impl SettingsController {
-    /// Where a row's label must stop: short of its star and reset link when
-    /// it shows them, otherwise at `plain`.
+    /// Where a row's label must stop: short of its reset link when it shows
+    /// one, otherwise at `plain`.
     fn label_end(&self, index: usize, row: IntRect, plain: i32) -> i32 {
-        let star = star_rect(row).x;
-        let pinned = self
-            .settings
-            .get(index)
-            .is_some_and(|setting| self.pinned.contains(&setting.id));
-        match (self.view.selected == Some(index), pinned) {
-            (true, _) if self.resettable(index) => star - 58,
-            (true, _) | (_, true) => star - 4,
-            _ => plain,
+        if self.view.selected == Some(index) && self.resettable(index) {
+            reset_rect(row).x - 4
+        } else {
+            plain
         }
     }
 
-    /// Stars on pinned rows, and the selected row's pin toggle and reset link.
+    /// The selected row's reset link, above the row's highlight.
     fn render_row_actions(
         &self,
         surface: &mut Surface,
@@ -464,35 +457,9 @@ impl SettingsController {
         layout: &SettingsLayout,
         gamma: Option<&GammaRamp>,
     ) {
-        let emphasized = |focus| self.view.focus == focus || self.view.hover == Some(focus);
-        for index in self.visible_indices() {
-            let Some(row) = self.row_rect(layout, index) else {
-                continue;
-            };
-            let pinned = self
-                .settings
-                .get(index)
-                .is_some_and(|setting| self.pinned.contains(&setting.id));
-            let selected = self.view.selected == Some(index);
-            // Every Quick row is pinned, so only its toggle is drawn there.
-            let marked = pinned && self.category != SettingsCategory::Quick;
-            if marked || selected {
-                let focused = selected && emphasized(SettingsFocus::Pin);
-                book.ink_star(surface, star_rect(row), pinned, focused, gamma);
-            }
-        }
-        if let Some((_, rect)) = self
-            .row_actions(layout)
-            .into_iter()
-            .find(|(focus, _)| *focus == SettingsFocus::Reset)
-        {
-            book.ink_link(
-                surface,
-                rect,
-                "Reset",
-                emphasized(SettingsFocus::Reset),
-                gamma,
-            );
+        for (focus, rect) in self.row_actions(layout) {
+            let emphasized = self.view.focus == focus || self.view.hover == Some(focus);
+            book.ink_link(surface, rect, "Reset", emphasized, gamma);
         }
     }
 

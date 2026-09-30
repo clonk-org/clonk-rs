@@ -20,9 +20,6 @@ pub enum SettingsFocus {
     Row(usize),
     Modified,
     Advanced,
-    Pin,
-    PinUp,
-    PinDown,
     Reset,
     ResetCategory,
     TestMicrophone,
@@ -449,10 +446,7 @@ impl SettingsController {
                 }
                 if matches!(
                     self.view.focus,
-                    SettingsFocus::Pin
-                        | SettingsFocus::PinUp
-                        | SettingsFocus::PinDown
-                        | SettingsFocus::Reset
+                    SettingsFocus::Reset
                         | SettingsFocus::ResetCategory
                         | SettingsFocus::TestMicrophone
                         | SettingsFocus::RefreshDevices
@@ -495,7 +489,15 @@ impl SettingsController {
                             return Vec::new();
                         }
                         if key == KeyCode::Down && old == Some(visible.len() - 1) {
-                            self.set_focus(SettingsFocus::Pin);
+                            let layout = self.layout();
+                            let next = self
+                                .row_actions(&layout)
+                                .into_iter()
+                                .chain(self.footer_links(&layout))
+                                .map(|(focus, _)| focus)
+                                .next()
+                                .unwrap_or(SettingsFocus::Close);
+                            self.set_focus(next);
                             return Vec::new();
                         }
                         let step = if matches!(key, KeyCode::PageUp | KeyCode::PageDown) {
@@ -817,26 +819,6 @@ impl SettingsController {
                 self.show_advanced = !self.show_advanced;
                 self.view.scroll = 0;
             }
-            SettingsFocus::Pin => {
-                if let Some(index) = self.view.selected {
-                    self.toggle_pin(index);
-                }
-            }
-            SettingsFocus::PinUp | SettingsFocus::PinDown => {
-                if let Some(position) = self
-                    .view
-                    .selected
-                    .and_then(|i| self.settings.get(i))
-                    .and_then(|s| self.pinned.iter().position(|id| *id == s.id))
-                {
-                    let next = if focus == SettingsFocus::PinUp {
-                        position.saturating_sub(1)
-                    } else {
-                        (position + 1).min(self.pinned.len() - 1)
-                    };
-                    self.pinned.swap(position, next);
-                }
-            }
             SettingsFocus::Reset => {
                 if let Some(index) = self.view.selected.filter(|i| self.editable(*i)) {
                     return vec![SettingsAction::Change(
@@ -1146,8 +1128,7 @@ impl SettingsController {
         targets
     }
 
-    /// The star that pins the selected row to Quick, and the reset link a
-    /// changed row offers, placed just left of the row's value.
+    /// The reset link a changed, selected row offers just left of its value.
     pub(crate) fn row_actions(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         let Some((index, row)) = self
             .view
@@ -1156,15 +1137,11 @@ impl SettingsController {
         else {
             return Vec::new();
         };
-        let star = star_rect(row);
-        let mut actions = vec![(SettingsFocus::Pin, star)];
         if self.resettable(index) {
-            actions.push((
-                SettingsFocus::Reset,
-                IntRect::new(star.x - 54, row.y + 3, 48, row.h - 6),
-            ));
+            vec![(SettingsFocus::Reset, reset_rect(row))]
+        } else {
+            Vec::new()
         }
-        actions
     }
 
     fn resettable(&self, index: usize) -> bool {
@@ -1188,7 +1165,7 @@ impl SettingsController {
                 42
             };
         let specs = if self.category == SettingsCategory::Quick {
-            vec![(SettingsFocus::PinUp, 64), (SettingsFocus::PinDown, 80)]
+            Vec::new()
         } else {
             vec![
                 (SettingsFocus::Advanced, if compact { 112 } else { 150 }),
@@ -1287,9 +1264,9 @@ pub(crate) fn detail_text(setting: &Setting) -> String {
     })
 }
 
-/// Where a row's star sits: just left of its value.
-pub(crate) fn star_rect(row: IntRect) -> IntRect {
-    IntRect::new(row.x + row.w - 174 - 28, row.y + (row.h - 20) / 2, 20, 20)
+/// Where a changed row's reset link sits: just left of its value.
+pub(crate) fn reset_rect(row: IntRect) -> IntRect {
+    IntRect::new(row.x + row.w - 174 - 56, row.y + 3, 48, row.h - 6)
 }
 
 fn value_rect(row: IntRect) -> IntRect {
@@ -1485,6 +1462,29 @@ mod tests {
         assert_eq!(controller.row_emphasis(0), Some(RowEmphasis::Selected));
         controller.pointer_move(GuiPoint::new(layout.panel.x as f32, layout.panel.y as f32));
         assert_eq!(controller.row_emphasis(2), None);
+    }
+
+    #[test]
+    fn a_selected_row_offers_only_a_reset_link_and_only_once_it_has_changed() {
+        let percent = |value| AdvancedConfigValue::Integer {
+            value,
+            min: 0,
+            max: 100,
+        };
+        let mut controller = SettingsController::new(vec![preference("Volume", percent(50))]);
+        controller.select_category(SettingsCategory::Display);
+        let layout = controller.layout();
+        assert!(controller.row_actions(&layout).is_empty());
+        controller.settings[0].value = percent(80);
+        let actions: Vec<_> = controller
+            .row_actions(&layout)
+            .into_iter()
+            .map(|(focus, _)| focus)
+            .collect();
+        assert_eq!(actions, vec![SettingsFocus::Reset]);
+        controller.pinned = vec![controller.settings[0].id.clone()];
+        controller.select_category(SettingsCategory::Quick);
+        assert!(controller.footer_links(&controller.layout()).is_empty());
     }
 
     #[test]
@@ -1724,7 +1724,7 @@ mod tests {
         controller.audio_page = AudioPage::Voice;
         controller.set_focus(SettingsFocus::Row(0));
         controller.key(KeyCode::Down, false, false);
-        assert_eq!(controller.view.focus, SettingsFocus::Pin);
+        assert_eq!(controller.view.focus, SettingsFocus::Advanced);
         for _ in 0..8 {
             if controller.view.focus == SettingsFocus::TestMicrophone {
                 break;
@@ -1851,7 +1851,7 @@ mod tests {
         controller.key(KeyCode::Enter, false, false);
         controller.text("75");
         assert_eq!(controller.key(KeyCode::Tab, false, false).len(), 1);
-        assert_eq!(controller.view.focus, SettingsFocus::Pin);
+        assert_eq!(controller.view.focus, SettingsFocus::Advanced);
         controller.set_focus(SettingsFocus::Row(0));
         controller.key(KeyCode::Enter, false, false);
         controller.text("999");
@@ -1910,7 +1910,6 @@ mod tests {
             SettingsFocus::Search,
             SettingsFocus::Modified,
             SettingsFocus::Advanced,
-            SettingsFocus::Pin,
             SettingsFocus::Reset,
             SettingsFocus::ResetCategory,
             SettingsFocus::Close,
