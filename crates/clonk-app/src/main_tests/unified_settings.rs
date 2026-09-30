@@ -789,3 +789,37 @@ fn unified_settings_open_as_a_popup_over_screens_other_than_the_main_menu() {
         "mean deviation {deviation} from the dimmed scenario list"
     );
 }
+
+#[test]
+fn unified_settings_draw_an_open_choice_list_above_the_rows_it_covers() {
+    use clonk_frontend::settings_overlay::SettingsFocus;
+    let scale = 1.0;
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(scale, false);
+    app.configure_native_startup_fonts(scale, false);
+    app.handle_main_menu_activation(MainMenuItem::Options)
+        .unwrap();
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    let text_size = controller
+        .settings
+        .iter()
+        .position(|s| s.id.section == "Chat" && s.id.key == "TextSize")
+        .unwrap();
+    controller.set_focus(SettingsFocus::Row(text_size));
+    controller.key(clonk_frontend::KeyCode::Enter, false, false);
+    let (_, _, plan) = render_ordered_test_frame(&mut app, scale, 800, 600);
+    let batch = |needle: &str| {
+        plan.batches
+            .iter()
+            .rposition(|batch| batch.text.iter().any(|text| text.text.contains(needle)))
+    };
+    let list = batch("Enter: select").expect("the choice list is drawn");
+    let rows = batch("Enhanced chat").expect("the rows are drawn");
+    // The GPU presenter draws a batch's text above its boxes, so a list in
+    // the rows' batch would let their captions show through it.
+    assert!(list > rows, "choice list batch {list}, rows batch {rows}");
+}

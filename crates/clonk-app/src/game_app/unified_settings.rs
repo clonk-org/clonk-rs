@@ -171,6 +171,11 @@ impl GameApp {
                 cover_screen,
                 gamma,
             );
+            if settings.controller.has_popup() {
+                settings
+                    .controller
+                    .render_popup(surface, &assets, resources.fonts, book, gamma);
+            }
             true
         } else if let Some(bounds) = self.settings_launcher() {
             resources.skin.draw_button(
@@ -193,39 +198,49 @@ impl GameApp {
     ) -> bool {
         let launcher = self.settings_launcher();
         let cover_screen = self.settings_cover_screen();
-        let Some(resources) = self.assets.message_dialog_resources() else {
+        let assets = std::sync::Arc::clone(&self.assets);
+        let Some(resources) = assets.message_dialog_resources() else {
             return false;
         };
-        let surface = self.rendering.graphics.surface_mut();
-        if let Some(settings) = self.unified_settings.as_mut() {
-            let (Some(assets), Some(book)) = (
-                self.assets.options_dlg_assets(self.config.compat_profile),
-                self.assets.options_book_fonts.as_deref(),
-            ) else {
+        let Some(settings) = self.unified_settings.as_mut() else {
+            let Some(bounds) = launcher else {
                 return false;
             };
-            settings.controller.render(
-                surface,
-                &assets,
-                resources.fonts,
-                book,
-                cover_screen,
-                gamma,
-            );
-            true
-        } else if let Some(bounds) = launcher {
             resources.skin.draw_button(
-                surface,
+                self.rendering.graphics.surface_mut(),
                 bounds,
                 &format!("Settings (Ctrl+{})", format_key_label(self.settings_key)),
                 resources.fonts,
                 Default::default(),
                 gamma,
             );
-            true
-        } else {
-            false
+            return true;
+        };
+        let (Some(dialog), Some(book)) = (
+            assets.options_dlg_assets(self.config.compat_profile),
+            assets.options_book_fonts.as_deref(),
+        ) else {
+            return false;
+        };
+        let surface = self.rendering.graphics.surface_mut();
+        settings
+            .controller
+            .render(surface, &dialog, resources.fonts, book, cover_screen, gamma);
+        if settings.controller.has_popup() {
+            // The presenter draws each layer's text above its boxes, so the
+            // popup takes a layer of its own and the page's text stays under it.
+            self.next_pending_native_overlay();
+            if let Some(settings) = self.unified_settings.as_mut() {
+                settings.controller.render_popup(
+                    self.rendering.graphics.surface_mut(),
+                    &dialog,
+                    resources.fonts,
+                    book,
+                    gamma,
+                );
+            }
         }
+        true
     }
 
     pub(crate) fn open_unified_settings(

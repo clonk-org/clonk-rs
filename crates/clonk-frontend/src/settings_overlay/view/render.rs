@@ -348,6 +348,31 @@ impl SettingsController {
                 gamma,
             );
         }
+    }
+
+    /// Whether a choice list or a confirmation is open over the page. The
+    /// caller draws it with [`Self::render_popup`] after the page, in a layer
+    /// of its own where the presenter needs one, so the page's text cannot
+    /// show through it.
+    pub fn has_popup(&self) -> bool {
+        self.view.choice.is_some()
+            || self.view.display_confirmation.is_some()
+            || self.view.reset_confirmation
+    }
+
+    /// Draws the open choice list or confirmation over the page [`Self::render`] drew.
+    pub fn render_popup(
+        &mut self,
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        gui: &ClonkFontSet,
+        fonts: &BookFonts,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let layout = self.layout();
+        let book = OptionsBook { assets, gui, fonts };
+        let body_font = &fonts.book;
+        let small_font = &fonts.book_small;
         if self.view.display_confirmation.is_some() || self.view.reset_confirmation {
             box_color(surface, layout.footer, 0x00c7bca9, gamma);
             let prompt = self
