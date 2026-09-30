@@ -2,7 +2,8 @@
 use super::*;
 use clonk_frontend::settings_overlay::SettingsAction;
 use clonk_frontend::settings_overlay::{
-    AudioPage, ControlsPage, SettingId, SettingsCategory, SettingsController,
+    AudioPage, ControlDevice, ControlSet, ControlsPage, SettingId, SettingsCategory,
+    SettingsController,
 };
 
 #[path = "unified_settings/apply.rs"]
@@ -53,8 +54,19 @@ impl GameApp {
             return;
         };
         let controller = &mut settings.controller;
-        controller.keyboard_set = page.keyboard_set;
-        controller.controller_set = page.controller_set;
+        // A game keeps showing its players' own sets.
+        let in_use = |device| {
+            controller
+                .set_users
+                .iter()
+                .any(|(set, _)| set.device == device)
+        };
+        if !in_use(ControlDevice::Keyboard) {
+            controller.keyboard_set = page.keyboard_set;
+        }
+        if !in_use(ControlDevice::Gamepad) {
+            controller.controller_set = page.controller_set;
+        }
         match page.category {
             SettingsCategory::Audio => controller.select_audio_page(page.audio_page),
             SettingsCategory::Controls => controller.select_controls_page(page.controls_page),
@@ -348,6 +360,13 @@ impl GameApp {
                 .map(|(section, key)| SettingId::new(section, key))
                 .collect()
             });
+        controller.set_users = self.local_control_set_users();
+        // In a game, start on the sets its players use, the first player's
+        // device showing.
+        for (set, _) in controller.set_users.clone().into_iter().rev() {
+            controller.choose_set(set);
+            controller.controls_page = ControlsPage::for_device(set.device);
+        }
         controller.select_category(category);
         let surface = self.rendering.graphics.surface();
         controller.resize(surface.width() as i32, surface.height() as i32);
@@ -391,6 +410,21 @@ impl GameApp {
         self.update_unified_settings(Instant::now());
         Ok(())
     }
+    /// The local players' control sets in a running game, in join order.
+    fn local_control_set_users(&self) -> Vec<(ControlSet, String)> {
+        if self.mode != AppMode::Running {
+            return Vec::new();
+        }
+        self.local_controls
+            .assignments()
+            .filter_map(|assignment| {
+                let (device, index) = assignment.device_set()?;
+                let player = self.engine.player(assignment.owner)?;
+                Some((ControlSet { device, index }, player.name().to_owned()))
+            })
+            .collect()
+    }
+
     pub(crate) fn close_unified_settings(&mut self) {
         self.finish_unified_display_preview(false);
         if let Err(error) = self.save_unified_settings() {

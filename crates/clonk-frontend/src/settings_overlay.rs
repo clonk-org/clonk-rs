@@ -119,6 +119,14 @@ impl ControlsPage {
         }
     }
 
+    /// The tab that shows `device`'s control sets.
+    pub const fn for_device(device: ControlDevice) -> Self {
+        match device {
+            ControlDevice::Keyboard => Self::Keyboard,
+            ControlDevice::Gamepad => Self::Controller,
+        }
+    }
+
     /// The device whose control sets the tab shows.
     pub const fn device(self) -> Option<ControlDevice> {
         match self {
@@ -233,6 +241,8 @@ pub struct SettingsController {
     /// The control sets the Keyboard and Controller tabs show.
     pub keyboard_set: usize,
     pub controller_set: usize,
+    /// The local players' names by the control set each one plays with.
+    pub set_users: Vec<(ControlSet, String)>,
     pub view: view::SettingsViewState,
 }
 
@@ -249,6 +259,7 @@ impl SettingsController {
             controls_page: ControlsPage::Keyboard,
             keyboard_set: 0,
             controller_set: 0,
+            set_users: Vec::new(),
             view: Default::default(),
         }
     }

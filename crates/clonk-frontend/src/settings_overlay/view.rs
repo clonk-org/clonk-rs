@@ -248,6 +248,43 @@ impl SettingsController {
             .flatten()
     }
 
+    /// The shown control set's name, with the players who use it.
+    pub fn control_set_caption(&self) -> Option<String> {
+        self.control_set_page()
+            .map(|set| match self.set_user_names(set) {
+                Some(names) => format!("{} · used by {names}", set.label()),
+                None => set.label(),
+            })
+    }
+
+    /// The names of the players who use `set`, in join order.
+    pub(crate) fn set_user_names(&self, set: ControlSet) -> Option<String> {
+        let users: Vec<_> = self
+            .set_users
+            .iter()
+            .filter(|(used, _)| *used == set)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        (!users.is_empty()).then(|| users.join(", "))
+    }
+
+    /// The footer's detail line: the last change's message, or where and
+    /// when the selected setting applies — on a control set's page, the set
+    /// and the players who use it.
+    pub(crate) fn footer_detail(&self) -> String {
+        if !self.view.message.is_empty() {
+            return self.view.message.clone();
+        }
+        self.view
+            .selected
+            .and_then(|index| self.settings.get(index))
+            .map(|setting| match self.control_set_caption() {
+                Some(caption) => detail_text_in(setting, &caption),
+                None => detail_text(setting),
+            })
+            .unwrap_or_default()
+    }
+
     /// Focus on the picture of the control set the page shows.
     fn control_set_focus(&self) -> Option<SettingsFocus> {
         self.control_set_page()
@@ -1479,6 +1516,11 @@ pub(crate) fn formatted_value(setting: &Setting, value: &AdvancedConfigValue) ->
 /// The footer's second line: why a setting is unavailable, or where and when
 /// a change takes effect.
 pub(crate) fn detail_text(setting: &Setting) -> String {
+    detail_text_in(setting, &setting.details.scope)
+}
+
+/// [`detail_text`] with `scope` naming where the setting applies.
+fn detail_text_in(setting: &Setting, scope: &str) -> String {
     setting.details.unavailable.clone().unwrap_or_else(|| {
         let active = setting
             .details
@@ -1497,8 +1539,7 @@ pub(crate) fn detail_text(setting: &Setting) -> String {
             String::new()
         };
         format!(
-            "{} · {}{active}{default}",
-            setting.details.scope,
+            "{scope} · {}{active}{default}",
             setting.details.policy.label()
         )
     })
@@ -1937,6 +1978,33 @@ mod tests {
             controller.confirmation_prompt().as_deref(),
             Some("Reset 1 key of Keyboard 1 to its default?")
         );
+    }
+
+    #[test]
+    fn a_control_set_is_named_with_the_players_who_use_it() {
+        let mut controller = keyboard_set();
+        controller.select_controls_page(ControlsPage::Keyboard);
+        assert_eq!(
+            controller.control_set_caption().as_deref(),
+            Some("Keyboard 1")
+        );
+        let first = ControlSet {
+            device: ControlDevice::Keyboard,
+            index: 0,
+        };
+        controller.set_users = vec![(first, "Tyler".into()), (first, "Robin".into())];
+        assert_eq!(
+            controller.control_set_caption().as_deref(),
+            Some("Keyboard 1 · used by Tyler, Robin")
+        );
+        controller.set_focus(SettingsFocus::Row(1));
+        assert_eq!(
+            controller.footer_detail(),
+            "Keyboard 1 · used by Tyler, Robin · Applies now",
+            "the footer names the players wherever the caption has no room"
+        );
+        controller.select_controls_page(ControlsPage::General);
+        assert_eq!(controller.control_set_caption(), None);
     }
 
     #[test]

@@ -325,16 +325,13 @@ impl SettingsController {
             box_color(surface, thumb, 0x0094846a, gamma);
         }
         let mut description = "Tab: navigate · arrows: adjust · Enter: edit · Esc: back".to_owned();
-        let mut detail = self.view.message.clone();
+        let detail = self.footer_detail();
         if let Some(setting) = self.view.selected.and_then(|i| self.settings.get(i)) {
             description = if setting.details.description.is_empty() {
                 setting.label.clone()
             } else {
                 setting.details.description.clone()
             };
-            if detail.is_empty() {
-                detail = detail_text(setting);
-            }
         }
         if self.control_set_page().is_some() {
             // The grid names each command, so one line says what the
@@ -606,16 +603,25 @@ impl SettingsController {
         font: &ClonkFont,
         gamma: Option<&GammaRamp>,
     ) {
-        let (Some(set), Some((_, last))) = (
+        let (Some(set), Some(caption), Some((_, last))) = (
             self.control_set_page(),
+            self.control_set_caption(),
             self.control_set_pictures(layout).last().copied(),
         ) else {
             return;
         };
         let x = last.x + last.w + 14;
         let room = layout.list.x + layout.list.w - x;
-        let name = set.label();
-        if font.measure(&name, false).0 + 6 <= room {
+        // Where room is short, the players' names outlast the set's name,
+        // which its glowing picture already shows.
+        let users = self
+            .set_user_names(set)
+            .map(|names| format!("Used by {names}"));
+        if let Some(name) = [Some(caption), users, Some(set.label())]
+            .into_iter()
+            .flatten()
+            .find(|name| font.measure(name, false).0 + 6 <= room)
+        {
             text(
                 surface,
                 font,

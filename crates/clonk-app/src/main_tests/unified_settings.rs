@@ -806,7 +806,8 @@ fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
     controller.select_controls_page(ControlsPage::Keyboard);
     assert_eq!(
         controller.current_group().map(|set| set.label()).as_deref(),
-        Some("Keyboard 2")
+        Some("Keyboard 1"),
+        "the game's player plays with Keyboard 1, which wins over the set left"
     );
     app.close_unified_settings();
     app.apply_ingame_menu_action_for_player(0, MenuAction::VoiceSetup)
@@ -905,5 +906,48 @@ fn unified_settings_turn_on_controller_menus_with_a_check_box() {
     assert_eq!(
         app.config.deferred.get("Controls", "GamepadGuiControl"),
         Some("1")
+    );
+}
+
+#[test]
+fn unified_settings_open_a_game_on_the_control_set_its_player_uses() {
+    use clonk_frontend::settings_overlay::{
+        ControlDevice, ControlSet, ControlsPage, SettingsCategory,
+    };
+    let mut app = new_classic_running_sandbox_app();
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    let owner = app.players.local_owner;
+    app.local_controls = LocalControlRegistry::default();
+    app.local_controls.initialize(test_local_control_init(
+        owner,
+        GamepadSlot::new(1).control_set(),
+        false,
+        false,
+    ));
+    let name = app.engine.player(owner).unwrap().name().to_owned();
+    app.apply_ingame_menu_action_for_player(0, MenuAction::ActivateOptions)
+        .unwrap();
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    let pad = ControlSet {
+        device: ControlDevice::Gamepad,
+        index: 1,
+    };
+    assert_eq!(controller.set_users, vec![(pad, name.clone())]);
+    controller.select_category(SettingsCategory::Controls);
+    assert_eq!(controller.controls_page, ControlsPage::Controller);
+    assert_eq!(
+        controller.control_set_caption(),
+        Some(format!("Controller 2 · used by {name}"))
+    );
+    controller.cycle_group(1);
+    app.close_unified_settings();
+    app.apply_ingame_menu_action_for_player(0, MenuAction::ActivateOptions)
+        .unwrap();
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert_eq!(
+        controller.current_group(),
+        Some(pad),
+        "a game reopens on its player's own keys"
     );
 }

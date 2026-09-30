@@ -1,4 +1,5 @@
 use clonk_engine::{ControlEvent, PlayerRuntimeControl, PlayerStatus};
+use clonk_frontend::startup_options_controls::ControlDevice;
 use winit::event::ElementState;
 
 const CONTROL_SET_NONE: i32 = -1;
@@ -31,6 +32,21 @@ pub(crate) struct LocalControlAssignment {
 }
 
 impl LocalControlAssignment {
+    /// The keyboard or gamepad set, numbered from 0 on its device.
+    pub(crate) fn device_set(self) -> Option<(ControlDevice, usize)> {
+        match self.set {
+            KEYBOARD_SET_FIRST..=KEYBOARD_SET_LAST => Some((
+                ControlDevice::Keyboard,
+                (self.set - KEYBOARD_SET_FIRST) as usize,
+            )),
+            GAMEPAD_SET_FIRST..=GAMEPAD_SET_LAST => Some((
+                ControlDevice::Gamepad,
+                (self.set - GAMEPAD_SET_FIRST) as usize,
+            )),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn runtime_control(self) -> PlayerRuntimeControl {
         PlayerRuntimeControl::with_preferences(
             self.set,
