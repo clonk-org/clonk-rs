@@ -1011,14 +1011,6 @@ pub(crate) fn formatted_value(setting: &Setting, value: &AdvancedConfigValue) ->
             }),
         AdvancedConfigValue::Bool(on) => if *on { "On" } else { "Off" }.into(),
         _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
-        _ if matches!(setting.id.section.as_str(), "Sound" | "Voice")
-            && setting.id.key.ends_with("Volume") =>
-        {
-            format!("{}%", value.serialized())
-        }
-        _ if setting.id.section == "Voice" && setting.id.key == "ActivationHangover" => {
-            format!("{} ms", value.serialized())
-        }
         AdvancedConfigValue::Integer { value, .. } => format!("{value}{}", setting.details.unit),
         _ => value.serialized(),
     }
