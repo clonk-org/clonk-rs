@@ -28,7 +28,7 @@ impl GameApp {
                 if voice {
                     self.open_unified_voice_settings()?;
                 } else {
-                    self.open_unified_settings(SettingsCategory::Interface)?;
+                    self.open_unified_settings_where_left()?;
                 }
             }
             return Ok(true);
@@ -110,7 +110,7 @@ impl GameApp {
                 && point.y < (r.y + r.h) as f32
         }) {
             if down {
-                self.open_unified_settings(SettingsCategory::Interface)?;
+                self.open_unified_settings_where_left()?;
             }
             return Ok(true);
         }

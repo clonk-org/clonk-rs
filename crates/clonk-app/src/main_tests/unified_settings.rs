@@ -733,3 +733,32 @@ fn unified_settings_dims_the_running_game_behind_the_book() {
         "game {game}, behind settings {dimmed}"
     );
 }
+
+#[test]
+fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
+    use clonk_frontend::settings_overlay::{AudioPage, SettingsCategory};
+    let mut app = new_classic_running_sandbox_app();
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    app.apply_ingame_menu_action_for_player(0, MenuAction::ActivateOptions)
+        .unwrap();
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    assert_eq!(controller.category, SettingsCategory::Interface);
+    controller.select_category(SettingsCategory::Controls);
+    controller.cycle_group(1);
+    app.close_unified_settings();
+    app.apply_ingame_menu_action_for_player(0, MenuAction::ActivateOptions)
+        .unwrap();
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert_eq!(controller.category, SettingsCategory::Controls);
+    assert_eq!(controller.current_group().as_deref(), Some("Keyboard 2"));
+    app.close_unified_settings();
+    app.apply_ingame_menu_action_for_player(0, MenuAction::VoiceSetup)
+        .unwrap();
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert_eq!(
+        (controller.category, controller.audio_page),
+        (SettingsCategory::Audio, AudioPage::Voice),
+        "voice entry points keep their own destination"
+    );
+}

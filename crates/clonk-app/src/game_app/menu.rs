@@ -1330,10 +1330,12 @@ impl GameApp {
             }
             MenuAction::ActivateOptions => {
                 if self.config.compat_profile == crate::settings::CompatProfile::Normal {
-                    return self.open_unified_settings_for_player(
+                    self.open_unified_settings_for_player(
                         clonk_frontend::settings_overlay::SettingsCategory::Interface,
                         player,
-                    );
+                    )?;
+                    self.resume_unified_settings_page();
+                    return Ok(());
                 }
                 self.ingame_menus.players.replace(
                     player,
@@ -3550,9 +3552,7 @@ impl GameApp {
             self.open_network_game_dialog();
         } else if screen.eq_ignore_ascii_case("options") {
             if self.config.compat_profile == crate::settings::CompatProfile::Normal {
-                if let Err(error) = self.open_unified_settings(
-                    clonk_frontend::settings_overlay::SettingsCategory::Interface,
-                ) {
+                if let Err(error) = self.open_unified_settings_where_left() {
                     tracing::error!(%error, "could not open settings");
                 }
             } else {

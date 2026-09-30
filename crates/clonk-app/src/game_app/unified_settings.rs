@@ -1,7 +1,9 @@
 //! One presentation-only settings overlay, independent of the underlying screen.
 use super::*;
 use clonk_frontend::settings_overlay::SettingsAction;
-use clonk_frontend::settings_overlay::{SettingId, SettingsCategory, SettingsController};
+use clonk_frontend::settings_overlay::{
+    AudioPage, SettingId, SettingsCategory, SettingsController,
+};
 
 #[path = "unified_settings/apply.rs"]
 mod settings_apply;
@@ -26,7 +28,39 @@ pub(crate) struct UnifiedSettings {
     owner: i32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SettingsPage {
+    category: SettingsCategory,
+    audio_page: AudioPage,
+    group: Option<String>,
+}
+
 impl GameApp {
+    /// Opens settings where they last closed; the first time, on the
+    /// program page.
+    pub(crate) fn open_unified_settings_where_left(&mut self) -> Result<(), EngineError> {
+        self.open_unified_settings(SettingsCategory::Interface)?;
+        self.resume_unified_settings_page();
+        Ok(())
+    }
+
+    /// Returns an open overlay to the page and control set it last closed on.
+    pub(crate) fn resume_unified_settings_page(&mut self) {
+        let (Some(page), Some(settings)) = (
+            self.settings_return_page.clone(),
+            self.unified_settings.as_mut(),
+        ) else {
+            return;
+        };
+        let controller = &mut settings.controller;
+        controller.group = page.group;
+        if page.category == SettingsCategory::Audio {
+            controller.select_audio_page(page.audio_page);
+        } else {
+            controller.select_category(page.category);
+        }
+    }
+
     pub(crate) fn open_unified_voice_settings(&mut self) -> Result<(), EngineError> {
         self.open_unified_settings(SettingsCategory::Audio)?;
         if let Some(settings) = self.unified_settings.as_mut() {
@@ -344,6 +378,11 @@ impl GameApp {
             return;
         }
         if let Some(settings) = self.unified_settings.take() {
+            self.settings_return_page = Some(SettingsPage {
+                category: settings.controller.category,
+                audio_page: settings.controller.audio_page,
+                group: settings.controller.group.clone(),
+            });
             if settings.owns_pause && settings.opened_in == self.mode {
                 self.netplay.offline_halt_count =
                     self.netplay.offline_halt_count.saturating_sub(1).max(0);

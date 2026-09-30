@@ -3193,6 +3193,7 @@ impl GameApp {
             voice_chat: crate::voice_service::VoiceChatService::new(),
             voice_setup: None,
             unified_settings: None,
+            settings_return_page: None,
             settings_key: crate::settings_catalog::shortcut_key(paths),
             assets: assets.clone(),
             active_global_gui_failures: HashMap::new(),
