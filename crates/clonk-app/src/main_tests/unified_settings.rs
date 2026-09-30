@@ -706,3 +706,30 @@ fn unified_settings_names_a_rebound_keys_default_by_its_key() {
     assert_eq!(details.display_value.as_deref(), Some("F12"));
     assert_eq!(details.default_display.as_deref(), Some("Q"));
 }
+
+#[test]
+fn unified_settings_dims_the_running_game_behind_the_book() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    let mut app = new_classic_running_sandbox_app();
+    app.app_paths = None;
+    let (width, height) = (800_usize, 600_usize);
+    app.resize(width as u32, height as u32).unwrap();
+    // The upper board's left end, well clear of the options book.
+    let strip_brightness = |frame: &[u8]| -> u64 {
+        (0..32)
+            .flat_map(|y| (0..160).map(move |x| (y * width + x) * 4))
+            .map(|i| u64::from(frame[i]) + u64::from(frame[i + 1]) + u64::from(frame[i + 2]))
+            .sum()
+    };
+    let mut game = vec![0; width * height * 4];
+    app.render(&mut game).unwrap();
+    app.open_unified_settings(SettingsCategory::Audio).unwrap();
+    let mut dimmed = vec![0; width * height * 4];
+    app.render(&mut dimmed).unwrap();
+    let (game, dimmed) = (strip_brightness(&game), strip_brightness(&dimmed));
+    assert!(game > 0, "the strip shows the running game");
+    assert!(
+        dimmed * 4 < game * 3,
+        "game {game}, behind settings {dimmed}"
+    );
+}
