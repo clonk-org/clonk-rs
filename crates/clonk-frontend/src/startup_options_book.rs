@@ -10,6 +10,9 @@ const PAGE_TAB_INK: u32 = 0x0061_4a32;
 const PAGE_TAB_INK_RGBA: [u8; 4] = [0x4e, 0x3a, 0x26, 255];
 /// Gold of a pinned setting's star.
 const STAR_GOLD: u32 = 0x00e0_b030;
+/// The popup window's dark wooden frame and the gilt line inside it.
+const WINDOW_FRAME_WOOD: u32 = 0x0030_1c0c;
+const WINDOW_FRAME_GILT: u32 = 0x40c0_a060;
 /// Medium ink for the other tabs and the rule they stand on, darker than the
 /// group-box ink so the strip holds its shape against the parchment.
 const PAGE_TAB_RULE_INK: u32 = 0x0080_6a50;
@@ -38,7 +41,36 @@ pub(crate) struct BookLayout {
     pub tab_icon_size: i32,
 }
 
+impl BookLayout {
+    /// The same layout moved by `(dx, dy)`, as when the book opens in a window.
+    pub fn offset(self, dx: i32, dy: i32) -> Self {
+        let rect = |r: IntRect| IntRect::new(r.x + dx, r.y + dy, r.w, r.h);
+        let point = |(x, y): (i32, i32)| (x + dx, y + dy);
+        Self {
+            title_center: point(self.title_center),
+            back_button: rect(self.back_button),
+            tabular: rect(self.tabular),
+            paper: rect(self.paper),
+            sheet: rect(self.sheet),
+            tab_clips: self.tab_clips.map(point),
+            tab_icons: self.tab_icons.map(point),
+            tab_captions: self.tab_captions.map(point),
+            focus_highlight: rect(self.focus_highlight),
+            ..self
+        }
+    }
+}
+
 impl OptionsBook<'_> {
+    /// Where settings opened over another screen sit: the whole options
+    /// screen, centred and inset so the screen behind stays in view, never
+    /// smaller than the book's 640x480 minimum.
+    pub fn window(w: i32, h: i32) -> IntRect {
+        let margin_x = ((w - 640) / 2).clamp(0, w / 16);
+        let margin_y = ((h - 480) / 2).clamp(0, h / 16);
+        IntRect::new(margin_x, margin_y, w - 2 * margin_x, h - 2 * margin_y)
+    }
+
     pub fn layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) -> BookLayout {
         let mut state = OptionsDlgState::new(ProgramSheetState::default());
         state.enable_voice_sheet(VoiceOptionsState::default());
@@ -68,40 +100,44 @@ impl OptionsBook<'_> {
         active: usize,
         tab_focused: bool,
         back: ClassicButtonState,
-        startup_background: bool,
+        window: Option<IntRect>,
         gamma: Option<&GammaRamp>,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
-        if startup_background {
-            draw_image_bilinear(
+        match window {
+            None => draw_image_bilinear(
                 surface,
                 &GuiRect::new(0.0, 0.0, w as f32, h as f32),
                 &self.assets.background,
                 gamma,
-            );
-        } else {
-            draw_engine_box(surface, 0, 0, w - 1, h - 1, 0x80000000, gamma);
-            // Over another screen the book sits on a darker panel, so that
-            // screen's own buttons cannot be mistaken for the book's.
-            let panel = popup_panel(layout);
-            draw_engine_box(
-                surface,
-                panel.x,
-                panel.y,
-                panel.x + panel.w - 1,
-                panel.y + panel.h - 1,
-                0x6010_0c08,
-                gamma,
-            );
-            draw_frame_dw(
-                surface,
-                panel.x,
-                panel.y,
-                panel.x + panel.w - 1,
-                panel.y + panel.h - 1,
-                0x70c0_a060,
-                gamma,
-            );
+            ),
+            // Over another screen: that screen dimmed, and the options screen
+            // in a framed window over it.
+            Some(frame) => {
+                draw_engine_box(surface, 0, 0, w - 1, h - 1, 0x80000000, gamma);
+                draw_image_bilinear(surface, &gui_rect(frame), &self.assets.background, gamma);
+                let (right, bottom) = (frame.x + frame.w - 1, frame.y + frame.h - 1);
+                for inset in 0..2 {
+                    draw_frame_dw(
+                        surface,
+                        frame.x + inset,
+                        frame.y + inset,
+                        right - inset,
+                        bottom - inset,
+                        WINDOW_FRAME_WOOD,
+                        gamma,
+                    );
+                }
+                draw_frame_dw(
+                    surface,
+                    frame.x + 2,
+                    frame.y + 2,
+                    right - 2,
+                    bottom - 2,
+                    WINDOW_FRAME_GILT,
+                    gamma,
+                );
+            }
         }
         self.gui.title.draw_with_gamma(
             surface,
@@ -357,6 +393,48 @@ impl OptionsBook<'_> {
         }
     }
 
+    /// A button inked onto the page: an ink outline around its label. The
+    /// default answer (Enter) takes the darker ink and a light wash.
+    pub fn ink_button(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        label: &str,
+        default: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let (right, bottom) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
+        let ink = if default {
+            draw_engine_box(surface, rect.x, rect.y, right, bottom, 0xa0ff_f8e8, gamma);
+            PAGE_TAB_INK
+        } else {
+            PAGE_TAB_RULE_INK
+        };
+        for inset in 0..2 {
+            draw_frame_dw(
+                surface,
+                rect.x + inset,
+                rect.y + inset,
+                right - inset,
+                bottom - inset,
+                ink,
+                gamma,
+            );
+        }
+        let font = &self.fonts.book_small;
+        let width = font.measure(label, true).0;
+        font.draw_with_gamma(
+            surface,
+            rect.x + (rect.w - width) / 2,
+            rect.y + (rect.h - font.line_height) / 2,
+            label,
+            PAGE_TAB_INK_RGBA,
+            TextAlign::Left,
+            true,
+            gamma,
+        );
+    }
+
     /// A check box inked onto the page, ticked when on, with its label.
     #[allow(clippy::too_many_arguments)]
     pub fn ink_toggle(
@@ -585,17 +663,33 @@ impl OptionsBook<'_> {
     }
 }
 
-/// The book's footprint when it opens over another screen: tabs, paper,
-/// title and Back button, with a margin.
-fn popup_panel(layout: &BookLayout) -> IntRect {
-    let back = layout.back_button;
-    let left = layout.tab_clips[0].0.min(back.x) - 16;
-    let right = (layout.paper.x + layout.paper.w).max(back.x + back.w) + 16;
-    let top = layout.title_center.1 - 8;
-    let bottom = back.y + back.h + 12;
-    IntRect::new(left, top, right - left, bottom - top)
-}
-
 fn gui_rect(rect: IntRect) -> GuiRect {
     GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_popup_window_is_centred_and_never_squeezes_the_book_below_its_minimum() {
+        for (w, h) in [(800, 600), (1280, 720), (1920, 1080), (1001, 757)] {
+            let window = OptionsBook::window(w, h);
+            assert_eq!(window.x, w - (window.x + window.w), "{w}x{h} side margins");
+            assert_eq!(
+                window.y,
+                h - (window.y + window.h),
+                "{w}x{h} top and bottom"
+            );
+            assert!(
+                window.x > 0 && window.y > 0,
+                "{w}x{h} leaves the screen in view"
+            );
+            assert!(
+                window.w >= 640 && window.h >= 480,
+                "{w}x{h} keeps the minimum"
+            );
+        }
+        assert_eq!(OptionsBook::window(640, 480), IntRect::new(0, 0, 640, 480));
+    }
 }

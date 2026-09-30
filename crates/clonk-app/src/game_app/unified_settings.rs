@@ -227,9 +227,17 @@ impl GameApp {
             .controller
             .render(surface, &dialog, resources.fonts, book, cover_screen, gamma);
         if settings.controller.has_popup() {
-            // The presenter draws each layer's text above its boxes, so the
-            // popup takes a layer of its own and the page's text stays under it.
-            self.next_pending_native_overlay();
+            // An ordered presentation draws each layer's text above its boxes,
+            // so there the popup takes a layer of its own and the page's text
+            // stays under it. Drawing straight to the surface keeps its order.
+            if self
+                .rendering
+                .graphics
+                .surface()
+                .is_clonk_text_capture_active()
+            {
+                self.next_pending_native_overlay();
+            }
             if let Some(settings) = self.unified_settings.as_mut() {
                 settings.controller.render_popup(
                     self.rendering.graphics.surface_mut(),
@@ -313,6 +321,7 @@ impl GameApp {
                 config.set_in(Some(&section), key, value);
             }
         }
+        let popup = !self.settings_cover_screen();
         let mut controller = SettingsController::new(crate::settings_catalog::catalog(&config));
         controller.pinned = config
             .get_in(Some("Settings"), "Favorites")
@@ -345,7 +354,13 @@ impl GameApp {
             self.assets.clonk_fonts.as_deref(),
             self.assets.options_book_fonts.as_deref(),
         ) {
-            controller.resize_book(surface.width() as i32, surface.height() as i32, fonts, book);
+            controller.resize_book(
+                surface.width() as i32,
+                surface.height() as i32,
+                fonts,
+                book,
+                popup,
+            );
         }
         let owns_pause = self.mode == AppMode::Running
             && self.runtime_network_role() == RuntimeNetworkRole::Offline;

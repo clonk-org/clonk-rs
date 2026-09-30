@@ -775,11 +775,11 @@ fn unified_settings_open_as_a_popup_over_screens_other_than_the_main_menu() {
     app.open_unified_settings_where_left().unwrap();
     let mut popup = vec![0; width * height * 4];
     app.render(&mut popup).unwrap();
-    // Beside the options book the scenario list shows through at half
+    // Beside the settings window the scenario list shows through at half
     // brightness, pixel for pixel, instead of the startup backdrop.
     let samples: Vec<u64> = (100..500)
         .step_by(4)
-        .flat_map(|y| (745..795).step_by(2).map(move |x| (y * width + x) * 4))
+        .flat_map(|y| (755..795).step_by(2).map(move |x| (y * width + x) * 4))
         .flat_map(|i| (0..3).map(move |channel| i + channel))
         .map(|i| (u64::from(screen[i]) * 128 / 255).abs_diff(u64::from(popup[i])))
         .collect();

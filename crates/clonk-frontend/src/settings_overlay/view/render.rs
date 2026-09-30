@@ -14,9 +14,15 @@ impl SettingsController {
         startup_background: bool,
         gamma: Option<&GammaRamp>,
     ) {
-        self.resize_book(surface.width() as i32, surface.height() as i32, gui, fonts);
+        self.resize_book(
+            surface.width() as i32,
+            surface.height() as i32,
+            gui,
+            fonts,
+            !startup_background,
+        );
         let layout = self.layout();
-        let native = OptionsBook::layout(self.view.width, self.view.height, gui, fonts);
+        let native = self.book_layout(gui, fonts);
         let book = OptionsBook { assets, gui, fonts };
         let body_font = &fonts.book;
         let small_font = &fonts.book_small;
@@ -41,17 +47,17 @@ impl SettingsController {
                     SettingsFocus::Close | SettingsFocus::CloseMicrophoneTest
                 ),
             },
-            startup_background,
+            self.view.window,
             gamma,
         );
-        if !startup_background {
+        if let Some(window) = self.view.window {
             text(
                 surface,
                 &gui.caption,
                 IntRect::new(
                     layout.back.x + layout.back.w + 24,
                     layout.back.y + 2,
-                    self.view.width - layout.back.x - layout.back.w - 48,
+                    window.x + window.w - layout.back.x - layout.back.w - 48,
                     28,
                 ),
                 &self.view.context,
@@ -373,51 +379,24 @@ impl SettingsController {
         let book = OptionsBook { assets, gui, fonts };
         let body_font = &fonts.book;
         let small_font = &fonts.book_small;
-        if self.view.display_confirmation.is_some() || self.view.reset_confirmation {
-            box_color(surface, layout.footer, 0x00c7bca9, gamma);
-            let prompt = self
-                .view
-                .display_confirmation
-                .map(|seconds| format!("Keep these display settings? Reverting in {seconds}s."))
-                .unwrap_or_else(|| "Reset this page? Display and saved progress are kept.".into());
+        if let (Some(prompt), Some(actions)) = (
+            self.confirmation_prompt(),
+            self.confirmation_actions(&layout),
+        ) {
+            // A card over the footer: the question and its two answers.
+            let card = layout.footer;
+            box_color(surface, card, 0x00d2_c6b0, gamma);
+            book.field(surface, card, gamma);
             wrapped_text(
                 surface,
                 body_font,
-                IntRect::new(layout.footer.x, layout.footer.y + 4, layout.footer.w, 50),
+                IntRect::new(card.x + 6, card.y + 6, card.w - 12, 48),
                 &prompt,
                 [40, 31, 21, 255],
                 gamma,
             );
-            for (offset, label) in [
-                (
-                    0,
-                    if self.view.reset_confirmation {
-                        "Reset"
-                    } else {
-                        "Keep"
-                    },
-                ),
-                (
-                    160,
-                    if self.view.reset_confirmation {
-                        "Cancel"
-                    } else {
-                        "Revert"
-                    },
-                ),
-            ] {
-                book.button(
-                    surface,
-                    IntRect::new(
-                        layout.footer.x + offset,
-                        layout.footer.y + layout.footer.h - 32,
-                        150,
-                        28,
-                    ),
-                    label,
-                    Default::default(),
-                    gamma,
-                );
+            for (index, (label, rect)) in actions.iter().enumerate() {
+                book.ink_button(surface, *rect, label, index == 0, gamma);
             }
         }
         if let Some(picker) = self.view.choice.as_ref() {

@@ -74,6 +74,9 @@ pub struct SettingsViewState {
     pub(crate) dragging: Option<usize>,
     pub(crate) scroll_drag: Option<i32>,
     pub(crate) hover: Option<SettingsFocus>,
+    /// The popup window the book opens in over another screen; `None` when
+    /// it covers the screen.
+    pub(crate) window: Option<IntRect>,
     layout: Option<SettingsLayout>,
 }
 
@@ -101,6 +104,7 @@ impl Default for SettingsViewState {
             dragging: None,
             scroll_drag: None,
             hover: None,
+            window: None,
             layout: None,
         }
     }
@@ -163,12 +167,31 @@ impl SettingsLayout {
 }
 
 impl SettingsController {
-    pub fn resize_book(&mut self, width: i32, height: i32, gui: &ClonkFontSet, book: &BookFonts) {
+    /// Lays the page out in the options book, covering the screen or, as a
+    /// `popup` over another screen, in a centred window.
+    pub fn resize_book(
+        &mut self,
+        width: i32,
+        height: i32,
+        gui: &ClonkFontSet,
+        book: &BookFonts,
+        popup: bool,
+    ) {
         self.resize(width, height);
-        let layout = SettingsLayout::from_book(&OptionsBook::layout(width, height, gui, book));
+        self.view.window = popup.then(|| OptionsBook::window(width, height));
+        let layout = SettingsLayout::from_book(&self.book_layout(gui, book));
         if self.view.layout != Some(layout) {
             self.view.layout = Some(layout);
             self.ensure_visible();
+        }
+    }
+
+    pub(crate) fn book_layout(&self, gui: &ClonkFontSet, book: &BookFonts) -> BookLayout {
+        match self.view.window {
+            Some(frame) => {
+                OptionsBook::layout(frame.w, frame.h, gui, book).offset(frame.x, frame.y)
+            }
+            None => OptionsBook::layout(self.view.width, self.view.height, gui, book),
         }
     }
 
@@ -339,20 +362,12 @@ impl SettingsController {
                 KeyCode::Escape => self.view.reset_confirmation = false,
                 KeyCode::Enter => {
                     self.view.reset_confirmation = false;
-                    let visible = self.visible_indices();
                     return self
-                        .settings
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, s)| {
-                            s.category == self.category
-                                && visible.contains(index)
-                                && !s.details.exclude_from_category_reset
-                                && s.value.is_editable()
-                                && s.details.unavailable.is_none()
-                                && s.details.policy != ApplyPolicy::DisplayPreview
+                        .page_reset_candidates()
+                        .into_iter()
+                        .map(|index| {
+                            SettingsAction::Change(index, self.settings[index].default.clone())
                         })
-                        .map(|(i, s)| SettingsAction::Change(i, s.default.clone()))
                         .collect();
                 }
                 _ => {}
@@ -596,6 +611,68 @@ impl SettingsController {
             .then_some("Search all settings (Ctrl+F)")
     }
 
+    /// The page's changed settings that Reset page returns to their
+    /// defaults. Display modes and saved progress are never reset from here.
+    fn page_reset_candidates(&self) -> Vec<usize> {
+        self.visible_indices()
+            .into_iter()
+            .filter(|index| {
+                let setting = &self.settings[*index];
+                setting.category == self.category
+                    && !setting.details.exclude_from_category_reset
+                    && setting.details.policy != ApplyPolicy::DisplayPreview
+                    && self.resettable(*index)
+            })
+            .collect()
+    }
+
+    /// The question an open confirmation asks.
+    pub fn confirmation_prompt(&self) -> Option<String> {
+        if let Some(seconds) = self.view.display_confirmation {
+            return Some(format!(
+                "Keep these display settings? They revert in {seconds} s."
+            ));
+        }
+        self.view.reset_confirmation.then(|| {
+            let count = self.page_reset_candidates().len();
+            let (noun, default) = if count == 1 {
+                ("setting", "its default")
+            } else {
+                ("settings", "their defaults")
+            };
+            format!(
+                "Reset {count} {noun} on this page to {default}? \
+                 Display modes and saved progress are kept."
+            )
+        })
+    }
+
+    /// An open confirmation's answers, its default (Enter) first.
+    pub(crate) fn confirmation_actions(
+        &self,
+        layout: &SettingsLayout,
+    ) -> Option<[(String, IntRect); 2]> {
+        let reset = self.view.reset_confirmation;
+        (reset || self.view.display_confirmation.is_some()).then(|| {
+            let y = layout.footer.y + layout.footer.h - 32;
+            let (confirm, cancel) = if reset {
+                ("Reset", "Cancel")
+            } else {
+                ("Keep", "Revert")
+            };
+            [
+                (
+                    confirm.into(),
+                    IntRect::new(layout.footer.x + 6, y, 130, 28),
+                ),
+                (
+                    cancel.into(),
+                    IntRect::new(layout.footer.x + 146, y, 110, 28),
+                ),
+            ]
+        })
+    }
+
     /// Whether sub-page tabs have room for an icon beside their caption.
     pub(crate) fn page_tab_icons(&self, layout: &SettingsLayout) -> bool {
         layout.list.w >= 480
@@ -774,7 +851,12 @@ impl SettingsController {
                     return Vec::new();
                 }
                 if self.category != SettingsCategory::Quick {
-                    self.view.reset_confirmation = true;
+                    if self.page_reset_candidates().is_empty() {
+                        self.view.message =
+                            "Every setting on this page is already at its default.".into();
+                    } else {
+                        self.view.reset_confirmation = true;
+                    }
                 }
             }
             SettingsFocus::TestMicrophone => {
@@ -845,19 +927,12 @@ impl SettingsController {
             return self.choice_pointer(point, down);
         }
         let layout = self.layout();
-        if self.view.display_confirmation.is_some() || self.view.reset_confirmation {
+        if let Some([(_, confirm), (_, cancel)]) = self.confirmation_actions(&layout) {
             if !down {
-                let keep = IntRect::new(
-                    layout.footer.x,
-                    layout.footer.y + layout.footer.h - 32,
-                    150,
-                    28,
-                );
-                let revert = IntRect::new(keep.x + 160, keep.y, 150, 30);
-                if contains(keep, point) {
+                if contains(confirm, point) {
                     return self.key(KeyCode::Enter, false, false);
                 }
-                if contains(revert, point) {
+                if contains(cancel, point) {
                     return self.key(KeyCode::Escape, false, false);
                 }
             }
@@ -1410,6 +1485,45 @@ mod tests {
         assert_eq!(controller.row_emphasis(0), Some(RowEmphasis::Selected));
         controller.pointer_move(GuiPoint::new(layout.panel.x as f32, layout.panel.y as f32));
         assert_eq!(controller.row_emphasis(2), None);
+    }
+
+    #[test]
+    fn a_page_reset_names_what_it_resets_and_is_not_offered_when_nothing_changed() {
+        let percent = |value| AdvancedConfigValue::Integer {
+            value,
+            min: 0,
+            max: 100,
+        };
+        let mut volume = preference("Volume", percent(50));
+        volume.value = percent(80);
+        let mut controller = SettingsController::new(vec![
+            volume,
+            preference("ShowClock", AdvancedConfigValue::Bool(true)),
+        ]);
+        controller.select_category(SettingsCategory::Display);
+        controller.set_focus(SettingsFocus::ResetCategory);
+        controller.key(KeyCode::Enter, false, false);
+        assert!(controller
+            .confirmation_prompt()
+            .is_some_and(|prompt| prompt.starts_with("Reset 1 setting on this page")));
+        let layout = controller.layout();
+        let [(_, confirm), _] = controller.confirmation_actions(&layout).unwrap();
+        let centre = GuiPoint::new(
+            (confirm.x + confirm.w / 2) as f32,
+            (confirm.y + confirm.h / 2) as f32,
+        );
+        controller.pointer(centre, true);
+        assert_eq!(
+            controller.pointer(centre, false),
+            vec![SettingsAction::Change(0, percent(50))]
+        );
+        assert!(controller.confirmation_prompt().is_none());
+
+        controller.settings[0].value = percent(50);
+        controller.set_focus(SettingsFocus::ResetCategory);
+        controller.key(KeyCode::Enter, false, false);
+        assert!(controller.confirmation_prompt().is_none());
+        assert!(controller.view.message.contains("already at its default"));
     }
 
     #[test]
