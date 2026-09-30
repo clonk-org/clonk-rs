@@ -231,6 +231,7 @@ impl SettingsController {
         self.view.choice = None;
         self.cancel_interaction();
         self.category = category;
+        self.view.message.clear();
         self.query.clear();
         self.view.search_edit.set_text("");
         self.view.edit = None;
@@ -682,6 +683,9 @@ impl SettingsController {
 
     /// The keys that operate the focused control, for the footer.
     pub fn input_hint(&self) -> String {
+        if self.view.choice.is_some() {
+            return "Up/Down: choose · Enter: select · Esc: cancel".into();
+        }
         let action = match self.view.focus {
             SettingsFocus::Row(index) => self.settings.get(index).map_or("", |setting| {
                 if setting.details.binding {
@@ -732,6 +736,10 @@ impl SettingsController {
     pub fn set_focus(&mut self, focus: SettingsFocus) {
         self.view.focus = focus;
         if let SettingsFocus::Row(index) = focus {
+            // A change's status describes the setting that changed.
+            if self.view.selected != Some(index) {
+                self.view.message.clear();
+            }
             self.view.selected = Some(index);
         }
         self.ensure_visible();
@@ -1006,6 +1014,10 @@ impl SettingsController {
     }
 
     pub fn pointer_move(&mut self, point: GuiPoint) -> Vec<SettingsAction> {
+        if self.view.choice.is_some() {
+            self.choice_hover(point);
+            return Vec::new();
+        }
         let layout = self.layout();
         self.view.hover = self
             .targets(&layout)
@@ -1462,6 +1474,57 @@ mod tests {
         assert_eq!(controller.row_emphasis(0), Some(RowEmphasis::Selected));
         controller.pointer_move(GuiPoint::new(layout.panel.x as f32, layout.panel.y as f32));
         assert_eq!(controller.row_emphasis(2), None);
+    }
+
+    fn text_size() -> Setting {
+        let choice = AdvancedConfigValue::Choice {
+            value: "1".into(),
+            choices: [("0", "Small"), ("1", "Medium"), ("2", "Large")]
+                .into_iter()
+                .map(
+                    |(value, label)| crate::startup_options_advanced::AdvancedConfigChoice {
+                        value: value.into(),
+                        label: label.into(),
+                    },
+                )
+                .collect(),
+        };
+        preference("TextSize", choice)
+    }
+
+    #[test]
+    fn a_choice_list_opens_under_its_value_no_wider_than_it_needs_and_follows_the_pointer() {
+        let mut controller = SettingsController::new(vec![text_size()]);
+        controller.select_category(SettingsCategory::Display);
+        controller.set_focus(SettingsFocus::Row(0));
+        controller.key(KeyCode::Enter, false, false);
+        let layout = controller.layout();
+        let row = controller.row_rect(&layout, 0).unwrap();
+        let value = value_rect(row);
+        let list = controller.choice_rect();
+        assert_eq!(list.y, value.y + value.h, "opens right under the value");
+        assert_eq!(list.x + list.w, value.x + value.w, "aligned to the value");
+        assert!(list.w < layout.list.w / 2, "a menu, not a page-wide panel");
+        let first = GuiPoint::new((list.x + 8) as f32, (list.y + 6) as f32);
+        controller.pointer_move(first);
+        assert_eq!(controller.view.choice.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn moving_to_another_setting_or_page_clears_the_last_change_message() {
+        let mut controller = SettingsController::new(vec![
+            preference("ShowClock", AdvancedConfigValue::Bool(true)),
+            preference("ShowStats", AdvancedConfigValue::Bool(true)),
+        ]);
+        controller.select_category(SettingsCategory::Display);
+        controller.view.message = "Show clock · Applies now".into();
+        controller.set_focus(SettingsFocus::Row(0));
+        assert!(!controller.view.message.is_empty(), "same setting keeps it");
+        controller.set_focus(SettingsFocus::Row(1));
+        assert!(controller.view.message.is_empty());
+        controller.view.message = "Show stats · Applies now".into();
+        controller.select_category(SettingsCategory::Audio);
+        assert!(controller.view.message.is_empty());
     }
 
     #[test]

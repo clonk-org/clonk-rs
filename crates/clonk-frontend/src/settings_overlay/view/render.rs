@@ -376,7 +376,6 @@ impl SettingsController {
         let layout = self.layout();
         let book = OptionsBook { assets, gui, fonts };
         let body_font = &fonts.book;
-        let small_font = &fonts.book_small;
         if let (Some(prompt), Some(actions)) = (
             self.confirmation_prompt(),
             self.confirmation_actions(&layout),
@@ -399,36 +398,35 @@ impl SettingsController {
         }
         if let Some(picker) = self.view.choice.as_ref() {
             let rect = self.choice_rect();
-            box_color(surface, rect, 0x00d5c9b5, gamma);
+            box_color(surface, rect, 0x00d8_ccb8, gamma);
             book.field(surface, rect, gamma);
-            text(
-                surface,
-                small_font,
-                IntRect::new(rect.x + 4, rect.y, rect.w - 8, 28),
-                "Enter: select · Esc: cancel",
-                [55, 45, 32, 255],
-                gamma,
-            );
+            let current = self
+                .settings
+                .get(picker.index)
+                .map(|setting| setting.value.serialized());
             for (index, choice) in self
                 .choices()
                 .iter()
                 .enumerate()
                 .skip(picker.scroll)
-                .take(8)
+                .take(choices::VISIBLE_ITEMS)
             {
-                let row = IntRect::new(
+                let item = IntRect::new(
                     rect.x + 3,
-                    rect.y + 28 + (index - picker.scroll) as i32 * 28,
+                    rect.y + 3 + (index - picker.scroll) as i32 * choices::ITEM_HEIGHT,
                     rect.w - 6,
-                    28,
+                    choices::ITEM_HEIGHT,
                 );
                 if picker.selected == index {
-                    book.highlight(surface, row, gamma);
+                    box_color(surface, item, 0xb26b_5030, gamma);
+                }
+                if current.as_deref() == Some(choice.value.as_str()) {
+                    book.ink_tick(surface, item.x + 3, item.y + (item.h - 12) / 2, gamma);
                 }
                 text(
                     surface,
                     body_font,
-                    row,
+                    IntRect::new(item.x + 18, item.y + 1, item.w - 20, item.h),
                     &choice.label,
                     [40, 31, 21, 255],
                     gamma,

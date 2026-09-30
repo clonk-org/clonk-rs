@@ -1,6 +1,11 @@
 use super::*;
 use crate::startup_options_advanced::AdvancedConfigChoice;
 
+/// Height of one entry in an open choice list.
+pub(super) const ITEM_HEIGHT: i32 = 26;
+/// Entries a choice list shows before it scrolls.
+pub(super) const VISIBLE_ITEMS: usize = 8;
+
 pub(crate) struct ChoicePicker {
     pub index: usize,
     pub selected: usize,
@@ -44,22 +49,52 @@ impl SettingsController {
             .unwrap_or_default()
     }
 
+    /// The open list: right under its value and aligned to it, as wide as
+    /// its longest choice needs, opening upward when the page ends first.
     pub(super) fn choice_rect(&self) -> IntRect {
         let layout = self.layout();
-        let height = self.choices().len().min(8) as i32 * 28 + 32;
-        let top = self
+        let choices = self.choices();
+        let height = choices.len().min(VISIBLE_ITEMS) as i32 * ITEM_HEIGHT + 6;
+        let longest = choices
+            .iter()
+            .map(|choice| choice.label.chars().count())
+            .max()
+            .unwrap_or(0) as i32;
+        let Some(value) = self
             .view
             .choice
             .as_ref()
             .and_then(|picker| self.row_rect(&layout, picker.index))
-            .map_or(layout.list.y, |row| row.y + 24);
-        IntRect::new(
-            layout.list.x,
-            top.min(layout.panel.y + layout.panel.h - height - 8)
-                .max(layout.panel.y + 32),
-            layout.list.w,
-            height,
-        )
+            .map(value_rect)
+        else {
+            return IntRect::new(layout.list.x, layout.list.y, layout.list.w / 3, height);
+        };
+        let width = (longest * 9 + 28).clamp(value.w, layout.list.w);
+        let below = value.y + value.h;
+        let y = if below + height <= layout.panel.y + layout.panel.h - 8 {
+            below
+        } else {
+            (value.y - height).max(layout.panel.y + 8)
+        };
+        IntRect::new(value.x + value.w - width, y, width, height)
+    }
+
+    /// The choice under the pointer, if any.
+    fn choice_at(&self, point: GuiPoint) -> Option<usize> {
+        let rect = self.choice_rect();
+        let picker = self.view.choice.as_ref()?;
+        (contains(rect, point) && point.y >= (rect.y + 3) as f32)
+            .then(|| picker.scroll + ((point.y as i32 - rect.y - 3) / ITEM_HEIGHT) as usize)
+            .filter(|index| *index < self.choices().len())
+    }
+
+    /// Highlights the choice under the pointer.
+    pub(super) fn choice_hover(&mut self, point: GuiPoint) {
+        if let Some(index) = self.choice_at(point) {
+            if let Some(picker) = self.view.choice.as_mut() {
+                picker.selected = index;
+            }
+        }
     }
 
     fn accept_choice(&mut self) -> Vec<SettingsAction> {
@@ -111,8 +146,8 @@ impl SettingsController {
         }
         if let Some(picker) = self.view.choice.as_mut() {
             picker.scroll = picker.scroll.min(picker.selected);
-            if picker.selected >= picker.scroll + 8 {
-                picker.scroll = picker.selected + 1 - 8;
+            if picker.selected >= picker.scroll + VISIBLE_ITEMS {
+                picker.scroll = picker.selected + 1 - VISIBLE_ITEMS;
             }
         }
         Vec::new()
@@ -148,27 +183,23 @@ impl SettingsController {
     }
 
     pub(super) fn choice_pointer(&mut self, point: GuiPoint, down: bool) -> Vec<SettingsAction> {
-        let rect = self.choice_rect();
-        let count = self.choices().len();
-        if !contains(rect, point) {
+        if !contains(self.choice_rect(), point) {
             if down {
                 self.view.choice = None;
             }
             return Vec::new();
         }
+        let Some(index) = self.choice_at(point) else {
+            return Vec::new();
+        };
         let Some(picker) = self.view.choice.as_mut() else {
             return Vec::new();
         };
-        if point.y >= (rect.y + 28) as f32 {
-            let index = picker.scroll + ((point.y as i32 - rect.y - 28) / 28).max(0) as usize;
-            if index < count {
-                if down {
-                    picker.pressed = Some(index);
-                    picker.selected = index;
-                } else if picker.pressed.take() == Some(index) {
-                    return self.accept_choice();
-                }
-            }
+        if down {
+            picker.pressed = Some(index);
+            picker.selected = index;
+        } else if picker.pressed.take() == Some(index) {
+            return self.accept_choice();
         }
         Vec::new()
     }

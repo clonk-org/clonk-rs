@@ -253,12 +253,10 @@ impl OptionsBook<'_> {
             gamma,
         );
         for inset in 0..2 {
-            draw_line_dw(
+            ink_segment(
                 surface,
-                left + inset,
-                bottom - 1,
-                left + SLANT + inset,
-                top + inset,
+                (left + inset, bottom - 1),
+                (left + SLANT + inset, top + inset),
                 ink,
                 gamma,
             );
@@ -271,12 +269,10 @@ impl OptionsBook<'_> {
                 ink,
                 gamma,
             );
-            draw_line_dw(
+            ink_segment(
                 surface,
-                right - SLANT - inset,
-                top + inset,
-                right - inset,
-                bottom - 1,
+                (right - SLANT - inset, top + inset),
+                (right - inset, bottom - 1),
                 ink,
                 gamma,
             );
@@ -433,6 +429,26 @@ impl OptionsBook<'_> {
         );
     }
 
+    /// An ink tick filling the 12x12 cell at `(x, y)`.
+    pub fn ink_tick(&self, surface: &mut Surface, x: i32, y: i32, gamma: Option<&GammaRamp>) {
+        for stroke in 0..2 {
+            ink_segment(
+                surface,
+                (x + 2, y + 5 + stroke),
+                (x + 5, y + 8 + stroke),
+                PAGE_TAB_INK,
+                gamma,
+            );
+            ink_segment(
+                surface,
+                (x + 5, y + 8 + stroke),
+                (x + 10, y + 2 + stroke),
+                PAGE_TAB_INK,
+                gamma,
+            );
+        }
+    }
+
     /// A check box inked onto the page, ticked when on, with its label.
     #[allow(clippy::too_many_arguments)]
     pub fn ink_toggle(
@@ -458,26 +474,7 @@ impl OptionsBook<'_> {
             );
         }
         if checked {
-            for stroke in 0..2 {
-                draw_line_dw(
-                    surface,
-                    x + 3,
-                    y + 5 + stroke,
-                    x + 5,
-                    y + 8 + stroke,
-                    PAGE_TAB_INK,
-                    gamma,
-                );
-                draw_line_dw(
-                    surface,
-                    x + 5,
-                    y + 8 + stroke,
-                    x + 9,
-                    y + 2 + stroke,
-                    PAGE_TAB_INK,
-                    gamma,
-                );
-            }
+            self.ink_tick(surface, x, y, gamma);
         }
         self.ink_link(
             surface,
@@ -608,6 +605,36 @@ impl OptionsBook<'_> {
             false,
             gamma,
         );
+    }
+}
+
+/// A one-pixel ink line from `from` to `to`, both ends included, plotted
+/// pixel by pixel. The dialog's own line primitive draws only straight lines
+/// in software, so slants and ticks would vanish there.
+fn ink_segment(
+    surface: &mut Surface,
+    from: (i32, i32),
+    to: (i32, i32),
+    color: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    let (dx, dy) = ((to.0 - from.0).abs(), -(to.1 - from.1).abs());
+    let (step_x, step_y) = ((to.0 - from.0).signum(), (to.1 - from.1).signum());
+    let (mut x, mut y, mut error) = (from.0, from.1, dx + dy);
+    loop {
+        draw_engine_box(surface, x, y, x, y, color, gamma);
+        if (x, y) == to {
+            break;
+        }
+        let doubled = 2 * error;
+        if doubled >= dy {
+            error += dy;
+            x += step_x;
+        }
+        if doubled <= dx {
+            error += dx;
+            y += step_y;
+        }
     }
 }
 

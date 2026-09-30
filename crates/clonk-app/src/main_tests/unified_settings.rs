@@ -817,7 +817,8 @@ fn unified_settings_draw_an_open_choice_list_above_the_rows_it_covers() {
             .iter()
             .rposition(|batch| batch.text.iter().any(|text| text.text.contains(needle)))
     };
-    let list = batch("Enter: select").expect("the choice list is drawn");
+    // "Small" appears only in the open list; "Medium" is also the row's value.
+    let list = batch("Small").expect("the choice list is drawn");
     let rows = batch("Enhanced chat").expect("the rows are drawn");
     // The GPU presenter draws a batch's text above its boxes, so a list in
     // the rows' batch would let their captions show through it.
