@@ -31,6 +31,15 @@ pub enum SettingsFocus {
     Close,
 }
 
+/// How strongly a list row is marked: the keyboard focus, the row the footer
+/// actions and description apply to, or the row under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowEmphasis {
+    Hovered,
+    Selected,
+    Focused,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
     Change(usize, AdvancedConfigValue),
@@ -63,6 +72,7 @@ pub struct SettingsViewState {
     pub(crate) choice: Option<choices::ChoicePicker>,
     pub(crate) dragging: Option<usize>,
     pub(crate) scroll_drag: Option<i32>,
+    pub(crate) hovered: Option<usize>,
     layout: Option<SettingsLayout>,
 }
 
@@ -89,6 +99,7 @@ impl Default for SettingsViewState {
             choice: None,
             dragging: None,
             scroll_drag: None,
+            hovered: None,
             layout: None,
         }
     }
@@ -516,6 +527,19 @@ impl SettingsController {
         order
     }
 
+    pub(crate) fn row_emphasis(&self, index: usize) -> Option<RowEmphasis> {
+        [
+            (
+                self.view.focus == SettingsFocus::Row(index),
+                RowEmphasis::Focused,
+            ),
+            (self.view.selected == Some(index), RowEmphasis::Selected),
+            (self.view.hovered == Some(index), RowEmphasis::Hovered),
+        ]
+        .into_iter()
+        .find_map(|(applies, emphasis)| applies.then_some(emphasis))
+    }
+
     pub fn set_focus(&mut self, focus: SettingsFocus) {
         self.view.focus = focus;
         if let SettingsFocus::Row(index) = focus {
@@ -814,6 +838,11 @@ impl SettingsController {
     }
 
     pub fn pointer_move(&mut self, point: GuiPoint) -> Vec<SettingsAction> {
+        let layout = self.layout();
+        self.view.hovered = self.visible_indices().into_iter().find(|index| {
+            self.row_rect(&layout, *index)
+                .is_some_and(|row| contains(row, point))
+        });
         if let Some(offset) = self.view.scroll_drag {
             if let Some((track, thumb)) = self.scrollbar() {
                 let maximum = self
@@ -975,6 +1004,53 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn preference(key: &str, value: AdvancedConfigValue) -> Setting {
+        Setting {
+            id: SettingId::new("Graphics", key),
+            label: key.into(),
+            keywords: String::new(),
+            category: SettingsCategory::Display,
+            advanced: false,
+            default: value.clone(),
+            value,
+            details: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_row_the_footer_acts_on_stays_highlighted_while_search_has_focus() {
+        let mut controller = SettingsController::new(
+            ["ShowClock", "ShowStats", "ShowPortraits"]
+                .map(|key| preference(key, AdvancedConfigValue::Bool(true)))
+                .to_vec(),
+        );
+        controller.select_category(SettingsCategory::Display);
+        controller.focus_search();
+        assert_eq!(controller.row_emphasis(0), Some(RowEmphasis::Selected));
+        assert_eq!(controller.row_emphasis(1), None);
+        controller.set_focus(SettingsFocus::Row(1));
+        assert_eq!(controller.row_emphasis(0), None);
+        assert_eq!(controller.row_emphasis(1), Some(RowEmphasis::Focused));
+    }
+
+    #[test]
+    fn the_pointer_marks_the_row_it_is_over_until_it_leaves_the_list() {
+        let mut controller = SettingsController::new(
+            ["ShowClock", "ShowStats", "ShowPortraits"]
+                .map(|key| preference(key, AdvancedConfigValue::Bool(true)))
+                .to_vec(),
+        );
+        controller.select_category(SettingsCategory::Display);
+        let layout = controller.layout();
+        let row = controller.row_rect(&layout, 2).unwrap();
+        controller.pointer_move(GuiPoint::new((row.x + 40) as f32, (row.y + 4) as f32));
+        assert_eq!(controller.row_emphasis(2), Some(RowEmphasis::Hovered));
+        assert_eq!(controller.row_emphasis(0), Some(RowEmphasis::Selected));
+        controller.pointer_move(GuiPoint::new(layout.panel.x as f32, layout.panel.y as f32));
+        assert_eq!(controller.row_emphasis(2), None);
+    }
+
     #[test]
     fn audio_subpages_are_directly_clickable_without_changing_filters() {
         let mut controller = SettingsController::new(Vec::new());

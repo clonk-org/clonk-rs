@@ -188,6 +188,9 @@ impl SettingsController {
             let Some(rect) = self.row_rect(&layout, index) else {
                 continue;
             };
+            if let Some(emphasis) = self.row_emphasis(index) {
+                draw_row_emphasis(surface, rect, emphasis, gamma);
+            }
             let setting = &self.settings[index];
             let focused = self.view.focus == SettingsFocus::Row(index);
             let editable = setting.value.is_editable() && setting.details.unavailable.is_none();
@@ -446,6 +449,31 @@ impl SettingsController {
                 );
             }
         }
+    }
+}
+
+/// A brown wash over the row (engine colours carry inverted alpha), plus an
+/// ink bar at the left edge for the row the footer and keyboard act on.
+fn draw_row_emphasis(
+    surface: &mut Surface,
+    row: IntRect,
+    emphasis: RowEmphasis,
+    gamma: Option<&GammaRamp>,
+) {
+    let band = IntRect::new(row.x - 4, row.y - 1, row.w + 8, row.h + 2);
+    let (wash, marked) = match emphasis {
+        RowEmphasis::Focused => (0xb26b_5030, true),
+        RowEmphasis::Selected => (0xcc6b_5030, true),
+        RowEmphasis::Hovered => (0xe86b_5030, false),
+    };
+    box_color(surface, band, wash, gamma);
+    if marked {
+        box_color(
+            surface,
+            IntRect::new(band.x, band.y, 3, band.h),
+            0x0050_3820,
+            gamma,
+        );
     }
 }
 
