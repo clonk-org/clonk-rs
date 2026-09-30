@@ -125,6 +125,9 @@ pub struct SettingDetails {
     pub policy: ApplyPolicy,
     pub active_value: Option<String>,
     pub display_value: Option<String>,
+    /// The application's label for the default, when `display_value` shows
+    /// the value in a form the overlay cannot derive (key and button names).
+    pub default_display: Option<String>,
     pub binding: bool,
     pub unavailable: Option<String>,
     pub step: i128,

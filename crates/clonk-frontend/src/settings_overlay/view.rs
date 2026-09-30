@@ -1027,7 +1027,12 @@ pub(crate) fn detail_text(setting: &Setting) -> String {
             .map(|value| format!(" · Active: {value}"))
             .unwrap_or_default();
         let default = if setting.is_modified() {
-            format!(" · Default: {}", formatted_value(setting, &setting.default))
+            let default = setting
+                .details
+                .default_display
+                .clone()
+                .unwrap_or_else(|| formatted_value(setting, &setting.default));
+            format!(" · Default: {default}")
         } else {
             String::new()
         };
@@ -1099,6 +1104,21 @@ mod tests {
         assert_eq!(value_label(&duration), "12 s");
         duration.value = seconds(30);
         assert!(detail_text(&duration).ends_with("Default: 12 s"));
+    }
+
+    #[test]
+    fn a_rebound_key_names_its_default_with_the_applications_label() {
+        let key = |value| AdvancedConfigValue::Integer {
+            value,
+            min: 0,
+            max: 255,
+        };
+        let mut binding = preference("Kbd1Key1", key(81));
+        binding.value = key(123);
+        binding.details.display_value = Some("F12".into());
+        binding.details.default_display = Some("Q".into());
+        assert_eq!(value_label(&binding), "F12");
+        assert!(detail_text(&binding).ends_with("Default: Q"));
     }
 
     #[test]

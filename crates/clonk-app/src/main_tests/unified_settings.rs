@@ -656,3 +656,51 @@ fn unified_settings_shortcut_search_and_escape_stay_in_the_current_screen() {
     assert_eq!(app.mode, AppMode::Running);
     assert!(!app.running_chat_active());
 }
+
+#[test]
+fn unified_settings_names_unbound_buttons_and_symbol_keys_readably() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    let mut app = new_classic_running_sandbox_app();
+    app.app_paths = None;
+    app.open_unified_settings(SettingsCategory::Controls)
+        .unwrap();
+    let label = |section: &str, key: &str| {
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .settings
+            .iter()
+            .find(|s| s.id.section == section && s.id.key == key)
+            .and_then(|s| s.details.display_value.clone())
+            .unwrap()
+    };
+    assert_eq!(label("Gamepad0", "Button1"), "Not bound");
+    let push_to_talk = label("Voice", "PushToTalkKey");
+    assert!(push_to_talk.contains("Backquote"), "{push_to_talk}");
+}
+
+#[test]
+fn unified_settings_names_a_rebound_keys_default_by_its_key() {
+    use clonk_frontend::settings_overlay::{SettingsAction, SettingsCategory};
+    let mut app = new_classic_running_sandbox_app();
+    app.app_paths = None;
+    app.open_unified_settings(SettingsCategory::Controls)
+        .unwrap();
+    let index = app
+        .unified_settings
+        .as_ref()
+        .unwrap()
+        .controller
+        .settings
+        .iter()
+        .position(|s| s.id.section == "Controls" && s.id.key == "Kbd1Key1")
+        .unwrap();
+    app.process_unified_settings_actions(vec![SettingsAction::CaptureBinding(index)])
+        .unwrap();
+    app.handle_key(VirtualKeyCode::F12, ElementState::Pressed)
+        .unwrap();
+    let details = &app.unified_settings.as_ref().unwrap().controller.settings[index].details;
+    assert_eq!(details.display_value.as_deref(), Some("F12"));
+    assert_eq!(details.default_display.as_deref(), Some("Q"));
+}

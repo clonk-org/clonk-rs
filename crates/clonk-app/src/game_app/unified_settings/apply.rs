@@ -231,16 +231,11 @@ impl GameApp {
                 if !setting.details.binding {
                     continue;
                 }
+                let gamepad = crate::settings_catalog::gamepad_binding(&setting.id).is_some();
                 setting.details.display_value =
-                    setting.value.serialized().parse::<i32>().ok().map(|raw| {
-                        if crate::settings_catalog::gamepad_binding(&setting.id).is_some() {
-                            crate::input::legacy_gamepad_key_label(Some(raw))
-                        } else {
-                            crate::input::decode_platform_key_code(raw)
-                                .map(format_key_label)
-                                .unwrap_or_else(|| "Unassigned".into())
-                        }
-                    });
+                    Some(binding_label(&setting.value.serialized(), gamepad));
+                setting.details.default_display =
+                    Some(binding_label(&setting.default.serialized(), gamepad));
             }
         }
     }
@@ -288,6 +283,33 @@ impl GameApp {
         temp.persist(&path).map_err(|error| error.error)?;
         self.config.deferred.take_by_section();
         Ok(())
+    }
+}
+
+/// A binding as players read it: the key or button name, with a lone symbol
+/// key spelled out beside its glyph, or "Not bound".
+fn binding_label(raw: &str, gamepad: bool) -> String {
+    raw.parse::<i32>()
+        .ok()
+        .map(|raw| {
+            if gamepad {
+                crate::input::legacy_gamepad_key_label(Some(raw))
+            } else {
+                crate::input::decode_platform_key_code(raw)
+                    .map(readable_key_label)
+                    .unwrap_or_default()
+            }
+        })
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| "Not bound".into())
+}
+
+fn readable_key_label(key: VirtualKeyCode) -> String {
+    let label = format_key_label(key);
+    if label.chars().count() == 1 && !label.chars().all(char::is_alphanumeric) {
+        format!("{label} ({key:?})")
+    } else {
+        label
     }
 }
 
