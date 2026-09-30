@@ -48,7 +48,7 @@ impl SettingsCategory {
             Self::Audio => "Audio",
             Self::Controls => "Controls",
             Self::Display => "Graphics",
-            Self::Interface => "Program",
+            Self::Interface => "General",
             Self::Game => "Game",
             Self::System => "System",
         }
@@ -320,6 +320,14 @@ impl SettingsController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tabs_use_the_names_players_expect_from_other_games() {
+        assert_eq!(
+            SettingsCategory::ALL.map(SettingsCategory::label),
+            ["General", "Graphics", "Audio", "Controls", "Game", "System", "Quick"]
+        );
+    }
 
     #[test]
     fn voice_page_shows_relevant_activation_controls_without_hiding_them_from_search_or_pins() {
