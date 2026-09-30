@@ -553,6 +553,35 @@ impl SettingsController {
         .find_map(|(applies, emphasis)| applies.then_some(emphasis))
     }
 
+    /// The keys that operate the focused control, for the footer.
+    pub fn input_hint(&self) -> String {
+        let action = match self.view.focus {
+            SettingsFocus::Row(index) => self.settings.get(index).map_or("", |setting| {
+                if setting.details.binding {
+                    "Enter: press a new key"
+                } else {
+                    match setting.value {
+                        AdvancedConfigValue::Bool(_) => "Enter: toggle",
+                        AdvancedConfigValue::Integer { .. } => {
+                            "Left/Right: adjust · Enter: type a value"
+                        }
+                        AdvancedConfigValue::Choice { .. } => "Left/Right: change · Enter: list",
+                        _ => "Enter: edit",
+                    }
+                }
+            }),
+            SettingsFocus::Search => "Type to search · Down: results",
+            SettingsFocus::Category(_) => "Up/Down: pages · Right: settings",
+            SettingsFocus::AudioPage(_) | SettingsFocus::Group => "Left/Right: switch",
+            _ => "Tab: next",
+        };
+        if action.is_empty() {
+            "Esc: close".into()
+        } else {
+            format!("{action} · Esc: close")
+        }
+    }
+
     /// Shows the next (`step` 1) or previous (-1) group, wrapping around.
     pub fn cycle_group(&mut self, step: isize) {
         let groups = self.groups();
@@ -1145,6 +1174,40 @@ mod tests {
         assert_eq!(value_label(&duration), "12 s");
         duration.value = seconds(30);
         assert!(detail_text(&duration).ends_with("Default: 12 s"));
+    }
+
+    #[test]
+    fn the_footer_names_the_keys_that_operate_the_focused_control() {
+        let volume = AdvancedConfigValue::Integer {
+            value: 50,
+            min: 0,
+            max: 100,
+        };
+        let mut binding = preference("Kbd1Key1", volume.clone());
+        binding.details.binding = true;
+        let mut controller = SettingsController::new(vec![
+            preference("ShowClock", AdvancedConfigValue::Bool(true)),
+            preference("Volume", volume),
+            binding,
+        ]);
+        controller.select_category(SettingsCategory::Display);
+        for (focus, hint) in [
+            (SettingsFocus::Row(0), "Enter: toggle"),
+            (
+                SettingsFocus::Row(1),
+                "Left/Right: adjust · Enter: type a value",
+            ),
+            (SettingsFocus::Row(2), "Enter: press a new key"),
+            (SettingsFocus::Search, "Type to search · Down: results"),
+        ] {
+            controller.set_focus(focus);
+            assert!(
+                controller.input_hint().starts_with(hint),
+                "{focus:?}: {}",
+                controller.input_hint()
+            );
+            assert!(controller.input_hint().ends_with("Esc: close"));
+        }
     }
 
     #[test]

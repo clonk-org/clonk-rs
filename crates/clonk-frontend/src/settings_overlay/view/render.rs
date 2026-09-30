@@ -176,6 +176,7 @@ impl SettingsController {
                 gamma,
             );
         }
+        self.render_input_hint(surface, &layout, small_font, gamma);
         let visible = self.visible_indices();
         if visible.is_empty() {
             text(
@@ -421,6 +422,56 @@ impl SettingsController {
                     gamma,
                 );
             }
+        }
+    }
+}
+
+impl SettingsController {
+    /// Right-aligns the focused control's keys on the footer's button row,
+    /// in whatever room the buttons leave; omitted where it does not fit.
+    fn render_input_hint(
+        &self,
+        surface: &mut Surface,
+        layout: &SettingsLayout,
+        font: &ClonkFont,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let targets = self.targets(layout);
+        let footer_buttons = || {
+            targets.iter().filter(|(focus, _)| {
+                matches!(
+                    focus,
+                    SettingsFocus::Pin
+                        | SettingsFocus::PinUp
+                        | SettingsFocus::PinDown
+                        | SettingsFocus::Reset
+                        | SettingsFocus::ResetCategory
+                )
+            })
+        };
+        let Some(row) = footer_buttons().map(|(_, rect)| *rect).next() else {
+            return;
+        };
+        let left = footer_buttons()
+            .map(|(_, rect)| rect.x + rect.w)
+            .max()
+            .unwrap_or(row.x)
+            + 12;
+        let right = targets
+            .iter()
+            .find(|(focus, _)| *focus == SettingsFocus::TestMicrophone)
+            .map_or(layout.footer.x + layout.footer.w, |(_, rect)| rect.x - 12);
+        let hint = self.input_hint();
+        let width = font.measure(&hint, false).0;
+        if width <= right - left {
+            text(
+                surface,
+                font,
+                IntRect::new(right - width - 6, row.y + 4, width + 6, row.h),
+                &hint,
+                [96, 80, 60, 255],
+                gamma,
+            );
         }
     }
 }
