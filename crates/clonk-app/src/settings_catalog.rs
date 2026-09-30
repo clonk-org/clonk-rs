@@ -50,10 +50,16 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
             setting.advanced,
             setting.category as usize,
             match (setting.id.section.as_str(), setting.id.key.as_str()) {
-                ("Sound", "SoundVolume") | ("Graphics", "DisplayMode") => 0,
-                ("Sound", "MusicVolume") | ("Graphics", "Scale") => 1,
-                ("Voice", "Enabled") | ("Graphics", "ResolutionX") => 2,
-                ("Voice", "Volume") | ("Graphics", "ResolutionY") => 3,
+                ("Sound", "SoundVolume")
+                | ("Graphics", "DisplayMode")
+                | ("General", "GamepadEnabled") => 0,
+                ("Sound", "MusicVolume")
+                | ("Graphics", "Scale")
+                | ("Controls", "GamepadGuiControl") => 1,
+                ("Voice", "Enabled")
+                | ("Graphics", "ResolutionX")
+                | ("General", "ScrollSmooth") => 2,
+                ("Voice", "Volume") | ("Graphics", "ResolutionY") | ("Settings", "OpenKey") => 3,
                 ("Voice", "InputDevice") => 4,
                 ("Voice", "OutputDevice") => 5,
                 ("Voice", "ActivationMode") => 6,
@@ -198,6 +204,21 @@ pub(crate) fn gamepad_binding(id: &SettingId) -> Option<(usize, crate::input::Co
         .ok()?
         .checked_sub(1)?;
     Some((set, *crate::input::ControlBindingId::ALL.get(key)?))
+}
+
+/// A controller's recorded axis calibration: its set, axis and which value.
+fn gamepad_axis_calibration(id: &SettingId) -> Option<(usize, usize, &'static str)> {
+    let set = id.section.strip_prefix("Gamepad")?.parse::<usize>().ok()?;
+    let rest = id.key.strip_prefix("Axis")?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+    let axis = rest[..digits].parse::<usize>().ok()?;
+    let extent = match &rest[digits..] {
+        "Min" => "minimum",
+        "Max" => "maximum",
+        "Calibrated" => "calibrated",
+        _ => return None,
+    };
+    Some((set, axis, extent))
 }
 
 fn describe(setting: &mut Setting) {
@@ -476,6 +497,21 @@ fn describe(setting: &mut Setting) {
             "Select the profile for the next application launch.",
             "legacy normal restart",
         )),
+        ("General", "GamepadEnabled") => Some((
+            "Use controllers",
+            "Recognise game controllers for play. Takes effect after restarting Clonk.",
+            "gamepad joystick joypad",
+        )),
+        ("Controls", "GamepadGuiControl") => Some((
+            "Use a controller in menus",
+            "Move through menus with the first controller as well as the keyboard and mouse.",
+            "gamepad joystick navigation",
+        )),
+        ("General", "ScrollSmooth") => Some((
+            "Camera smoothing",
+            "How gradually the view follows your crew: 1 snaps to it, higher values glide.",
+            "scroll view follow",
+        )),
         _ => None,
     };
     if let Some((label, description, keywords)) = metadata {
@@ -493,6 +529,13 @@ fn describe(setting: &mut Setting) {
         || (section == "Graphics" && matches!(key, "ResolutionX" | "ResolutionY"))
     {
         setting.advanced = true;
+    }
+    if let Some((set, axis, extent)) = gamepad_axis_calibration(&setting.id) {
+        setting.label = format!("Controller {}: axis {} {extent}", set + 1, axis + 1);
+        setting.details.description = format!(
+            "Calibration the game records for this axis of controller {}.",
+            set + 1
+        );
     }
     if let Some((set, id)) = keyboard_binding(&setting.id) {
         setting.label = format!(
@@ -557,6 +600,8 @@ fn describe(setting: &mut Setting) {
         ("Graphics", "ResolutionX") => Some((640, 7680)),
         ("Graphics", "ResolutionY") => Some((480, 4320)),
         ("Graphics", "SmokeLevel") => Some((0, 300)),
+        // C4Viewport.cpp:1205-1206 divides by BoundBy(ScrollSmooth, 1, 50).
+        ("General", "ScrollSmooth") => Some((1, 50)),
         ("Network", name) if name.starts_with("Port") => Some((-1, 65535)),
         _ => None,
     };
@@ -566,6 +611,13 @@ fn describe(setting: &mut Setting) {
                 *min = low;
                 *max = high;
             }
+        }
+    }
+    // C++ stores an int but offers it as a check box
+    // (C4StartupOptionsDlg.cpp:331,433-435).
+    if (section, key) == ("Controls", "GamepadGuiControl") {
+        for value in [&mut setting.value, &mut setting.default] {
+            *value = AdvancedConfigValue::Bool(value.serialized() != "0");
         }
     }
     let choices: &[(&str, &str)] = match (section, key) {
@@ -820,6 +872,64 @@ mod tests {
                 .map(|binding| binding.set.label())
                 .as_deref(),
             Some("Keyboard 1")
+        );
+    }
+
+    #[test]
+    fn unified_catalog_names_the_controls_preferences_players_look_for() {
+        let rows = catalog(&Config::new());
+        let row = |section: &str, key: &str| {
+            rows.iter()
+                .find(|row| row.id.section == section && row.id.key == key)
+                .unwrap()
+        };
+        for (section, key, label) in [
+            ("General", "GamepadEnabled", "Use controllers"),
+            ("Controls", "GamepadGuiControl", "Use a controller in menus"),
+            ("General", "ScrollSmooth", "Camera smoothing"),
+        ] {
+            let setting = row(section, key);
+            assert_eq!(setting.label, label);
+            assert!(!setting.advanced, "{label} is on the General tab");
+            assert_eq!(setting.category, SettingsCategory::Controls);
+            assert!(!setting.details.description.is_empty());
+        }
+        assert!(
+            matches!(
+                row("Controls", "GamepadGuiControl").value,
+                AdvancedConfigValue::Bool(false)
+            ),
+            "the C++ check box stays a check box"
+        );
+        // C4Viewport.cpp:1205-1206 divides by BoundBy(ScrollSmooth, 1, 50).
+        assert!(matches!(
+            row("General", "ScrollSmooth").value,
+            AdvancedConfigValue::Integer {
+                min: 1,
+                max: 50,
+                ..
+            }
+        ));
+        let axis = row("Gamepad1", "Axis2Min");
+        assert_eq!(axis.label, "Controller 2: axis 3 minimum");
+        assert!(axis.advanced, "calibration the game records stays advanced");
+        let general: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                row.category == SettingsCategory::Controls
+                    && !row.advanced
+                    && row.details.control.is_none()
+            })
+            .map(|row| row.label.as_str())
+            .collect();
+        assert_eq!(
+            general,
+            [
+                "Use controllers",
+                "Use a controller in menus",
+                "Camera smoothing",
+                "Open settings shortcut"
+            ]
         );
     }
 

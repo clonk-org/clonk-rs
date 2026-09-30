@@ -853,3 +853,30 @@ fn unified_settings_draw_an_open_choice_list_above_the_rows_it_covers() {
     // the rows' batch would let their captions show through it.
     assert!(list > rows, "choice list batch {list}, rows batch {rows}");
 }
+
+#[test]
+fn unified_settings_turn_on_controller_menus_with_a_check_box() {
+    use clonk_frontend::settings_overlay::{ControlsPage, SettingsAction, SettingsCategory};
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let mut app = new_classic_running_sandbox_app();
+    app.app_paths = None;
+    app.open_unified_settings(SettingsCategory::Controls)
+        .unwrap();
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    controller.select_controls_page(ControlsPage::General);
+    let index = controller
+        .visible_indices()
+        .into_iter()
+        .find(|index| controller.settings[*index].id.key == "GamepadGuiControl")
+        .expect("on the General tab");
+    app.process_unified_settings_actions(vec![SettingsAction::Change(
+        index,
+        AdvancedConfigValue::Bool(true),
+    )])
+    .unwrap();
+    assert!(app.config.gamepad_gui_control);
+    assert_eq!(
+        app.config.deferred.get("Controls", "GamepadGuiControl"),
+        Some("1")
+    );
+}
