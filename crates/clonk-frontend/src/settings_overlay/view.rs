@@ -244,7 +244,7 @@ impl SettingsController {
         self.query
             .trim()
             .is_empty()
-            .then(|| self.current_group())
+            .then(|| self.current_control_set())
             .flatten()
     }
 
@@ -331,7 +331,7 @@ impl SettingsController {
         let top = tabs.y + tabs.h + 4;
         let height = (layout.list.y - 6 - top).min(SET_PICTURE_HEIGHT);
         let width = height * 80 / 36;
-        self.groups()
+        self.control_sets()
             .into_iter()
             .enumerate()
             .map(|(position, set)| {
@@ -707,7 +707,7 @@ impl SettingsController {
                     return self.activate(tabs[(position + step) % tabs.len()]);
                 }
                 if matches!(self.view.focus, SettingsFocus::ControlSet(_)) {
-                    self.cycle_group(if key == KeyCode::Left { -1 } else { 1 });
+                    self.cycle_control_set(if key == KeyCode::Left { -1 } else { 1 });
                     self.view.focus = self.control_set_focus().unwrap_or(self.view.focus);
                     return Vec::new();
                 }
@@ -924,18 +924,18 @@ impl SettingsController {
         }
     }
 
-    /// Shows the next (`step` 1) or previous (-1) group, wrapping around.
-    pub fn cycle_group(&mut self, step: isize) {
-        let groups = self.groups();
-        if groups.is_empty() {
+    /// Shows the next (`step` 1) or previous (-1) control set, wrapping around.
+    pub fn cycle_control_set(&mut self, step: isize) {
+        let sets = self.control_sets();
+        if sets.is_empty() {
             return;
         }
         let current = self
-            .current_group()
-            .and_then(|group| groups.iter().position(|candidate| *candidate == group))
+            .current_control_set()
+            .and_then(|shown| sets.iter().position(|set| *set == shown))
             .unwrap_or(0);
-        let next = (current as isize + step).rem_euclid(groups.len() as isize) as usize;
-        self.choose_set(groups[next]);
+        let next = (current as isize + step).rem_euclid(sets.len() as isize) as usize;
+        self.choose_set(sets[next]);
         self.view.scroll = 0;
         self.view.selected = self.visible_indices().first().copied();
     }
@@ -1726,11 +1726,11 @@ mod tests {
         controller.key(KeyCode::Left, false, false);
         controller.select_controls_page(ControlsPage::Controller);
         assert_eq!(controller.visible_indices(), vec![4]);
-        controller.cycle_group(1);
+        controller.cycle_control_set(1);
         assert_eq!(controller.visible_indices(), vec![5]);
         controller.select_controls_page(ControlsPage::General);
         assert_eq!(controller.visible_indices(), vec![0]);
-        assert_eq!(controller.current_group(), None);
+        assert_eq!(controller.current_control_set(), None);
         controller.select_controls_page(ControlsPage::Keyboard);
         assert_eq!(
             controller.visible_indices(),

@@ -788,9 +788,9 @@ fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
     let controller = &mut app.unified_settings.as_mut().unwrap().controller;
     assert_eq!(controller.category, SettingsCategory::Interface);
     controller.select_category(SettingsCategory::Controls);
-    controller.cycle_group(1);
+    controller.cycle_control_set(1);
     controller.select_controls_page(ControlsPage::Controller);
-    controller.cycle_group(2);
+    controller.cycle_control_set(2);
     app.close_unified_settings();
     app.apply_ingame_menu_action_for_player(0, MenuAction::ActivateOptions)
         .unwrap();
@@ -800,12 +800,18 @@ fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
         (SettingsCategory::Controls, ControlsPage::Controller)
     );
     assert_eq!(
-        controller.current_group().map(|set| set.label()).as_deref(),
+        controller
+            .current_control_set()
+            .map(|set| set.label())
+            .as_deref(),
         Some("Controller 3")
     );
     controller.select_controls_page(ControlsPage::Keyboard);
     assert_eq!(
-        controller.current_group().map(|set| set.label()).as_deref(),
+        controller
+            .current_control_set()
+            .map(|set| set.label())
+            .as_deref(),
         Some("Keyboard 1"),
         "the game's player plays with Keyboard 1, which wins over the set left"
     );
@@ -940,13 +946,13 @@ fn unified_settings_open_a_game_on_the_control_set_its_player_uses() {
         controller.control_set_caption(),
         Some(format!("Controller 2 · used by {name}"))
     );
-    controller.cycle_group(1);
+    controller.cycle_control_set(1);
     app.close_unified_settings();
     app.apply_ingame_menu_action_for_player(0, MenuAction::ActivateOptions)
         .unwrap();
     let controller = &app.unified_settings.as_ref().unwrap().controller;
     assert_eq!(
-        controller.current_group(),
+        controller.current_control_set(),
         Some(pad),
         "a game reopens on its player's own keys"
     );

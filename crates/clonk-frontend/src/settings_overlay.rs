@@ -270,23 +270,23 @@ impl SettingsController {
     }
 
     /// The control sets on the current page, in catalog order.
-    pub fn groups(&self) -> Vec<ControlSet> {
+    pub fn control_sets(&self) -> Vec<ControlSet> {
         self.settings
             .iter()
             .filter(|setting| setting.category == self.category && self.page_contains(setting))
             .filter_map(|setting| setting.details.control.map(|binding| binding.set))
-            .fold(Vec::new(), |mut groups, group| {
-                if !groups.contains(&group) {
-                    groups.push(group);
+            .fold(Vec::new(), |mut sets, set| {
+                if !sets.contains(&set) {
+                    sets.push(set);
                 }
-                groups
+                sets
             })
     }
 
     /// The control set whose bindings the page shows: the one chosen for
     /// its device while the page has it, otherwise the page's first.
-    pub fn current_group(&self) -> Option<ControlSet> {
-        let groups = self.groups();
+    pub fn current_control_set(&self) -> Option<ControlSet> {
+        let sets = self.control_sets();
         self.controls_page
             .device()
             .map(|device| ControlSet {
@@ -296,8 +296,8 @@ impl SettingsController {
                     ControlDevice::Gamepad => self.controller_set,
                 },
             })
-            .filter(|set| groups.contains(set))
-            .or_else(|| groups.into_iter().next())
+            .filter(|set| sets.contains(set))
+            .or_else(|| sets.into_iter().next())
     }
 
     /// Shows `set` on its device's tab from now on.
@@ -347,7 +347,7 @@ impl SettingsController {
 
     pub fn visible_indices(&self) -> Vec<usize> {
         let query = self.query.trim().to_lowercase();
-        let group = self.current_group();
+        let shown_set = self.current_control_set();
         let mut indices: Vec<_> = self
             .settings
             .iter()
@@ -366,7 +366,7 @@ impl SettingsController {
                             && setting
                                 .details
                                 .control
-                                .is_none_or(|binding| Some(binding.set) == group)
+                                .is_none_or(|binding| Some(binding.set) == shown_set)
                     }
                 } else {
                     let searchable = format!(
