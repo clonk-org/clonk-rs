@@ -2,6 +2,7 @@
 //! (categories, search and pinned settings) addresses the same stable IDs.
 
 use crate::startup_options_advanced::AdvancedConfigValue;
+pub use crate::startup_options_controls::ControlDevice;
 
 mod view;
 pub use view::{SettingsAction, SettingsFocus, SettingsLayout};
@@ -94,6 +95,31 @@ impl AudioPage {
     }
 }
 
+/// One of the keyboard or controller control sets players choose between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlSet {
+    pub device: ControlDevice,
+    pub index: usize,
+}
+
+impl ControlSet {
+    pub fn label(self) -> String {
+        let device = match self.device {
+            ControlDevice::Keyboard => "Keyboard",
+            ControlDevice::Gamepad => "Controller",
+        };
+        format!("{device} {}", self.index + 1)
+    }
+}
+
+/// The key or button a control set assigns to one command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlBinding {
+    pub set: ControlSet,
+    /// The command's index in `CONTROL_KEY_LABELS`.
+    pub command: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ApplyPolicy {
     #[default]
@@ -134,9 +160,9 @@ pub struct SettingDetails {
     pub exclude_from_category_reset: bool,
     /// Appended to whole-number values, such as `"%"` or `" s"`.
     pub unit: String,
-    /// Settings sharing a group are listed one group at a time within their
-    /// category, such as the bindings of one control set.
-    pub group: Option<String>,
+    /// A control set's binding; the category lists one control set at a
+    /// time.
+    pub control: Option<ControlBinding>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,7 +191,7 @@ pub struct SettingsController {
     pub show_advanced: bool,
     pub pinned: Vec<SettingId>,
     pub modified_only: bool,
-    pub group: Option<String>,
+    pub group: Option<ControlSet>,
     pub view: view::SettingsViewState,
 }
 
@@ -189,12 +215,12 @@ impl SettingsController {
         self.settings.get(index).is_some_and(Setting::is_modified)
     }
 
-    /// The groups in the current category, in catalog order.
-    pub fn groups(&self) -> Vec<String> {
+    /// The control sets in the current category, in catalog order.
+    pub fn groups(&self) -> Vec<ControlSet> {
         self.settings
             .iter()
             .filter(|setting| setting.category == self.category)
-            .filter_map(|setting| setting.details.group.clone())
+            .filter_map(|setting| setting.details.control.map(|binding| binding.set))
             .fold(Vec::new(), |mut groups, group| {
                 if !groups.contains(&group) {
                     groups.push(group);
@@ -203,12 +229,11 @@ impl SettingsController {
             })
     }
 
-    /// The group whose settings the category shows: the chosen one while the
-    /// category has it, otherwise the category's first.
-    pub fn current_group(&self) -> Option<String> {
+    /// The control set whose bindings the category shows: the chosen one
+    /// while the category has it, otherwise the category's first.
+    pub fn current_group(&self) -> Option<ControlSet> {
         let groups = self.groups();
         self.group
-            .clone()
             .filter(|group| groups.contains(group))
             .or_else(|| groups.into_iter().next())
     }
@@ -258,9 +283,8 @@ impl SettingsController {
                                 || self.audio_setting_visible(setting))
                             && setting
                                 .details
-                                .group
-                                .as_ref()
-                                .is_none_or(|own| Some(own) == group.as_ref())
+                                .control
+                                .is_none_or(|binding| Some(binding.set) == group)
                     }
                 } else {
                     let searchable = format!(

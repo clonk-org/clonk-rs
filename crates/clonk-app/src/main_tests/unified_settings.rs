@@ -767,7 +767,10 @@ fn unified_settings_reopen_on_the_page_and_control_set_the_player_left() {
         .unwrap();
     let controller = &app.unified_settings.as_ref().unwrap().controller;
     assert_eq!(controller.category, SettingsCategory::Controls);
-    assert_eq!(controller.current_group().as_deref(), Some("Keyboard 2"));
+    assert_eq!(
+        controller.current_group().map(|set| set.label()).as_deref(),
+        Some("Keyboard 2")
+    );
     app.close_unified_settings();
     app.apply_ingame_menu_action_for_player(0, MenuAction::VoiceSetup)
         .unwrap();

@@ -144,7 +144,10 @@ impl SettingsController {
                     surface,
                     body_font,
                     IntRect::new(rect.x + 3, rect.y, rect.w - 24, rect.h),
-                    &self.current_group().unwrap_or_default(),
+                    &self
+                        .current_group()
+                        .map(ControlSet::label)
+                        .unwrap_or_default(),
                     [0, 0, 0, 255],
                     gamma,
                 );

@@ -731,7 +731,7 @@ impl SettingsController {
             .and_then(|group| groups.iter().position(|candidate| *candidate == group))
             .unwrap_or(0);
         let next = (current as isize + step).rem_euclid(groups.len() as isize) as usize;
-        self.group = Some(groups[next].clone());
+        self.group = Some(groups[next]);
         self.view.scroll = 0;
         self.view.selected = self.visible_indices().first().copied();
     }
@@ -1395,18 +1395,21 @@ mod tests {
 
     #[test]
     fn control_bindings_show_one_control_set_at_a_time_and_cycle_between_sets() {
-        let control = |key: &str, group: Option<&str>| {
+        let control = |key: &str, set: Option<(ControlDevice, usize, usize)>| {
             let mut setting = preference(key, AdvancedConfigValue::Bool(true));
             setting.category = SettingsCategory::Controls;
-            setting.details.group = group.map(Into::into);
+            setting.details.control = set.map(|(device, index, command)| ControlBinding {
+                set: ControlSet { device, index },
+                command,
+            });
             setting
         };
         let mut controller = SettingsController::new(vec![
             control("GamepadEnabled", None),
-            control("Kbd1Key1", Some("Keyboard 1")),
-            control("Kbd1Key2", Some("Keyboard 1")),
-            control("Kbd2Key1", Some("Keyboard 2")),
-            control("Button1", Some("Controller 1")),
+            control("Kbd1Key1", Some((ControlDevice::Keyboard, 0, 0))),
+            control("Kbd1Key2", Some((ControlDevice::Keyboard, 0, 1))),
+            control("Kbd2Key1", Some((ControlDevice::Keyboard, 1, 0))),
+            control("Button1", Some((ControlDevice::Gamepad, 0, 0))),
         ]);
         controller.select_category(SettingsCategory::Controls);
         assert_eq!(controller.visible_indices(), vec![0, 1, 2]);

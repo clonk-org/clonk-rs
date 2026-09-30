@@ -2,7 +2,7 @@
 use super::*;
 use clonk_frontend::settings_overlay::SettingsAction;
 use clonk_frontend::settings_overlay::{
-    AudioPage, SettingId, SettingsCategory, SettingsController,
+    AudioPage, ControlSet, SettingId, SettingsCategory, SettingsController,
 };
 
 #[path = "unified_settings/apply.rs"]
@@ -30,7 +30,7 @@ pub(crate) struct UnifiedSettings {
 pub(crate) struct SettingsPage {
     category: SettingsCategory,
     audio_page: AudioPage,
-    group: Option<String>,
+    group: Option<ControlSet>,
 }
 
 impl GameApp {
@@ -401,7 +401,7 @@ impl GameApp {
             self.settings_return_page = Some(SettingsPage {
                 category: settings.controller.category,
                 audio_page: settings.controller.audio_page,
-                group: settings.controller.group.clone(),
+                group: settings.controller.group,
             });
             if settings.owns_pause && settings.opened_in == self.mode {
                 self.netplay.offline_halt_count =
