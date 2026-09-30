@@ -194,10 +194,12 @@ impl SettingsController {
             let setting = &self.settings[index];
             let focused = self.view.focus == SettingsFocus::Row(index);
             let editable = setting.value.is_editable() && setting.details.unavailable.is_none();
-            let color = if editable {
-                [0, 0, 0, 255]
-            } else {
-                [102, 90, 74, 255]
+            // Changed settings are written in sienna ink; the footer names
+            // the default Reset restores.
+            let color = match (editable, setting.is_modified()) {
+                (false, _) => [102, 90, 74, 255],
+                (true, true) => [128, 45, 12, 255],
+                (true, false) => [0, 0, 0, 255],
             };
             if let AdvancedConfigValue::Bool(checked) = setting.value {
                 let checkbox = IntRect::new(rect.x, rect.y + 4, rect.w, 20);

@@ -143,6 +143,12 @@ pub struct Setting {
     pub details: SettingDetails,
 }
 
+impl Setting {
+    pub fn is_modified(&self) -> bool {
+        self.value.serialized() != self.default.serialized()
+    }
+}
+
 pub struct SettingsController {
     pub settings: Vec<Setting>,
     pub category: SettingsCategory,
@@ -166,6 +172,11 @@ impl SettingsController {
             modified_only: false,
             view: Default::default(),
         }
+    }
+
+    /// Whether the setting differs from the value Reset would restore.
+    pub fn is_modified(&self, index: usize) -> bool {
+        self.settings.get(index).is_some_and(Setting::is_modified)
     }
 
     pub fn toggle_pin(&mut self, index: usize) {

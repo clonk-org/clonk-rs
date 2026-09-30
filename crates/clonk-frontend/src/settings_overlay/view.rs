@@ -1009,6 +1009,7 @@ pub(crate) fn formatted_value(setting: &Setting, value: &AdvancedConfigValue) ->
                     value.clone()
                 }
             }),
+        AdvancedConfigValue::Bool(on) => if *on { "On" } else { "Off" }.into(),
         _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
         _ if matches!(setting.id.section.as_str(), "Sound" | "Voice")
             && setting.id.key.ends_with("Volume") =>
@@ -1032,8 +1033,13 @@ pub(crate) fn detail_text(setting: &Setting) -> String {
             .as_ref()
             .map(|value| format!(" · Active: {value}"))
             .unwrap_or_default();
+        let default = if setting.is_modified() {
+            format!(" · Default: {}", formatted_value(setting, &setting.default))
+        } else {
+            String::new()
+        };
         format!(
-            "{} · {}{active}",
+            "{} · {}{active}{default}",
             setting.details.scope,
             setting.details.policy.label()
         )
@@ -1086,6 +1092,33 @@ mod tests {
         controller.set_focus(SettingsFocus::Row(1));
         assert_eq!(controller.row_emphasis(0), None);
         assert_eq!(controller.row_emphasis(1), Some(RowEmphasis::Focused));
+    }
+
+    #[test]
+    fn a_changed_setting_is_marked_and_names_the_default_it_would_reset_to() {
+        let mut clock = preference("ShowClock", AdvancedConfigValue::Bool(true));
+        clock.value = AdvancedConfigValue::Bool(false);
+        let mut scale = preference(
+            "Scale",
+            AdvancedConfigValue::Integer {
+                value: 100,
+                min: 100,
+                max: 400,
+            },
+        );
+        scale.value = AdvancedConfigValue::Integer {
+            value: 150,
+            min: 100,
+            max: 400,
+        };
+        let stats = preference("ShowStats", AdvancedConfigValue::Bool(false));
+        let controller = SettingsController::new(vec![clock, scale, stats]);
+        assert!(controller.is_modified(0));
+        assert!(controller.is_modified(1));
+        assert!(!controller.is_modified(2));
+        assert!(detail_text(&controller.settings[0]).ends_with(" · Default: On"));
+        assert!(detail_text(&controller.settings[1]).ends_with(" · Default: 100"));
+        assert!(!detail_text(&controller.settings[2]).contains("Default"));
     }
 
     #[test]
