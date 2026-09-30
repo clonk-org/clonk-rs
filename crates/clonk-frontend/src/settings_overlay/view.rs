@@ -9,8 +9,9 @@ mod choices;
 mod microphone;
 mod render;
 const ROW_HEIGHT: i32 = 36;
-/// The control-set selector's row above a control set's bindings.
-const SET_ROW_HEIGHT: i32 = 34;
+/// The height of a control set's picture from the classic control sheets,
+/// which is 80x36.
+const SET_PICTURE_HEIGHT: i32 = 36;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsFocus {
@@ -19,7 +20,8 @@ pub enum SettingsFocus {
     Category(SettingsCategory),
     AudioPage(AudioPage),
     ControlsPage(ControlsPage),
-    Group,
+    /// A control set's picture, by the set's index on its device.
+    ControlSet(usize),
     Row(usize),
     Modified,
     Advanced,
@@ -213,11 +215,32 @@ impl SettingsController {
             layout.list.y -= row;
             layout.list.h += row;
         }
-        if self.current_group().is_some() {
-            layout.list.y += SET_ROW_HEIGHT;
-            layout.list.h -= SET_ROW_HEIGHT;
+        if self.control_set_page().is_some() {
+            // The pictures shrink where the page is short.
+            let row = if layout.list.h >= 4 * 44 + SET_PICTURE_HEIGHT + 10 {
+                SET_PICTURE_HEIGHT + 10
+            } else {
+                36
+            };
+            layout.list.y += row;
+            layout.list.h -= row;
         }
         layout
+    }
+
+    /// The control set the page shows, unless a search replaced the page.
+    fn control_set_page(&self) -> Option<ControlSet> {
+        self.query
+            .trim()
+            .is_empty()
+            .then(|| self.current_group())
+            .flatten()
+    }
+
+    /// Focus on the picture of the control set the page shows.
+    fn control_set_focus(&self) -> Option<SettingsFocus> {
+        self.control_set_page()
+            .map(|set| SettingsFocus::ControlSet(set.index))
     }
 
     /// Whether the page has a row of tabs under the search field.
@@ -245,17 +268,36 @@ impl SettingsController {
         }
     }
 
-    /// Where the control-set selector sits: at the top of the page, above
-    /// the bindings.
-    fn set_row(&self, layout: &SettingsLayout) -> Option<IntRect> {
-        self.current_group().map(|_| {
-            IntRect::new(
-                layout.list.x,
-                layout.list.y - SET_ROW_HEIGHT,
-                layout.list.w,
-                SET_ROW_HEIGHT - 6,
-            )
-        })
+    /// The row the page's tabs stand in, under the search field.
+    fn page_tab_row(layout: &SettingsLayout) -> IntRect {
+        IntRect::new(layout.list.x, layout.search.y + 29, layout.list.w, 28)
+    }
+
+    /// The pictures of the page's control sets, side by side between the
+    /// tabs and the bindings, in the classic sheets' 80x36 proportions.
+    pub(crate) fn control_set_pictures(&self, layout: &SettingsLayout) -> Vec<(usize, IntRect)> {
+        if self.control_set_page().is_none() {
+            return Vec::new();
+        }
+        let tabs = Self::page_tab_row(layout);
+        let top = tabs.y + tabs.h + 4;
+        let height = (layout.list.y - 6 - top).min(SET_PICTURE_HEIGHT);
+        let width = height * 80 / 36;
+        self.groups()
+            .into_iter()
+            .enumerate()
+            .map(|(position, set)| {
+                (
+                    set.index,
+                    IntRect::new(
+                        layout.list.x + position as i32 * (width + 10),
+                        top,
+                        width,
+                        height,
+                    ),
+                )
+            })
+            .collect()
     }
 
     pub fn resize(&mut self, width: i32, height: i32) {
@@ -483,14 +525,15 @@ impl SettingsController {
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
                 let backwards = matches!(key, KeyCode::Up | KeyCode::PageUp);
                 let on_tab = Some(self.view.focus) == self.current_page_tab();
-                if on_tab || self.view.focus == SettingsFocus::Group {
+                if on_tab || matches!(self.view.focus, SettingsFocus::ControlSet(_)) {
                     let above = if on_tab {
                         None
                     } else {
                         self.current_page_tab()
                     };
-                    let below = (on_tab && !self.groups().is_empty())
-                        .then_some(SettingsFocus::Group)
+                    let below = on_tab
+                        .then(|| self.control_set_focus())
+                        .flatten()
                         .or_else(|| {
                             self.visible_indices()
                                 .first()
@@ -539,12 +582,11 @@ impl SettingsController {
                             .iter()
                             .position(|i| self.view.focus == SettingsFocus::Row(*i));
                         if key == KeyCode::Up && old == Some(0) {
-                            self.set_focus(if !self.groups().is_empty() {
-                                SettingsFocus::Group
-                            } else {
-                                self.current_page_tab()
-                                    .unwrap_or(SettingsFocus::Category(self.category))
-                            });
+                            self.set_focus(
+                                self.control_set_focus()
+                                    .or_else(|| self.current_page_tab())
+                                    .unwrap_or(SettingsFocus::Category(self.category)),
+                            );
                             return Vec::new();
                         }
                         if key == KeyCode::Down && old == Some(visible.len() - 1) {
@@ -598,8 +640,9 @@ impl SettingsController {
                     };
                     return self.activate(tabs[(position + step) % tabs.len()]);
                 }
-                if self.view.focus == SettingsFocus::Group {
+                if matches!(self.view.focus, SettingsFocus::ControlSet(_)) {
                     self.cycle_group(if key == KeyCode::Left { -1 } else { 1 });
+                    self.view.focus = self.control_set_focus().unwrap_or(self.view.focus);
                     return Vec::new();
                 }
                 if let SettingsFocus::Row(index) = self.view.focus {
@@ -633,9 +676,7 @@ impl SettingsController {
         let mut order = SettingsCategory::ALL.map(SettingsFocus::Category).to_vec();
         order.push(SettingsFocus::Search);
         order.extend(self.current_page_tab());
-        if !self.groups().is_empty() {
-            order.push(SettingsFocus::Group);
-        }
+        order.extend(self.control_set_focus());
         order.extend(self.visible_indices().into_iter().map(SettingsFocus::Row));
         let layout = self.layout();
         order.extend(
@@ -760,9 +801,9 @@ impl SettingsController {
             }),
             SettingsFocus::Search => "Type to search · Down: results",
             SettingsFocus::Category(_) => "Up/Down: pages · Right: settings",
-            SettingsFocus::AudioPage(_) | SettingsFocus::ControlsPage(_) | SettingsFocus::Group => {
-                "Left/Right: switch"
-            }
+            SettingsFocus::AudioPage(_)
+            | SettingsFocus::ControlsPage(_)
+            | SettingsFocus::ControlSet(_) => "Left/Right: switch",
             _ => "Tab: next",
         };
         let reset = match self.view.focus {
@@ -878,7 +919,14 @@ impl SettingsController {
             SettingsFocus::Category(category) => self.select_category(category),
             SettingsFocus::AudioPage(page) => self.select_audio_page(page),
             SettingsFocus::ControlsPage(page) => self.select_controls_page(page),
-            SettingsFocus::Group => self.cycle_group(1),
+            SettingsFocus::ControlSet(index) => {
+                if let Some(device) = self.controls_page.device() {
+                    self.choose_set(ControlSet { device, index });
+                    self.view.scroll = 0;
+                    self.view.selected = self.visible_indices().first().copied();
+                    self.view.focus = SettingsFocus::ControlSet(index);
+                }
+            }
             SettingsFocus::Modified => {
                 self.modified_only = !self.modified_only;
                 self.view.scroll = 0;
@@ -1154,12 +1202,11 @@ impl SettingsController {
     fn targets(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         let mut targets = vec![(SettingsFocus::Search, layout.search)];
         targets.extend(self.page_tab_rects(layout));
-        if let Some(row) = self.set_row(layout) {
-            targets.push((
-                SettingsFocus::Group,
-                IntRect::new(row.x, row.y + (row.h - 26) / 2, 190, 26),
-            ));
-        }
+        targets.extend(
+            self.control_set_pictures(layout)
+                .into_iter()
+                .map(|(index, rect)| (SettingsFocus::ControlSet(index), rect)),
+        );
         targets.extend(
             SettingsCategory::ALL
                 .into_iter()
@@ -1194,7 +1241,8 @@ impl SettingsController {
                     _ => (104, 80),
                 };
                 let width = if icons { with_icon } else { plain };
-                let rect = IntRect::new(x, layout.search.y + 29, width, 28);
+                let row = Self::page_tab_row(layout);
+                let rect = IntRect::new(x, row.y, width, row.h);
                 x += width + 6;
                 (tab, rect)
             })
@@ -1473,7 +1521,7 @@ mod tests {
         controller.select_category(SettingsCategory::Controls);
         assert_eq!(controller.controls_page, ControlsPage::Keyboard);
         assert_eq!(controller.visible_indices(), vec![1, 2]);
-        controller.set_focus(SettingsFocus::Group);
+        controller.set_focus(SettingsFocus::ControlSet(0));
         controller.key(KeyCode::Right, false, false);
         assert_eq!(controller.visible_indices(), vec![3]);
         controller.key(KeyCode::Right, false, false);
@@ -1540,6 +1588,65 @@ mod tests {
             controller.controls_page,
             ControlsPage::General,
             "switching wraps"
+        );
+    }
+
+    #[test]
+    fn a_control_set_is_chosen_by_its_picture_with_the_pointer_or_the_arrow_keys() {
+        let mut controller = SettingsController::new(
+            (0..4)
+                .map(|set| {
+                    control(
+                        &format!("Kbd{}Key1", set + 1),
+                        Some((ControlDevice::Keyboard, set, 0)),
+                    )
+                })
+                .collect(),
+        );
+        controller.select_controls_page(ControlsPage::Keyboard);
+        let layout = controller.layout();
+        let targets = controller.targets(&layout);
+        let tab = targets
+            .iter()
+            .find(|(focus, _)| *focus == SettingsFocus::ControlsPage(ControlsPage::Keyboard))
+            .unwrap()
+            .1;
+        let pictures: Vec<_> = targets
+            .iter()
+            .filter(|(focus, _)| matches!(focus, SettingsFocus::ControlSet(_)))
+            .copied()
+            .collect();
+        assert_eq!(
+            pictures.iter().map(|(focus, _)| *focus).collect::<Vec<_>>(),
+            (0..4).map(SettingsFocus::ControlSet).collect::<Vec<_>>()
+        );
+        for (_, picture) in &pictures {
+            assert!(picture.y >= tab.y + tab.h && picture.y + picture.h <= layout.list.y);
+            assert!(
+                picture.w > picture.h * 2,
+                "the set's keyboard, not a button"
+            );
+        }
+        let third = pictures[2].1;
+        let centre = GuiPoint::new(
+            (third.x + third.w / 2) as f32,
+            (third.y + third.h / 2) as f32,
+        );
+        controller.pointer(centre, true);
+        controller.pointer(centre, false);
+        assert_eq!(controller.visible_indices(), vec![2]);
+        assert_eq!(controller.view.focus, SettingsFocus::ControlSet(2));
+        controller.key(KeyCode::Right, false, false);
+        assert_eq!(controller.visible_indices(), vec![3]);
+        assert_eq!(controller.view.focus, SettingsFocus::ControlSet(3));
+        controller.key(KeyCode::Down, false, false);
+        assert_eq!(controller.view.focus, SettingsFocus::Row(3));
+        controller.key(KeyCode::Up, false, false);
+        assert_eq!(controller.view.focus, SettingsFocus::ControlSet(3));
+        controller.key(KeyCode::Up, false, false);
+        assert_eq!(
+            controller.view.focus,
+            SettingsFocus::ControlsPage(ControlsPage::Keyboard)
         );
     }
 

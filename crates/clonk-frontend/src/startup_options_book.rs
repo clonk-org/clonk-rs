@@ -485,6 +485,79 @@ impl OptionsBook<'_> {
         );
     }
 
+    /// A control set's picture from the classic control sheets: the keyboard
+    /// or gamepad with the set's number. The chosen set glows as the sheets'
+    /// set buttons do, the pointer lights one faintly, and keyboard focus
+    /// underlines it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn control_set_picture(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        (device, index): (ControlDevice, usize),
+        chosen: bool,
+        hovered: bool,
+        focused: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let picture = match device {
+            ControlDevice::Keyboard => self
+                .assets
+                .control
+                .as_ref()
+                .map(|image| (image, control_facets::KEYBOARD)),
+            ControlDevice::Gamepad => self.assets.gamepad.as_ref().map(|image| {
+                (
+                    image,
+                    IntRect::new(
+                        0,
+                        0,
+                        control_facets::GAMEPAD_PHASE_WIDTH,
+                        image.height() as i32,
+                    ),
+                )
+            }),
+        };
+        if chosen || hovered {
+            self.highlight(surface, rect, gamma);
+        }
+        match picture {
+            Some((image, cell)) => {
+                let source = control_facets::phase_rect(cell, index);
+                crate::classic_gui::draw_facet_stretch(
+                    surface,
+                    image,
+                    (
+                        source.x as f32,
+                        source.y as f32,
+                        source.w as f32,
+                        source.h as f32,
+                    ),
+                    (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                    gamma,
+                );
+            }
+            None => self.ink_button(surface, rect, &(index + 1).to_string(), chosen, gamma),
+        }
+        if chosen {
+            self.highlight(surface, rect, gamma);
+        }
+        if focused {
+            let y = rect.y + rect.h + 1;
+            for row in 0..2 {
+                draw_line_dw(
+                    surface,
+                    rect.x + 4,
+                    y + row,
+                    rect.x + rect.w - 4,
+                    y + row,
+                    PAGE_TAB_INK,
+                    gamma,
+                );
+            }
+        }
+    }
+
     /// The Sound and Voice chat tab icons: the options book's speaker, and the
     /// chat illustration its voice sheet uses where the icon sheet has it.
     pub fn page_icon(&self, voice: bool) -> ImageData {

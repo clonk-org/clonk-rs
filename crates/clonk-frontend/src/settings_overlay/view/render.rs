@@ -150,19 +150,18 @@ impl SettingsController {
                 );
                 continue;
             }
-            if focus == SettingsFocus::Group {
-                book.combo(surface, rect, highlighted, gamma);
-                text(
-                    surface,
-                    body_font,
-                    IntRect::new(rect.x + 3, rect.y, rect.w - 24, rect.h),
-                    &self
-                        .current_group()
-                        .map(ControlSet::label)
-                        .unwrap_or_default(),
-                    [0, 0, 0, 255],
-                    gamma,
-                );
+            if let SettingsFocus::ControlSet(index) = focus {
+                if let Some(device) = self.controls_page.device() {
+                    book.control_set_picture(
+                        surface,
+                        rect,
+                        (device, index),
+                        self.control_set_page().map(|set| set.index) == Some(index),
+                        self.view.hover == Some(focus),
+                        highlighted,
+                        gamma,
+                    );
+                }
                 continue;
             }
             let emphasized = highlighted || self.view.hover == Some(focus);
@@ -202,6 +201,7 @@ impl SettingsController {
                 }
             }
         }
+        self.render_control_set_name(surface, &layout, body_font, gamma);
         self.render_input_hint(surface, &layout, small_font, gamma);
         let visible = self.visible_indices();
         if visible.is_empty() {
@@ -504,6 +504,35 @@ impl SettingsController {
             opening,
             gamma,
         );
+    }
+
+    /// Names the chosen control set beside the pictures, where it fits.
+    fn render_control_set_name(
+        &self,
+        surface: &mut Surface,
+        layout: &SettingsLayout,
+        font: &ClonkFont,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let (Some(set), Some((_, last))) = (
+            self.control_set_page(),
+            self.control_set_pictures(layout).last().copied(),
+        ) else {
+            return;
+        };
+        let x = last.x + last.w + 14;
+        let room = layout.list.x + layout.list.w - x;
+        let name = set.label();
+        if font.measure(&name, false).0 + 6 <= room {
+            text(
+                surface,
+                font,
+                IntRect::new(x, last.y + (last.h - 26) / 2, room, 26),
+                &name,
+                [40, 31, 21, 255],
+                gamma,
+            );
+        }
     }
 
     /// Right-aligns the focused control's keys on the footer's button row,
