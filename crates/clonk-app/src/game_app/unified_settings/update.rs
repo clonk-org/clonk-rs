@@ -70,11 +70,13 @@ impl GameApp {
             .unwrap_or_default();
         if let Some(settings) = self.unified_settings.as_mut() {
             settings.controller.view.microphone_status = if audio.is_some() {
-                format!("{} · {}", state.status, state.device_status)
+                state.status
             } else {
                 "Audio unavailable. Connect a device and choose Refresh devices.".into()
             };
             settings.controller.view.microphone_level = state.level;
+            settings.controller.view.microphone_testing = state.testing;
+            settings.controller.view.audio_device_status = state.device_status;
             for key in ["InputDevice", "OutputDevice"] {
                 let Some(setting) = settings
                     .controller

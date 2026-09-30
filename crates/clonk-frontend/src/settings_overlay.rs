@@ -67,6 +67,34 @@ impl SettingsCategory {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioPage {
+    #[default]
+    Sound,
+    Voice,
+}
+
+impl AudioPage {
+    pub const ALL: [Self; 2] = [Self::Sound, Self::Voice];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sound => "Sound",
+            Self::Voice => "Voice chat",
+        }
+    }
+
+    fn contains(self, setting: &Setting) -> bool {
+        match self {
+            Self::Sound => {
+                setting.id.section != "Voice"
+                    || matches!(setting.id.key.as_str(), "Volume" | "OutputDevice")
+            }
+            Self::Voice => setting.id.section == "Voice",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ApplyPolicy {
     #[default]
     Live,
@@ -118,6 +146,7 @@ pub struct Setting {
 pub struct SettingsController {
     pub settings: Vec<Setting>,
     pub category: SettingsCategory,
+    pub audio_page: AudioPage,
     pub query: String,
     pub show_advanced: bool,
     pub pinned: Vec<SettingId>,
@@ -130,6 +159,7 @@ impl SettingsController {
         Self {
             settings,
             category: SettingsCategory::Quick,
+            audio_page: AudioPage::Sound,
             query: String::new(),
             show_advanced: false,
             pinned: Vec::new(),
@@ -188,6 +218,8 @@ impl SettingsController {
                     } else {
                         setting.category == self.category
                             && (!setting.advanced || self.show_advanced)
+                            && (self.category != SettingsCategory::Audio
+                                || self.audio_setting_visible(setting))
                     }
                 } else {
                     let searchable = format!(
@@ -214,11 +246,90 @@ impl SettingsController {
         }
         indices
     }
+
+    fn audio_setting_visible(&self, setting: &Setting) -> bool {
+        if !self.audio_page.contains(setting) {
+            return false;
+        }
+        if self.audio_page == AudioPage::Sound || self.show_advanced {
+            return true;
+        }
+        let activated = self
+            .settings
+            .iter()
+            .find(|setting| setting.id.section == "Voice" && setting.id.key == "ActivationMode")
+            .is_some_and(|setting| {
+                matches!(setting.value.serialized().as_str(), "VoiceActivated" | "1")
+            });
+        match setting.id.key.as_str() {
+            "PushToTalkKey" => !activated,
+            "ActivationThreshold" | "ActivationHangover" => activated,
+            _ => true,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_page_shows_relevant_activation_controls_without_hiding_them_from_search_or_pins() {
+        let mut controller = SettingsController::new(
+            [
+                ("ActivationMode", "PushToTalk"),
+                ("PushToTalkKey", "86"),
+                ("ActivationThreshold", "40"),
+            ]
+            .into_iter()
+            .map(|(key, value)| Setting {
+                id: SettingId::new("Voice", key),
+                label: key.into(),
+                keywords: String::new(),
+                category: SettingsCategory::Audio,
+                advanced: false,
+                value: AdvancedConfigValue::Text(value.into()),
+                default: AdvancedConfigValue::Text(value.into()),
+                details: Default::default(),
+            })
+            .collect(),
+        );
+        controller.select_audio_page(AudioPage::Voice);
+        assert_eq!(controller.visible_indices(), vec![0, 1]);
+        controller.settings[0].value = AdvancedConfigValue::Text("VoiceActivated".into());
+        assert_eq!(controller.visible_indices(), vec![0, 2]);
+        controller.query = "PushToTalkKey".into();
+        assert_eq!(controller.visible_indices(), vec![1]);
+        controller.toggle_pin(1);
+        controller.select_category(SettingsCategory::Quick);
+        assert_eq!(controller.visible_indices(), vec![1]);
+    }
+
+    #[test]
+    fn audio_opens_the_sound_mix_without_microphone_setup() {
+        let mut controller = SettingsController::new(
+            [
+                ("Sound", "MusicVolume"),
+                ("Voice", "Enabled"),
+                ("Voice", "Volume"),
+                ("Voice", "OutputDevice"),
+            ]
+            .into_iter()
+            .map(|(section, key)| Setting {
+                id: SettingId::new(section, key),
+                label: key.into(),
+                keywords: String::new(),
+                category: SettingsCategory::Audio,
+                advanced: false,
+                value: AdvancedConfigValue::Bool(true),
+                default: AdvancedConfigValue::Bool(true),
+                details: Default::default(),
+            })
+            .collect(),
+        );
+        controller.select_category(SettingsCategory::Audio);
+        assert_eq!(controller.visible_indices(), vec![0, 2, 3]);
+    }
 
     #[test]
     fn numeric_edits_validate_bounds_without_changing_the_live_value() {

@@ -1582,9 +1582,7 @@ impl GameApp {
             }
             MenuAction::VoiceSetup => {
                 if self.config.compat_profile == crate::settings::CompatProfile::Normal {
-                    self.open_unified_settings(
-                        clonk_frontend::settings_overlay::SettingsCategory::Audio,
-                    )?;
+                    self.open_unified_voice_settings()?;
                 } else {
                     self.open_voice_setup()?;
                 }

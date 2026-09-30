@@ -152,6 +152,16 @@ impl OptionsBook<'_> {
         }
     }
 
+    pub fn group(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        title: &str,
+        gamma: Option<&GammaRamp>,
+    ) {
+        OptionsDlgScreen::draw_group_box(surface, self.fonts, &rect, title, gamma);
+    }
+
     pub fn combo(
         &self,
         surface: &mut Surface,

@@ -25,11 +25,11 @@ impl GameApp {
                 && !self.input_routing.engine_key_repeated
                 && self.window_active
             {
-                self.open_unified_settings(if voice {
-                    SettingsCategory::Audio
+                if voice {
+                    self.open_unified_voice_settings()?;
                 } else {
-                    SettingsCategory::Interface
-                })?;
+                    self.open_unified_settings(SettingsCategory::Interface)?;
+                }
             }
             return Ok(true);
         }

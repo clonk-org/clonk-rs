@@ -52,10 +52,12 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
                 ("Sound", "MusicVolume") | ("Graphics", "Scale") => 1,
                 ("Voice", "Enabled") | ("Graphics", "ResolutionX") => 2,
                 ("Voice", "Volume") | ("Graphics", "ResolutionY") => 3,
-                ("Voice", "OutputDevice") => 4,
-                ("Voice", "InputDevice") => 5,
+                ("Voice", "InputDevice") => 4,
+                ("Voice", "OutputDevice") => 5,
                 ("Voice", "ActivationMode") => 6,
                 ("Voice", "PushToTalkKey") => 7,
+                ("Voice", "ActivationThreshold") => 8,
+                ("Voice", "ActivationHangover") => 9,
                 _ => 10,
             },
             setting.label.clone(),
@@ -337,8 +339,8 @@ fn describe(setting: &mut Setting) {
             "startup clicks audio",
         )),
         ("Voice", "Enabled") => Some((
-            "Voice chat",
-            "Enable proximity voice chat. Push to talk remains the default.",
+            "Enable voice chat",
+            "Hear nearby players and talk to them. Changes apply immediately.",
             "microphone mic talk mute",
         )),
         ("Voice", "Volume") => Some((
@@ -362,17 +364,17 @@ fn describe(setting: &mut Setting) {
             "ptt mic threshold sensitivity",
         )),
         ("Voice", "PushToTalkKey") => Some((
-            "Push to talk",
+            "Push-to-talk key",
             "Press Enter, then the key you want to use. Esc cancels.",
             "ptt mic keybind hotkey",
         )),
         ("Voice", "ActivationThreshold") => Some((
-            "Microphone activation threshold",
+            "Activation threshold",
             "Raise this to ignore quieter sounds. Lower it if words are not detected.",
             "mic sensitivity noise gate",
         )),
         ("Voice", "ActivationHangover") => Some((
-            "Microphone release delay",
+            "Release delay",
             "Milliseconds to keep transmitting after speech ends, to preserve word endings.",
             "mic hangover tail",
         )),
@@ -387,7 +389,7 @@ fn describe(setting: &mut Setting) {
             "mic fan hum",
         )),
         ("Voice", "AutomaticGainControl") => Some((
-            "Automatic microphone level",
+            "Automatic mic level",
             "Keep speech at a more consistent loudness.",
             "mic agc gain",
         )),
@@ -470,6 +472,14 @@ fn describe(setting: &mut Setting) {
         setting.keywords.push_str(keywords);
         setting.advanced = false;
     }
+    if section == "Voice"
+        && matches!(
+            key,
+            "EchoCancellation" | "NoiseSuppression" | "AutomaticGainControl" | "ActivationHangover"
+        )
+    {
+        setting.advanced = true;
+    }
     if let Some((set, id)) = keyboard_binding(&setting.id) {
         setting.label = format!(
             "Keyboard {}: {}",
@@ -496,10 +506,12 @@ fn describe(setting: &mut Setting) {
         setting.details.binding = true;
     }
     if setting.details.binding {
-        setting.details.description = format!(
-            "{}: Enter to bind, Esc to cancel. Other control sets are independent.",
-            setting.details.scope
-        );
+        if section != "Voice" {
+            setting.details.description = format!(
+                "{}: Enter to bind, Esc to cancel. Other control sets are independent.",
+                setting.details.scope
+            );
+        }
         setting
             .keywords
             .push_str(" keyboard controller bind key button remap");

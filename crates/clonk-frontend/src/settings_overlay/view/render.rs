@@ -32,8 +32,14 @@ impl SettingsController {
             active,
             self.view.focus == SettingsFocus::Category(self.category),
             ClassicButtonState {
-                pressed: self.view.pressed == Some(SettingsFocus::Close),
-                highlighted: self.view.focus == SettingsFocus::Close,
+                pressed: matches!(
+                    self.view.pressed,
+                    Some(SettingsFocus::Close | SettingsFocus::CloseMicrophoneTest)
+                ),
+                highlighted: matches!(
+                    self.view.focus,
+                    SettingsFocus::Close | SettingsFocus::CloseMicrophoneTest
+                ),
             },
             startup_background,
             gamma,
@@ -52,6 +58,10 @@ impl SettingsController {
                 [255, 255, 190, 255],
                 gamma,
             );
+        }
+        if self.view.microphone_test_open {
+            self.render_microphone_test(surface, &book, gamma);
+            return;
         }
         text(
             surface,
@@ -91,6 +101,28 @@ impl SettingsController {
                 continue;
             }
             let highlighted = self.view.focus == focus;
+            if let SettingsFocus::AudioPage(page) = focus {
+                let selected = self.audio_page == page && self.query.trim().is_empty();
+                book.button(
+                    surface,
+                    rect,
+                    page.label(),
+                    ClassicButtonState {
+                        pressed: selected || self.view.pressed == Some(focus),
+                        highlighted,
+                    },
+                    gamma,
+                );
+                if selected {
+                    box_color(
+                        surface,
+                        IntRect::new(rect.x + 4, rect.y + rect.h - 3, rect.w - 8, 2),
+                        0x00695035,
+                        gamma,
+                    );
+                }
+                continue;
+            }
             if matches!(focus, SettingsFocus::Modified | SettingsFocus::Advanced) {
                 let (label, checked) = if focus == SettingsFocus::Modified {
                     ("Changed", self.modified_only)
@@ -117,7 +149,7 @@ impl SettingsController {
                 SettingsFocus::PinDown => "Down",
                 SettingsFocus::Reset => "Reset value",
                 SettingsFocus::ResetCategory => "Reset page",
-                SettingsFocus::TestMicrophone => "Record / stop mic test",
+                SettingsFocus::TestMicrophone => "Test microphone",
                 SettingsFocus::RefreshDevices => "Refresh devices",
                 _ => "",
             };
@@ -208,6 +240,16 @@ impl SettingsController {
                                 }
                             }),
                         _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
+                        _ if matches!(setting.id.section.as_str(), "Sound" | "Voice")
+                            && setting.id.key.ends_with("Volume") =>
+                        {
+                            format!("{}%", setting.value.serialized())
+                        }
+                        _ if setting.id.section == "Voice"
+                            && setting.id.key == "ActivationHangover" =>
+                        {
+                            format!("{} ms", setting.value.serialized())
+                        }
                         _ => setting.value.serialized(),
                     });
             if let AdvancedConfigValue::Integer { value, min, max } = setting.value {
@@ -282,38 +324,43 @@ impl SettingsController {
                 });
             }
         }
-        if self.category == SettingsCategory::Audio && !self.view.microphone_status.is_empty() {
-            if self.view.message.is_empty() {
-                detail = self.view.microphone_status.clone();
-            }
-            let level = self.view.microphone_level.clamp(0.0, 1.0);
-            let meter = IntRect::new(layout.footer.x, layout.footer.y + 69, layout.footer.w, 3);
-            box_color(surface, meter, 0x00a4947a, gamma);
-            if level > 0.0 {
-                box_color(
-                    surface,
-                    IntRect::new(meter.x, meter.y, (meter.w as f32 * level) as i32, 3),
-                    0x003a784d,
-                    gamma,
-                );
-            }
+        if self.category == SettingsCategory::Audio {
+            let help = self
+                .view
+                .selected
+                .and_then(|index| self.settings.get(index))
+                .and_then(|setting| setting.details.unavailable.as_deref())
+                .unwrap_or(&description);
+            wrapped_text(
+                surface,
+                small_font,
+                IntRect::new(layout.footer.x, layout.footer.y, layout.footer.w, 46),
+                if self.view.message.is_empty() {
+                    help
+                } else {
+                    &self.view.message
+                },
+                [42, 33, 22, 255],
+                gamma,
+            );
+        } else {
+            text(
+                surface,
+                small_font,
+                IntRect::new(layout.footer.x, layout.footer.y, layout.footer.w, 20),
+                &description,
+                [42, 33, 22, 255],
+                gamma,
+            );
+            text(
+                surface,
+                small_font,
+                IntRect::new(layout.footer.x, layout.footer.y + 20, layout.footer.w, 20),
+                &detail,
+                [90, 61, 31, 255],
+                gamma,
+            );
         }
-        text(
-            surface,
-            small_font,
-            IntRect::new(layout.footer.x, layout.footer.y, layout.footer.w, 20),
-            &description,
-            [42, 33, 22, 255],
-            gamma,
-        );
-        text(
-            surface,
-            small_font,
-            IntRect::new(layout.footer.x, layout.footer.y + 20, layout.footer.w, 20),
-            &detail,
-            [90, 61, 31, 255],
-            gamma,
-        );
         if self.view.display_confirmation.is_some() || self.view.reset_confirmation {
             box_color(surface, layout.footer, 0x00c7bca9, gamma);
             let prompt = self
@@ -321,10 +368,10 @@ impl SettingsController {
                 .display_confirmation
                 .map(|seconds| format!("Keep these display settings? Reverting in {seconds}s."))
                 .unwrap_or_else(|| "Reset this page? Display and saved progress are kept.".into());
-            text(
+            wrapped_text(
                 surface,
                 body_font,
-                IntRect::new(layout.footer.x, layout.footer.y + 8, layout.footer.w, 44),
+                IntRect::new(layout.footer.x, layout.footer.y + 4, layout.footer.w, 50),
                 &prompt,
                 [40, 31, 21, 255],
                 gamma,
@@ -349,7 +396,12 @@ impl SettingsController {
             ] {
                 book.button(
                     surface,
-                    IntRect::new(layout.footer.x + offset, layout.footer.y + 70, 150, 28),
+                    IntRect::new(
+                        layout.footer.x + offset,
+                        layout.footer.y + layout.footer.h - 32,
+                        150,
+                        28,
+                    ),
                     label,
                     Default::default(),
                     gamma,
@@ -397,7 +449,12 @@ impl SettingsController {
     }
 }
 
-fn box_color(surface: &mut Surface, rect: IntRect, color: u32, gamma: Option<&GammaRamp>) {
+pub(super) fn box_color(
+    surface: &mut Surface,
+    rect: IntRect,
+    color: u32,
+    gamma: Option<&GammaRamp>,
+) {
     if rect.w > 0 && rect.h > 0 {
         draw_engine_box(
             surface,
@@ -411,7 +468,7 @@ fn box_color(surface: &mut Surface, rect: IntRect, color: u32, gamma: Option<&Ga
     }
 }
 
-fn text(
+pub(super) fn text(
     surface: &mut Surface,
     font: &ClonkFont,
     rect: IntRect,
@@ -431,4 +488,47 @@ fn text(
         rect,
         false,
     );
+}
+
+pub(super) fn wrapped_text(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    rect: IntRect,
+    label: &str,
+    color: [u8; 4],
+    gamma: Option<&GammaRamp>,
+) {
+    let mut lines = vec![String::new()];
+    for word in label.split_whitespace() {
+        let line = lines.last_mut().unwrap();
+        let candidate = if line.is_empty() {
+            word.into()
+        } else {
+            format!("{line} {word}")
+        };
+        if !line.is_empty() && font.measure(&candidate, false).0 > rect.w - 6 {
+            lines.push(word.into());
+        } else {
+            *line = candidate;
+        }
+    }
+    let count = ((rect.h - 2) / font.line_height).max(0) as usize;
+    if lines.len() > count && count > 0 {
+        lines[count - 1].push('…');
+    }
+    for (index, line) in lines.iter().take(count).enumerate() {
+        text(
+            surface,
+            font,
+            IntRect::new(
+                rect.x,
+                rect.y + index as i32 * font.line_height,
+                rect.w,
+                font.line_height + 2,
+            ),
+            line,
+            color,
+            gamma,
+        );
+    }
 }

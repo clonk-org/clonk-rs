@@ -749,15 +749,15 @@ fn capture_status_text(status: &clonk_audio::VoiceCaptureStatus) -> String {
 impl GameApp {
     pub(crate) fn update_voice_setup(&mut self) {
         if self.unified_settings.is_some() {
-            let audio_selected = self.unified_settings.as_ref().is_some_and(|settings| {
-                settings.controller.category
-                    == clonk_frontend::settings_overlay::SettingsCategory::Audio
-            });
+            let test_visible = self
+                .unified_settings
+                .as_ref()
+                .is_some_and(|settings| settings.controller.view.microphone_test_open);
             let changed_context = self
                 .voice_setup
                 .as_ref()
                 .is_some_and(|setup| setup.opened_in != self.mode);
-            if !audio_selected || changed_context || !self.window_active {
+            if !test_visible || changed_context || !self.window_active {
                 self.cancel_voice_setup_test();
             }
             if let Some(setup) = self.voice_setup.as_mut() {

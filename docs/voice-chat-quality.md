@@ -28,18 +28,23 @@ media never enters simulation, lockstep controls or recordings.
 
 ## Setup and privacy
 
-In the normal compatibility profile, open **Voice setup** from Options, the
-network lobby or the in-game Options menu. **Ctrl+Shift+V** also opens it from
-the menu or a running game. The panel fits a 640×480 window and supports
-keyboard, pointer, touch and gamepad input. It offers input/output selection,
-activation mode, push-to-talk binding, volume, processing switches and retry.
-Selections persist, including a selected device that is temporarily missing.
+In the normal compatibility profile, open **Options → Audio → Voice chat**.
+The lobby and in-game **Voice setup** entries and **Ctrl+Shift+V** go directly
+to that page. The original parchment book fits a 640×480 window and supports
+keyboard, pointer, touch and gamepad input. **Sound** holds the sound mixer;
+**Voice chat** holds input/output selection, activation mode, binding and voice
+volume. The shared voice volume and output controls edit the same preferences
+from either page. **Advanced** reveals processing switches and release timing;
+search and pinned Quick settings can always find every preference. Selections
+persist, including a selected device that is temporarily missing.
 
-Opening setup stops live capture and does not open the microphone. **Record**
-explicitly records three seconds into bounded memory, closes capture and then
+Opening setup stops live capture and does not open the microphone. Choose
+**Test microphone**, then **Record & listen** to explicitly record three
+seconds into bounded memory. The test closes capture and then
 plays it locally. The test works offline with voice disabled and never uses
 the network. Closing the panel, changing devices, losing focus or leaving the
-session cancels the test. Permission denial, unavailable devices and stalled
+session cancels the test. Returning to Sound also cancels the test.
+Permission denial, unavailable devices and stalled
 playback produce a status instead of silently retrying the recording.
 
 Voice transport capability is negotiated when joining, so enabling voice during

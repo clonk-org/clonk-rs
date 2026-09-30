@@ -88,6 +88,12 @@ fn unified_settings_book_keeps_controls_clear_of_tabs_in_compact_windows() {
                 "every illustrated tab must be clickable"
             );
         }
+        controller.select_audio_page(clonk_frontend::settings_overlay::AudioPage::Voice);
+        assert_eq!(controller.visible_indices().len(), 6);
+        assert!(
+            controller.layout().list.h >= 6 * 28,
+            "the complete basic microphone setup must fit at {width}x{height}"
+        );
     }
 }
 
@@ -189,6 +195,53 @@ fn unified_settings_microphone_test_stays_local_and_stops_when_leaving_audio() {
     assert!(cancelled.get());
     assert!(app.voice_setup.as_ref().unwrap().test.is_none());
     assert!(app.unified_settings.is_some());
+}
+
+#[test]
+fn unified_settings_stops_the_local_microphone_test_when_returning_to_sound() {
+    use clonk_frontend::settings_overlay::{AudioPage, SettingsAction, SettingsFocus};
+    let mut app = new_classic_running_sandbox_app();
+    app.app_paths = None;
+    app.test_audio_mut().options.voice_enabled = false;
+    app.open_unified_voice_settings().unwrap();
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    controller.set_focus(SettingsFocus::TestMicrophone);
+    assert!(controller
+        .key(clonk_frontend::KeyCode::Enter, false, false)
+        .is_empty());
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = cancelled.clone();
+    app.voice_setup.as_mut().unwrap().start_test =
+        Box::new(move |_, _| Ok(Box::new(LocalTestProbe(observed.clone()))));
+    app.process_unified_settings_actions(vec![SettingsAction::TestMicrophone])
+        .unwrap();
+    app.update_voice_setup();
+    assert!(
+        !cancelled.get(),
+        "the visible test panel owns the recording"
+    );
+    app.update_unified_settings(Instant::now());
+    assert!(
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .view
+            .microphone_testing
+    );
+    capture_unified_settings_fixture(&mut app, "game-microphone-recording");
+    app.unified_settings
+        .as_mut()
+        .unwrap()
+        .controller
+        .select_audio_page(AudioPage::Sound);
+    app.update_voice_setup();
+    assert!(
+        cancelled.get(),
+        "leaving the test must stop local capture even within Audio"
+    );
+    assert!(app.voice_setup.as_ref().unwrap().test.is_none());
+    assert!(!app.test_audio_mut().options.voice_enabled);
 }
 
 #[test]
@@ -411,7 +464,7 @@ fn unified_settings_display_preview_reverts_on_timeout_without_saving_the_candid
 
 #[test]
 fn unified_settings_entry_points_open_the_same_overlay_without_changing_context() {
-    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::settings_overlay::{AudioPage, SettingsCategory, SettingsFocus};
     let mut app = new_real_classic_menu_app(800, 600);
     app.config.compat_profile = crate::settings::CompatProfile::Normal;
     app.app_paths = None;
@@ -425,6 +478,29 @@ fn unified_settings_entry_points_open_the_same_overlay_without_changing_context(
     );
     assert_eq!(app.startup.view, before);
     capture_unified_settings_fixture(&mut app, "menu");
+    app.unified_settings
+        .as_mut()
+        .unwrap()
+        .controller
+        .select_audio_page(AudioPage::Sound);
+    capture_unified_settings_fixture(&mut app, "menu-sound");
+    app.unified_settings
+        .as_mut()
+        .unwrap()
+        .controller
+        .select_audio_page(AudioPage::Voice);
+    capture_unified_settings_fixture(&mut app, "menu-voice");
+    app.unified_settings
+        .as_mut()
+        .unwrap()
+        .controller
+        .show_advanced = true;
+    capture_unified_settings_fixture(&mut app, "menu-voice-advanced");
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    controller.show_advanced = false;
+    controller.set_focus(SettingsFocus::TestMicrophone);
+    controller.key(clonk_frontend::KeyCode::Enter, false, false);
+    capture_unified_settings_fixture(&mut app, "menu-microphone-test");
     app.close_unified_settings();
     app.apply_classic_startup_screen("options");
     assert!(app.unified_settings.is_some());
@@ -437,6 +513,11 @@ fn unified_settings_entry_points_open_the_same_overlay_without_changing_context(
     assert_eq!(
         app.unified_settings.as_ref().unwrap().controller.category,
         SettingsCategory::Audio
+    );
+    assert_eq!(
+        app.unified_settings.as_ref().unwrap().controller.audio_page,
+        AudioPage::Voice,
+        "voice entry points must go straight to microphone setup"
     );
     capture_unified_settings_fixture(&mut app, "game-audio");
 }

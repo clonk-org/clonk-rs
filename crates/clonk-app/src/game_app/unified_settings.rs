@@ -27,6 +27,17 @@ pub(crate) struct UnifiedSettings {
 }
 
 impl GameApp {
+    pub(crate) fn open_unified_voice_settings(&mut self) -> Result<(), EngineError> {
+        self.open_unified_settings(SettingsCategory::Audio)?;
+        if let Some(settings) = self.unified_settings.as_mut() {
+            settings
+                .controller
+                .select_audio_page(clonk_frontend::settings_overlay::AudioPage::Voice);
+        }
+        self.update_unified_settings(Instant::now());
+        Ok(())
+    }
+
     pub(crate) fn open_unified_settings_for_player(
         &mut self,
         category: SettingsCategory,
@@ -47,6 +58,7 @@ impl GameApp {
         for action in actions {
             match action {
                 SettingsAction::Close => self.close_unified_settings(),
+                SettingsAction::CancelMicrophoneTest => self.cancel_voice_setup_test(),
                 SettingsAction::Change(index, value) => {
                     self.change_unified_setting(index, value)?
                 }
