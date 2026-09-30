@@ -100,7 +100,7 @@ impl GameApp {
                 SettingsAction::CaptureBinding(index) => {
                     self.cancel_voice_setup_test();
                     if let Some(settings) = self.unified_settings.as_mut() {
-                        settings.controller.view.capturing = Some(index);
+                        settings.controller.begin_capture(index);
                         settings.controller.view.message =
                             "Press a key or controller input. Esc cancels.".into();
                     }

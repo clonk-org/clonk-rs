@@ -14,6 +14,9 @@ const WINDOW_FRAME_GILT: u32 = 0x40c0_a060;
 /// Medium ink for the other tabs and the rule they stand on, darker than the
 /// group-box ink so the strip holds its shape against the parchment.
 const PAGE_TAB_RULE_INK: u32 = 0x0080_6a50;
+/// Red ink for what waits on the player: a key to press, or the key that
+/// already holds the one just pressed.
+const WARNING_INK: u32 = 0x00b0_1c0c;
 
 pub(crate) struct OptionsBook<'a> {
     pub assets: &'a OptionsDlgAssets,
@@ -60,6 +63,8 @@ impl BookLayout {
 }
 
 impl OptionsBook<'_> {
+    pub const WARNING_INK_RGBA: [u8; 4] = [0xb0, 0x1c, 0x0c, 255];
+
     /// Where settings opened over another screen sit: the whole options
     /// screen, centred and inset so the screen behind stays in view, never
     /// smaller than the book's 640x480 minimum.
@@ -605,6 +610,21 @@ impl OptionsBook<'_> {
                     target.w as f32,
                     target.h as f32,
                 ),
+                gamma,
+            );
+        }
+    }
+
+    /// A red frame inked around what the player's last input ran into.
+    pub fn warning_frame(&self, surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {
+        for inset in 0..2 {
+            draw_frame_dw(
+                surface,
+                rect.x + inset,
+                rect.y + inset,
+                rect.x + rect.w - 1 - inset,
+                rect.y + rect.h - 1 - inset,
+                WARNING_INK,
                 gamma,
             );
         }

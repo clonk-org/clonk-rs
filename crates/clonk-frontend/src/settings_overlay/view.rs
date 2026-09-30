@@ -76,6 +76,8 @@ pub struct SettingsViewState {
     pub reset_confirmation: bool,
     /// The binding waiting for its new key or button.
     pub capturing: Option<usize>,
+    /// The binding that already holds the key or button just refused.
+    pub conflict: Option<usize>,
     pub(crate) search_edit: RenameEdit<()>,
     pub(crate) edit: Option<(usize, RenameEdit<()>)>,
     pub(crate) pressed: Option<SettingsFocus>,
@@ -107,6 +109,7 @@ impl Default for SettingsViewState {
             display_confirmation: None,
             reset_confirmation: false,
             capturing: None,
+            conflict: None,
             search_edit: RenameEdit::new("", None),
             edit: None,
             pressed: None,
@@ -336,6 +339,18 @@ impl SettingsController {
         self.audio_page = page;
         self.select_category(SettingsCategory::Audio);
         self.view.focus = SettingsFocus::AudioPage(page);
+    }
+
+    /// Waits for a new key or button for the binding at `index`.
+    pub fn begin_capture(&mut self, index: usize) {
+        self.view.capturing = Some(index);
+        self.view.conflict = None;
+    }
+
+    /// Stops waiting for a key or button.
+    pub fn end_capture(&mut self) {
+        self.view.capturing = None;
+        self.view.conflict = None;
     }
 
     pub fn select_controls_page(&mut self, page: ControlsPage) {
@@ -821,6 +836,17 @@ impl SettingsController {
     pub fn input_hint(&self) -> String {
         if self.view.choice.is_some() {
             return "Up/Down: choose · Enter: select · Esc: cancel".into();
+        }
+        if let Some(index) = self.view.capturing {
+            let device = self
+                .settings
+                .get(index)
+                .and_then(|setting| setting.details.control)
+                .map_or(ControlDevice::Keyboard, |binding| binding.set.device);
+            return format!(
+                "Press the new {} · Esc: keep the old one",
+                binding_noun(device, 1)
+            );
         }
         let action = match self.view.focus {
             SettingsFocus::Row(index) => self.settings.get(index).map_or("", |setting| {
@@ -1865,6 +1891,12 @@ mod tests {
             controller.key(KeyCode::Enter, false, false),
             vec![SettingsAction::CaptureBinding(8)]
         );
+        controller.begin_capture(8);
+        assert_eq!(
+            controller.input_hint(),
+            "Press the new key · Esc: keep the old one"
+        );
+        controller.end_capture();
         controller.settings[8].details.control = Some(ControlBinding {
             set: ControlSet {
                 device: ControlDevice::Gamepad,

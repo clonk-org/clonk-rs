@@ -564,6 +564,24 @@ fn unified_settings_binding_capture_rejects_conflicts_and_consumes_the_new_key()
         .view
         .message
         .contains("Already assigned"));
+    let holder = app
+        .unified_settings
+        .as_ref()
+        .unwrap()
+        .controller
+        .settings
+        .iter()
+        .position(|s| s.id.section == "Controls" && s.id.key == "Kbd1Key3");
+    assert_eq!(
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .view
+            .conflict,
+        holder,
+        "the grid points at the key's holder"
+    );
     app.handle_key(VirtualKeyCode::F12, ElementState::Pressed)
         .unwrap();
     assert_eq!(
@@ -573,6 +591,15 @@ fn unified_settings_binding_capture_rejects_conflicts_and_consumes_the_new_key()
             .controller
             .view
             .capturing,
+        None
+    );
+    assert_eq!(
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .view
+            .conflict,
         None
     );
     assert_eq!(

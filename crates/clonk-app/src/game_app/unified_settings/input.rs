@@ -45,7 +45,7 @@ impl GameApp {
             {
                 if key == VirtualKeyCode::Escape {
                     if let Some(settings) = self.unified_settings.as_mut() {
-                        settings.controller.view.capturing = None;
+                        settings.controller.end_capture();
                         settings.controller.view.message = "Binding unchanged".into();
                     }
                 } else if let Some(raw) = crate::input::encode_virtual_key_code(key) {
@@ -155,6 +155,19 @@ impl GameApp {
                     "Already assigned to {}. Choose another input or Esc.",
                     clonk_frontend::startup_options_controls::CONTROL_KEY_LABELS[binding as usize]
                 );
+                let holder = setting.details.control.map(|own| {
+                    clonk_frontend::settings_overlay::ControlBinding {
+                        command: binding as usize,
+                        ..own
+                    }
+                });
+                settings.controller.view.conflict = holder.and_then(|holder| {
+                    settings
+                        .controller
+                        .settings
+                        .iter()
+                        .position(|other| other.details.control == Some(holder))
+                });
             }
             return Ok(());
         }
@@ -168,7 +181,7 @@ impl GameApp {
                 },
             )?;
             if let Some(settings) = self.unified_settings.as_mut() {
-                settings.controller.view.capturing = None;
+                settings.controller.end_capture();
             }
         }
         Ok(())
@@ -183,7 +196,7 @@ impl GameApp {
             .any(|event| matches!(event, GamepadEvent::Clear { .. }))
         {
             if let Some(settings) = self.unified_settings.as_mut() {
-                settings.controller.view.capturing = None;
+                settings.controller.end_capture();
                 settings.controller.cancel_interaction();
             }
             self.cancel_voice_setup_test();

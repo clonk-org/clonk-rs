@@ -541,6 +541,9 @@ impl SettingsController {
         if let Some(emphasis) = emphasis {
             draw_row_emphasis(surface, cell, emphasis, gamma);
         }
+        if self.view.conflict == Some(index) {
+            book.warning_frame(surface, cell, gamma);
+        }
         let capturing = self.view.capturing == Some(index);
         let size = (cell.h - 6).min(48);
         let cap = IntRect::new(cell.x + 4, cell.y + (cell.h - size) / 2, size, size);
@@ -580,7 +583,14 @@ impl SettingsController {
                 ControlDevice::Keyboard => "Press a key…",
                 ControlDevice::Gamepad => "Press a button…",
             };
-            book.key_chip(surface, font, chip, prompt, [176, 28, 12, 255], gamma);
+            book.key_chip(
+                surface,
+                font,
+                chip,
+                prompt,
+                OptionsBook::WARNING_INK_RGBA,
+                gamma,
+            );
         } else if key == NOT_BOUND {
             text(surface, font, chip, &key, [140, 124, 100, 255], gamma);
         } else {
