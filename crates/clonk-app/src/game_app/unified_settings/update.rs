@@ -24,7 +24,7 @@ impl GameApp {
                 .map(|preview| preview.deadline.saturating_duration_since(now).as_secs() + 1);
             if settings.opened_in != self.mode {
                 settings.owns_pause = false;
-                settings.binding = None;
+                settings.controller.view.capturing = None;
                 settings.controller.cancel_interaction();
                 settings.opened_in = self.mode;
             }

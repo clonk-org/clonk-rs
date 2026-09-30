@@ -64,6 +64,8 @@ pub struct SettingsViewState {
     pub audio_device_status: String,
     pub display_confirmation: Option<u64>,
     pub reset_confirmation: bool,
+    /// The binding waiting for its new key or button.
+    pub capturing: Option<usize>,
     pub(crate) search_edit: RenameEdit<()>,
     pub(crate) edit: Option<(usize, RenameEdit<()>)>,
     pub(crate) pressed: Option<SettingsFocus>,
@@ -94,6 +96,7 @@ impl Default for SettingsViewState {
             audio_device_status: String::new(),
             display_confirmation: None,
             reset_confirmation: false,
+            capturing: None,
             search_edit: RenameEdit::new("", None),
             edit: None,
             pressed: None,

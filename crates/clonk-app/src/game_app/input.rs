@@ -50,7 +50,7 @@ impl GameApp {
     pub(crate) fn platform_ime_allowed(&self) -> bool {
         if let Some(settings) = self.unified_settings.as_ref() {
             return self.window_active
-                && settings.binding.is_none()
+                && settings.controller.view.capturing.is_none()
                 && settings.controller.editing();
         }
         if !self.window_active

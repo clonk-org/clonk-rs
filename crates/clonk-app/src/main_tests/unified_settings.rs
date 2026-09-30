@@ -547,7 +547,15 @@ fn unified_settings_binding_capture_rejects_conflicts_and_consumes_the_new_key()
     app.process_unified_settings_actions(vec![SettingsAction::CaptureBinding(index)])
         .unwrap();
     app.handle_key(duplicate, ElementState::Pressed).unwrap();
-    assert_eq!(app.unified_settings.as_ref().unwrap().binding, Some(index));
+    assert_eq!(
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .view
+            .capturing,
+        Some(index)
+    );
     assert!(app
         .unified_settings
         .as_ref()
@@ -558,7 +566,15 @@ fn unified_settings_binding_capture_rejects_conflicts_and_consumes_the_new_key()
         .contains("Already assigned"));
     app.handle_key(VirtualKeyCode::F12, ElementState::Pressed)
         .unwrap();
-    assert_eq!(app.unified_settings.as_ref().unwrap().binding, None);
+    assert_eq!(
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .view
+            .capturing,
+        None
+    );
     assert_eq!(
         app.bindings.key_for_set(0, ControlBindingId::CursorLeft),
         Some(VirtualKeyCode::F12)

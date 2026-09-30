@@ -36,7 +36,7 @@ impl GameApp {
         if self
             .unified_settings
             .as_ref()
-            .is_some_and(|settings| settings.binding.is_some())
+            .is_some_and(|settings| settings.controller.view.capturing.is_some())
         {
             self.input_routing.key_event_suppresses_text = true;
             if state == ElementState::Pressed
@@ -45,7 +45,7 @@ impl GameApp {
             {
                 if key == VirtualKeyCode::Escape {
                     if let Some(settings) = self.unified_settings.as_mut() {
-                        settings.binding = None;
+                        settings.controller.view.capturing = None;
                         settings.controller.view.message = "Binding unchanged".into();
                     }
                 } else if let Some(raw) = crate::input::encode_virtual_key_code(key) {
@@ -121,7 +121,7 @@ impl GameApp {
     fn capture_unified_binding(&mut self, raw: i32, gamepad: bool) -> Result<(), EngineError> {
         use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
         let Some((index, setting)) = self.unified_settings.as_ref().and_then(|settings| {
-            let index = settings.binding?;
+            let index = settings.controller.view.capturing?;
             Some((index, settings.controller.settings.get(index)?.clone()))
         }) else {
             return Ok(());
@@ -168,7 +168,7 @@ impl GameApp {
                 },
             )?;
             if let Some(settings) = self.unified_settings.as_mut() {
-                settings.binding = None;
+                settings.controller.view.capturing = None;
             }
         }
         Ok(())
@@ -183,7 +183,7 @@ impl GameApp {
             .any(|event| matches!(event, GamepadEvent::Clear { .. }))
         {
             if let Some(settings) = self.unified_settings.as_mut() {
-                settings.binding = None;
+                settings.controller.view.capturing = None;
                 settings.controller.cancel_interaction();
             }
             self.cancel_voice_setup_test();
@@ -195,7 +195,7 @@ impl GameApp {
         if self
             .unified_settings
             .as_ref()
-            .is_some_and(|settings| settings.binding.is_some())
+            .is_some_and(|settings| settings.controller.view.capturing.is_some())
         {
             let raw = events.iter().find_map(|event| match *event {
                 GamepadEvent::Button {

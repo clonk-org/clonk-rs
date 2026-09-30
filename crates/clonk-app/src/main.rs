@@ -4870,7 +4870,7 @@ impl GameApp {
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
         self.finish_unified_display_preview(false);
         if let Some(settings) = self.unified_settings.as_mut() {
-            settings.binding = None;
+            settings.controller.view.capturing = None;
             settings.controller.cancel_interaction();
         }
         self.cancel_voice_setup_test();

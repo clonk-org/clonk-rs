@@ -22,7 +22,6 @@ pub(crate) struct UnifiedSettings {
     config: Config,
     owns_pause: bool,
     opened_in: AppMode,
-    pub(crate) binding: Option<usize>,
     preview: Option<settings_display::DisplayPreview>,
     owner: i32,
 }
@@ -98,7 +97,7 @@ impl GameApp {
                 SettingsAction::CaptureBinding(index) => {
                     self.cancel_voice_setup_test();
                     if let Some(settings) = self.unified_settings.as_mut() {
-                        settings.binding = Some(index);
+                        settings.controller.view.capturing = Some(index);
                         settings.controller.view.message =
                             "Press a key or controller input. Esc cancels.".into();
                     }
@@ -379,7 +378,6 @@ impl GameApp {
             config,
             owns_pause,
             opened_in: self.mode,
-            binding: None,
             preview: None,
             owner: self.players.local_owner,
         });
