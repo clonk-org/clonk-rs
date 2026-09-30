@@ -516,6 +516,13 @@ fn describe(setting: &mut Setting) {
             .keywords
             .push_str(" keyboard controller bind key button remap");
     }
+    setting.details.unit = match (section, key) {
+        ("Chat", "Duration") => " s",
+        ("Chat", "Opacity") | ("Sound", "MusicVolume" | "SoundVolume") | ("Voice", "Volume") => "%",
+        ("Voice", "ActivationHangover") => " ms",
+        _ => "",
+    }
+    .into();
     let bounds = match (section, key) {
         ("Sound", "MusicVolume" | "SoundVolume") => Some((0, 100)),
         ("Graphics", "Scale") => Some((100, 400)),
@@ -683,6 +690,25 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn unified_catalog_names_the_unit_of_every_measured_preference() {
+        let rows = catalog(&Config::new());
+        for (section, key, unit) in [
+            ("Chat", "Duration", " s"),
+            ("Chat", "Opacity", "%"),
+            ("Sound", "MusicVolume", "%"),
+            ("Sound", "SoundVolume", "%"),
+            ("Voice", "Volume", "%"),
+            ("Voice", "ActivationHangover", " ms"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|s| s.id.section == section && s.id.key == key)
+                .unwrap();
+            assert_eq!(row.details.unit, unit, "{section}.{key}");
+        }
+    }
+
     #[test]
     fn unified_catalog_includes_every_advanced_setting_once() {
         let config = Config::new();

@@ -1019,6 +1019,7 @@ pub(crate) fn formatted_value(setting: &Setting, value: &AdvancedConfigValue) ->
         _ if setting.id.section == "Voice" && setting.id.key == "ActivationHangover" => {
             format!("{} ms", value.serialized())
         }
+        AdvancedConfigValue::Integer { value, .. } => format!("{value}{}", setting.details.unit),
         _ => value.serialized(),
     }
 }
@@ -1092,6 +1093,20 @@ mod tests {
         controller.set_focus(SettingsFocus::Row(1));
         assert_eq!(controller.row_emphasis(0), None);
         assert_eq!(controller.row_emphasis(1), Some(RowEmphasis::Focused));
+    }
+
+    #[test]
+    fn numeric_values_and_defaults_carry_their_unit() {
+        let seconds = |value| AdvancedConfigValue::Integer {
+            value,
+            min: 3,
+            max: 60,
+        };
+        let mut duration = preference("Duration", seconds(12));
+        duration.details.unit = " s".into();
+        assert_eq!(value_label(&duration), "12 s");
+        duration.value = seconds(30);
+        assert!(detail_text(&duration).ends_with("Default: 12 s"));
     }
 
     #[test]

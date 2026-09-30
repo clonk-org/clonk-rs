@@ -129,6 +129,8 @@ pub struct SettingDetails {
     pub unavailable: Option<String>,
     pub step: i128,
     pub exclude_from_category_reset: bool,
+    /// Appended to whole-number values, such as `"%"` or `" s"`.
+    pub unit: String,
 }
 
 #[derive(Clone, Debug)]
