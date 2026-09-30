@@ -41,7 +41,7 @@
 mod settings_book;
 #[path = "startup_options_voice_sheet.rs"]
 mod voice_sheet;
-pub(crate) use settings_book::OptionsBook;
+pub(crate) use settings_book::{BookLayout, OptionsBook};
 pub use voice_sheet::{
     VoiceOptionsAction, VoiceOptionsControl, VoiceOptionsLabels, VoiceOptionsState,
     VoiceSheetLayout,

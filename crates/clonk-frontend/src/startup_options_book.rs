@@ -20,27 +20,50 @@ pub(crate) struct OptionsBook<'a> {
     pub fonts: &'a BookFonts,
 }
 
+/// What the options book draws with: its title, Back button, tab strip and
+/// paper, in screen coordinates. The sheets' own control layouts stay with
+/// the compatibility renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BookLayout {
+    pub title_center: (i32, i32),
+    pub back_button: IntRect,
+    pub tabular: IntRect,
+    pub paper: IntRect,
+    pub sheet: IntRect,
+    pub tab_clips: [(i32, i32); 7],
+    pub tab_icons: [(i32, i32); 7],
+    pub tab_captions: [(i32, i32); 7],
+    pub focus_highlight: IntRect,
+    pub tab_height: i32,
+    pub tab_icon_size: i32,
+}
+
 impl OptionsBook<'_> {
-    pub fn layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) -> OptionsDlgLayout {
+    pub fn layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) -> BookLayout {
         let mut state = OptionsDlgState::new(ProgramSheetState::default());
         state.enable_voice_sheet(VoiceOptionsState::default());
-        let mut layout = state.build_layout(w, h, gui, book);
+        let layout = state.build_layout(w, h, gui, book);
         // Keep the native seven-tab sizing, in the browser's category order.
-        let clips = layout.tab_clips;
-        let icons = layout.tab_icons;
-        let captions = layout.tab_captions;
-        for (position, sheet) in voice_sheet::VOICE_SHEETS.iter().enumerate() {
-            layout.tab_clips[position] = clips[sheet.index()];
-            layout.tab_icons[position] = icons[sheet.index()];
-            layout.tab_captions[position] = captions[sheet.index()];
+        let order = voice_sheet::VOICE_SHEETS;
+        BookLayout {
+            title_center: layout.title_center,
+            back_button: layout.back_button,
+            tabular: layout.tabular,
+            paper: layout.paper,
+            sheet: layout.sheet,
+            tab_clips: order.map(|sheet| layout.tab_clips[sheet.index()]),
+            tab_icons: order.map(|sheet| layout.tab_icons[sheet.index()]),
+            tab_captions: order.map(|sheet| layout.tab_captions[sheet.index()]),
+            focus_highlight: layout.focus_highlight,
+            tab_height: layout.tab_height,
+            tab_icon_size: layout.tab_icon_size,
         }
-        layout
     }
 
     pub fn chrome(
         &self,
         surface: &mut Surface,
-        layout: &OptionsDlgLayout,
+        layout: &BookLayout,
         tabs: &[(&str, usize); 7],
         active: usize,
         tab_focused: bool,
@@ -126,7 +149,7 @@ impl OptionsBook<'_> {
     fn tab(
         &self,
         surface: &mut Surface,
-        layout: &OptionsDlgLayout,
+        layout: &BookLayout,
         index: usize,
         (label, icon): (&str, usize),
         gamma: Option<&GammaRamp>,
@@ -564,7 +587,7 @@ impl OptionsBook<'_> {
 
 /// The book's footprint when it opens over another screen: tabs, paper,
 /// title and Back button, with a margin.
-fn popup_panel(layout: &OptionsDlgLayout) -> IntRect {
+fn popup_panel(layout: &BookLayout) -> IntRect {
     let back = layout.back_button;
     let left = layout.tab_clips[0].0.min(back.x) - 16;
     let right = (layout.paper.x + layout.paper.w).max(back.x + back.w) + 16;

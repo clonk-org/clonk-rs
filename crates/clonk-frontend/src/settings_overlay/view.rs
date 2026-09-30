@@ -2,7 +2,7 @@ use super::*;
 use crate::classic_gui::IntRect;
 use crate::clonk_fonts::ClonkFontSet;
 use crate::rename_edit::{RenameEdit, RenameEditCursorOperation};
-use crate::startup_options_dlg::{BookFonts, OptionsBook, OptionsDlgLayout};
+use crate::startup_options_dlg::{BookFonts, BookLayout, OptionsBook};
 use crate::{GuiPoint, KeyCode};
 
 mod choices;
@@ -133,7 +133,7 @@ impl SettingsLayout {
         }
     }
 
-    fn from_book(book: &OptionsDlgLayout) -> Self {
+    fn from_book(book: &BookLayout) -> Self {
         let sheet = book.sheet;
         let margin = if sheet.w < 500 { 8 } else { 32 };
         let x = (sheet.x + margin).max(book.tab_clips[0].0 + 128);
