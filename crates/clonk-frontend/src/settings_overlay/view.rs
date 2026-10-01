@@ -247,7 +247,7 @@ impl SettingsController {
     }
 
     /// The control set the page shows, unless a search replaced the page.
-    fn control_set_page(&self) -> Option<ControlSet> {
+    pub(super) fn control_set_page(&self) -> Option<ControlSet> {
         self.query
             .trim()
             .is_empty()
@@ -2066,6 +2066,14 @@ mod tests {
             close.x > popup.search.x && close.x + close.w <= popup.search.x + popup.search.w,
             "at the page's right: {close:?}"
         );
+    }
+
+    #[test]
+    fn a_control_sets_grid_keeps_every_key_when_only_changed_is_on_elsewhere() {
+        let mut controller = keyboard_set();
+        controller.modified_only = true;
+        controller.select_controls_page(ControlsPage::Keyboard);
+        assert_eq!(controller.visible_indices(), (1..=12).collect::<Vec<_>>());
     }
 
     #[test]

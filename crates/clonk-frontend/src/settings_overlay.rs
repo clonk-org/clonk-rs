@@ -338,6 +338,8 @@ impl SettingsController {
     pub fn visible_indices(&self) -> Vec<usize> {
         let query = self.query.trim().to_lowercase();
         let shown_set = self.current_control_set();
+        // A control set's grid keeps every key in its place.
+        let changed_only = self.modified_only && self.control_set_page().is_none();
         self.settings
             .iter()
             .enumerate()
@@ -363,7 +365,7 @@ impl SettingsController {
                         .split_whitespace()
                         .all(|word| searchable.contains(word))
                 };
-                (matches && (!self.modified_only || setting.is_modified())).then_some(index)
+                (matches && (!changed_only || setting.is_modified())).then_some(index)
             })
             .collect()
     }
