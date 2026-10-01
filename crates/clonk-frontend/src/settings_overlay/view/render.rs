@@ -240,7 +240,12 @@ impl SettingsController {
                 );
                 continue;
             }
-            let end = self.label_end(rect, rect.x + rect.w - 182);
+            let value_width = if setting.details.slider.is_some() {
+                SLIDER_WITH_ENDS
+            } else {
+                174
+            };
+            let end = self.label_end(rect, rect.x + rect.w - value_width - 8);
             text(
                 surface,
                 body_font,
@@ -256,8 +261,27 @@ impl SettingsController {
             }
             let label = value_label(setting);
             if let Some(fraction) = slider_fraction(setting) {
-                let track = slider_rect(rect);
+                let track = slider_track(setting, rect);
                 book.slider(surface, track, fraction, gamma);
+                if let Some(scale) = setting.details.slider {
+                    // The options book's own reading: its ends, not a value
+                    // (C4StartupOptionsDlg.cpp:768-773).
+                    let (weak, strong) = scale.ends;
+                    let width = small_font.measure(weak, false).0 + 6;
+                    let y = track.y + (track.h - small_font.line_height) / 2 - 2;
+                    for (word, x) in [(weak, track.x - 6 - width), (strong, track.x + track.w + 6)]
+                    {
+                        text(
+                            surface,
+                            small_font,
+                            IntRect::new(x - 3, y, width.max(60), small_font.line_height),
+                            word,
+                            color,
+                            gamma,
+                        );
+                    }
+                    continue;
+                }
                 let number = IntRect::new(
                     track.x + track.w + 6,
                     value_rect.y,

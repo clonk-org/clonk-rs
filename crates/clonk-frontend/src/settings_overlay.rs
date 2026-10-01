@@ -160,13 +160,14 @@ pub struct ControlBinding {
 
 /// A slider whose positions are not the value it stores, such as fair crew
 /// strength: positions `0..=positions` are converted to and from the value,
-/// and `label` names a value for the player.
+/// and the words at its `ends`, such as "weak" and "strong", stand in for
+/// naming the value.
 #[derive(Clone, Copy, Debug)]
 pub struct SliderScale {
     pub positions: i128,
     pub position: fn(i128) -> i128,
     pub value: fn(i128) -> i128,
-    pub label: fn(i128) -> String,
+    pub ends: (&'static str, &'static str),
 }
 
 impl SliderScale {

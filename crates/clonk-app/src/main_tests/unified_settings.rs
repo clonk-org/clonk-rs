@@ -1094,3 +1094,38 @@ fn unified_settings_write_changed_settings_in_the_same_ink_as_the_rest() {
     assert_eq!(ink("Chat message duration"), ink("Chat opacity"));
     assert_eq!(ink("30 s"), ink("85%"));
 }
+
+#[test]
+fn unified_settings_show_fair_crew_strength_between_weak_and_strong_like_the_options_book() {
+    use clonk_frontend::settings_overlay::SettingsFocus;
+    let scale = 1.0;
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(scale, false);
+    app.configure_native_startup_fonts(scale, false);
+    app.handle_main_menu_activation(MainMenuItem::Options)
+        .unwrap();
+    let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+    let strength = controller
+        .settings
+        .iter()
+        .position(|s| s.id.section == "General" && s.id.key == "DefCrewStrength")
+        .unwrap();
+    controller.set_focus(SettingsFocus::Row(strength));
+    let (_, _, plan) = render_ordered_test_frame(&mut app, scale, 800, 600);
+    let texts: Vec<_> = plan
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.text)
+        .map(|text| text.text.as_str())
+        .collect();
+    // C4StartupOptionsDlg.cpp:768-773 labels the slider's ends, not its value.
+    assert!(
+        texts.contains(&"weak") && texts.contains(&"strong"),
+        "{texts:?}"
+    );
+    assert!(texts.iter().all(|text| !text.contains("Rank")), "{texts:?}");
+}

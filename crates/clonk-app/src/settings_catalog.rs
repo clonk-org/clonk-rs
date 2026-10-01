@@ -232,13 +232,6 @@ fn fair_crew_strength(position: i128) -> i128 {
     )
 }
 
-/// The rank a fair crew of `strength` fights at, as the game announces it
-/// ("Activated Fair Crew, rank %s").
-fn fair_crew_rank_label(strength: i128) -> String {
-    let strength = strength.clamp(0, i128::from(i32::MAX)) as i32;
-    format!("Rank {}", clonk_engine::fair_crew_rank(strength, 1000))
-}
-
 /// A controller's recorded axis calibration: its set, axis and which value.
 fn gamepad_axis_calibration(id: &SettingId) -> Option<(usize, usize, &'static str)> {
     let set = id.section.strip_prefix("Gamepad")?.parse::<usize>().ok()?;
@@ -498,8 +491,9 @@ fn describe(setting: &mut Setting) {
         )),
         ("General", "DefCrewStrength") => Some((
             "Fair crew strength",
-            "The rank every Clonk fights at in games you create with a fair crew.",
-            "rules host rank",
+            // IDS_DESC_FAIRCREWSTRENGTH, the options book's tooltip.
+            "Controls the strength of Clonks in a game with \"Fair Crew\".",
+            "rules host weak strong",
         )),
         ("General", "CompatProfile") => Some((
             "Compatibility profile",
@@ -627,7 +621,9 @@ fn describe(setting: &mut Setting) {
             positions: 100,
             position: fair_crew_position,
             value: fair_crew_strength,
-            label: fair_crew_rank_label,
+            // IDS_CTL_FAIRCREWWEAK and IDS_CTL_FAIRCREWSTRONG
+            // (C4StartupOptionsDlg.cpp:768-773).
+            ends: ("weak", "strong"),
         });
     }
     // C++ stores an int but offers it as a check box
@@ -980,8 +976,7 @@ mod tests {
                 "each step lands back on its position"
             );
         }
-        assert_eq!((scale.label)(19574), "Rank 7");
-        assert_eq!((scale.label)(1000), "Rank 1");
+        assert_eq!(scale.ends, ("weak", "strong"));
         assert!(
             matches!(
                 strength.default,

@@ -17,6 +17,9 @@ const SET_PICTURE_HEIGHT: i32 = 36;
 const GRID_FOOTER_LIFT: i32 = 46;
 /// The tallest row of the binding grid; taller pages leave the room below.
 const GRID_ROW_MAX: i32 = 64;
+/// The width of a slider read by the words at its ends: "weak", the track,
+/// "strong".
+const SLIDER_WITH_ENDS: i32 = 240;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsFocus {
@@ -1169,8 +1172,8 @@ impl SettingsController {
                 let Some(row) = self.row_rect(&layout, index) else {
                     continue;
                 };
-                let track = slider_rect(row);
                 let setting = &self.settings[index];
+                let track = slider_track(setting, row);
                 if contains(track, point)
                     && slider_fraction(setting).is_some()
                     && self.editable(index)
@@ -1266,7 +1269,7 @@ impl SettingsController {
         let AdvancedConfigValue::Integer { value, min, max } = setting.value else {
             return Vec::new();
         };
-        let track = slider_rect(row);
+        let track = slider_track(setting, row);
         let fraction = ((point.x - (track.x + 24) as f32) / (track.w - 48) as f32).clamp(0.0, 1.0);
         let next = match setting.details.slider {
             Some(scale) => (scale.value)((scale.positions as f32 * fraction).round() as i128),
@@ -1493,10 +1496,7 @@ pub(crate) fn formatted_value(setting: &Setting, value: &AdvancedConfigValue) ->
             }),
         AdvancedConfigValue::Bool(on) => if *on { "On" } else { "Off" }.into(),
         _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
-        AdvancedConfigValue::Integer { value, .. } => match setting.details.slider {
-            Some(scale) => (scale.label)(*value),
-            None => format!("{value}{}", setting.details.unit),
-        },
+        AdvancedConfigValue::Integer { value, .. } => format!("{value}{}", setting.details.unit),
         _ => value.serialized(),
     }
 }
@@ -1510,13 +1510,16 @@ pub(crate) fn detail_text(setting: &Setting) -> String {
 /// [`detail_text`] with `scope` naming where the setting applies.
 fn detail_text_in(setting: &Setting, scope: &str) -> String {
     setting.details.unavailable.clone().unwrap_or_else(|| {
+        // A slider read by its ends has no number to quote.
+        let named = setting.details.slider.is_none();
         let active = setting
             .details
             .active_value
             .as_ref()
+            .filter(|_| named)
             .map(|value| format!(" · Active: {}", formatted_value(setting, value)))
             .unwrap_or_default();
-        let default = if setting.is_modified() {
+        let default = if named && setting.is_modified() {
             let default = setting
                 .details
                 .default_display
@@ -1582,9 +1585,14 @@ fn value_rect(row: IntRect) -> IntRect {
     IntRect::new(row.x + row.w - 174, row.y + 2, 174, 26)
 }
 
-/// A slider's track, with room after it for a label such as "Rank 10".
-fn slider_rect(row: IntRect) -> IntRect {
-    IntRect::new(row.x + row.w - 174, row.y + 9, 112, 16)
+/// A slider's track: before the words at its ends for a scaled slider,
+/// otherwise before the label that names its value.
+fn slider_track(setting: &Setting, row: IntRect) -> IntRect {
+    if setting.details.slider.is_some() {
+        IntRect::new(row.x + row.w - SLIDER_WITH_ENDS + 46, row.y + 9, 132, 16)
+    } else {
+        IntRect::new(row.x + row.w - 174, row.y + 9, 112, 16)
+    }
 }
 
 fn contains(rect: IntRect, point: GuiPoint) -> bool {
@@ -2160,7 +2168,7 @@ mod tests {
             positions: 100,
             position: |strength| ((strength as f64 / 1000.0).powf(1.0 / 1.5) * 9.5).round() as i128,
             value: |position| ((position as f64 / 9.5).powf(1.5) * 1000.0) as i128,
-            label: |strength| format!("Rank {}", strength / 1000),
+            ends: ("weak", "strong"),
         });
         setting
     }
@@ -2175,13 +2183,15 @@ mod tests {
             controller.key(KeyCode::Right, false, false).as_slice(),
             [SettingsAction::Change(0, AdvancedConfigValue::Integer { value, .. })] if *value == strength(70.0)
         ));
-        assert_eq!(value_label(&controller.settings[0]), "Rank 19");
         assert!(controller.input_hint().starts_with("Left/Right: adjust · "));
         assert!(!controller.input_hint().contains("type a value"));
         assert!(controller.key(KeyCode::Enter, false, false).is_empty());
         assert!(!controller.editing(), "no number field for a scaled slider");
         let layout = controller.layout();
-        let track = slider_rect(controller.row_rect(&layout, 0).unwrap());
+        let track = slider_track(
+            &controller.settings[0],
+            controller.row_rect(&layout, 0).unwrap(),
+        );
         let actions = controller.pointer(
             GuiPoint::new((track.x + track.w - 24) as f32, (track.y + 8) as f32),
             true,
@@ -2209,8 +2219,8 @@ mod tests {
             max: i128::from(i32::MAX),
         });
         assert!(
-            detail_text(&crew).contains("Active: Rank 1"),
-            "{}",
+            !detail_text(&crew).contains("Active") && !detail_text(&crew).contains("Default"),
+            "a slider read by its ends quotes no number: {}",
             detail_text(&crew)
         );
     }
@@ -2618,7 +2628,7 @@ mod tests {
         controller.category = SettingsCategory::Audio;
         let layout = SettingsLayout::new(800, 600);
         let row = controller.row_rect(&layout, 0).unwrap();
-        let track = slider_rect(row);
+        let track = slider_track(&controller.settings[0], row);
         let actions = controller.pointer(
             GuiPoint::new((track.x + track.w - 24) as f32, (track.y + 8) as f32),
             true,
