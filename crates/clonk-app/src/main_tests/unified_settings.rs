@@ -1049,3 +1049,48 @@ fn unified_settings_popup_is_the_book_alone_over_the_dimmed_screen() {
         "mean deviation {deviation} from the dimmed scenario list around the book"
     );
 }
+
+#[test]
+fn unified_settings_write_changed_settings_in_the_same_ink_as_the_rest() {
+    use clonk_frontend::settings_overlay::SettingsAction;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let scale = 1.0;
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(scale, false);
+    app.configure_native_startup_fonts(scale, false);
+    app.handle_main_menu_activation(MainMenuItem::Options)
+        .unwrap();
+    let duration = app
+        .unified_settings
+        .as_ref()
+        .unwrap()
+        .controller
+        .settings
+        .iter()
+        .position(|s| s.id.section == "Chat" && s.id.key == "Duration")
+        .unwrap();
+    app.process_unified_settings_actions(vec![SettingsAction::Change(
+        duration,
+        AdvancedConfigValue::Integer {
+            value: 30,
+            min: 3,
+            max: 60,
+        },
+    )])
+    .unwrap();
+    let (_, _, plan) = render_ordered_test_frame(&mut app, scale, 800, 600);
+    let ink = |needle: &str| {
+        plan.batches
+            .iter()
+            .flat_map(|batch| &batch.text)
+            .find(|text| text.text == needle)
+            .map(|text| text.color)
+            .unwrap_or_else(|| panic!("{needle:?} is drawn"))
+    };
+    assert_eq!(ink("Chat message duration"), ink("Chat opacity"));
+    assert_eq!(ink("30 s"), ink("85%"));
+}
