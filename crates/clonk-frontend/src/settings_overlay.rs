@@ -205,7 +205,8 @@ pub struct SettingDetails {
     pub description: String,
     pub scope: String,
     pub policy: ApplyPolicy,
-    pub active_value: Option<String>,
+    /// The value the running game keeps using until the change applies.
+    pub active_value: Option<AdvancedConfigValue>,
     pub display_value: Option<String>,
     /// The application's label for the default, when `display_value` shows
     /// the value in a form the overlay cannot derive (key and button names).

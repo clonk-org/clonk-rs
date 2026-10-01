@@ -1514,7 +1514,7 @@ fn detail_text_in(setting: &Setting, scope: &str) -> String {
             .details
             .active_value
             .as_ref()
-            .map(|value| format!(" · Active: {value}"))
+            .map(|value| format!(" · Active: {}", formatted_value(setting, value)))
             .unwrap_or_default();
         let default = if setting.is_modified() {
             let default = setting
@@ -2190,6 +2190,29 @@ mod tests {
             actions.as_slice(),
             [SettingsAction::Change(0, AdvancedConfigValue::Integer { value, .. })] if *value == strength(100.0)
         ));
+    }
+
+    #[test]
+    fn the_value_a_game_still_uses_reads_like_the_setting_itself() {
+        let mut record = preference("Record", AdvancedConfigValue::Bool(false));
+        record.details.policy = ApplyPolicy::NextGame;
+        record.details.active_value = Some(AdvancedConfigValue::Bool(true));
+        assert!(
+            detail_text(&record).contains("Active: On"),
+            "{}",
+            detail_text(&record)
+        );
+        let mut crew = crew_strength(19574);
+        crew.details.active_value = Some(AdvancedConfigValue::Integer {
+            value: 1000,
+            min: 0,
+            max: i128::from(i32::MAX),
+        });
+        assert!(
+            detail_text(&crew).contains("Active: Rank 1"),
+            "{}",
+            detail_text(&crew)
+        );
     }
 
     #[test]

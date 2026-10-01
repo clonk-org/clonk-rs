@@ -77,7 +77,7 @@ impl GameApp {
             settings.config.set_in(Some(&id.section), &id.key, &text);
             if let Some(row) = settings.controller.settings.get_mut(index) {
                 if row.details.policy != ApplyPolicy::Live && row.details.active_value.is_none() {
-                    row.details.active_value = Some(row.value.serialized());
+                    row.details.active_value = Some(row.value.clone());
                 }
                 row.value = match value {
                     AdvancedConfigValue::Text(_) => AdvancedConfigValue::Text(text),
