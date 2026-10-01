@@ -213,108 +213,8 @@ impl SettingsController {
             };
             if self.control_set_page().is_some() {
                 self.render_binding_cell(surface, &book, rect, index, gamma);
-                continue;
-            }
-            if let Some(emphasis) = self.row_emphasis(index) {
-                draw_row_emphasis(surface, rect, emphasis, gamma);
-            }
-            let setting = &self.settings[index];
-            let focused = self.view.focus == SettingsFocus::Row(index);
-            let editable = setting.value.is_editable() && setting.details.unavailable.is_none();
-            let color = if editable {
-                [0, 0, 0, 255]
             } else {
-                [102, 90, 74, 255]
-            };
-            if let AdvancedConfigValue::Bool(checked) = setting.value {
-                let checkbox = IntRect::new(rect.x, rect.y + 4, rect.w, 20);
-                book.checkbox(surface, checkbox, "", checked, focused, gamma);
-                let end = self.label_end(rect, rect.x + rect.w);
-                text(
-                    surface,
-                    body_font,
-                    IntRect::new(rect.x + 24, rect.y + 2, (end - rect.x - 24).max(1), 28),
-                    &setting.label,
-                    color,
-                    gamma,
-                );
-                continue;
-            }
-            let value_width = if setting.details.slider.is_some() {
-                SLIDER_WITH_ENDS
-            } else {
-                174
-            };
-            let end = self.label_end(rect, rect.x + rect.w - value_width - 8);
-            text(
-                surface,
-                body_font,
-                IntRect::new(rect.x, rect.y + 2, (end - rect.x).max(1), 28),
-                &setting.label,
-                color,
-                gamma,
-            );
-            let value_rect = value_rect(rect);
-            if let Some((_, edit)) = self.view.edit.as_mut().filter(|(i, _)| *i == index) {
-                edit.render(surface, body_font, value_rect, gamma);
-                continue;
-            }
-            let label = value_label(setting);
-            if let Some(fraction) = slider_fraction(setting) {
-                let track = slider_track(setting, rect);
-                book.slider(surface, track, fraction, gamma);
-                if let Some(scale) = setting.details.slider {
-                    // The options book's own reading: its ends, not a value
-                    // (C4StartupOptionsDlg.cpp:768-773).
-                    let (weak, strong) = scale.ends;
-                    let width = small_font.measure(weak, false).0 + 6;
-                    let y = track.y + (track.h - small_font.line_height) / 2 - 2;
-                    for (word, x) in [(weak, track.x - 6 - width), (strong, track.x + track.w + 6)]
-                    {
-                        text(
-                            surface,
-                            small_font,
-                            IntRect::new(x - 3, y, width.max(60), small_font.line_height),
-                            word,
-                            color,
-                            gamma,
-                        );
-                    }
-                    continue;
-                }
-                let number = IntRect::new(
-                    track.x + track.w + 6,
-                    value_rect.y,
-                    value_rect.x + value_rect.w - track.x - track.w - 6,
-                    26,
-                );
-                if focused {
-                    book.field(surface, number, gamma);
-                }
-                text(surface, body_font, number, &label, color, gamma);
-                continue;
-            }
-            if matches!(setting.value, AdvancedConfigValue::Choice { .. }) {
-                book.combo(surface, value_rect, focused, gamma);
-                text(
-                    surface,
-                    body_font,
-                    IntRect::new(
-                        value_rect.x + 3,
-                        value_rect.y,
-                        value_rect.w - 24,
-                        value_rect.h,
-                    ),
-                    &label,
-                    color,
-                    gamma,
-                );
-            } else {
-                book.field(surface, value_rect, gamma);
-                if focused {
-                    book.highlight(surface, value_rect, gamma);
-                }
-                text(surface, body_font, value_rect, &label, color, gamma);
+                self.render_setting_row(surface, &book, rect, index, gamma);
             }
         }
         self.render_row_actions(surface, &book, &layout, gamma);
@@ -515,6 +415,120 @@ impl SettingsController {
             opening,
             gamma,
         );
+    }
+
+    /// One setting's row: its label, and its value as a check box, slider,
+    /// choice or field.
+    fn render_setting_row(
+        &mut self,
+        surface: &mut Surface,
+        book: &OptionsBook,
+        rect: IntRect,
+        index: usize,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let body_font = &book.fonts.book;
+        let small_font = &book.fonts.book_small;
+        if let Some(emphasis) = self.row_emphasis(index) {
+            draw_row_emphasis(surface, rect, emphasis, gamma);
+        }
+        let setting = &self.settings[index];
+        let focused = self.view.focus == SettingsFocus::Row(index);
+        let editable = setting.value.is_editable() && setting.details.unavailable.is_none();
+        let color = if editable {
+            [0, 0, 0, 255]
+        } else {
+            [102, 90, 74, 255]
+        };
+        if let AdvancedConfigValue::Bool(checked) = setting.value {
+            let checkbox = IntRect::new(rect.x, rect.y + 4, rect.w, 20);
+            book.checkbox(surface, checkbox, "", checked, focused, gamma);
+            let end = self.label_end(rect, rect.x + rect.w);
+            text(
+                surface,
+                body_font,
+                IntRect::new(rect.x + 24, rect.y + 2, (end - rect.x - 24).max(1), 28),
+                &setting.label,
+                color,
+                gamma,
+            );
+            return;
+        }
+        let value_width = if setting.details.slider.is_some() {
+            SLIDER_WITH_ENDS
+        } else {
+            174
+        };
+        let end = self.label_end(rect, rect.x + rect.w - value_width - 8);
+        text(
+            surface,
+            body_font,
+            IntRect::new(rect.x, rect.y + 2, (end - rect.x).max(1), 28),
+            &setting.label,
+            color,
+            gamma,
+        );
+        let value_rect = value_rect(rect);
+        if let Some((_, edit)) = self.view.edit.as_mut().filter(|(i, _)| *i == index) {
+            edit.render(surface, body_font, value_rect, gamma);
+            return;
+        }
+        let label = value_label(setting);
+        if let Some(fraction) = slider_fraction(setting) {
+            let track = slider_track(setting, rect);
+            book.slider(surface, track, fraction, gamma);
+            if let Some(scale) = setting.details.slider {
+                // The options book's own reading: its ends, not a value
+                // (C4StartupOptionsDlg.cpp:768-773).
+                let (weak, strong) = scale.ends;
+                let width = small_font.measure(weak, false).0 + 6;
+                let y = track.y + (track.h - small_font.line_height) / 2 - 2;
+                for (word, x) in [(weak, track.x - 6 - width), (strong, track.x + track.w + 6)] {
+                    text(
+                        surface,
+                        small_font,
+                        IntRect::new(x - 3, y, width.max(60), small_font.line_height),
+                        word,
+                        color,
+                        gamma,
+                    );
+                }
+                return;
+            }
+            let number = IntRect::new(
+                track.x + track.w + 6,
+                value_rect.y,
+                value_rect.x + value_rect.w - track.x - track.w - 6,
+                26,
+            );
+            if focused {
+                book.field(surface, number, gamma);
+            }
+            text(surface, body_font, number, &label, color, gamma);
+            return;
+        }
+        if matches!(setting.value, AdvancedConfigValue::Choice { .. }) {
+            book.combo(surface, value_rect, focused, gamma);
+            text(
+                surface,
+                body_font,
+                IntRect::new(
+                    value_rect.x + 3,
+                    value_rect.y,
+                    value_rect.w - 24,
+                    value_rect.h,
+                ),
+                &label,
+                color,
+                gamma,
+            );
+        } else {
+            book.field(surface, value_rect, gamma);
+            if focused {
+                book.highlight(surface, value_rect, gamma);
+            }
+            text(surface, body_font, value_rect, &label, color, gamma);
+        }
     }
 
     /// One binding of a control set: the command's key cap from the classic
