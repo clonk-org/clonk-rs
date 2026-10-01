@@ -3869,7 +3869,10 @@ fn secondary_startup_dialogs_route_their_visible_controls() {
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
     settle_startup_fade(&mut app);
 
-    click_main_button(&mut app, 3);
+    // Exercise the retained options book directly, including its voice sheet.
+    // Normal main-menu entry is covered by the unified settings tests.
+    app.begin_startup_dialog_fade(StartupDialog::Options);
+    app.open_options_menu();
     main_assert_eq!(app.startup.view => StartupView::Options);
     settle_startup_fade(&mut app);
     app.test_key(VirtualKeyCode::ArrowDown, ElementState::Pressed);

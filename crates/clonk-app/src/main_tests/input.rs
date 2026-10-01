@@ -5603,6 +5603,8 @@ fn mouse_option_phase(app: &GameApp, player: i32) -> Option<u8> {
 #[test]
 fn options_mouse_entry_is_on_for_requesting_holder() {
     let mut app = new_running_sandbox_app();
+    // This test pins the native submenu retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let holder = app.players.local_owner;
 
     let flags = app.option_flags(holder);
@@ -5641,6 +5643,8 @@ fn options_mouse_entry_is_hidden_for_non_holder_while_taken() {
 #[test]
 fn unclaimed_mouse_entry_is_off_for_each_local_player() {
     let mut app = new_running_sandbox_app();
+    // This test pins the native options UI retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let primary = app.players.local_owner;
     let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
 

@@ -186,6 +186,12 @@ message board and composer, including after a settings reload, without changing
 the saved chat preference. Both interfaces use the existing message controls
 and recipient visibility rules.
 
+Normal mode also uses one searchable settings overlay across startup, gameplay
+and voice entry points, with pinned Quick settings, local offline pause ownership
+and confirmed display previews. This profile retains the native options book
+and in-game submenus. Both interfaces save through the native configuration
+schema, and current-match changes use the existing host-validated control paths.
+
 Whole-screen equality is promised **as pixels only where every pixel is
 oracle-authored**. A screen that renders the port's own branding or its
 super-resolved startup art is promised the same *layout* — the same ordered

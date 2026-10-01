@@ -2922,6 +2922,11 @@ pub(crate) struct GameApp {
     /// the deterministic engine.
     pub(crate) voice_chat: crate::voice_service::VoiceChatService,
     pub(crate) voice_setup: Option<crate::game_app_voice_setup::VoiceSetup>,
+    pub(crate) unified_settings: Option<crate::game_app_unified_settings::UnifiedSettings>,
+    /// Where settings last closed; entry points without a destination of
+    /// their own reopen there.
+    pub(crate) settings_return_page: Option<crate::game_app_unified_settings::SettingsPage>,
+    pub(crate) settings_key: VirtualKeyCode,
     pub(crate) assets: Arc<FrontendAssets>,
     /// Per-resource failures from resolving the active scenario's C4GUI
     /// sheet/font set. Empty means the active (or startup) bundle resolved

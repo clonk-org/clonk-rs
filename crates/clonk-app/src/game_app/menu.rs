@@ -1329,6 +1329,14 @@ impl GameApp {
                 );
             }
             MenuAction::ActivateOptions => {
+                if self.config.compat_profile == crate::settings::CompatProfile::Normal {
+                    self.open_unified_settings_for_player(
+                        clonk_frontend::settings_overlay::SettingsCategory::Interface,
+                        player,
+                    )?;
+                    self.resume_unified_settings_page();
+                    return Ok(());
+                }
                 self.ingame_menus.players.replace(
                     player,
                     Some(self.ingame_options_menu(
@@ -1339,6 +1347,12 @@ impl GameApp {
                 );
             }
             MenuAction::ActivateDisplay => {
+                if self.config.compat_profile == crate::settings::CompatProfile::Normal {
+                    return self.open_unified_settings_for_player(
+                        clonk_frontend::settings_overlay::SettingsCategory::Interface,
+                        player,
+                    );
+                }
                 self.ingame_menus.players.replace(
                     player,
                     Some(IngameMenuState::display_menu(
@@ -1569,7 +1583,11 @@ impl GameApp {
                 }
             }
             MenuAction::VoiceSetup => {
-                self.open_voice_setup()?;
+                if self.config.compat_profile == crate::settings::CompatProfile::Normal {
+                    self.open_unified_voice_settings()?;
+                } else {
+                    self.open_voice_setup()?;
+                }
             }
             MenuAction::ToggleSound => {
                 // Application.SoundSystem->ToggleOnOff() + reopen with the
@@ -1608,6 +1626,9 @@ impl GameApp {
                         // C4MouseControl whenever ownership is reinitialized.
                         self.reset_ingame_mouse_control();
                     }
+                }
+                if self.unified_settings.is_some() {
+                    return Ok(());
                 }
                 self.ingame_menus.players.replace(
                     player,
@@ -3530,7 +3551,13 @@ impl GameApp {
         } else if screen.eq_ignore_ascii_case("net") {
             self.open_network_game_dialog();
         } else if screen.eq_ignore_ascii_case("options") {
-            self.open_options_menu();
+            if self.config.compat_profile == crate::settings::CompatProfile::Normal {
+                if let Err(error) = self.open_unified_settings_where_left() {
+                    tracing::error!(%error, "could not open settings");
+                }
+            } else {
+                self.open_options_menu();
+            }
         } else if screen.eq_ignore_ascii_case("plrsel") {
             self.open_player_selection_dialog();
         } else if screen.eq_ignore_ascii_case("about") {

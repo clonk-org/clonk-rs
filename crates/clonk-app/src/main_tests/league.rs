@@ -4296,6 +4296,8 @@ fn non_league_network_part_continues_the_running_round_locally() {
     // src/C4GameControl.cpp:93-127; src/C4Client.cpp:124-128,306-317;
     // src/C4PlayerList.cpp:466-476).
     let mut app = new_running_sandbox_app();
+    // This test pins the native options UI retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let local_player = app.players.local_owner;
     let local_client = 3;
     let remote_player = 17;

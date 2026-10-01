@@ -397,7 +397,7 @@ impl GameApp {
         }
     }
 
-    fn current_classic_lobby_option_rows(&self) -> Option<Vec<LobbyOptionRow>> {
+    pub(crate) fn current_classic_lobby_option_rows(&self) -> Option<Vec<LobbyOptionRow>> {
         let mode = self.netplay.mode.as_ref()?;
         let runtime_join_allowed = self
             .lobby
@@ -2562,6 +2562,11 @@ impl GameApp {
     }
 
     fn classic_lobby_option_is_editable(&self, option: LobbyOptionKind) -> bool {
+        if self.unified_settings.is_some() {
+            return self
+                .current_classic_lobby_option_rows()
+                .is_some_and(|rows| rows.iter().any(|row| row.kind == option && row.editable));
+        }
         self.lobby.classic_host.as_ref().is_some_and(|lobby| {
             lobby.controller.active_sheet() == LobbySheet::Options
                 && lobby
@@ -2573,6 +2578,17 @@ impl GameApp {
     }
 
     fn classic_lobby_option_accepts_choice(&self, option: LobbyOptionKind, selected: i32) -> bool {
+        if self.unified_settings.is_some() {
+            return self
+                .current_classic_lobby_option_rows()
+                .is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row.kind == option
+                            && row.editable
+                            && row.choices.iter().any(|choice| choice.id == selected)
+                    })
+                });
+        }
         self.lobby.classic_host.as_ref().is_some_and(|lobby| {
             lobby.controller.active_sheet() == LobbySheet::Options
                 && lobby.controller.option_rows().iter().any(|row| {

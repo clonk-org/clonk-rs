@@ -5157,6 +5157,8 @@ fn dirty_axis_calibration_updates_cpp_keys_without_rewriting_other_bytes() {
 fn startup_dialog_fade_preserves_ordered_native_text_at_scaled_output() {
     let scale = 1.5;
     let mut app = new_real_classic_menu_app(320, 200);
+    // Preserve the native dialog/fade contract under the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     app.rendering.graphics.set_runtime_sprite_filtering(scale, false);
     app.configure_native_startup_fonts(scale, false);
     let _ = render_ordered_test_frame(&mut app, scale, 480, 300);
@@ -10488,6 +10490,8 @@ fn client_host_socket_loss_continues_the_running_round_locally() {
     // src/C4Network2.cpp:1758-1765,1786-1817;
     // src/C4GameControl.cpp:93-127).
     let mut app = new_running_sandbox_app();
+    // This test pins the native options UI retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let local_player = app.players.local_owner;
     let local_client = 7;
     let remote_player = 17;

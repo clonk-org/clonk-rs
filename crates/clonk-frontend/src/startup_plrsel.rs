@@ -824,7 +824,7 @@ fn bilinear_sample_tile(
 /// sampling/blending (StdDDraw2.cpp:637-786) plus the blit shader's color
 /// modulation (StdGL.cpp:1068-1088): rgb scaled by `mod.rgb` before the
 /// gamma lookup, alpha = tex.a + mod.a (raw byte, 0 for PrefColorDw).
-fn draw_image_bilinear_modulated(
+pub(crate) fn draw_image_bilinear_modulated(
     surface: &mut Surface,
     rect: &GuiRect,
     image: &ImageData,

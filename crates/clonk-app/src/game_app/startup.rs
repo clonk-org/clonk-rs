@@ -4740,6 +4740,9 @@ impl GameApp {
                 self.open_player_selection_dialog();
             }
             MainMenuItem::Options => {
+                if self.config.compat_profile == crate::settings::CompatProfile::Normal {
+                    return self.open_unified_settings_where_left();
+                }
                 self.begin_startup_dialog_fade(StartupDialog::Options);
                 self.open_options_menu();
             }

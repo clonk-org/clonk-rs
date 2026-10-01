@@ -296,9 +296,11 @@ impl GameApp {
     }
 
     pub(crate) fn voice_setup_is_modal(&self) -> bool {
-        self.voice_setup
-            .as_ref()
-            .is_some_and(|setup| !setup.embedded)
+        self.unified_settings.is_none()
+            && self
+                .voice_setup
+                .as_ref()
+                .is_some_and(|setup| !setup.embedded)
     }
 
     fn voice_options_selected(&self) -> bool {
@@ -325,7 +327,7 @@ impl GameApp {
         let embedded = self.voice_options_selected();
         self.voice_chat.stop_capture();
         self.guard_classic_global_gui_bootstrap()?;
-        if self.mode == AppMode::Running {
+        if self.mode == AppMode::Running && self.unified_settings.is_none() {
             // Explicit modal entry clears held player controls through the
             // synchronized control path (C4PlayerList.cpp:588-595).
             self.dispatch_control_event(ControlEvent::ClearPressed)?;
@@ -635,6 +637,7 @@ impl GameApp {
 
     pub(crate) fn voice_setup_launcher(&self) -> Option<clonk_frontend::classic_gui::IntRect> {
         (self.config.compat_profile != crate::settings::CompatProfile::LegacyClonk
+            && self.settings_launcher().is_none()
             && self.mode == AppMode::Menu
             && matches!(self.startup.view, StartupView::NetworkLobby)
             && self.dialogs.messages.is_empty()
@@ -655,6 +658,9 @@ impl GameApp {
         &mut self,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> Result<bool> {
+        if self.render_unified_settings(gamma) {
+            return Ok(true);
+        }
         let launcher = self.voice_setup_launcher();
         if launcher.is_none() && !self.voice_setup_is_modal() {
             return Ok(false);
@@ -742,6 +748,23 @@ fn capture_status_text(status: &clonk_audio::VoiceCaptureStatus) -> String {
 
 impl GameApp {
     pub(crate) fn update_voice_setup(&mut self) {
+        if self.unified_settings.is_some() {
+            let test_visible = self
+                .unified_settings
+                .as_ref()
+                .is_some_and(|settings| settings.controller.view.microphone_test_open);
+            let changed_context = self
+                .voice_setup
+                .as_ref()
+                .is_some_and(|setup| setup.opened_in != self.mode);
+            if !test_visible || changed_context || !self.window_active {
+                self.cancel_voice_setup_test();
+            }
+            if let Some(setup) = self.voice_setup.as_mut() {
+                setup.opened_in = self.mode;
+            }
+            return;
+        }
         if self.voice_setup.as_ref().is_some_and(|setup| {
             setup.opened_in != self.mode || (setup.embedded && !self.voice_options_selected())
         }) {

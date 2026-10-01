@@ -37,8 +37,11 @@
 //!    hidden RGB; GL-tile padding outside the image is transparent WHITE
 //!    (C4Surface.cpp:1113).
 
+#[path = "startup_options_book.rs"]
+mod settings_book;
 #[path = "startup_options_voice_sheet.rs"]
 mod voice_sheet;
+pub(crate) use settings_book::{BookLayout, OptionsBook};
 pub use voice_sheet::{
     VoiceOptionsAction, VoiceOptionsControl, VoiceOptionsLabels, VoiceOptionsState,
     VoiceSheetLayout,

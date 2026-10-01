@@ -1536,6 +1536,34 @@ pub(crate) fn apply_options_display_requests(
             && app.startup.view == StartupView::Options
             && app.startup.options_dialog.is_some();
         match request {
+            OptionsDisplayRequest::SettingsPreview(state) => {
+                display_options.begin_settings_preview();
+                apply_settings_display_preview(window, app, presenter, state)?;
+                display_options.record_mode(state.mode);
+                display_options.record_scale_percent(state.percent, state.width, state.height);
+            }
+            OptionsDisplayRequest::SettingsConfirm(keep) => {
+                display_options.finish_settings_preview(keep);
+                let (width, height) = if keep {
+                    let size = window.inner_size();
+                    (size.width, size.height)
+                } else {
+                    display_options.actual_size()
+                };
+                let state = crate::game_app_unified_settings::SettingsDisplayState {
+                    mode: display_options.mode,
+                    percent: display_options.scale_percent(),
+                    width,
+                    height,
+                };
+                if keep {
+                    display_options.record_actual_size(width, height);
+                    app.record_unified_display_result(state);
+                } else {
+                    apply_settings_display_preview(window, app, presenter, state)?;
+                }
+            }
+
             OptionsDisplayRequest::SetMode(mode) => {
                 let mode = match mode {
                     clonk_frontend::startup_options_graphics::GraphicsDisplayMode::Fullscreen => {
@@ -1580,6 +1608,32 @@ pub(crate) fn apply_options_display_requests(
         }
         window.request_redraw();
     }
+    Ok(())
+}
+
+fn apply_settings_display_preview(
+    window: &Window,
+    app: &mut GameApp,
+    presenter: &mut clonk_scaling::FramePresenter,
+    state: crate::game_app_unified_settings::SettingsDisplayState,
+) -> Result<()> {
+    anyhow::ensure!(
+        (100..=400).contains(&state.percent),
+        "invalid settings scale"
+    );
+    match state.mode {
+        DisplayMode::Fullscreen => window.set_fullscreen(Some(Fullscreen::Borderless(None))),
+        DisplayMode::Window => {
+            window.set_fullscreen(None);
+            let _ = window.request_inner_size(PhysicalSize::new(state.width, state.height));
+        }
+    }
+    presenter.set_scale(state.percent as f32 / 100.0);
+    let filtering = app.rendering.graphics.point_filtering();
+    app.configure_native_startup_fonts(presenter.scale(), filtering);
+    let (width, height) = presenter.logical_size();
+    app.resize(width, height)?;
+    app.rendering.set_display_mode(state.mode);
     Ok(())
 }
 
@@ -8166,6 +8220,8 @@ impl ClassicMessageBoardState {
 pub(crate) enum OptionsDisplayRequest {
     SetMode(clonk_frontend::startup_options_graphics::GraphicsDisplayMode),
     SetScale { percent: i32, persist: bool },
+    SettingsPreview(crate::game_app_unified_settings::SettingsDisplayState),
+    SettingsConfirm(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -817,13 +817,21 @@ impl GameApp {
         option: LobbyOptionKind,
         value: i32,
     ) -> Result<(), EngineError> {
-        let valid_choice = self.dialogs.client_list.as_ref().is_some_and(|dialog| {
-            dialog.option_rows().iter().any(|row| {
+        let valid_choice = if self.unified_settings.is_some() {
+            self.settings_runtime_option_rows().iter().any(|row| {
                 row.kind == option
                     && row.editable
                     && row.choices.iter().any(|choice| choice.id == value)
             })
-        });
+        } else {
+            self.dialogs.client_list.as_ref().is_some_and(|dialog| {
+                dialog.option_rows().iter().any(|row| {
+                    row.kind == option
+                        && row.editable
+                        && row.choices.iter().any(|choice| choice.id == value)
+                })
+            })
+        };
         if !valid_choice {
             return Ok(());
         }

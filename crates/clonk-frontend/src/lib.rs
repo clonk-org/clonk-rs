@@ -41,6 +41,7 @@ mod render_config;
 pub mod runtime_client_list;
 pub mod runtime_help;
 pub mod scoreboard;
+pub mod settings_overlay;
 mod software_draw;
 mod sprite_capture;
 mod sprites;

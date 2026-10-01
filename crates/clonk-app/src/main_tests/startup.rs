@@ -1680,6 +1680,8 @@ fn main_menu_without_visible_player_forces_creation_and_overwrites_participants(
         test_runtime_config_with("Player".to_string(), false),
     )
     .test_value();
+    // This test pins the native options UI retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     wait_for_menu_preserving_first_player_dialog(&mut app);
     main_assert_eq!(app.startup.view => StartupView::MainMenu);
     main_assert!(matches!(
@@ -4074,6 +4076,8 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
     main_assert_eq!(incoming_only => [30, 40, 50, 60]);
 
     let mut app = new_real_classic_menu_app(320, 200);
+    // Preserve the native dialog/fade contract under the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let mut main = vec![0_u8; 320 * 200 * 4];
     main_assert!(app.render(&mut main).expect("present stable Main dialog"));
 
@@ -4125,6 +4129,8 @@ fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
 #[test]
 fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
     let mut app = new_real_classic_menu_app(320, 200);
+    // Preserve the native dialog/fade contract under the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     let mut frame = vec![0_u8; 320 * 200 * 4];
     app.test_render(&mut frame);
     app.handle_main_menu_activation(MainMenuItem::About)
@@ -4883,6 +4889,8 @@ fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
 fn escape_in_submenu_returns_to_main_menu() {
     clonk_logging::init();
     let mut app = new_running_sandbox_app();
+    // This test pins the native options UI retained by the compatibility profile.
+    app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
     app.open_ingame_menu().test_value();
     app.apply_ingame_menu_action(MenuAction::ActivateOptions)
         .test_value();
@@ -5203,6 +5211,8 @@ fn load_frontend_scenarios_sets_human_readable_location() {
 fn classic_startup_argument_selects_initial_cpp_view() {
     let view = |screen: &str| {
         let mut app = new_real_classic_menu_app(640, 480);
+        // This test pins the native options UI retained by the compatibility profile.
+        app.config.compat_profile = crate::settings::CompatProfile::LegacyClonk;
         app.apply_classic_startup_screen(screen);
         (app.startup.view, app.scensel.mode)
     };

@@ -608,6 +608,21 @@ impl GameOptionButtons {
         self.cancel_disabled_presses();
     }
 
+    /// Keep the selector's local defaults in sync with the shared settings UI.
+    /// A lobby's current match parameters must still use synchronized controls.
+    pub fn set_selector_preferences(&mut self, fair_crew: Option<bool>, record: Option<bool>) {
+        if self.context.is_lobby() {
+            return;
+        }
+        if let Some(enabled) = fair_crew {
+            self.values.fair_crew = enabled;
+        }
+        if let Some(enabled) = record {
+            self.values.record = enabled;
+        }
+        self.cancel_disabled_presses();
+    }
+
     pub fn set_countdown(&mut self, countdown: bool) {
         self.values.countdown = countdown;
         self.cancel_disabled_presses();

@@ -1763,6 +1763,24 @@ impl GameApp {
             .set_network_status_text(Some(lines.join("|")));
     }
 
+    pub(crate) fn settings_runtime_option_rows(&self) -> Vec<LobbyOptionRow> {
+        if self.mode != AppMode::Running || self.netplay.manager.is_none() {
+            return Vec::new();
+        }
+        core_runtime_option_rows(
+            self.engine.is_control_host(),
+            matches!(self.runtime_network_role(), RuntimeNetworkRole::Host),
+            self.netplay.is_league,
+            &self.classic_lobby_option_labels(),
+            self.runtime_client_list_control_mode(),
+            self.netplay
+                .control_clock
+                .map(NetworkControlClock::control_rate)
+                .unwrap_or_else(|| self.engine.control_rate()),
+            self.runtime_join_admission_allowed(),
+        )
+    }
+
     pub(crate) fn runtime_client_list_snapshot(
         &mut self,
     ) -> (
