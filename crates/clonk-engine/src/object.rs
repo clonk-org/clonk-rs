@@ -3408,7 +3408,7 @@ impl Object {
 
 /// `C4RankSystem::RankByExperience` with the default curve
 /// Experience(rank) = rank^1.5 * RankBase(=1000) (C4RankSystem.cpp:226-237).
-pub fn fair_crew_rank(experience: i32, rank_base: i32) -> i32 {
+fn fair_crew_rank(experience: i32, rank_base: i32) -> i32 {
     let mut rank = 0;
     loop {
         let next = ((rank + 1) as f64).powf(1.5) * f64::from(rank_base);
