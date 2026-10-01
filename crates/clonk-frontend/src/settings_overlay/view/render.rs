@@ -176,14 +176,12 @@ impl SettingsController {
                     emphasized,
                     gamma,
                 ),
-                // Drawn on its row, above the row's highlight.
-                SettingsFocus::Reset => {}
+                // Drawn on their rows, above the rows' highlights.
+                SettingsFocus::Reset | SettingsFocus::TestMicrophone => {}
                 _ => {
                     let reset = self.page_reset_label();
                     let label = match focus {
                         SettingsFocus::ResetCategory => reset.as_str(),
-                        SettingsFocus::TestMicrophone if compact => "Test mic",
-                        SettingsFocus::TestMicrophone => "Test microphone",
                         SettingsFocus::RefreshDevices => "Refresh devices",
                         _ => "",
                     };
@@ -233,7 +231,7 @@ impl SettingsController {
             if let AdvancedConfigValue::Bool(checked) = setting.value {
                 let checkbox = IntRect::new(rect.x, rect.y + 4, rect.w, 20);
                 book.checkbox(surface, checkbox, "", checked, focused, gamma);
-                let end = self.label_end(index, rect, rect.x + rect.w);
+                let end = self.label_end(rect, rect.x + rect.w);
                 text(
                     surface,
                     body_font,
@@ -244,7 +242,7 @@ impl SettingsController {
                 );
                 continue;
             }
-            let end = self.label_end(index, rect, rect.x + rect.w - 182);
+            let end = self.label_end(rect, rect.x + rect.w - 182);
             text(
                 surface,
                 body_font,
@@ -450,17 +448,16 @@ impl SettingsController {
 }
 
 impl SettingsController {
-    /// Where a row's label must stop: short of its reset link when it shows
-    /// one, otherwise at `plain`.
-    fn label_end(&self, index: usize, row: IntRect, plain: i32) -> i32 {
-        if self.view.selected == Some(index) && self.resettable(index) {
-            reset_rect(row).x - 4
-        } else {
-            plain
-        }
+    /// Where a row's label must stop: short of a link inked into the row,
+    /// otherwise at `plain`.
+    fn label_end(&self, row: IntRect, plain: i32) -> i32 {
+        self.row_actions(&self.layout())
+            .into_iter()
+            .find(|(_, link)| link.y >= row.y && link.y < row.y + row.h)
+            .map_or(plain, |(_, link)| link.x - 4)
     }
 
-    /// The selected row's reset link, above the row's highlight.
+    /// The links inked into rows, above the rows' highlights.
     fn render_row_actions(
         &self,
         surface: &mut Surface,
@@ -470,7 +467,12 @@ impl SettingsController {
     ) {
         for (focus, rect) in self.row_actions(layout) {
             let emphasized = self.view.focus == focus || self.view.hover == Some(focus);
-            book.ink_link(surface, rect, "Reset", emphasized, gamma);
+            let label = if focus == SettingsFocus::TestMicrophone {
+                "Test"
+            } else {
+                "Reset"
+            };
+            book.ink_link(surface, rect, label, emphasized, gamma);
         }
     }
 
@@ -674,15 +676,11 @@ impl SettingsController {
         };
         let left = links
             .iter()
-            .filter(|(focus, _)| *focus != SettingsFocus::TestMicrophone)
             .map(|(_, rect)| rect.x + rect.w)
             .max()
             .unwrap_or(row.x)
             + 12;
-        let right = links
-            .iter()
-            .find(|(focus, _)| *focus == SettingsFocus::TestMicrophone)
-            .map_or(layout.footer.x + layout.footer.w, |(_, rect)| rect.x - 12);
+        let right = layout.footer.x + layout.footer.w;
         let hint = self.input_hint();
         let width = font.measure(&hint, false).0;
         if width <= right - left {

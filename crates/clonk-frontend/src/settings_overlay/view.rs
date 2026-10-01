@@ -1400,23 +1400,26 @@ impl SettingsController {
             .collect()
     }
 
-    /// The reset link a changed, selected row offers just left of its value.
+    /// Links inked into rows just left of their values: the microphone's
+    /// test, and Reset on the selected row once it has changed.
     pub(crate) fn row_actions(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         if self.control_set_page().is_some() {
             return Vec::new();
         }
-        let Some((index, row)) = self
-            .view
-            .selected
-            .and_then(|index| self.row_rect(layout, index).map(|row| (index, row)))
-        else {
-            return Vec::new();
-        };
-        if self.resettable(index) {
-            vec![(SettingsFocus::Reset, reset_rect(row))]
-        } else {
-            Vec::new()
-        }
+        self.visible_indices()
+            .into_iter()
+            .filter_map(|index| {
+                let row = self.row_rect(layout, index)?;
+                let setting = &self.settings[index];
+                if setting.id.section == "Voice" && setting.id.key == "InputDevice" {
+                    Some((SettingsFocus::TestMicrophone, reset_rect(row)))
+                } else if self.view.selected == Some(index) && self.resettable(index) {
+                    Some((SettingsFocus::Reset, reset_rect(row)))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn resettable(&self, index: usize) -> bool {
@@ -1429,7 +1432,7 @@ impl SettingsController {
     }
 
     /// Page-wide actions, inked along the footer: the view filters and
-    /// Reset page, plus the voice page's microphone test at the right.
+    /// Reset page.
     pub(crate) fn footer_links(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         let compact = layout.footer.w < 480;
         let y = layout.footer.y
@@ -1450,22 +1453,14 @@ impl SettingsController {
             ]
         };
         let mut x = layout.footer.x;
-        let mut links: Vec<_> = specs
+        specs
             .into_iter()
             .map(|(focus, width)| {
                 let rect = IntRect::new(x, y, width, 26);
                 x += width + 10;
                 (focus, rect)
             })
-            .collect();
-        if self.voice_page_selected() {
-            let width = if compact { 72 } else { 128 };
-            links.push((
-                SettingsFocus::TestMicrophone,
-                IntRect::new(layout.footer.x + layout.footer.w - width, y, width, 26),
-            ));
-        }
-        links
+            .collect()
     }
 
     /// Advanced settings the current page would add when shown.
@@ -2076,6 +2071,66 @@ mod tests {
         assert_eq!(controller.visible_indices(), (1..=12).collect::<Vec<_>>());
     }
 
+    /// The Voice chat page's switch and microphone choice.
+    fn voice_page() -> SettingsController {
+        use crate::startup_options_advanced::AdvancedConfigChoice;
+        let voice = |key: &str, value: AdvancedConfigValue| Setting {
+            id: SettingId::new("Voice", key),
+            label: key.into(),
+            keywords: String::new(),
+            category: SettingsCategory::Audio,
+            advanced: false,
+            default: value.clone(),
+            value,
+            details: Default::default(),
+        };
+        let device = AdvancedConfigValue::Choice {
+            value: String::new(),
+            choices: vec![AdvancedConfigChoice {
+                value: String::new(),
+                label: "System default".into(),
+            }],
+        };
+        let mut controller = SettingsController::new(vec![
+            voice("Enabled", AdvancedConfigValue::Bool(true)),
+            voice("InputDevice", device),
+        ]);
+        controller.select_audio_page(AudioPage::Voice);
+        controller
+    }
+
+    #[test]
+    fn the_microphone_row_offers_its_test_beside_the_device_choice() {
+        let mut controller = voice_page();
+        let layout = controller.layout();
+        assert!(
+            controller
+                .footer_links(&layout)
+                .iter()
+                .all(|(focus, _)| *focus != SettingsFocus::TestMicrophone),
+            "not parked in the footer"
+        );
+        let row = controller.row_rect(&layout, 1).unwrap();
+        let test = |controller: &SettingsController| {
+            controller
+                .row_actions(&layout)
+                .into_iter()
+                .find(|(focus, _)| *focus == SettingsFocus::TestMicrophone)
+                .map(|(_, rect)| rect)
+        };
+        controller.set_focus(SettingsFocus::Row(0));
+        let link = test(&controller).expect("shown while another row is selected");
+        assert!(link.y >= row.y && link.y + link.h <= row.y + row.h);
+        assert!(
+            link.x + link.w <= value_rect(row).x,
+            "left of the device choice"
+        );
+        let centre = GuiPoint::new((link.x + link.w / 2) as f32, (link.y + link.h / 2) as f32);
+        controller.pointer(centre, true);
+        controller.pointer(centre, false);
+        assert!(controller.view.microphone_test_open);
+    }
+
     #[test]
     fn a_rebound_key_names_its_default_with_the_applications_label() {
         let key = |value| AdvancedConfigValue::Integer {
@@ -2428,22 +2483,8 @@ mod tests {
     }
     #[test]
     fn directional_navigation_reaches_microphone_tools_and_returns_to_categories() {
-        let value = AdvancedConfigValue::Bool(true);
-        let mut controller = SettingsController::new(vec![Setting {
-            id: SettingId::new("Voice", "Enabled"),
-            label: "Voice chat".into(),
-            keywords: String::new(),
-            category: SettingsCategory::Audio,
-            advanced: false,
-            value: value.clone(),
-            default: value,
-            details: Default::default(),
-        }]);
-        controller.category = SettingsCategory::Audio;
-        controller.audio_page = AudioPage::Voice;
-        controller.set_focus(SettingsFocus::Row(0));
-        controller.key(KeyCode::Down, false, false);
-        assert_eq!(controller.view.focus, SettingsFocus::Advanced);
+        let mut controller = voice_page();
+        controller.set_focus(SettingsFocus::Row(1));
         for _ in 0..8 {
             if controller.view.focus == SettingsFocus::TestMicrophone {
                 break;
