@@ -2216,6 +2216,23 @@ mod tests {
     }
 
     #[test]
+    fn a_scaled_slider_at_its_end_keeps_a_value_beyond_it_when_pressed_onward() {
+        let mut controller = SettingsController::new(vec![crew_strength(50_000)]);
+        controller.select_category(SettingsCategory::Display);
+        controller.set_focus(SettingsFocus::Row(0));
+        assert!(
+            matches!(
+                controller.key(KeyCode::Right, false, false).as_slice(),
+                [SettingsAction::Change(
+                    0,
+                    AdvancedConfigValue::Integer { value: 50_000, .. }
+                )]
+            ),
+            "Right never lowers a strength the slider cannot show"
+        );
+    }
+
+    #[test]
     fn a_rebound_key_names_its_default_with_the_applications_label() {
         let key = |value| AdvancedConfigValue::Integer {
             value,

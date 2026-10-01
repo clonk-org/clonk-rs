@@ -170,9 +170,17 @@ pub struct SliderScale {
 }
 
 impl SliderScale {
-    /// The value `steps` positions away from `value`, kept on the slider.
+    /// The value `steps` positions away from `value`, kept on the slider. A
+    /// press that cannot move the slider keeps the value, even one beyond
+    /// the slider's end.
     fn step(self, value: i128, steps: i128) -> i128 {
-        (self.value)(((self.position)(value) + steps).clamp(0, self.positions))
+        let current = (self.position)(value).clamp(0, self.positions);
+        let next = (current + steps).clamp(0, self.positions);
+        if next == current {
+            value
+        } else {
+            (self.value)(next)
+        }
     }
 }
 
