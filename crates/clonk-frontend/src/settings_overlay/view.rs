@@ -30,7 +30,6 @@ pub enum SettingsFocus {
     Row(usize),
     Modified,
     Advanced,
-    Reset,
     ResetCategory,
     TestMicrophone,
     RecordMicrophone,
@@ -624,8 +623,7 @@ impl SettingsController {
                 }
                 if matches!(
                     self.view.focus,
-                    SettingsFocus::Reset
-                        | SettingsFocus::ResetCategory
+                    SettingsFocus::ResetCategory
                         | SettingsFocus::TestMicrophone
                         | SettingsFocus::RefreshDevices
                         | SettingsFocus::Close
@@ -1040,14 +1038,6 @@ impl SettingsController {
                 self.show_advanced = !self.show_advanced;
                 self.view.scroll = 0;
             }
-            SettingsFocus::Reset => {
-                if let Some(index) = self.view.selected.filter(|i| self.editable(*i)) {
-                    return vec![SettingsAction::Change(
-                        index,
-                        self.settings[index].default.clone(),
-                    )];
-                }
-            }
             SettingsFocus::ResetCategory => {
                 if !self.query.is_empty() {
                     self.view.message = "Clear search before resetting a category.".into();
@@ -1401,7 +1391,7 @@ impl SettingsController {
     }
 
     /// Links inked into rows just left of their values: the microphone's
-    /// test, and Reset on the selected row once it has changed.
+    /// test. Delete resets a changed setting, so rows carry no reset link.
     pub(crate) fn row_actions(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         if self.control_set_page().is_some() {
             return Vec::new();
@@ -1411,13 +1401,8 @@ impl SettingsController {
             .filter_map(|index| {
                 let row = self.row_rect(layout, index)?;
                 let setting = &self.settings[index];
-                if setting.id.section == "Voice" && setting.id.key == "InputDevice" {
-                    Some((SettingsFocus::TestMicrophone, row_link_rect(row)))
-                } else if self.view.selected == Some(index) && self.resettable(index) {
-                    Some((SettingsFocus::Reset, row_link_rect(row)))
-                } else {
-                    None
-                }
+                (setting.id.section == "Voice" && setting.id.key == "InputDevice")
+                    .then(|| (SettingsFocus::TestMicrophone, row_link_rect(row)))
             })
             .collect()
     }
@@ -2242,7 +2227,7 @@ mod tests {
     }
 
     #[test]
-    fn a_selected_row_offers_only_a_reset_link_and_only_once_it_has_changed() {
+    fn a_changed_row_carries_no_reset_link_and_delete_restores_its_default() {
         let percent = |value| AdvancedConfigValue::Integer {
             value,
             min: 0,
@@ -2250,15 +2235,13 @@ mod tests {
         };
         let mut controller = SettingsController::new(vec![preference("Volume", percent(50))]);
         controller.select_category(SettingsCategory::Display);
-        let layout = controller.layout();
-        assert!(controller.row_actions(&layout).is_empty());
         controller.settings[0].value = percent(80);
-        let actions: Vec<_> = controller
-            .row_actions(&layout)
-            .into_iter()
-            .map(|(focus, _)| focus)
-            .collect();
-        assert_eq!(actions, vec![SettingsFocus::Reset]);
+        controller.set_focus(SettingsFocus::Row(0));
+        assert!(controller.row_actions(&controller.layout()).is_empty());
+        assert_eq!(
+            controller.edit_command("delete", false, false),
+            vec![SettingsAction::Change(0, percent(50))]
+        );
     }
 
     #[test]
@@ -2670,7 +2653,6 @@ mod tests {
             SettingsFocus::Search,
             SettingsFocus::Modified,
             SettingsFocus::Advanced,
-            SettingsFocus::Reset,
             SettingsFocus::ResetCategory,
             SettingsFocus::Close,
         ] {

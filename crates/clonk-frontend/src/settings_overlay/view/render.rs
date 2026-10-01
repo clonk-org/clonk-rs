@@ -176,8 +176,8 @@ impl SettingsController {
                     emphasized,
                     gamma,
                 ),
-                // Drawn on their rows, above the rows' highlights.
-                SettingsFocus::Reset | SettingsFocus::TestMicrophone => {}
+                // Drawn on its row, above the row's highlight.
+                SettingsFocus::TestMicrophone => {}
                 _ => {
                     let reset = self.page_reset_label();
                     let label = match focus {
@@ -467,12 +467,7 @@ impl SettingsController {
     ) {
         for (focus, rect) in self.row_actions(layout) {
             let emphasized = self.view.focus == focus || self.view.hover == Some(focus);
-            let label = if focus == SettingsFocus::TestMicrophone {
-                "Test"
-            } else {
-                "Reset"
-            };
-            book.ink_link(surface, rect, label, emphasized, gamma);
+            book.ink_link(surface, rect, "Test", emphasized, gamma);
         }
     }
 
