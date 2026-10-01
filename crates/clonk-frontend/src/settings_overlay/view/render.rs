@@ -724,6 +724,9 @@ pub(super) fn text(
     color: [u8; 4],
     gamma: Option<&GammaRamp>,
 ) {
+    // The line starts 2 px into `rect`, so a tight `rect` would cut off its
+    // descenders wherever glyphs fill the line, as they do when scaled.
+    let clip = IntRect::new(rect.x, rect.y, rect.w, rect.h.max(font.line_height + 2));
     draw_clipped_text_with_markup(
         surface,
         font,
@@ -733,7 +736,7 @@ pub(super) fn text(
         color,
         TextAlign::Left,
         gamma,
-        rect,
+        clip,
         false,
     );
 }

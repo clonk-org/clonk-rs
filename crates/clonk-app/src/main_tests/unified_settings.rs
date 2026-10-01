@@ -957,3 +957,52 @@ fn unified_settings_open_a_game_on_the_control_set_its_player_uses() {
         "a game reopens on its player's own keys"
     );
 }
+
+#[test]
+fn unified_settings_clip_no_line_of_text_above_its_descenders() {
+    use clonk_frontend::settings_overlay::{
+        ControlsPage, SettingsCategory, SettingsController, SettingsFocus,
+    };
+    use clonk_graphics::clonk_font::ClonkFontRole;
+    let scale = 1.0;
+    let mut app = new_real_classic_menu_app(800, 600);
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    app.rendering
+        .graphics
+        .set_runtime_sprite_filtering(scale, false);
+    app.configure_native_startup_fonts(scale, false);
+    app.handle_main_menu_activation(MainMenuItem::Options)
+        .unwrap();
+    let book = app.assets.options_book_fonts.clone().unwrap();
+    let pages: [fn(&mut SettingsController); 4] = [
+        |controller| controller.select_category(SettingsCategory::Interface),
+        |controller| controller.select_category(SettingsCategory::Audio),
+        |controller| controller.select_controls_page(ControlsPage::Keyboard),
+        |controller| controller.select_controls_page(ControlsPage::General),
+    ];
+    for select in pages {
+        let controller = &mut app.unified_settings.as_mut().unwrap().controller;
+        select(controller);
+        let first = controller.visible_indices()[0];
+        controller.set_focus(SettingsFocus::Row(first));
+        let (_, _, plan) = render_ordered_test_frame(&mut app, scale, 800, 600);
+        for text in plan.batches.iter().flat_map(|batch| &batch.text) {
+            let line = match text.role {
+                ClonkFontRole::BookSmall => book.book_small.line_height,
+                ClonkFontRole::BookText => book.book.line_height,
+                _ => continue,
+            };
+            if let Some(clip) = text.clip {
+                assert!(
+                    clip.y + clip.height as i32 >= text.y + line,
+                    "{:?} is cut off: line {}..{}, clip ends at {}",
+                    text.text,
+                    text.y,
+                    text.y + line,
+                    clip.y + clip.height as i32
+                );
+            }
+        }
+    }
+}
