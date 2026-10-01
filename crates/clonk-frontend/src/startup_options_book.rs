@@ -8,9 +8,6 @@ const PAGE_TAB_INK: u32 = 0x0061_4a32;
 /// Ink for the page's link text: a shade darker than [`PAGE_TAB_INK`] so
 /// the book font's thin strokes stay legible.
 const PAGE_TAB_INK_RGBA: [u8; 4] = [0x4e, 0x3a, 0x26, 255];
-/// The popup window's dark wooden frame and the gilt line inside it.
-const WINDOW_FRAME_WOOD: u32 = 0x0030_1c0c;
-const WINDOW_FRAME_GILT: u32 = 0x40c0_a060;
 /// Medium ink for the other tabs and the rule they stand on, darker than the
 /// group-box ink so the strip holds its shape against the parchment.
 const PAGE_TAB_RULE_INK: u32 = 0x0080_6a50;
@@ -65,9 +62,9 @@ impl BookLayout {
 impl OptionsBook<'_> {
     pub const WARNING_INK_RGBA: [u8; 4] = [0xb0, 0x1c, 0x0c, 255];
 
-    /// Where settings opened over another screen sit: the whole options
-    /// screen, centred and inset so the screen behind stays in view, never
-    /// smaller than the book's 640x480 minimum.
+    /// Where settings opened over another screen lay the book out: centred
+    /// and inset so the screen behind stays in view, never smaller than the
+    /// book's 640x480 minimum.
     pub fn window(w: i32, h: i32) -> IntRect {
         let margin_x = ((w - 640) / 2).clamp(0, w / 16);
         let margin_y = ((h - 480) / 2).clamp(0, h / 16);
@@ -107,51 +104,28 @@ impl OptionsBook<'_> {
         gamma: Option<&GammaRamp>,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
-        match window {
-            None => draw_image_bilinear(
+        if window.is_some() {
+            // Over another screen: that screen dimmed, with the book alone
+            // over it.
+            draw_engine_box(surface, 0, 0, w - 1, h - 1, 0x80000000, gamma);
+        } else {
+            draw_image_bilinear(
                 surface,
                 &GuiRect::new(0.0, 0.0, w as f32, h as f32),
                 &self.assets.background,
                 gamma,
-            ),
-            // Over another screen: that screen dimmed, and the options screen
-            // in a framed window over it.
-            Some(frame) => {
-                draw_engine_box(surface, 0, 0, w - 1, h - 1, 0x80000000, gamma);
-                draw_image_bilinear(surface, &gui_rect(frame), &self.assets.background, gamma);
-                let (right, bottom) = (frame.x + frame.w - 1, frame.y + frame.h - 1);
-                for inset in 0..2 {
-                    draw_frame_dw(
-                        surface,
-                        frame.x + inset,
-                        frame.y + inset,
-                        right - inset,
-                        bottom - inset,
-                        WINDOW_FRAME_WOOD,
-                        gamma,
-                    );
-                }
-                draw_frame_dw(
-                    surface,
-                    frame.x + 2,
-                    frame.y + 2,
-                    right - 2,
-                    bottom - 2,
-                    WINDOW_FRAME_GILT,
-                    gamma,
-                );
-            }
+            );
+            self.gui.title.draw_with_gamma(
+                surface,
+                layout.title_center.0,
+                layout.title_center.1,
+                "Options",
+                YELLOW_FONT_RGBA,
+                TextAlign::Center,
+                true,
+                gamma,
+            );
         }
-        self.gui.title.draw_with_gamma(
-            surface,
-            layout.title_center.0,
-            layout.title_center.1,
-            "Options",
-            YELLOW_FONT_RGBA,
-            TextAlign::Center,
-            true,
-            gamma,
-        );
         let b = layout.back_button;
         draw_bar(surface, &gui_rect(b), &self.assets.button, gamma);
         if back.highlighted {

@@ -1006,3 +1006,41 @@ fn unified_settings_clip_no_line_of_text_above_its_descenders() {
         }
     }
 }
+
+#[test]
+fn unified_settings_popup_is_the_book_alone_over_the_dimmed_screen() {
+    let (width, height) = (800_usize, 600_usize);
+    let mut app = new_real_classic_menu_app(width as u32, height as u32);
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.app_paths = None;
+    app.apply_classic_startup_screen("scen");
+    let mut screen = vec![0; width * height * 4];
+    app.render(&mut screen).unwrap();
+    app.open_unified_settings_where_left().unwrap();
+    let mut popup = vec![0; width * height * 4];
+    app.render(&mut popup).unwrap();
+    // Just above the book's paper, where the options screen had its backdrop
+    // and title, the scenario list shows through at half brightness.
+    let book = app
+        .unified_settings
+        .as_ref()
+        .unwrap()
+        .controller
+        .layout()
+        .panel;
+    let samples: Vec<u64> = (book.y - 24..book.y - 8)
+        .step_by(2)
+        .flat_map(|y| {
+            (book.x + 140..book.x + book.w - 40)
+                .step_by(6)
+                .map(move |x| (y as usize * width + x as usize) * 4)
+        })
+        .flat_map(|i| (0..3).map(move |channel| i + channel))
+        .map(|i| (u64::from(screen[i]) * 128 / 255).abs_diff(u64::from(popup[i])))
+        .collect();
+    let deviation = samples.iter().sum::<u64>() / samples.len() as u64;
+    assert!(
+        deviation < 10,
+        "mean deviation {deviation} from the dimmed scenario list around the book"
+    );
+}
