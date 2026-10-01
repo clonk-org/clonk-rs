@@ -104,7 +104,8 @@ fn unified_settings_keeps_the_screen_and_releases_only_its_own_offline_pause() {
     app.config.compat_profile = crate::settings::CompatProfile::Normal;
     let screen = app.startup.view;
     app.netplay.offline_halt_count = 1;
-    app.open_unified_settings(SettingsCategory::Quick).unwrap();
+    app.open_unified_settings(SettingsCategory::Interface)
+        .unwrap();
     assert!(app.unified_settings.is_some());
     assert_eq!(app.mode, AppMode::Running);
     assert_eq!(app.startup.view, screen);
@@ -122,7 +123,8 @@ fn unified_settings_recording_default_updates_the_game_about_to_start() {
     app.open_scenario_browser();
     app.records.directory = Some(PathBuf::from("Records"));
     app.records.enabled = false;
-    app.open_unified_settings(SettingsCategory::Game).unwrap();
+    app.open_unified_settings(SettingsCategory::Interface)
+        .unwrap();
     let index = app
         .unified_settings
         .as_ref()
@@ -160,7 +162,8 @@ fn unified_settings_cancels_the_underlying_pointer_capture() {
     .unwrap();
     app.handle_mouse_button(ElementState::Pressed).unwrap();
     assert!(!app.take_exit_request());
-    app.open_unified_settings(SettingsCategory::Quick).unwrap();
+    app.open_unified_settings(SettingsCategory::Interface)
+        .unwrap();
     app.close_unified_settings();
     app.handle_mouse_button(ElementState::Released).unwrap();
     assert!(
@@ -398,7 +401,8 @@ fn unified_settings_exposes_current_match_values_without_giving_clients_host_aut
     )));
     app.engine.set_control_host(false);
     let rate = app.engine.control_rate();
-    app.open_unified_settings(SettingsCategory::Game).unwrap();
+    app.open_unified_settings(SettingsCategory::Interface)
+        .unwrap();
     assert_eq!(app.netplay.offline_halt_count, 0);
     let rows = &app.unified_settings.as_ref().unwrap().controller.settings;
     let index = rows
@@ -659,7 +663,8 @@ fn unified_settings_applies_live_values_and_merges_saved_changes_without_losing_
         saved.get_in(Some("Vendor"), "Extension"),
         Some("changed externally")
     );
-    app.open_unified_settings(SettingsCategory::Quick).unwrap();
+    app.open_unified_settings(SettingsCategory::Interface)
+        .unwrap();
     assert_eq!(
         app.unified_settings.as_ref().unwrap().controller.settings[index]
             .value

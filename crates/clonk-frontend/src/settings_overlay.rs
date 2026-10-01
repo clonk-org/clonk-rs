@@ -1,5 +1,5 @@
 //! Shared settings navigation. Values belong to the application; every view
-//! (categories, search and pinned settings) addresses the same stable IDs.
+//! (categories and search) addresses the same stable IDs.
 
 use crate::startup_options_advanced::AdvancedConfigValue;
 pub use crate::startup_options_controls::ControlDevice;
@@ -27,46 +27,38 @@ impl SettingId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsCategory {
-    Quick,
     Audio,
     Controls,
     Display,
+    /// General: the interface, games you start, the current match and the
+    /// program itself.
     Interface,
-    Game,
-    System,
 }
 
 impl SettingsCategory {
-    pub const ALL: [Self; 7] = [
-        Self::Interface,
-        Self::Display,
-        Self::Audio,
-        Self::Controls,
-        Self::Game,
-        Self::System,
-        Self::Quick,
-    ];
+    pub const ALL: [Self; 4] = [Self::Interface, Self::Display, Self::Audio, Self::Controls];
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Quick => "Quick",
             Self::Audio => "Audio",
             Self::Controls => "Controls",
             Self::Display => "Graphics",
             Self::Interface => "General",
-            Self::Game => "Game",
-            Self::System => "System",
         }
     }
 
     fn book_icon(self) -> usize {
         match self {
-            Self::Interface | Self::Quick => 0,
+            Self::Interface => 0,
             Self::Display => 1,
             Self::Audio => 2,
             Self::Controls => 3,
-            Self::Game => 4,
-            Self::System => 5,
         }
+    }
+
+    /// The tab `step` places on from this one, wrapping around.
+    fn step(self, step: isize) -> Self {
+        let index = Self::ALL.iter().position(|c| *c == self).unwrap_or(0) as isize;
+        Self::ALL[(index + step).rem_euclid(Self::ALL.len() as isize) as usize]
     }
 }
 
@@ -235,7 +227,6 @@ pub struct SettingsController {
     pub audio_page: AudioPage,
     pub query: String,
     pub show_advanced: bool,
-    pub pinned: Vec<SettingId>,
     pub modified_only: bool,
     pub controls_page: ControlsPage,
     /// The control sets the Keyboard and Controller tabs show.
@@ -250,11 +241,10 @@ impl SettingsController {
     pub fn new(settings: Vec<Setting>) -> Self {
         Self {
             settings,
-            category: SettingsCategory::Quick,
+            category: SettingsCategory::Interface,
             audio_page: AudioPage::Sound,
             query: String::new(),
             show_advanced: false,
-            pinned: Vec::new(),
             modified_only: false,
             controls_page: ControlsPage::Keyboard,
             keyboard_set: 0,
@@ -348,26 +338,21 @@ impl SettingsController {
     pub fn visible_indices(&self) -> Vec<usize> {
         let query = self.query.trim().to_lowercase();
         let shown_set = self.current_control_set();
-        let mut indices: Vec<_> = self
-            .settings
+        self.settings
             .iter()
             .enumerate()
             .filter_map(|(index, setting)| {
                 let matches = if query.is_empty() {
-                    if self.category == SettingsCategory::Quick {
-                        self.pinned.contains(&setting.id)
-                    } else {
-                        setting.category == self.category
-                            && (!setting.advanced || self.show_advanced)
-                            && (self.category != SettingsCategory::Audio
-                                || self.audio_setting_visible(setting))
-                            && (self.category != SettingsCategory::Controls
-                                || self.controls_page.contains(setting))
-                            && setting
-                                .details
-                                .control
-                                .is_none_or(|binding| Some(binding.set) == shown_set)
-                    }
+                    setting.category == self.category
+                        && (!setting.advanced || self.show_advanced)
+                        && (self.category != SettingsCategory::Audio
+                            || self.audio_setting_visible(setting))
+                        && (self.category != SettingsCategory::Controls
+                            || self.controls_page.contains(setting))
+                        && setting
+                            .details
+                            .control
+                            .is_none_or(|binding| Some(binding.set) == shown_set)
                 } else {
                     let searchable = format!(
                         "{} {} {} {}",
@@ -380,15 +365,7 @@ impl SettingsController {
                 };
                 (matches && (!self.modified_only || setting.is_modified())).then_some(index)
             })
-            .collect();
-        if query.is_empty() && self.category == SettingsCategory::Quick {
-            indices.sort_by_key(|index| {
-                self.pinned
-                    .iter()
-                    .position(|id| *id == self.settings[*index].id)
-            });
-        }
-        indices
+            .collect()
     }
 
     fn audio_setting_visible(&self, setting: &Setting) -> bool {
@@ -418,15 +395,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tabs_use_the_names_players_expect_from_other_games() {
+    fn four_tabs_hold_every_setting_under_the_names_players_expect() {
         assert_eq!(
             SettingsCategory::ALL.map(SettingsCategory::label),
-            ["General", "Graphics", "Audio", "Controls", "Game", "System", "Quick"]
+            ["General", "Graphics", "Audio", "Controls"]
         );
     }
 
     #[test]
-    fn voice_page_shows_relevant_activation_controls_without_hiding_them_from_search_or_pins() {
+    fn voice_page_shows_relevant_activation_controls_without_hiding_them_from_search() {
         let mut controller = SettingsController::new(
             [
                 ("ActivationMode", "PushToTalk"),
@@ -451,9 +428,6 @@ mod tests {
         controller.settings[0].value = AdvancedConfigValue::Text("VoiceActivated".into());
         assert_eq!(controller.visible_indices(), vec![0, 2]);
         controller.query = "PushToTalkKey".into();
-        assert_eq!(controller.visible_indices(), vec![1]);
-        controller.pinned.push(controller.settings[1].id.clone());
-        controller.select_category(SettingsCategory::Quick);
         assert_eq!(controller.visible_indices(), vec![1]);
     }
 
@@ -507,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_settings_share_values_in_their_listed_order() {
+    fn only_changed_keeps_the_settings_that_differ_from_their_defaults() {
         let value = AdvancedConfigValue::Bool(true);
         let setting = |key: &str| Setting {
             id: SettingId::new("Sound", key),
@@ -520,11 +494,8 @@ mod tests {
             details: Default::default(),
         };
         let mut controller = SettingsController::new(vec![setting("Music"), setting("Sound")]);
-        controller.pinned = vec![
-            SettingId::new("Sound", "Sound"),
-            SettingId::new("Sound", "Music"),
-        ];
-        assert_eq!(controller.visible_indices(), vec![1, 0]);
+        controller.select_category(SettingsCategory::Audio);
+        assert_eq!(controller.visible_indices(), vec![0, 1]);
         controller.settings[0].value = AdvancedConfigValue::Bool(false);
         controller.modified_only = true;
         assert_eq!(controller.visible_indices(), vec![0]);

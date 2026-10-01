@@ -96,7 +96,7 @@ impl OptionsBook<'_> {
         &self,
         surface: &mut Surface,
         layout: &BookLayout,
-        tabs: &[(&str, usize); 7],
+        tabs: &[(&str, usize)],
         active: usize,
         tab_focused: bool,
         back: ClassicButtonState,

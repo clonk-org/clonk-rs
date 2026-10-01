@@ -22,7 +22,7 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
                 Setting {
                     id: SettingId::new(&section.name, &row.name),
                     label: row.name,
-                    category: SettingsCategory::System,
+                    category: SettingsCategory::Interface,
                     keywords: section.name.clone(),
                     advanced: true,
                     value: row.value,
@@ -52,20 +52,26 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
             match (setting.id.section.as_str(), setting.id.key.as_str()) {
                 ("Sound", "SoundVolume")
                 | ("Graphics", "DisplayMode")
-                | ("General", "GamepadEnabled") => 0,
+                | ("General", "GamepadEnabled")
+                | ("Chat", "Enhanced") => 0,
                 ("Sound", "MusicVolume")
                 | ("Graphics", "Scale")
-                | ("Controls", "GamepadGuiControl") => 1,
+                | ("Controls", "GamepadGuiControl")
+                | ("Chat", "TextSize") => 1,
                 ("Voice", "Enabled")
                 | ("Graphics", "ResolutionX")
-                | ("General", "ScrollSmooth") => 2,
-                ("Voice", "Volume") | ("Graphics", "ResolutionY") | ("Settings", "OpenKey") => 3,
-                ("Voice", "InputDevice") => 4,
-                ("Voice", "OutputDevice") => 5,
-                ("Voice", "ActivationMode") => 6,
-                ("Voice", "PushToTalkKey") => 7,
-                ("Voice", "ActivationThreshold") => 8,
-                ("Voice", "ActivationHangover") => 9,
+                | ("General", "ScrollSmooth")
+                | ("Chat", "Opacity") => 2,
+                ("Voice", "Volume")
+                | ("Graphics", "ResolutionY")
+                | ("Settings", "OpenKey")
+                | ("Chat", "Duration") => 3,
+                ("Voice", "InputDevice") | ("General", "FPS") => 4,
+                ("Voice", "OutputDevice") | ("Graphics", "ShowStats") => 5,
+                ("Voice", "ActivationMode") | ("General", "NoCrew") => 6,
+                ("Voice", "PushToTalkKey") | ("General", "DefCrewStrength") => 7,
+                ("Voice", "ActivationThreshold") | ("General", "Record") => 8,
+                ("Voice", "ActivationHangover") | ("General", "CompatProfile") => 9,
                 _ => binding_rank(&setting.id).unwrap_or(10),
             },
             setting.label.clone(),
@@ -236,13 +242,15 @@ fn describe(setting: &mut Setting) {
                 | "ConfigResetSafety"
                 | "Version"
         );
+    // Everything that is not sound, controls or the picture itself sits on
+    // General: the interface, games you start, networking and the program.
     setting.category = match section {
         "Sound" | "Voice" => Audio,
         "Controls" => Controls,
         name if name.starts_with("Gamepad") => Controls,
-        "Chat" | "Toasts" | "IRC" => Interface,
+        "General" if matches!(key, "GamepadEnabled" | "ScrollSmooth") => Controls,
         "Graphics"
-            if matches!(
+            if !matches!(
                 key,
                 "ShowPortraits"
                     | "ShowCrewNames"
@@ -257,35 +265,9 @@ fn describe(setting: &mut Setting) {
                     | "SplitscreenDividers"
             ) =>
         {
-            Interface
+            Display
         }
-        "Graphics" => Display,
-        "Network" | "Lobby" => Game,
-        "General"
-            if matches!(
-                key,
-                "FPS"
-                    | "Language"
-                    | "LanguageEx"
-                    | "FontName"
-                    | "FontSize"
-                    | "UseWhiteIngameChat"
-                    | "UseWhiteLobbyChat"
-                    | "ShowLogTimestamps"
-            ) =>
-        {
-            Interface
-        }
-        "General"
-            if matches!(
-                key,
-                "NoCrew" | "DefCrewStrength" | "Record" | "DebugMode" | "AllowScriptingInReplays"
-            ) =>
-        {
-            Game
-        }
-        "General" if matches!(key, "GamepadEnabled" | "ScrollSmooth") => Controls,
-        _ => System,
+        _ => Interface,
     };
     setting.details.policy = match (section, key) {
         ("Voice", _) | ("Chat", _) => Live,
@@ -767,13 +749,13 @@ mod tests {
             (
                 "Network",
                 "PortTCP",
-                SettingsCategory::Game,
+                SettingsCategory::Interface,
                 ApplyPolicy::NextConnection,
             ),
             (
                 "General",
                 "CompatProfile",
-                SettingsCategory::System,
+                SettingsCategory::Interface,
                 ApplyPolicy::Restart,
             ),
         ] {

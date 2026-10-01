@@ -336,30 +336,6 @@ impl GameApp {
         }
         let popup = !self.settings_cover_screen();
         let mut controller = SettingsController::new(crate::settings_catalog::catalog(&config));
-        controller.pinned = config
-            .get_in(Some("Settings"), "Favorites")
-            .map(|value| {
-                value
-                    .split(',')
-                    .filter_map(|id| id.split_once(':'))
-                    .map(|(section, key)| SettingId::new(section, key))
-                    .collect()
-            })
-            .unwrap_or_else(|| {
-                [
-                    ("Sound", "MusicVolume"),
-                    ("Sound", "SoundVolume"),
-                    ("Voice", "Enabled"),
-                    ("Voice", "InputDevice"),
-                    ("Voice", "Volume"),
-                    ("Graphics", "Scale"),
-                    ("Graphics", "DisplayMode"),
-                    ("Chat", "TextSize"),
-                ]
-                .into_iter()
-                .map(|(section, key)| SettingId::new(section, key))
-                .collect()
-            });
         controller.set_users = self.local_control_set_users();
         // In a game, start on the sets its players use, the first player's
         // device showing.

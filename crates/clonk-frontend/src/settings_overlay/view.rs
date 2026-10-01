@@ -129,7 +129,7 @@ pub struct SettingsLayout {
     pub search: IntRect,
     pub list: IntRect,
     pub footer: IntRect,
-    pub tabs: [IntRect; 7],
+    pub tabs: [IntRect; SettingsCategory::ALL.len()],
     pub back: IntRect,
 }
 
@@ -571,13 +571,7 @@ impl SettingsController {
                 }
             }
             KeyCode::Tab if control => {
-                let index = SettingsCategory::ALL
-                    .iter()
-                    .position(|c| *c == self.category)
-                    .unwrap_or(0);
-                self.select_category(
-                    SettingsCategory::ALL[(index + if shift { 6 } else { 1 }) % 7],
-                );
+                self.select_category(self.category.step(if shift { -1 } else { 1 }));
             }
             KeyCode::Tab => {
                 let order = self.focus_order();
@@ -649,13 +643,7 @@ impl SettingsController {
                     return Vec::new();
                 }
                 if let SettingsFocus::Category(category) = self.view.focus {
-                    let index = SettingsCategory::ALL
-                        .iter()
-                        .position(|c| *c == category)
-                        .unwrap_or(0);
-                    self.select_category(
-                        SettingsCategory::ALL[(index + if backwards { 6 } else { 1 }) % 7],
-                    );
+                    self.select_category(category.step(if backwards { -1 } else { 1 }));
                 } else {
                     let visible = self.visible_indices();
                     if !visible.is_empty() {
@@ -1065,19 +1053,17 @@ impl SettingsController {
                     self.view.message = "Clear search before resetting a category.".into();
                     return Vec::new();
                 }
-                if self.category != SettingsCategory::Quick {
-                    if self.page_reset_candidates().is_empty() {
-                        self.view.message = match self.control_set_page() {
-                            Some(set) => format!(
-                                "{} already uses its default {}.",
-                                set.label(),
-                                binding_noun(set.device, 2)
-                            ),
-                            None => "Every setting on this page is already at its default.".into(),
-                        };
-                    } else {
-                        self.view.reset_confirmation = true;
-                    }
+                if self.page_reset_candidates().is_empty() {
+                    self.view.message = match self.control_set_page() {
+                        Some(set) => format!(
+                            "{} already uses its default {}.",
+                            set.label(),
+                            binding_noun(set.device, 2)
+                        ),
+                        None => "Every setting on this page is already at its default.".into(),
+                    };
+                } else {
+                    self.view.reset_confirmation = true;
                 }
             }
             SettingsFocus::TestMicrophone => {
@@ -1443,8 +1429,7 @@ impl SettingsController {
     }
 
     /// Page-wide actions, inked along the footer: the view filters and
-    /// Reset page (Quick orders its pins instead), plus the voice page's
-    /// microphone test at the right.
+    /// Reset page, plus the voice page's microphone test at the right.
     pub(crate) fn footer_links(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
         let compact = layout.footer.w < 480;
         let y = layout.footer.y
@@ -1455,9 +1440,7 @@ impl SettingsController {
             } else {
                 42
             };
-        let specs = if self.category == SettingsCategory::Quick {
-            Vec::new()
-        } else if self.control_set_page().is_some() {
+        let specs = if self.control_set_page().is_some() {
             vec![(SettingsFocus::ResetCategory, 150)]
         } else {
             vec![
@@ -2213,9 +2196,6 @@ mod tests {
             .map(|(focus, _)| focus)
             .collect();
         assert_eq!(actions, vec![SettingsFocus::Reset]);
-        controller.pinned = vec![controller.settings[0].id.clone()];
-        controller.select_category(SettingsCategory::Quick);
-        assert!(controller.footer_links(&controller.layout()).is_empty());
     }
 
     #[test]
@@ -2396,13 +2376,13 @@ mod tests {
             id: SettingId::new("Network", "Comment"),
             label: "Comment".into(),
             keywords: String::new(),
-            category: SettingsCategory::Game,
+            category: SettingsCategory::Interface,
             advanced: false,
             value: AdvancedConfigValue::Text("old".into()),
             default: AdvancedConfigValue::Text(String::new()),
             details: Default::default(),
         }]);
-        controller.category = SettingsCategory::Game;
+        controller.category = SettingsCategory::Interface;
         controller.set_focus(SettingsFocus::Row(0));
         controller.key(KeyCode::Enter, false, false);
         controller.text("unfinished");

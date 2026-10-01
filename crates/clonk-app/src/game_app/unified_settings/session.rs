@@ -42,7 +42,7 @@ impl GameApp {
                     id: SettingId::new("Session", format!("{:?}", row.kind)),
                     label: format!("This match: {}", row.caption.trim_end_matches(':')),
                     keywords: "current session host lobby server game network rules".into(),
-                    category: SettingsCategory::Game,
+                    category: SettingsCategory::Interface,
                     advanced: false,
                     default: value.clone(),
                     value,

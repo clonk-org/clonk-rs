@@ -199,11 +199,7 @@ impl SettingsController {
                 surface,
                 body_font,
                 layout.list,
-                if self.category == SettingsCategory::Quick && self.query.is_empty() {
-                    "No quick settings are set up."
-                } else {
-                    "No matches. Try another term or clear the filters."
-                },
+                "No matches. Try another term or clear the filters.",
                 [40, 31, 21, 255],
                 gamma,
             );
