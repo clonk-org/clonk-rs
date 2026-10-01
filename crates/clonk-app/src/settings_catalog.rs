@@ -3,6 +3,7 @@
 use clonk_core::std_config::Config;
 use clonk_frontend::settings_overlay::{
     ApplyPolicy, ControlBinding, ControlDevice, ControlSet, Setting, SettingId, SettingsCategory,
+    SliderScale,
 };
 use clonk_frontend::startup_options_advanced::{AdvancedConfigChoice, AdvancedConfigValue};
 
@@ -210,6 +211,32 @@ pub(crate) fn gamepad_binding(id: &SettingId) -> Option<(usize, crate::input::Co
         .ok()?
         .checked_sub(1)?;
     Some((set, *crate::input::ControlBindingId::ALL.get(key)?))
+}
+
+/// Where the options book's fair crew slider stands for `strength`: the
+/// inverse of [`fair_crew_strength`], rounded where C++'s
+/// `FairCrewStrength2Slider` truncates (C4StartupOptionsDlg.cpp:1061-1065), so
+/// each step of the slider lands back on its own position.
+fn fair_crew_position(strength: i128) -> i128 {
+    ((strength.max(0) as f64 / 1000.0).powf(1.0 / 1.5) * 9.5)
+        .round()
+        .min(100.0) as i128
+}
+
+/// `C4StartupOptionsDlg::FairCrewSlider2Strength` (C4StartupOptionsDlg.cpp:1055-1059).
+fn fair_crew_strength(position: i128) -> i128 {
+    i128::from(
+        clonk_frontend::startup_options_dlg::fair_crew_slider_to_strength(
+            position.clamp(0, 100) as i32
+        ),
+    )
+}
+
+/// The rank a fair crew of `strength` fights at, as the game announces it
+/// ("Activated Fair Crew, rank %s").
+fn fair_crew_rank_label(strength: i128) -> String {
+    let strength = strength.clamp(0, i128::from(i32::MAX)) as i32;
+    format!("Rank {}", clonk_engine::fair_crew_rank(strength, 1000))
 }
 
 /// A controller's recorded axis calibration: its set, axis and which value.
@@ -471,8 +498,8 @@ fn describe(setting: &mut Setting) {
         )),
         ("General", "DefCrewStrength") => Some((
             "Fair crew strength",
-            "Default crew strength for future games you create.",
-            "rules host",
+            "The rank every Clonk fights at in games you create with a fair crew.",
+            "rules host rank",
         )),
         ("General", "CompatProfile") => Some((
             "Compatibility profile",
@@ -594,6 +621,14 @@ fn describe(setting: &mut Setting) {
                 *max = high;
             }
         }
+    }
+    if (section, key) == ("General", "DefCrewStrength") {
+        setting.details.slider = Some(SliderScale {
+            positions: 100,
+            position: fair_crew_position,
+            value: fair_crew_strength,
+            label: fair_crew_rank_label,
+        });
     }
     // C++ stores an int but offers it as a check box
     // (C4StartupOptionsDlg.cpp:331,433-435).
@@ -912,6 +947,47 @@ mod tests {
                 "Camera smoothing",
                 "Open settings shortcut"
             ]
+        );
+    }
+
+    #[test]
+    fn unified_catalog_sets_fair_crew_strength_on_the_options_books_rank_slider() {
+        let mut config = Config::new();
+        config.set_in(Some("General"), "DefCrewStrength", "19574");
+        let rows = catalog(&config);
+        let strength = rows
+            .iter()
+            .find(|row| row.id.section == "General" && row.id.key == "DefCrewStrength")
+            .unwrap();
+        let scale = strength
+            .details
+            .slider
+            .expect("a slider, as in the options book");
+        assert_eq!(scale.positions, 100);
+        for position in [0, 1, 9, 69, 100] {
+            // C4StartupOptionsDlg.cpp:1055-1059 stores what a position means.
+            assert_eq!(
+                (scale.value)(position),
+                i128::from(
+                    clonk_frontend::startup_options_dlg::fair_crew_slider_to_strength(
+                        position as i32
+                    )
+                )
+            );
+            assert_eq!(
+                (scale.position)((scale.value)(position)),
+                position,
+                "each step lands back on its position"
+            );
+        }
+        assert_eq!((scale.label)(19574), "Rank 7");
+        assert_eq!((scale.label)(1000), "Rank 1");
+        assert!(
+            matches!(
+                strength.default,
+                AdvancedConfigValue::Integer { value: 1000, .. }
+            ),
+            "Reset restores the native default exactly"
         );
     }
 

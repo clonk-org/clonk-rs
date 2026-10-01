@@ -255,26 +255,20 @@ impl SettingsController {
                 continue;
             }
             let label = value_label(setting);
-            if let AdvancedConfigValue::Integer { value, min, max } = setting.value {
-                if max > min
-                    && max - min <= 1000
-                    && !setting.details.binding
-                    && setting.details.policy != ApplyPolicy::DisplayPreview
-                {
-                    let track = slider_rect(rect);
-                    book.slider(
-                        surface,
-                        track,
-                        (value - min) as f64 / (max - min) as f64,
-                        gamma,
-                    );
-                    let number = IntRect::new(track.x + track.w + 6, value_rect.y, 40, 26);
-                    if focused {
-                        book.field(surface, number, gamma);
-                    }
-                    text(surface, body_font, number, &label, color, gamma);
-                    continue;
+            if let Some(fraction) = slider_fraction(setting) {
+                let track = slider_rect(rect);
+                book.slider(surface, track, fraction, gamma);
+                let number = IntRect::new(
+                    track.x + track.w + 6,
+                    value_rect.y,
+                    value_rect.x + value_rect.w - track.x - track.w - 6,
+                    26,
+                );
+                if focused {
+                    book.field(surface, number, gamma);
                 }
+                text(surface, body_font, number, &label, color, gamma);
+                continue;
             }
             if matches!(setting.value, AdvancedConfigValue::Choice { .. }) {
                 book.combo(surface, value_rect, focused, gamma);

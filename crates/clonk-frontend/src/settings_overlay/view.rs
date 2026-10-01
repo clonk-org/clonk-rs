@@ -891,6 +891,9 @@ impl SettingsController {
                 } else {
                     match setting.value {
                         AdvancedConfigValue::Bool(_) => "Enter: toggle",
+                        AdvancedConfigValue::Integer { .. } if setting.details.slider.is_some() => {
+                            "Left/Right: adjust"
+                        }
                         AdvancedConfigValue::Integer { .. } => {
                             "Left/Right: adjust · Enter: type a value"
                         }
@@ -1012,6 +1015,8 @@ impl SettingsController {
                 match setting.value {
                     AdvancedConfigValue::Bool(_) => return self.adjust(index, 1),
                     AdvancedConfigValue::Choice { .. } => self.open_choices(index),
+                    // Its positions, not its stored values, are what players set.
+                    AdvancedConfigValue::Integer { .. } if setting.details.slider.is_some() => {}
                     _ => {
                         let mut edit = RenameEdit::new(setting.value.serialized(), None);
                         edit.select_all();
@@ -1088,9 +1093,11 @@ impl SettingsController {
         let value = match &setting.value {
             AdvancedConfigValue::Bool(value) => AdvancedConfigValue::Bool(!value),
             AdvancedConfigValue::Integer { value, min, max } => AdvancedConfigValue::Integer {
-                value: value
-                    .saturating_add(direction * setting.details.step.max(1))
-                    .clamp(*min, *max),
+                value: match setting.details.slider {
+                    Some(scale) => scale.step(*value, direction),
+                    None => value.saturating_add(direction * setting.details.step.max(1)),
+                }
+                .clamp(*min, *max),
                 min: *min,
                 max: *max,
             },
@@ -1165,9 +1172,7 @@ impl SettingsController {
                 let track = slider_rect(row);
                 let setting = &self.settings[index];
                 if contains(track, point)
-                    && !setting.details.binding
-                    && setting.details.policy != ApplyPolicy::DisplayPreview
-                    && matches!(setting.value, AdvancedConfigValue::Integer { min, max, .. } if max > min && max - min <= 1000)
+                    && slider_fraction(setting).is_some()
                     && self.editable(index)
                 {
                     self.view.edit = None;
@@ -1263,7 +1268,11 @@ impl SettingsController {
         };
         let track = slider_rect(row);
         let fraction = ((point.x - (track.x + 24) as f32) / (track.w - 48) as f32).clamp(0.0, 1.0);
-        let next = min + ((max - min) as f32 * fraction).round() as i128;
+        let next = match setting.details.slider {
+            Some(scale) => (scale.value)((scale.positions as f32 * fraction).round() as i128),
+            None => min + ((max - min) as f32 * fraction).round() as i128,
+        }
+        .clamp(min, max);
         if next == value {
             return Vec::new();
         }
@@ -1484,7 +1493,10 @@ pub(crate) fn formatted_value(setting: &Setting, value: &AdvancedConfigValue) ->
             }),
         AdvancedConfigValue::Bool(on) => if *on { "On" } else { "Off" }.into(),
         _ if setting.id.key.to_lowercase().contains("password") => "••••••".into(),
-        AdvancedConfigValue::Integer { value, .. } => format!("{value}{}", setting.details.unit),
+        AdvancedConfigValue::Integer { value, .. } => match setting.details.slider {
+            Some(scale) => (scale.label)(*value),
+            None => format!("{value}{}", setting.details.unit),
+        },
         _ => value.serialized(),
     }
 }
@@ -1544,6 +1556,23 @@ fn binding_noun(device: ControlDevice, count: usize) -> &'static str {
     }
 }
 
+/// Where a setting's slider stands, from 0 to 1, when it is shown as one:
+/// a scaled setting, or a whole number with a short range.
+pub(crate) fn slider_fraction(setting: &Setting) -> Option<f64> {
+    let AdvancedConfigValue::Integer { value, min, max } = setting.value else {
+        return None;
+    };
+    if setting.details.binding || setting.details.policy == ApplyPolicy::DisplayPreview {
+        return None;
+    }
+    match setting.details.slider {
+        Some(scale) => {
+            Some(((scale.position)(value) as f64 / scale.positions.max(1) as f64).clamp(0.0, 1.0))
+        }
+        None => (max > min && max - min <= 1000).then(|| (value - min) as f64 / (max - min) as f64),
+    }
+}
+
 /// Where a link inked into a row sits: just left of the row's value.
 pub(crate) fn row_link_rect(row: IntRect) -> IntRect {
     IntRect::new(row.x + row.w - 174 - 56, row.y + 3, 48, row.h - 6)
@@ -1553,8 +1582,9 @@ fn value_rect(row: IntRect) -> IntRect {
     IntRect::new(row.x + row.w - 174, row.y + 2, 174, 26)
 }
 
+/// A slider's track, with room after it for a label such as "Rank 10".
 fn slider_rect(row: IntRect) -> IntRect {
-    IntRect::new(row.x + row.w - 174, row.y + 9, 128, 16)
+    IntRect::new(row.x + row.w - 174, row.y + 9, 112, 16)
 }
 
 fn contains(rect: IntRect, point: GuiPoint) -> bool {
@@ -2114,6 +2144,52 @@ mod tests {
         controller.pointer(centre, true);
         controller.pointer(centre, false);
         assert!(controller.view.microphone_test_open);
+    }
+
+    /// Fair crew strength as the options book's slider holds it: positions
+    /// linear in rank, strength exponential (C4StartupOptionsDlg.cpp:1055-1065).
+    fn crew_strength(strength: i128) -> Setting {
+        let value = |value| AdvancedConfigValue::Integer {
+            value,
+            min: 0,
+            max: i128::from(i32::MAX),
+        };
+        let mut setting = preference("DefCrewStrength", value(strength));
+        setting.default = value(1000);
+        setting.details.slider = Some(SliderScale {
+            positions: 100,
+            position: |strength| ((strength as f64 / 1000.0).powf(1.0 / 1.5) * 9.5).round() as i128,
+            value: |position| ((position as f64 / 9.5).powf(1.5) * 1000.0) as i128,
+            label: |strength| format!("Rank {}", strength / 1000),
+        });
+        setting
+    }
+
+    #[test]
+    fn a_scaled_slider_moves_by_position_and_stores_what_the_position_means() {
+        let strength = |position: f64| ((position / 9.5).powf(1.5) * 1000.0) as i128;
+        let mut controller = SettingsController::new(vec![crew_strength(19574)]);
+        controller.select_category(SettingsCategory::Display);
+        controller.set_focus(SettingsFocus::Row(0));
+        assert!(matches!(
+            controller.key(KeyCode::Right, false, false).as_slice(),
+            [SettingsAction::Change(0, AdvancedConfigValue::Integer { value, .. })] if *value == strength(70.0)
+        ));
+        assert_eq!(value_label(&controller.settings[0]), "Rank 19");
+        assert!(controller.input_hint().starts_with("Left/Right: adjust · "));
+        assert!(!controller.input_hint().contains("type a value"));
+        assert!(controller.key(KeyCode::Enter, false, false).is_empty());
+        assert!(!controller.editing(), "no number field for a scaled slider");
+        let layout = controller.layout();
+        let track = slider_rect(controller.row_rect(&layout, 0).unwrap());
+        let actions = controller.pointer(
+            GuiPoint::new((track.x + track.w - 24) as f32, (track.y + 8) as f32),
+            true,
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [SettingsAction::Change(0, AdvancedConfigValue::Integer { value, .. })] if *value == strength(100.0)
+        ));
     }
 
     #[test]

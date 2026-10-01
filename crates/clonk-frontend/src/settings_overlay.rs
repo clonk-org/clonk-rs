@@ -158,6 +158,24 @@ pub struct ControlBinding {
     pub command: usize,
 }
 
+/// A slider whose positions are not the value it stores, such as fair crew
+/// strength: positions `0..=positions` are converted to and from the value,
+/// and `label` names a value for the player.
+#[derive(Clone, Copy, Debug)]
+pub struct SliderScale {
+    pub positions: i128,
+    pub position: fn(i128) -> i128,
+    pub value: fn(i128) -> i128,
+    pub label: fn(i128) -> String,
+}
+
+impl SliderScale {
+    /// The value `steps` positions away from `value`, kept on the slider.
+    fn step(self, value: i128, steps: i128) -> i128 {
+        (self.value)(((self.position)(value) + steps).clamp(0, self.positions))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ApplyPolicy {
     #[default]
@@ -201,6 +219,8 @@ pub struct SettingDetails {
     /// A control set's binding; the category lists one control set at a
     /// time.
     pub control: Option<ControlBinding>,
+    /// How the setting's slider maps positions to values, when not linearly.
+    pub slider: Option<SliderScale>,
 }
 
 #[derive(Clone, Debug)]
