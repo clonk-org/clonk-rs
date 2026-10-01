@@ -20,6 +20,16 @@ const GRID_ROW_MAX: i32 = 64;
 /// The width of a slider read by the words at its ends: "weak", the track,
 /// "strong".
 const SLIDER_WITH_ENDS: i32 = 240;
+/// The height of a section heading in a settings list.
+const HEADING_HEIGHT: i32 = 26;
+
+/// One line of a settings list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListLine {
+    /// The heading of the section the setting at this index opens.
+    Heading(usize),
+    Setting(usize),
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsFocus {
@@ -951,11 +961,81 @@ impl SettingsController {
         self.ensure_visible();
     }
 
+    /// How many lines the list shows from its scroll position.
     fn page_size(&self) -> usize {
         if self.control_set_page().is_some() {
             return self.visible_indices().len().max(1);
         }
-        (self.layout().list.h / self.row_height()).max(1) as usize
+        self.lines_in_view(&self.layout()).len().max(1)
+    }
+
+    /// The list's lines: each visible setting, after the heading of the
+    /// section it opens. Search results and a control set's grid have none.
+    pub(crate) fn list_lines(&self) -> Vec<ListLine> {
+        let sections = self.query.trim().is_empty() && self.control_set_page().is_none();
+        let mut current = None;
+        self.visible_indices()
+            .into_iter()
+            .flat_map(|index| {
+                let heading = self.settings[index].details.heading;
+                let opens = sections && heading.is_some() && heading != current;
+                current = heading;
+                opens
+                    .then_some(ListLine::Heading(index))
+                    .into_iter()
+                    .chain(std::iter::once(ListLine::Setting(index)))
+            })
+            .collect()
+    }
+
+    fn line_height(&self, line: ListLine) -> i32 {
+        match line {
+            ListLine::Heading(_) => HEADING_HEIGHT,
+            ListLine::Setting(_) => self.row_height(),
+        }
+    }
+
+    /// The lines that fit from the scroll position, each where it sits. A
+    /// heading waits for room for its first setting.
+    pub(crate) fn lines_in_view(&self, layout: &SettingsLayout) -> Vec<(ListLine, IntRect)> {
+        let bottom = layout.list.y + layout.list.h;
+        let mut y = layout.list.y;
+        let mut lines: Vec<_> = self
+            .list_lines()
+            .into_iter()
+            .skip(self.view.scroll)
+            .map_while(|line| {
+                let height = self.line_height(line);
+                (y + height <= bottom).then(|| {
+                    let rect = IntRect::new(layout.list.x, y, layout.list.w - 14, height - 3);
+                    y += height;
+                    (line, rect)
+                })
+            })
+            .collect();
+        if matches!(lines.last(), Some((ListLine::Heading(_), _))) {
+            lines.pop();
+        }
+        lines
+    }
+
+    /// The furthest the list scrolls: until its last line is in view.
+    fn max_scroll(&self) -> usize {
+        if self.control_set_page().is_some() {
+            return 0;
+        }
+        let lines = self.list_lines();
+        let room = self.layout().list.h;
+        let mut used = 0;
+        let fitting = lines
+            .iter()
+            .rev()
+            .take_while(|line| {
+                used += self.line_height(**line);
+                used <= room
+            })
+            .count();
+        lines.len() - fitting
     }
 
     fn row_height(&self) -> i32 {
@@ -967,18 +1047,37 @@ impl SettingsController {
     }
 
     fn ensure_visible(&mut self) {
-        let visible = self.visible_indices();
-        let count = self.page_size();
-        self.view.scroll = self.view.scroll.min(visible.len().saturating_sub(count));
-        if let SettingsFocus::Row(index) = self.view.focus {
-            if let Some(position) = visible.iter().position(|i| *i == index) {
-                if position < self.view.scroll {
-                    self.view.scroll = position;
-                }
-                if position >= self.view.scroll + count {
-                    self.view.scroll = position + 1 - count;
-                }
-            }
+        self.view.scroll = self.view.scroll.min(self.max_scroll());
+        let SettingsFocus::Row(index) = self.view.focus else {
+            return;
+        };
+        if self.control_set_page().is_some() {
+            return;
+        }
+        let lines = self.list_lines();
+        let Some(position) = lines
+            .iter()
+            .position(|line| *line == ListLine::Setting(index))
+        else {
+            return;
+        };
+        // A section's first setting brings its heading into view.
+        let top = position
+            .checked_sub(1)
+            .filter(|above| matches!(lines[*above], ListLine::Heading(_)))
+            .unwrap_or(position);
+        if top < self.view.scroll {
+            self.view.scroll = top;
+        }
+        let room = self.layout().list.h;
+        while self.view.scroll < position
+            && lines[self.view.scroll..=position]
+                .iter()
+                .map(|line| self.line_height(*line))
+                .sum::<i32>()
+                > room
+        {
+            self.view.scroll += 1;
         }
     }
 
@@ -990,11 +1089,11 @@ impl SettingsController {
             self.scroll_choices(amount);
             return;
         }
-        self.view.scroll = self.view.scroll.saturating_add_signed(amount as isize).min(
-            self.visible_indices()
-                .len()
-                .saturating_sub(self.page_size()),
-        );
+        self.view.scroll = self
+            .view
+            .scroll
+            .saturating_add_signed(amount as isize)
+            .min(self.max_scroll());
     }
 
     fn editable(&mut self, index: usize) -> bool {
@@ -1247,10 +1346,7 @@ impl SettingsController {
             .map(|(focus, _)| focus);
         if let Some(offset) = self.view.scroll_drag {
             if let Some((track, thumb)) = self.scrollbar() {
-                let maximum = self
-                    .visible_indices()
-                    .len()
-                    .saturating_sub(self.page_size());
+                let maximum = self.max_scroll();
                 let travel = (track.h - thumb.h).max(1);
                 self.view.scroll = (((point.y as i32 - track.y - offset).clamp(0, travel) as f64
                     / f64::from(travel))
@@ -1290,15 +1386,16 @@ impl SettingsController {
     }
 
     fn scrollbar(&self) -> Option<(IntRect, IntRect)> {
-        let count = self.visible_indices().len();
-        let page = self.page_size();
-        if count <= page {
+        let maximum = self.max_scroll();
+        if maximum == 0 {
             return None;
         }
+        let count = self.list_lines().len();
+        let page = self.page_size();
         let list = self.layout().list;
         let track = IntRect::new(list.x + list.w - 10, list.y, 10, list.h);
         let height = (list.h * page as i32 / count as i32).max(20).min(list.h);
-        let top = (list.h - height) * self.view.scroll as i32 / (count - page) as i32;
+        let top = (list.h - height) * self.view.scroll.min(maximum) as i32 / maximum as i32;
         Some((track, IntRect::new(track.x, track.y + top, track.w, height)))
     }
 
@@ -1339,17 +1436,10 @@ impl SettingsController {
                 .flatten()
                 .map(|binding| grid_cell(layout, binding.command));
         }
-        let position = self.visible_indices().iter().position(|i| *i == index)?;
-        (position >= self.view.scroll && position < self.view.scroll + self.page_size()).then(
-            || {
-                IntRect::new(
-                    layout.list.x,
-                    layout.list.y + (position - self.view.scroll) as i32 * self.row_height(),
-                    layout.list.w - 14,
-                    self.row_height() - 3,
-                )
-            },
-        )
+        self.lines_in_view(layout)
+            .into_iter()
+            .find(|(line, _)| *line == ListLine::Setting(index))
+            .map(|(_, rect)| rect)
     }
 
     fn targets(&self, layout: &SettingsLayout) -> Vec<(SettingsFocus, IntRect)> {
@@ -2240,6 +2330,94 @@ mod tests {
             ),
             "Right never lowers a strength the slider cannot show"
         );
+    }
+
+    /// A General setting in the section under `heading`.
+    fn general(key: &str, heading: &'static str) -> Setting {
+        let mut setting = preference(key, AdvancedConfigValue::Bool(true));
+        setting.category = SettingsCategory::Interface;
+        setting.details.heading = Some(heading);
+        setting
+    }
+
+    #[test]
+    fn general_settings_sit_under_the_heading_of_their_section() {
+        let mut controller = SettingsController::new(vec![
+            general("Enhanced", "Chat"),
+            general("TextSize", "Chat"),
+            general("FPS", "On screen"),
+        ]);
+        controller.select_category(SettingsCategory::Interface);
+        assert_eq!(
+            controller.list_lines(),
+            vec![
+                ListLine::Heading(0),
+                ListLine::Setting(0),
+                ListLine::Setting(1),
+                ListLine::Heading(2),
+                ListLine::Setting(2),
+            ]
+        );
+        let layout = controller.layout();
+        let first = controller.row_rect(&layout, 0).unwrap();
+        assert!(
+            first.y >= layout.list.y + HEADING_HEIGHT,
+            "below its heading"
+        );
+        controller.set_focus(SettingsFocus::Row(1));
+        controller.key(KeyCode::Down, false, false);
+        assert_eq!(
+            controller.view.focus,
+            SettingsFocus::Row(2),
+            "headings are not stops"
+        );
+        controller.query = "fps".into();
+        assert_eq!(
+            controller.list_lines(),
+            vec![ListLine::Setting(2)],
+            "search results stand alone"
+        );
+    }
+
+    #[test]
+    fn scrolling_keeps_the_focused_setting_and_its_heading_in_view() {
+        let mut controller = SettingsController::new(
+            ["Chat", "On screen", "New games"]
+                .into_iter()
+                .flat_map(|heading| (0..6).map(move |n| general(&format!("{heading}{n}"), heading)))
+                .collect(),
+        );
+        controller.select_category(SettingsCategory::Interface);
+        let layout = controller.layout();
+        controller.set_focus(SettingsFocus::Row(17));
+        assert!(
+            controller.row_rect(&layout, 17).is_some(),
+            "the last setting scrolls into view"
+        );
+        controller.set_focus(SettingsFocus::Row(6));
+        assert!(
+            controller
+                .lines_in_view(&layout)
+                .iter()
+                .any(|(line, _)| *line == ListLine::Heading(6)),
+            "a section's first setting brings its heading"
+        );
+        controller.scroll(1000);
+        assert!(
+            controller.row_rect(&layout, 17).is_some(),
+            "scrolling stops with the last line in view"
+        );
+        assert!(controller.scrollbar().is_some());
+        for scroll in 0..=controller.max_scroll() {
+            controller.view.scroll = scroll;
+            assert!(
+                matches!(
+                    controller.lines_in_view(&layout).last(),
+                    Some((ListLine::Setting(_), _))
+                ),
+                "a heading never ends the view without its first setting (scroll {scroll})"
+            );
+        }
     }
 
     #[test]

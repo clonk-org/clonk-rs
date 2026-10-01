@@ -680,6 +680,20 @@ fn describe(setting: &mut Setting) {
             setting.details.policy.label()
         );
     }
+    setting.details.heading = (setting.category == Interface).then(|| general_section(setting));
+}
+
+/// The section of the General page a setting is listed under.
+fn general_section(setting: &Setting) -> &'static str {
+    if setting.advanced {
+        return "Advanced";
+    }
+    match (setting.id.section.as_str(), setting.id.key.as_str()) {
+        ("Chat", _) => "Chat",
+        ("General", "FPS") | ("Graphics", "ShowStats") => "On screen",
+        ("General", "NoCrew" | "DefCrewStrength" | "Record") => "New games",
+        _ => "Program",
+    }
 }
 
 /// Interface scales a player picks from; a saved value off these steps
@@ -983,6 +997,41 @@ mod tests {
                 AdvancedConfigValue::Integer { value: 1000, .. }
             ),
             "Reset restores the native default exactly"
+        );
+    }
+
+    #[test]
+    fn unified_catalog_lists_general_in_headed_sections() {
+        let rows = catalog(&Config::new());
+        let heading = |advanced: bool| -> Vec<Option<&str>> {
+            rows.iter()
+                .filter(|row| {
+                    row.category == SettingsCategory::Interface && row.advanced == advanced
+                })
+                .map(|row| row.details.heading)
+                .collect()
+        };
+        assert_eq!(
+            heading(false),
+            [
+                ["Chat"; 4].as_slice(),
+                &["On screen"; 2],
+                &["New games"; 3],
+                &["Program"],
+            ]
+            .concat()
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>()
+        );
+        assert!(heading(true)
+            .iter()
+            .all(|heading| *heading == Some("Advanced")));
+        assert!(
+            rows.iter()
+                .filter(|row| row.category != SettingsCategory::Interface)
+                .all(|row| row.details.heading.is_none()),
+            "only General is split into sections"
         );
     }
 

@@ -49,6 +49,7 @@ impl GameApp {
                     details: SettingDetails {
                         description: row.tooltip,
                         scope: "This match · synchronized host control".into(),
+                        heading: Some("This match"),
                         policy: ApplyPolicy::Live,
                         exclude_from_category_reset: true,
                         display_value: Some(row.value),

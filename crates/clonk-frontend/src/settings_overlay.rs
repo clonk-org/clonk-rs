@@ -231,6 +231,8 @@ pub struct SettingDetails {
     pub control: Option<ControlBinding>,
     /// How the setting's slider maps positions to values, when not linearly.
     pub slider: Option<SliderScale>,
+    /// The heading of the section the setting is listed under on its page.
+    pub heading: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]

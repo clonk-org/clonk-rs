@@ -633,6 +633,35 @@ impl OptionsBook<'_> {
         }
     }
 
+    /// A section heading inked onto the page: its name, and a rule running
+    /// on to the page's edge.
+    pub fn section_heading(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        label: &str,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let font = &self.fonts.book;
+        let width = font.measure(label, true).0;
+        let y = rect.y + rect.h - font.line_height;
+        font.draw_with_gamma(
+            surface,
+            rect.x,
+            y,
+            label,
+            PAGE_TAB_INK_RGBA,
+            TextAlign::Left,
+            true,
+            gamma,
+        );
+        let (start, end) = (rect.x + width + 10, rect.x + rect.w);
+        if start < end {
+            let rule = y + font.line_height / 2 + 1;
+            draw_line_dw(surface, start, rule, end, rule, PAGE_TAB_RULE_INK, gamma);
+        }
+    }
+
     /// A red frame inked around what the player's last input ran into.
     pub fn warning_frame(&self, surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {
         for inset in 0..2 {

@@ -202,19 +202,23 @@ impl SettingsController {
                 gamma,
             );
         }
-        for index in visible
-            .iter()
-            .copied()
-            .skip(self.view.scroll)
-            .take(self.page_size())
-        {
-            let Some(rect) = self.row_rect(&layout, index) else {
-                continue;
-            };
-            if self.control_set_page().is_some() {
-                self.render_binding_cell(surface, &book, rect, index, gamma);
-            } else {
-                self.render_setting_row(surface, &book, rect, index, gamma);
+        if self.control_set_page().is_some() {
+            for index in visible {
+                if let Some(cell) = self.row_rect(&layout, index) {
+                    self.render_binding_cell(surface, &book, cell, index, gamma);
+                }
+            }
+        } else {
+            for (line, rect) in self.lines_in_view(&layout) {
+                match line {
+                    ListLine::Heading(index) => {
+                        let heading = self.settings[index].details.heading.unwrap_or_default();
+                        book.section_heading(surface, rect, heading, gamma);
+                    }
+                    ListLine::Setting(index) => {
+                        self.render_setting_row(surface, &book, rect, index, gamma)
+                    }
+                }
             }
         }
         self.render_row_actions(surface, &book, &layout, gamma);
