@@ -51,20 +51,8 @@ impl SettingsController {
             self.view.window,
             gamma,
         );
-        if let Some(window) = self.view.window {
-            text(
-                surface,
-                &gui.caption,
-                IntRect::new(
-                    layout.back.x + layout.back.w + 24,
-                    layout.back.y + 2,
-                    window.x + window.w - layout.back.x - layout.back.w - 48,
-                    28,
-                ),
-                &self.view.context,
-                [255, 255, 190, 255],
-                gamma,
-            );
+        if self.view.window.is_some() {
+            self.render_popup_header(surface, &book, &layout, small_font, gamma);
         }
         if self.view.microphone_test_open {
             self.render_microphone_test(surface, &book, gamma);
@@ -592,6 +580,48 @@ impl SettingsController {
             text(surface, font, chip, &key, [140, 124, 100, 255], gamma);
         } else {
             book.key_chip(surface, font, chip, &key, ink, gamma);
+        }
+    }
+
+    /// A popup's header in its paper's margin: what the screen behind is
+    /// doing, and the mark that closes settings.
+    fn render_popup_header(
+        &self,
+        surface: &mut Surface,
+        book: &OptionsBook,
+        layout: &SettingsLayout,
+        font: &ClonkFont,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let close = layout.back;
+        let closing = [SettingsFocus::Close, SettingsFocus::CloseMicrophoneTest];
+        let emphasized = closing.contains(&self.view.focus)
+            || self
+                .view
+                .hover
+                .is_some_and(|focus| closing.contains(&focus))
+            || self
+                .view
+                .pressed
+                .is_some_and(|focus| closing.contains(&focus));
+        book.ink_close(surface, close, emphasized, gamma);
+        // Where room is short, the status keeps its first clause.
+        let end = close.x - 10;
+        let context = self.view.context.as_str();
+        let first = context.split(" · ").next().unwrap_or_default();
+        if let Some((shown, width)) = [context, first]
+            .into_iter()
+            .map(|candidate| (candidate, font.measure(candidate, false).0 + 6))
+            .find(|(_, width)| *width <= end - layout.list.x)
+        {
+            text(
+                surface,
+                font,
+                IntRect::new(end - width, close.y, width, close.h),
+                shown,
+                [96, 80, 60, 255],
+                gamma,
+            );
         }
     }
 

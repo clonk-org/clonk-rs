@@ -126,9 +126,30 @@ impl OptionsBook<'_> {
                 gamma,
             );
         }
-        let b = layout.back_button;
+        if window.is_none() {
+            self.back_button(surface, layout.back_button, back, gamma);
+        }
+        for (index, tab) in tabs.iter().enumerate().filter(|(i, _)| *i != active) {
+            self.tab(surface, layout, index, *tab, gamma);
+        }
+        draw_image_bilinear_white_pad(surface, &gui_rect(layout.paper), &self.assets.paper, gamma);
+        self.tab(surface, layout, active, tabs[active], gamma);
+        if tab_focused {
+            let mut rect = layout.focus_highlight;
+            rect.y += layout.tab_clips[active].1 - layout.tab_clips[0].1;
+            self.highlight(surface, rect, gamma);
+        }
+    }
+
+    fn back_button(
+        &self,
+        surface: &mut Surface,
+        b: IntRect,
+        state: ClassicButtonState,
+        gamma: Option<&GammaRamp>,
+    ) {
         draw_bar(surface, &gui_rect(b), &self.assets.button, gamma);
-        if back.highlighted {
+        if state.highlighted {
             self.highlight(
                 surface,
                 IntRect::new(b.x + 5, b.y + 3, b.w - 10, b.h - 6),
@@ -136,7 +157,7 @@ impl OptionsBook<'_> {
             );
         }
         let font = self.gui.button_font(b.h);
-        let offset = i32::from(back.pressed);
+        let offset = i32::from(state.pressed);
         font.draw_with_gamma(
             surface,
             (b.x + b.x + b.w - 1) / 2 + offset,
@@ -147,15 +168,38 @@ impl OptionsBook<'_> {
             true,
             gamma,
         );
-        for (index, tab) in tabs.iter().enumerate().filter(|(i, _)| *i != active) {
-            self.tab(surface, layout, index, *tab, gamma);
+    }
+
+    /// A close mark inked onto the page: a cross, boxed while it has focus or
+    /// the pointer.
+    pub fn ink_close(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        emphasized: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        if emphasized {
+            self.ink_button(surface, rect, "", true, gamma);
         }
-        draw_image_bilinear_white_pad(surface, &gui_rect(layout.paper), &self.assets.paper, gamma);
-        self.tab(surface, layout, active, tabs[active], gamma);
-        if tab_focused {
-            let mut rect = layout.focus_highlight;
-            rect.y += layout.tab_clips[active].1 - layout.tab_clips[0].1;
-            self.highlight(surface, rect, gamma);
+        let inset = rect.w / 4;
+        let (left, top) = (rect.x + inset, rect.y + inset);
+        let (right, bottom) = (rect.x + rect.w - 1 - inset, rect.y + rect.h - 1 - inset);
+        for offset in 0..2 {
+            ink_segment(
+                surface,
+                (left + offset, top),
+                (right + offset, bottom),
+                PAGE_TAB_INK,
+                gamma,
+            );
+            ink_segment(
+                surface,
+                (right + offset, top),
+                (left + offset, bottom),
+                PAGE_TAB_INK,
+                gamma,
+            );
         }
     }
 

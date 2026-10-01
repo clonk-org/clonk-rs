@@ -150,7 +150,9 @@ impl SettingsLayout {
         }
     }
 
-    fn from_book(book: &BookLayout) -> Self {
+    /// The page laid out on the book's sheet. A `popup` book closes from a
+    /// mark inked on its paper, as it has no Back button beneath it.
+    fn from_book(book: &BookLayout, popup: bool) -> Self {
         let sheet = book.sheet;
         let margin = if sheet.w < 500 { 8 } else { 32 };
         let x = (sheet.x + margin).max(book.tab_clips[0].0 + 128);
@@ -174,7 +176,12 @@ impl SettingsLayout {
                     book.tab_height - 8,
                 )
             }),
-            back: book.back_button,
+            back: if popup {
+                // Clear of the paper's torn top edge.
+                IntRect::new(x + w - 20, sheet.y - 18, 18, 18)
+            } else {
+                book.back_button
+            },
         }
     }
 }
@@ -192,7 +199,7 @@ impl SettingsController {
     ) {
         self.resize(width, height);
         self.view.window = popup.then(|| OptionsBook::window(width, height));
-        let layout = SettingsLayout::from_book(&self.book_layout(gui, book));
+        let layout = SettingsLayout::from_book(&self.book_layout(gui, book), popup);
         if self.view.layout != Some(layout) {
             self.view.layout = Some(layout);
             self.ensure_visible();
@@ -2037,6 +2044,44 @@ mod tests {
             controller.controls_page,
             ControlsPage::Controller,
             "the press still does what it targets"
+        );
+    }
+
+    /// The options book as `OptionsBook::layout` places it in the popup
+    /// window over an 800x600 screen.
+    fn book_in_an_800x600_popup() -> BookLayout {
+        BookLayout {
+            title_center: (400, 64),
+            back_button: IntRect::new(106, 522, 153, 32),
+            tabular: IntRect::new(76, 101, 648, 426),
+            paper: IntRect::new(166, 104, 558, 423),
+            sheet: IntRect::new(186, 131, 508, 364),
+            tab_clips: std::array::from_fn(|i| (76, 110 + i as i32 * 58)),
+            tab_icons: [(0, 0); 7],
+            tab_captions: [(0, 0); 7],
+            focus_highlight: IntRect::new(0, 0, 0, 0),
+            tab_height: 66,
+            tab_icon_size: 32,
+        }
+    }
+
+    #[test]
+    fn a_popup_closes_from_a_mark_on_its_paper_instead_of_the_back_button() {
+        let book = book_in_an_800x600_popup();
+        assert_eq!(
+            SettingsLayout::from_book(&book, false).back,
+            book.back_button,
+            "the whole-screen book keeps its Back button"
+        );
+        let popup = SettingsLayout::from_book(&book, true);
+        let close = popup.back;
+        assert!(
+            close.y >= book.paper.y && close.y + close.h <= popup.search.y,
+            "on the paper, above the search field: {close:?}"
+        );
+        assert!(
+            close.x > popup.search.x && close.x + close.w <= popup.search.x + popup.search.w,
+            "at the page's right: {close:?}"
         );
     }
 
