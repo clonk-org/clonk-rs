@@ -3406,13 +3406,9 @@ impl Object {
     }
 }
 
-/// Converts a script error from an engine-initiated callback into a logged
-/// no-op. C++ runs lifecycle/game calls with `fPassErrors=false`: the error
-/// shows in the log, the call yields nil, and the game continues
-/// (C4AulExec.cpp:1318-1342). Non-script engine errors stay fatal.
 /// `C4RankSystem::RankByExperience` with the default curve
 /// Experience(rank) = rank^1.5 * RankBase(=1000) (C4RankSystem.cpp:226-237).
-fn fair_crew_rank(experience: i32, rank_base: i32) -> i32 {
+pub fn fair_crew_rank(experience: i32, rank_base: i32) -> i32 {
     let mut rank = 0;
     loop {
         let next = ((rank + 1) as f64).powf(1.5) * f64::from(rank_base);
