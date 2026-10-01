@@ -1412,9 +1412,9 @@ impl SettingsController {
                 let row = self.row_rect(layout, index)?;
                 let setting = &self.settings[index];
                 if setting.id.section == "Voice" && setting.id.key == "InputDevice" {
-                    Some((SettingsFocus::TestMicrophone, reset_rect(row)))
+                    Some((SettingsFocus::TestMicrophone, row_link_rect(row)))
                 } else if self.view.selected == Some(index) && self.resettable(index) {
-                    Some((SettingsFocus::Reset, reset_rect(row)))
+                    Some((SettingsFocus::Reset, row_link_rect(row)))
                 } else {
                     None
                 }
@@ -1559,8 +1559,8 @@ fn binding_noun(device: ControlDevice, count: usize) -> &'static str {
     }
 }
 
-/// Where a changed row's reset link sits: just left of its value.
-pub(crate) fn reset_rect(row: IntRect) -> IntRect {
+/// Where a link inked into a row sits: just left of the row's value.
+pub(crate) fn row_link_rect(row: IntRect) -> IntRect {
     IntRect::new(row.x + row.w - 174 - 56, row.y + 3, 48, row.h - 6)
 }
 
