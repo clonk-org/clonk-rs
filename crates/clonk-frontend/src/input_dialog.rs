@@ -50,6 +50,7 @@ const EDIT_SELECTION: u32 = 0x7f7f_7f00;
 /// matching the text it sits under.
 const EDIT_COMPOSITION_UNDERLINE: u32 = 0x00ff_ffff;
 const WHITE: [u8; 4] = [255, 255, 255, 255];
+const PLACEHOLDER: [u8; 4] = [128, 142, 158, 255];
 
 /// A normal 40px `GUIIcons.png` phase or extended 64px `GUIIcons2.png`
 /// phase. `InputDialog` scales either source into its fixed 40px icon slot.
@@ -420,6 +421,8 @@ pub struct InputDialogController {
     chat_layout: bool,
     enhanced_font: Option<std::sync::Arc<ClonkFont>>,
     enhanced_notice: String,
+    /// Says where an enhanced chat message will go while nothing is typed.
+    placeholder: String,
     last_edit_input: Instant,
     sound_events: Vec<InputDialogSound>,
 }
@@ -458,6 +461,7 @@ impl InputDialogController {
             chat_layout: false,
             enhanced_font: None,
             enhanced_notice: String::new(),
+            placeholder: String::new(),
             last_edit_input: Instant::now(),
             sound_events: Vec::new(),
         }
@@ -509,6 +513,17 @@ impl InputDialogController {
 
     pub fn enhanced_notice(&self) -> &str {
         &self.enhanced_notice
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
+        self.placeholder = placeholder.into();
+    }
+
+    /// The enhanced composer's placeholder, while its field is empty.
+    pub fn visible_placeholder(&self) -> Option<&str> {
+        (self.enhanced_font.is_some() && self.displayed_text().is_empty())
+            .then_some(self.placeholder.as_str())
+            .filter(|placeholder| !placeholder.is_empty())
     }
 
     /// Mirrors `Edit::SetMaxText`. The C++ value includes room for the
@@ -1874,6 +1889,19 @@ impl InputDialogController {
             gamma,
             clip,
         );
+        if let Some(placeholder) = self.visible_placeholder() {
+            draw_clipped_text(
+                surface,
+                font,
+                client.x,
+                text_y0 - 1,
+                placeholder,
+                PLACEHOLDER,
+                TextAlign::Left,
+                gamma,
+                clip,
+            );
+        }
         // The composition is underlined, which is how every platform marks
         // text the IME has not committed yet.
         if let Some((start, end)) = self.displayed_composition_range() {
@@ -2604,6 +2632,25 @@ mod tests {
         state.replace_completion("Ada, help", 3, &layout, &fonts.text);
         state.handle_text_input("!", &layout, &fonts.text);
         assert_eq!(state.text(), "Ada!, help");
+    }
+
+    #[test]
+    fn an_enhanced_composer_shows_its_placeholder_only_while_empty() {
+        let fonts = endeavour_font_set();
+        let mut state = InputDialogController::new_chat("Everyone", "")
+            .with_enhanced_chat_font(std::sync::Arc::new(fonts.text.clone()));
+        state.set_placeholder("Message everyone");
+        assert_eq!(state.visible_placeholder(), Some("Message everyone"));
+        state.set_input_text("hi");
+        assert_eq!(state.visible_placeholder(), None);
+        state.set_input_text("");
+        assert_eq!(state.visible_placeholder(), Some("Message everyone"));
+        let classic = InputDialogController::new_chat("Chat:", "");
+        assert_eq!(
+            classic.visible_placeholder(),
+            None,
+            "classic chat is unchanged"
+        );
     }
 
     #[test]

@@ -469,6 +469,7 @@ impl GameApp {
                     dialog.controller.set_enhanced_chat_font(font);
                 }
             }
+            self.refresh_enhanced_chat_placeholder();
         }
         self.dialogs.game_option_input_consumed_keys.clear();
         self.dialogs.game_option_input_pointer_capture = None;

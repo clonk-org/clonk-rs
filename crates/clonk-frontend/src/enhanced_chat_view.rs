@@ -6,7 +6,7 @@ use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Surface};
 
 use crate::classic_gui::{draw_clipped_text_with_markup, draw_engine_box, IntRect};
-use crate::enhanced_chat::{ChatChannel, ChatMessage, EnhancedChat};
+use crate::enhanced_chat::{ChatAudience, ChatChannel, ChatMessage, EnhancedChat};
 use crate::{ClonkFontSet, GuiPoint};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +59,8 @@ pub struct ChatLayout {
 
 /// Width below which the overlay toggle drops to its short label.
 const OVERLAY_LABEL_WIDTH: i32 = 128;
+const CHIP_WIDTH: i32 = 132;
+pub const PICKER_ROW: i32 = 22;
 
 impl ChatLayout {
     pub fn new(width: i32, height: i32, line_height: i32, expanded: bool) -> Self {
@@ -95,21 +97,29 @@ impl ChatLayout {
             row,
         );
         let notice = IntRect::new(inner_x, y + h - row * 2 - 6, inner_w, row * 2);
-        let edit = IntRect::new(inner_x, notice.y - edit_height - 4, inner_w, edit_height);
-        let audience = IntRect::new(inner_x, edit.y - row - 4, inner_w / 2, row);
-        let latest = IntRect::new(
-            inner_x + inner_w / 2,
+        // The recipient leads the message it applies to, in the same row.
+        let chip_width = CHIP_WIDTH.min(inner_w / 3).max(1);
+        let audience = IntRect::new(inner_x, notice.y - edit_height - 4, chip_width, edit_height);
+        let edit = IntRect::new(
+            audience.x + chip_width + 4,
             audience.y,
-            inner_w - inner_w / 2,
-            row,
+            (inner_w - chip_width - 4).max(1),
+            edit_height,
         );
         let feed_top = if expanded {
             header.y + header.h + 6
         } else {
             y + 8
         };
-        let feed_bottom = if expanded { audience.y - 4 } else { y + h - 6 };
+        let feed_bottom = if expanded { edit.y - 6 } else { y + h - 6 };
         let feed = IntRect::new(inner_x, feed_top, inner_w, (feed_bottom - feed_top).max(0));
+        let latest_width = 150.min(inner_w);
+        let latest = IntRect::new(
+            inner_x + inner_w - latest_width,
+            feed_bottom - row,
+            latest_width,
+            row,
+        );
         Self {
             bounds,
             header,
@@ -125,6 +135,30 @@ impl ChatLayout {
             notice,
         }
     }
+
+    /// How many of `rows` recipients the picker shows at once.
+    pub fn picker_capacity(&self, rows: usize) -> usize {
+        let room = self.audience.y - 2 - (self.header.y + self.header.h + 4);
+        (((room - 4) / PICKER_ROW).max(1) as usize).min(rows)
+    }
+
+    /// The recipient list, opening upward from the chip it belongs to.
+    pub fn picker(&self, rows: usize) -> IntRect {
+        let height = self.picker_capacity(rows) as i32 * PICKER_ROW + 4;
+        let width = (self.audience.w * 2).max(200).min(self.header.w);
+        IntRect::new(self.audience.x, self.audience.y - 2 - height, width, height)
+    }
+
+    /// The `index`th visible row of the picker.
+    pub fn picker_row(&self, rows: usize, index: usize) -> IntRect {
+        let picker = self.picker(rows);
+        IntRect::new(
+            picker.x + 2,
+            picker.y + 2 + index as i32 * PICKER_ROW,
+            picker.w - 4,
+            PICKER_ROW,
+        )
+    }
 }
 
 pub fn contains(rect: IntRect, point: GuiPoint) -> bool {
@@ -137,7 +171,9 @@ pub fn contains(rect: IntRect, point: GuiPoint) -> bool {
 pub struct ChatView<'a> {
     pub preferences: &'a ChatPreferences,
     pub expanded: bool,
+    /// Who the message goes to, and that channel's colour.
     pub audience: &'a str,
+    pub audience_color: [u8; 4],
     pub hint: &'a str,
     pub notice: &'a str,
     pub timestamps: bool,
@@ -236,31 +272,12 @@ pub fn render_chat(
         let alpha = 255 - u32::from(view.preferences.opacity.min(100)) * 255 / 100;
         fill(surface, layout.bounds, (alpha << 24) | 0x101923, gamma);
         render_header(surface, ui_font, chat, &layout, gamma);
-        fill(surface, layout.audience, 0x00304152, gamma);
-        text(
+        render_audience_chip(
             surface,
             ui_font,
             layout.audience,
             view.audience,
-            [255; 4],
-            gamma,
-        );
-        let latest = if chat.unread() > 0 {
-            format!("{} new messages v", chat.unread())
-        } else {
-            if chat.is_scrolled() {
-                "Back to latest ↓"
-            } else {
-                ""
-            }
-            .into()
-        };
-        text(
-            surface,
-            ui_font,
-            layout.latest,
-            &latest,
-            [240, 208, 148, 255],
+            view.audience_color,
             gamma,
         );
         fill(surface, layout.edit, 0x00101a27, gamma);
@@ -318,6 +335,95 @@ pub fn render_chat(
             x += font.measure(&span.text, false).0 + font.h_space;
         }
     }
+    if view.expanded {
+        render_latest_pill(surface, ui_font, chat, layout.latest, gamma);
+    }
+}
+
+fn ink(color: [u8; 4]) -> u32 {
+    (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
+}
+
+/// `label` shortened with an ellipsis to fit `width`.
+fn fitted(font: &ClonkFont, label: &str, width: i32) -> String {
+    if font.measure(label, false).0 <= width {
+        return label.into();
+    }
+    let mut fitted = label.to_string();
+    while !fitted.is_empty() && font.measure(&format!("{fitted}…"), false).0 > width {
+        fitted.pop();
+    }
+    format!("{fitted}…")
+}
+
+/// Where the message goes, in that channel's colour, ahead of the text.
+fn render_audience_chip(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    rect: IntRect,
+    label: &str,
+    color: [u8; 4],
+    gamma: Option<&GammaRamp>,
+) {
+    fill(surface, rect, 0x001d2836, gamma);
+    fill(
+        surface,
+        IntRect::new(rect.x, rect.y, 3, rect.h),
+        ink(color),
+        gamma,
+    );
+    // A drawn ▾, so no font has to carry the glyph.
+    let arrow_x = rect.x + rect.w - 13;
+    let arrow_y = rect.y + rect.h / 2 - 2;
+    for row in 0..4 {
+        fill(
+            surface,
+            IntRect::new(arrow_x + row, arrow_y + row, 7 - row * 2, 1),
+            ink(color),
+            gamma,
+        );
+    }
+    let label_width = (rect.w - 10 - 18).max(1);
+    text(
+        surface,
+        font,
+        IntRect::new(
+            rect.x + 9,
+            rect.y + (rect.h - font.line_height) / 2,
+            label_width,
+            font.line_height + 2,
+        ),
+        &fitted(font, label, label_width),
+        color,
+        gamma,
+    );
+}
+
+/// Unread or scrolled-back history, as a pill over the transcript's corner.
+fn render_latest_pill(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    chat: &EnhancedChat,
+    rect: IntRect,
+    gamma: Option<&GammaRamp>,
+) {
+    let label = match chat.unread() {
+        0 if chat.is_scrolled() => "Back to latest ↓".to_string(),
+        0 => return,
+        1 => "1 new message ↓".to_string(),
+        unread => format!("{unread} new messages ↓"),
+    };
+    let width = font.measure(&label, false).0 + 16;
+    let pill = IntRect::new(rect.x + rect.w - width, rect.y, width, rect.h);
+    fill(surface, pill, 0x002c3b4d, gamma);
+    text(
+        surface,
+        font,
+        IntRect::new(pill.x + 8, pill.y + 2, pill.w - 8, pill.h - 2),
+        &label,
+        [240, 208, 148, 255],
+        gamma,
+    );
 }
 
 /// Tabs choose what the transcript shows; the check box, Settings and
@@ -432,7 +538,21 @@ pub(crate) const TIMESTAMP_COLOR: [u8; 4] = [140, 152, 166, 255];
 pub(crate) const WHITE_TEXT: [u8; 4] = [237, 242, 248, 255];
 pub(crate) const ALLIES_COLOR: [u8; 4] = [120, 220, 150, 255];
 pub(crate) const PRIVATE_COLOR: [u8; 4] = [236, 156, 236, 255];
+const SAY_COLOR: [u8; 4] = [240, 215, 170, 255];
 const LOG_COLOR: [u8; 4] = [160, 175, 191, 255];
+
+/// The colour a recipient is shown in wherever it is chosen.
+pub fn audience_color(audience: &ChatAudience) -> [u8; 4] {
+    match audience {
+        ChatAudience::Everyone => WHITE_TEXT,
+        ChatAudience::Allies => ALLIES_COLOR,
+        ChatAudience::Private(_) => PRIVATE_COLOR,
+        ChatAudience::Say => SAY_COLOR,
+    }
+}
+
+/// Neutral ink for a typed command, whose route the label already names.
+pub const COMMAND_COLOR: [u8; 4] = [174, 195, 215, 255];
 
 /// A run of one colour within a displayed line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -608,12 +728,17 @@ pub fn message_lines(
         .collect()
 }
 
+/// The recipient list above its chip: the current recipient is marked, the
+/// one under the pointer lit.
+#[allow(clippy::too_many_arguments)]
 pub fn render_audience_picker(
     surface: &mut Surface,
     fonts: &ClonkFontSet,
     preferences: &ChatPreferences,
-    labels: &[String],
+    choices: &[(String, [u8; 4])],
     offset: usize,
+    selected: Option<usize>,
+    hovered: Option<usize>,
     gamma: Option<&GammaRamp>,
 ) {
     let layout = ChatLayout::new(
@@ -622,24 +747,39 @@ pub fn render_audience_picker(
         preferences.font(fonts).line_height,
         true,
     );
-    fill(surface, layout.feed, 0x001b2b3d, gamma);
-    for (row, label) in labels
+    let picker = layout.picker(choices.len());
+    fill(surface, picker, 0x005a6b7e, gamma);
+    fill(
+        surface,
+        IntRect::new(picker.x + 1, picker.y + 1, picker.w - 2, picker.h - 2),
+        0x00141e2a,
+        gamma,
+    );
+    for (row, (index, (label, color))) in choices
         .iter()
+        .enumerate()
         .skip(offset)
-        .take((layout.feed.h / 22).max(0) as usize)
+        .take(layout.picker_capacity(choices.len()))
         .enumerate()
     {
+        let rect = layout.picker_row(choices.len(), row);
+        if Some(index) == selected {
+            fill(surface, rect, 0x00304152, gamma);
+            fill(
+                surface,
+                IntRect::new(rect.x, rect.y, 3, rect.h),
+                ink(*color),
+                gamma,
+            );
+        } else if Some(index) == hovered {
+            fill(surface, rect, 0x00243242, gamma);
+        }
         text(
             surface,
             &fonts.mini,
-            IntRect::new(
-                layout.feed.x + 4,
-                layout.feed.y + row as i32 * 22,
-                layout.feed.w - 8,
-                22,
-            ),
-            label,
-            [230, 237, 245, 255],
+            IntRect::new(rect.x + 9, rect.y + 3, rect.w - 12, rect.h - 3),
+            &fitted(&fonts.mini, label, rect.w - 12),
+            *color,
             gamma,
         );
     }
@@ -663,6 +803,7 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
@@ -697,6 +838,7 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
@@ -790,6 +932,7 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
@@ -830,6 +973,7 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
@@ -845,6 +989,32 @@ mod tests {
             latest.pixels() == scrolled.pixels(),
             "compact view must follow new messages"
         );
+    }
+
+    #[test]
+    fn the_recipient_sits_in_the_composer_row() {
+        let layout = ChatLayout::new(1152, 745, 22, true);
+        assert_eq!(layout.audience.y, layout.edit.y);
+        assert_eq!(layout.audience.h, layout.edit.h);
+        assert!(layout.audience.x + layout.audience.w < layout.edit.x);
+        assert!(layout.feed.y + layout.feed.h <= layout.edit.y);
+    }
+
+    #[test]
+    fn the_recipient_picker_opens_above_its_chip_inside_the_panel() {
+        for (width, height) in [(320, 200), (1152, 745)] {
+            let layout = ChatLayout::new(width, height, 22, true);
+            for rows in [4, 12, 40] {
+                let picker = layout.picker(rows);
+                assert!(picker.y + picker.h <= layout.audience.y);
+                assert!(picker.y >= layout.header.y + layout.header.h);
+                assert_eq!(picker.x, layout.audience.x);
+                for index in 0..rows.min(layout.picker_capacity(rows)) {
+                    let row = layout.picker_row(rows, index);
+                    assert!(row.y >= picker.y && row.y + row.h <= picker.y + picker.h);
+                }
+            }
+        }
     }
 
     #[test]

@@ -2229,6 +2229,30 @@ fn enhanced_chat_settings_opens_the_general_page_and_keeps_the_draft() {
 }
 
 #[test]
+fn enhanced_chat_composer_names_who_will_receive_the_message() {
+    use clonk_frontend::enhanced_chat::ChatAudience;
+    let mut app = new_running_sandbox_app();
+    install_message_fixture(&mut app);
+    app.snapshot = app.engine.snapshot();
+    app.start_running_chat(RunningChatMode::All);
+    let placeholder = |app: &GameApp| {
+        app.running_chat_controller()
+            .and_then(|controller| controller.visible_placeholder())
+            .map(str::to_string)
+    };
+
+    main_assert_eq!(placeholder(&app) => Some("Message everyone".to_string()));
+    for (audience, expected) in [
+        (ChatAudience::Allies, "Message your allies"),
+        (ChatAudience::Say, "Say above your crew"),
+        (ChatAudience::Private(7), "Message Sender privately"),
+    ] {
+        app.select_enhanced_chat_audience(audience);
+        main_assert_eq!(placeholder(&app) => Some(expected.to_string()));
+    }
+}
+
+#[test]
 fn enhanced_chat_offers_no_private_messages_to_a_local_player() {
     use clonk_frontend::enhanced_chat::ChatAudience;
     let mut app = new_running_sandbox_app();
@@ -2304,14 +2328,11 @@ fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients() {
     app.test_left_button(ElementState::Released);
     main_assert!(app.chat.audience_picker);
     capture(&mut app, "chat-recipients");
-    // Everyone is the first recipient row.
-    app.test_cursor(PhysicalPosition::new(
-        f64::from(layout.feed.x + 4),
-        f64::from(layout.feed.y + 4),
-    ));
-    app.test_left_button(ElementState::Pressed);
-    app.test_left_button(ElementState::Released);
+    // Everyone is the first recipient row of the picker above the chip.
+    let rows = app.enhanced_chat_audiences().len();
+    click_enhanced_chat(&mut app, layout.picker_row(rows, 0));
     main_assert_eq!(app.chat.enhanced.audience => ChatAudience::Everyone);
+    main_assert!(!app.chat.audience_picker);
     // Text size is a Settings → General → Chat preference.
     app.close_running_chat().test_value();
     app.chat.enhanced_preferences.text_size = 2;
