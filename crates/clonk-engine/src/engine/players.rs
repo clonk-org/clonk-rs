@@ -621,6 +621,53 @@ impl Engine {
         pref_control_style: bool,
         pref_auto_context_menu: bool,
     ) -> Result<(), EngineError> {
+        self.reinitialize_player_keeping_held_coms(
+            number,
+            at_client,
+            at_client_name,
+            player_name,
+            runtime_control,
+            script_player,
+            no_elimination_check,
+            pref_control_style,
+            pref_auto_context_menu,
+        )?;
+        self.clear_restored_player_pressed_coms(number)
+    }
+
+    /// InitControl's closing `PressedComs = 0` (C4Player.cpp:1917). Unlike
+    /// COM_ClearPressedComs it leaves LastCom alone.
+    pub fn clear_restored_player_pressed_coms(&mut self, number: i32) -> Result<(), EngineError> {
+        self.player_mut(number)?.control.pressed_coms = 0;
+        Ok(())
+    }
+
+    /// Everything `reinitialize_player_after_restore` does except
+    /// InitControl's closing `PressedComs = 0`. ApplyForcedControl still
+    /// drops the held coms when the control style changes
+    /// (C4Player.cpp:2376-2379).
+    ///
+    /// A runtime joiner recreates its players through this, deliberately
+    /// unlike C++, which runs the whole InitControl there too
+    /// (C4Game.cpp:2809-2823; C4Player.cpp:384-386). Only the joiner reloads:
+    /// the host and every other peer still hold the coms their players were
+    /// pressing when the dynamic was saved. Clearing them on the joiner alone
+    /// makes the next release a no-op there (C4Player.cpp:1541-1548) while it
+    /// stops the crew everywhere else (AutoStopUpdateComDir,
+    /// C4Object.cpp:3743-3754), so joining while anyone walked desynced the
+    /// joiner (clonk-org/clonk-rs#1825).
+    pub fn reinitialize_player_keeping_held_coms(
+        &mut self,
+        number: i32,
+        at_client: PlayerAtClient,
+        at_client_name: impl Into<String>,
+        player_name: impl Into<String>,
+        runtime_control: PlayerRuntimeControl,
+        script_player: bool,
+        no_elimination_check: bool,
+        pref_control_style: bool,
+        pref_auto_context_menu: bool,
+    ) -> Result<(), EngineError> {
         let forced_control_style = self.forced_control_style;
         let forced_auto_context_menu = self.forced_auto_context_menu;
         let clear_inactive_com_dir = {
@@ -661,12 +708,12 @@ impl Engine {
             let changed = player.control.control_style != control_style;
             if changed {
                 player.control.last_com = i32::from(crate::control::COM_NONE);
+                player.control.pressed_coms = 0;
             }
             player.control.set_control_style_value(control_style_value);
             player
                 .control
                 .set_auto_context_menu_value(auto_context_menu_value);
-            player.control.pressed_coms = 0;
             changed && control_style
         };
         if clear_inactive_com_dir {
