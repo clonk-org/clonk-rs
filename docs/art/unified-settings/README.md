@@ -15,3 +15,5 @@ the LegacyClonk compatibility profile still opens.
 | `voice-and-choice-list.jpg` | Voice chat with the microphone test on its row; a choice list opened under its value |
 | `in-game-popup.jpg` | Settings over a paused game at 1280x720: the book alone, closed from the mark on its paper |
 | `in-game-640x480.jpg` | The same at the smallest supported window |
+| `language-and-font-before-after.jpg` | The options book's Program sheet beside General's Language and font section, choosing a language |
+| `general-font-chat-and-program.jpg` | The font size list, which scrolls past eight sizes; white chat and timestamps under Chat; Preload game data under Program |
