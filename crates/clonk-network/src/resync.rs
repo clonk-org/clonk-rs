@@ -67,6 +67,14 @@ impl ControlBacklog {
             .collect()
     }
 
+    /// Reports whether a request from `tick` can still be fulfilled from its
+    /// first tick: nothing that old has been trimmed away.
+    pub fn can_replay_from(&self, tick: Tick) -> bool {
+        self.entries
+            .first_key_value()
+            .is_none_or(|(&oldest, _)| oldest <= tick)
+    }
+
     /// Reports whether an exact per-client packet is retained for `tick`.
     pub fn contains_packet(&self, client_id: ClientId, tick: Tick) -> bool {
         self.entries
@@ -236,6 +244,22 @@ mod tests {
             packet(2, 6, b"d"),
         ];
         assert_eq!(replay, expected);
+    }
+
+    #[test]
+    fn backlog_cannot_replay_from_a_trimmed_tick() {
+        let mut backlog = ControlBacklog::new(2);
+        assert!(backlog.can_replay_from(0), "nothing recorded, nothing lost");
+        for tick in 0..=3 {
+            backlog.record_packet(&packet(1, tick, b"x"));
+        }
+
+        assert!(!backlog.can_replay_from(1), "tick 1 was trimmed");
+        assert!(backlog.can_replay_from(2));
+        assert!(
+            backlog.can_replay_from(5),
+            "not yet recorded ticks arrive live"
+        );
     }
 
     #[test]

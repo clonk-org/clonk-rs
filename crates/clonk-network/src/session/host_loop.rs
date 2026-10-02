@@ -947,6 +947,7 @@ pub(crate) async fn run_host(
                         parameters,
                         completion,
                     } => {
+                        let resumed_tick = state.game_control_tick;
                         match publish_host_runtime_dynamic(
                             *dynamic,
                             synchronized_control_tick,
@@ -957,6 +958,10 @@ pub(crate) async fn run_host(
                                 // A waiting joiner must receive the new core
                                 // before the superseded resource is hidden.
                                 publish_pending_join_data(&mut state).await;
+                                // JoinData left as of the synchronized tick;
+                                // the host itself has played on since.
+                                state.game_control_tick =
+                                    state.game_control_tick.max(resumed_tick);
                                 if let Some(resource_id) = publication.previous_dynamic_id {
                                     mark_host_resource_removed(resource_id, &mut state);
                                 }
