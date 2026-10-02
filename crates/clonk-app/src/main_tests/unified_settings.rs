@@ -1082,6 +1082,10 @@ fn unified_settings_write_changed_settings_in_the_same_ink_as_the_rest() {
         },
     )])
     .unwrap();
+    // Bring the changed row and its unchanged neighbour into view.
+    app.unified_settings.as_mut().unwrap().controller.set_focus(
+        clonk_frontend::settings_overlay::SettingsFocus::Row(duration),
+    );
     let (_, _, plan) = render_ordered_test_frame(&mut app, scale, 800, 600);
     let ink = |needle: &str| {
         plan.batches
@@ -1128,4 +1132,92 @@ fn unified_settings_show_fair_crew_strength_between_weak_and_strong_like_the_opt
         "{texts:?}"
     );
     assert!(texts.iter().all(|text| !text.contains("Rank")), "{texts:?}");
+}
+
+#[test]
+fn unified_settings_apply_a_font_at_once_and_keep_the_old_one_when_it_cannot_be_built() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    struct NoSystemFonts;
+    impl system_fonts::SystemFontProvider for NoSystemFonts {
+        fn resolve(&self, _family: &str, _weight: u32) -> Option<system_fonts::SystemFontFace> {
+            None
+        }
+    }
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nFontName=Endeavour\nFontSize=14\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let row = |app: &GameApp, key: &str| {
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .settings
+            .iter()
+            .position(|s| s.id.section == "General" && s.id.key == key)
+            .unwrap()
+    };
+    let choose = |app: &GameApp, index: usize, chosen: &str| match &app
+        .unified_settings
+        .as_ref()
+        .unwrap()
+        .controller
+        .settings[index]
+        .value
+    {
+        AdvancedConfigValue::Choice { choices, .. } => AdvancedConfigValue::Choice {
+            value: chosen.into(),
+            choices: choices.clone(),
+        },
+        other => panic!("not a choice: {other:?}"),
+    };
+    // Endeavour ships with the game, so no system font is needed for it.
+    let size = row(&app, "FontSize");
+    let sixteen = choose(&app, size, "16");
+    app.change_unified_font_with_system_fonts(size, sixteen, &NoSystemFonts)
+        .test_value();
+    assert_eq!(
+        app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
+        25,
+        "rebuilt at once, as the options book does"
+    );
+    assert_eq!(
+        app.assets
+            .options_book_fonts
+            .as_ref()
+            .unwrap()
+            .book
+            .line_height,
+        25
+    );
+    assert_eq!(
+        Config::load(paths.config_file())
+            .test_value()
+            .get_in(Some("General"), "FontSize"),
+        Some("16"),
+        "saved at once, so the next scenario reads it"
+    );
+    let face = row(&app, "FontName");
+    let before = fs::read(paths.config_file()).test_value();
+    let missing = choose(&app, face, "Comic Sans MS");
+    app.change_unified_font_with_system_fonts(face, missing, &NoSystemFonts)
+        .test_value();
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert_eq!(controller.view.message, "Error initializing fonts");
+    assert_eq!(controller.settings[face].value.serialized(), "Endeavour");
+    assert_eq!(
+        app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
+        25
+    );
+    assert_eq!(fs::read(paths.config_file()).test_value(), before);
 }

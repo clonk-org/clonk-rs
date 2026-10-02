@@ -60,6 +60,9 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
 /// Curated settings in the order their tab lists them.
 const DISPLAY_ORDER: &[(&str, &str)] = &[
     // General
+    ("General", "Language"),
+    ("General", "FontName"),
+    ("General", "FontSize"),
     ("Chat", "Enhanced"),
     ("Chat", "TextSize"),
     ("Chat", "Opacity"),
@@ -350,7 +353,7 @@ fn describe(setting: &mut Setting) {
         (
             "General",
             "FPS" | "UseWhiteIngameChat" | "UseWhiteLobbyChat" | "ShowLogTimestamps"
-            | "ScrollSmooth",
+            | "ScrollSmooth" | "FontName" | "FontSize",
         )
         | ("Toasts", _) => Live,
         (
@@ -532,8 +535,18 @@ fn describe(setting: &mut Setting) {
             "Select the profile for the next application launch.",
             "legacy normal restart",
         )),
-        // The options book's Program sheet (C4StartupOptionsDlg.cpp:735-758),
+        // The options book's Program sheet (C4StartupOptionsDlg.cpp:700-758),
         // with its tooltips.
+        ("General", "FontName") => Some((
+            "Font",
+            "Typeface for menus and text; some lack other languages' letters.",
+            "typeface text letters",
+        )),
+        ("General", "FontSize") => Some((
+            "Font size",
+            "Size of menu and game text.",
+            "text letters bigger smaller",
+        )),
         ("General", "UseWhiteIngameChat") => Some((
             "White chat in game",
             "Shows in-game chat in white, with only the sender in player color.",
@@ -734,6 +747,21 @@ fn describe(setting: &mut Setting) {
             setting.details.policy.label()
         );
     }
+    // C4StartupOptionsDlg.cpp:1265-1284 lists these faces and sizes.
+    if setting.id == SettingId::new("General", "FontName") {
+        offer_listed(
+            setting,
+            clonk_frontend::startup_options_dlg::PROGRAM_FONT_FACES.map(String::from),
+            false,
+        );
+    }
+    if setting.id == SettingId::new("General", "FontSize") {
+        offer_listed(
+            setting,
+            clonk_frontend::startup_options_dlg::PROGRAM_FONT_SIZES.map(|size| size.to_string()),
+            true,
+        );
+    }
     setting.details.heading = (setting.category == Interface).then(|| general_section(setting));
 }
 
@@ -743,6 +771,7 @@ fn general_section(setting: &Setting) -> &'static str {
         return "Advanced";
     }
     match (setting.id.section.as_str(), setting.id.key.as_str()) {
+        ("General", "Language" | "FontName" | "FontSize") => "Language and font",
         ("Chat", _)
         | ("General", "UseWhiteIngameChat" | "UseWhiteLobbyChat" | "ShowLogTimestamps") => "Chat",
         ("General", "FPS") | ("Graphics", "ShowStats") => "On screen",
@@ -768,6 +797,34 @@ fn offer_scale_steps(setting: &mut Setting) {
         .map(|step| AdvancedConfigChoice {
             value: step.to_string(),
             label: format!("{step}%"),
+        })
+        .collect();
+    for value in [&mut setting.value, &mut setting.default] {
+        *value = AdvancedConfigValue::Choice {
+            value: value.serialized(),
+            choices: choices.clone(),
+        };
+    }
+}
+
+/// Offers `listed` as the setting's choices, keeping its current and default
+/// values selectable when they are not on the list; a `numeric` list is kept
+/// in numeric order.
+fn offer_listed(setting: &mut Setting, listed: impl IntoIterator<Item = String>, numeric: bool) {
+    let mut values: Vec<String> = listed.into_iter().collect();
+    for extra in [setting.value.serialized(), setting.default.serialized()] {
+        if !extra.is_empty() && !values.contains(&extra) {
+            values.push(extra);
+        }
+    }
+    if numeric {
+        values.sort_by_key(|value| value.parse::<i64>().unwrap_or(i64::MAX));
+    }
+    let choices: Vec<_> = values
+        .into_iter()
+        .map(|value| AdvancedConfigChoice {
+            label: value.clone(),
+            value,
         })
         .collect();
     for value in [&mut setting.value, &mut setting.default] {
@@ -1056,6 +1113,59 @@ mod tests {
     }
 
     #[test]
+    fn unified_catalog_offers_the_options_books_fonts_and_sizes() {
+        use clonk_frontend::startup_options_dlg::{PROGRAM_FONT_FACES, PROGRAM_FONT_SIZES};
+        let mut config = Config::new();
+        config.set_in(Some("General"), "FontName", "Papyrus");
+        config.set_in(Some("General"), "FontSize", "15");
+        let rows = catalog(&config);
+        let row = |key: &str| {
+            rows.iter()
+                .find(|row| row.id.section == "General" && row.id.key == key)
+                .unwrap()
+        };
+        let choices = |setting: &Setting| match &setting.value {
+            AdvancedConfigValue::Choice { value, choices } => (
+                value.clone(),
+                choices
+                    .iter()
+                    .map(|choice| choice.value.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("{} is not a choice: {other:?}", setting.id.key),
+        };
+        let face = row("FontName");
+        assert_eq!(face.label, "Font");
+        // C4StartupOptionsDlg.cpp:1265-1269 offers these faces; a face set
+        // by hand stays selectable.
+        let mut faces: Vec<String> = PROGRAM_FONT_FACES.map(String::from).to_vec();
+        faces.push("Papyrus".into());
+        assert_eq!(choices(face), ("Papyrus".into(), faces));
+        let size = row("FontSize");
+        assert_eq!(size.label, "Font size");
+        // C4StartupOptionsDlg.cpp:1271-1284 offers these sizes.
+        let mut sizes: Vec<i32> = PROGRAM_FONT_SIZES.to_vec();
+        sizes.push(15);
+        sizes.sort_unstable();
+        assert_eq!(
+            choices(size),
+            (
+                "15".into(),
+                sizes.iter().map(i32::to_string).collect::<Vec<_>>()
+            )
+        );
+        for setting in [face, size] {
+            assert!(
+                !setting.advanced,
+                "{} is on the General tab",
+                setting.id.key
+            );
+            assert_eq!(setting.details.heading, Some("Language and font"));
+            assert_eq!(setting.details.policy, ApplyPolicy::Live);
+        }
+    }
+
+    #[test]
     fn unified_catalog_offers_the_options_books_program_toggles() {
         let rows = catalog(&Config::new());
         let general: Vec<_> = rows
@@ -1117,7 +1227,8 @@ mod tests {
         assert_eq!(
             heading(false),
             [
-                ["Chat"; 7].as_slice(),
+                ["Language and font"; 2].as_slice(),
+                &["Chat"; 7],
                 &["On screen"; 2],
                 &["New games"; 3],
                 &["Program"; 2],

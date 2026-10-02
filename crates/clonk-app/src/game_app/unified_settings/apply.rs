@@ -22,6 +22,15 @@ impl GameApp {
         if setting.id.section == "Session" {
             return self.change_unified_session_setting(&setting.id.key, &value);
         }
+        if setting.id.section == "General"
+            && matches!(setting.id.key.as_str(), "FontName" | "FontSize")
+        {
+            return self.change_unified_font_with_system_fonts(
+                index,
+                value,
+                system_fonts::installed_system_fonts(),
+            );
+        }
         if setting.details.policy == ApplyPolicy::DisplayPreview {
             self.begin_unified_display_preview(index, value);
             return Ok(());
@@ -88,6 +97,77 @@ impl GameApp {
                 format!("{} · {}", setting.label, setting.details.policy.label());
         }
         self.refresh_unified_binding_labels();
+        Ok(())
+    }
+
+    /// Rebuilds the menus' fonts for a new face or size and saves the choice
+    /// at once, as the options book does (C4StartupOptionsDlg.cpp:1286-1306);
+    /// a font that cannot be built keeps the old one.
+    pub(crate) fn change_unified_font_with_system_fonts(
+        &mut self,
+        index: usize,
+        value: AdvancedConfigValue,
+        system_fonts: &dyn system_fonts::SystemFontProvider,
+    ) -> Result<(), EngineError> {
+        let Some(settings) = self.unified_settings.as_ref() else {
+            return Ok(());
+        };
+        let current = |key: &str| {
+            settings
+                .controller
+                .settings
+                .iter()
+                .find(|setting| setting.id.section == "General" && setting.id.key == key)
+                .map(|setting| setting.value.serialized())
+        };
+        let Some(changed) = settings.controller.settings.get(index).cloned() else {
+            return Ok(());
+        };
+        let chosen = value.serialized();
+        let face = if changed.id.key == "FontName" {
+            chosen.clone()
+        } else {
+            current("FontName").unwrap_or_else(|| "Endeavour".into())
+        };
+        let size = if changed.id.key == "FontSize" {
+            Some(chosen.as_str())
+        } else {
+            None
+        }
+        .map(str::to_owned)
+        .or_else(|| current("FontSize"))
+        .and_then(|size| size.trim().parse::<i32>().ok())
+        .unwrap_or(14);
+        let Some((gui, startup)) = self.resolve_font_selection(&face, size, system_fonts) else {
+            let message =
+                self.runtime_resource_text("IDS_ERR_INITFONTS", "Error initializing fonts");
+            if let Some(settings) = self.unified_settings.as_mut() {
+                settings.controller.view.message = message;
+            }
+            return Ok(());
+        };
+        self.config
+            .deferred
+            .set("General", &changed.id.key, &chosen);
+        if let Some(settings) = self.unified_settings.as_mut() {
+            settings
+                .config
+                .set_in(Some("General"), &changed.id.key, &chosen);
+            if let Some(row) = settings.controller.settings.get_mut(index) {
+                row.value = value;
+            }
+            settings.controller.view.message =
+                format!("{} · {}", changed.label, changed.details.policy.label());
+        }
+        // A scenario reads the font from the file when it loads, so the
+        // choice is saved now, as the options book saves it.
+        if let Err(error) = self.save_unified_settings() {
+            if let Some(settings) = self.unified_settings.as_mut() {
+                settings.controller.view.message =
+                    format!("Could not save: {error}. Close again to retry.");
+            }
+        }
+        self.install_font_selection(gui, startup);
         Ok(())
     }
 
