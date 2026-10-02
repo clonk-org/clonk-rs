@@ -184,7 +184,8 @@ impl GameApp {
         value: AdvancedConfigValue,
     ) -> Result<(), EngineError> {
         let code = value.serialized();
-        // System default leaves both unset, as a fresh configuration does; a
+        // System default empties both, which reads as unset: the system's
+        // language applies, as C4Config gives it (C4Config.cpp:1461-1470). A
         // code without a pack keeps its fallbacks
         // (C4StartupOptionsDlg.cpp:1205-1210).
         let fallbacks = if code.is_empty() {

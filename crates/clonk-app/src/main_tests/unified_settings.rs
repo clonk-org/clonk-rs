@@ -1297,3 +1297,44 @@ fn unified_settings_choose_an_installed_language_and_reload_its_texts_at_once() 
     assert_eq!(config.get_in(Some("General"), "LanguageEx"), Some("US,DE"));
     assert_eq!(config.get_in(Some("General"), "LanguageCharset"), Some(""));
 }
+
+#[test]
+fn unified_settings_system_default_language_still_names_savegame_descriptions() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nLanguage=DE\nLanguageEx=DE,US\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    assert_eq!(app.saves.description_language, b"DE");
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let settings = &app.unified_settings.as_ref().unwrap().controller.settings;
+    let language = settings
+        .iter()
+        .position(|s| s.id.section == "General" && s.id.key == "Language")
+        .unwrap();
+    let AdvancedConfigValue::Choice { choices, .. } = settings[language].value.clone() else {
+        panic!("Language is not a choice");
+    };
+    let system_default = AdvancedConfigValue::Choice {
+        value: String::new(),
+        choices,
+    };
+    app.change_unified_setting(language, system_default)
+        .test_value();
+    // An empty language reads as unset, so the system's names a savegame's
+    // description, as C++ names it (C4Config.cpp:1461-1470,
+    // C4GameSave.cpp:285-290).
+    assert_eq!(
+        app.saves.description_language,
+        classic_loader_system_language().unwrap_or("US").as_bytes()
+    );
+}

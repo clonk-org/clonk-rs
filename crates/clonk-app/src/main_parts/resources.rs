@@ -3446,9 +3446,12 @@ pub(crate) fn load_options_program_state(
         .unwrap_or(1_000);
     state.set_fair_crew_strength(fair_crew_strength);
 
+    // C4Config gives an empty language its default, as it does an absent one
+    // (C4Config.cpp:1461-1470).
     let language = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "Language"))
+        .filter(|language| !language.is_empty())
         .unwrap_or(&state.language)
         .to_string();
     let language_ex = paths
@@ -3633,7 +3636,9 @@ pub(crate) fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
 }
 
 pub(crate) fn materialized_save_description_language(config: &[u8]) -> Vec<u8> {
-    match clonk_app_netplay::configured_native_value(config, "General", "Language") {
+    match clonk_app_netplay::configured_native_value(config, "General", "Language")
+        .filter(|value| !value.is_empty())
+    {
         Some(value) => value
             .as_bytes()
             .iter()
@@ -3641,9 +3646,10 @@ pub(crate) fn materialized_save_description_language(config: &[u8]) -> Vec<u8> {
             .take_while(|byte| *byte != b',')
             .take(2)
             .collect::<Vec<_>>(),
-        // C4Config materializes its system-language default only when the
-        // field is absent. An explicitly stored empty first segment (for
-        // example `Language=,DE`) survives through SCopyUntil unchanged.
+        // C4Config materializes its system-language default when the field
+        // is absent or empty (`!Language[0]`, C4Config.cpp:1464). An
+        // explicitly stored empty first segment (for example `Language=,DE`)
+        // is not empty, so it survives through SCopyUntil unchanged.
         None => classic_loader_system_language()
             .unwrap_or("US")
             .as_bytes()
