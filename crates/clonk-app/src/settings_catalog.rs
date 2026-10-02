@@ -64,11 +64,15 @@ const DISPLAY_ORDER: &[(&str, &str)] = &[
     ("Chat", "TextSize"),
     ("Chat", "Opacity"),
     ("Chat", "Duration"),
+    ("General", "UseWhiteIngameChat"),
+    ("General", "UseWhiteLobbyChat"),
+    ("General", "ShowLogTimestamps"),
     ("General", "FPS"),
     ("Graphics", "ShowStats"),
     ("General", "NoCrew"),
     ("General", "DefCrewStrength"),
     ("General", "Record"),
+    ("General", "Preloading"),
     ("General", "CompatProfile"),
     // Graphics
     ("Graphics", "DisplayMode"),
@@ -351,7 +355,12 @@ fn describe(setting: &mut Setting) {
         | ("Toasts", _) => Live,
         (
             "General",
-            "NoCrew" | "DefCrewStrength" | "Record" | "DebugMode" | "AllowScriptingInReplays",
+            "NoCrew"
+            | "DefCrewStrength"
+            | "Record"
+            | "DebugMode"
+            | "AllowScriptingInReplays"
+            | "Preloading",
         )
         | ("Lobby", _) => NextGame,
         ("Network", _) | ("IRC", _) => NextConnection,
@@ -522,6 +531,28 @@ fn describe(setting: &mut Setting) {
             "Compatibility profile",
             "Select the profile for the next application launch.",
             "legacy normal restart",
+        )),
+        // The options book's Program sheet (C4StartupOptionsDlg.cpp:735-758),
+        // with its tooltips.
+        ("General", "UseWhiteIngameChat") => Some((
+            "White chat in game",
+            "Shows in-game chat in white, with only the sender in player color.",
+            "chat colour readability",
+        )),
+        ("General", "UseWhiteLobbyChat") => Some((
+            "White chat in lobby",
+            "Shows lobby chat in white, with only the sender in player color.",
+            "chat colour readability",
+        )),
+        ("General", "ShowLogTimestamps") => Some((
+            "Timestamps",
+            "Shows timestamps for chat and log messages.",
+            "chat log time clock",
+        )),
+        ("General", "Preloading") => Some((
+            "Preload game data",
+            "Automatically preloads game data in the lobby.",
+            "lobby loading performance",
         )),
         ("General", "GamepadEnabled") => Some((
             "Use controllers",
@@ -712,7 +743,8 @@ fn general_section(setting: &Setting) -> &'static str {
         return "Advanced";
     }
     match (setting.id.section.as_str(), setting.id.key.as_str()) {
-        ("Chat", _) => "Chat",
+        ("Chat", _)
+        | ("General", "UseWhiteIngameChat" | "UseWhiteLobbyChat" | "ShowLogTimestamps") => "Chat",
         ("General", "FPS") | ("Graphics", "ShowStats") => "On screen",
         ("General", "NoCrew" | "DefCrewStrength" | "Record") => "New games",
         _ => "Program",
@@ -1024,6 +1056,54 @@ mod tests {
     }
 
     #[test]
+    fn unified_catalog_offers_the_options_books_program_toggles() {
+        let rows = catalog(&Config::new());
+        let general: Vec<_> = rows
+            .iter()
+            .filter(|row| row.category == SettingsCategory::Interface && !row.advanced)
+            .map(|row| row.id.key.as_str())
+            .collect();
+        for (key, label, heading, policy) in [
+            (
+                "UseWhiteIngameChat",
+                "White chat in game",
+                "Chat",
+                ApplyPolicy::Live,
+            ),
+            (
+                "UseWhiteLobbyChat",
+                "White chat in lobby",
+                "Chat",
+                ApplyPolicy::Live,
+            ),
+            ("ShowLogTimestamps", "Timestamps", "Chat", ApplyPolicy::Live),
+            // Read when a lobby is next built (lobby.rs, LobbyPreloadState).
+            (
+                "Preloading",
+                "Preload game data",
+                "Program",
+                ApplyPolicy::NextGame,
+            ),
+        ] {
+            let setting = rows
+                .iter()
+                .find(|row| row.id.section == "General" && row.id.key == key)
+                .unwrap();
+            assert_eq!(setting.label, label);
+            assert!(!setting.advanced, "{key} is on the General tab");
+            assert_eq!(setting.details.heading, Some(heading), "{key}");
+            assert_eq!(setting.details.policy, policy, "{key}");
+            assert!(!setting.details.description.is_empty(), "{key}");
+        }
+        let position = |key: &str| general.iter().position(|candidate| *candidate == key);
+        assert!(
+            position("Duration") < position("UseWhiteIngameChat"),
+            "after the chat's own look"
+        );
+        assert!(position("Preloading") < position("CompatProfile"));
+    }
+
+    #[test]
     fn unified_catalog_lists_general_in_headed_sections() {
         let rows = catalog(&Config::new());
         let heading = |advanced: bool| -> Vec<Option<&str>> {
@@ -1037,10 +1117,10 @@ mod tests {
         assert_eq!(
             heading(false),
             [
-                ["Chat"; 4].as_slice(),
+                ["Chat"; 7].as_slice(),
                 &["On screen"; 2],
                 &["New games"; 3],
-                &["Program"],
+                &["Program"; 2],
             ]
             .concat()
             .into_iter()
