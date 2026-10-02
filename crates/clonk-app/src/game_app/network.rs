@@ -8195,10 +8195,10 @@ impl GameApp {
     }
 
     /// C4Network2::OnGameSynchronized saves the dynamic and sends JoinData
-    /// before the synchronized ControlTick can advance, and SendJoinData
-    /// rejects a dynamic older than ControlTick (src/C4Network2.cpp:1099-1116,
-    /// 1826,1945-1972). The save worker only moves that encoding off this
-    /// thread, so the host holds its control tick until the worker publishes.
+    /// inside ExecSyncControl (src/C4Network2.cpp:1099-1116,1945-1972). The
+    /// save worker encodes it while existing players keep playing, since its
+    /// joiner replays those ticks from the backlog; but no later status
+    /// barrier may run sync controls before that JoinData leaves.
     pub(crate) fn runtime_join_dynamic_awaits_publication(&self) -> bool {
         self.netplay
             .pending_runtime_dynamic_request

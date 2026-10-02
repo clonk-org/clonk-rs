@@ -2907,11 +2907,12 @@ fn runtime_dynamic_completion_rejects_stale_and_cancelled_generations() {
 }
 
 #[test]
-fn host_holds_its_synchronized_tick_until_the_runtime_join_dynamic_is_published() {
-    // C4Network2::OnGameSynchronized saves the dynamic and sends JoinData
-    // before the synchronized ControlTick can advance, and SendJoinData
-    // rejects a dynamic older than ControlTick (src/C4Network2.cpp:1099-1116,
-    // 1826,1945-1972). Encoding it on the save worker must keep that order.
+fn host_keeps_playing_while_its_runtime_join_dynamic_encodes() {
+    // C4Network2::OnGameSynchronized saves the dynamic synchronously, so every
+    // peer waits for it (src/C4Network2.cpp:1099-1116,1945-1972). The save
+    // worker encodes it instead while existing players keep playing; the
+    // joiner replays the ticks since from the backlog, so publication still
+    // names the synchronized tick.
     let mut host = new_running_sandbox_app();
     let (host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
     let synchronized_tick = host.expected_network_control_tick();
@@ -2946,7 +2947,7 @@ fn host_holds_its_synchronized_tick_until_the_runtime_join_dynamic_is_published(
 
     queue_empty_ready_tick(&host, &host_events);
     host.test_update();
-    main_assert_eq!(host.engine.frame() => frame, "the host must not run past its synchronized tick while the runtime dynamic is unpublished");
+    main_assert_eq!(host.engine.frame() => frame + 1, "existing players keep playing while the dynamic encodes");
 
     let publisher = thread::spawn(move || {
         let (tick, completion) = host_commands.receive_runtime_dynamic_publication();
@@ -2960,11 +2961,8 @@ fn host_holds_its_synchronized_tick_until_the_runtime_join_dynamic_is_published(
     });
     release_tx.send(()).expect("release the runtime-join save");
     host.finish_background_save_jobs();
-    main_assert_eq!(publisher.join().expect("publisher thread") => synchronized_tick);
+    main_assert_eq!(publisher.join().expect("publisher thread") => synchronized_tick, "the dynamic is published for the tick it was taken at");
     main_assert!(host.netplay.pending_runtime_dynamic_request.is_none());
-
-    host.test_update();
-    main_assert_eq!(host.engine.frame() => frame + 1, "publication releases the synchronized tick");
 }
 
 #[test]
@@ -2991,11 +2989,11 @@ fn host_defers_status_reach_until_the_runtime_join_dynamic_is_published() {
 }
 
 #[test]
-fn a_stopped_save_worker_fails_the_held_runtime_join_dynamic() {
-    // A panicking job ends the save worker, so the dynamic this ControlTick is
-    // held for can never publish. Fail it the way OnGameSynchronized fails an
-    // unsaved dynamic, with an emergency kick (src/C4Network2.cpp:1107-1115),
-    // instead of freezing every peer.
+fn a_stopped_save_worker_fails_the_pending_runtime_join_dynamic() {
+    // A panicking job ends the save worker, so the pending dynamic can never
+    // publish, and every later status barrier would wait for it. Fail it the
+    // way OnGameSynchronized fails an unsaved dynamic, with an emergency kick
+    // (src/C4Network2.cpp:1107-1115), instead of freezing every peer.
     let mut host = new_running_sandbox_app();
     let (host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
     let synchronized_tick = host.expected_network_control_tick();
@@ -3016,13 +3014,13 @@ fn a_stopped_save_worker_fails_the_held_runtime_join_dynamic() {
 
     queue_empty_ready_tick(&host, &host_events);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while host.engine.frame() == frame && Instant::now() < deadline {
+    while host.netplay.pending_runtime_dynamic_request.is_some() && Instant::now() < deadline {
         host.test_update();
         thread::sleep(Duration::from_millis(10));
     }
 
-    main_assert_eq!(host.engine.frame() => frame + 1, "a stopped save worker must release the held ControlTick");
-    main_assert!(host.netplay.pending_runtime_dynamic_request.is_none());
+    main_assert!(host.netplay.pending_runtime_dynamic_request.is_none(), "a stopped save worker must fail the pending dynamic");
+    main_assert_eq!(host.engine.frame() => frame + 1, "existing players kept playing meanwhile");
     responder.join().expect("the waiting joiner is removed");
 }
 
