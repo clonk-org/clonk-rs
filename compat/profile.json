@@ -446,6 +446,20 @@
       "owner": "docs/COMPAT_PROFILE.md (accepted divergences)"
     },
     {
+      "id": "transport-runtime-join-encode-overlap",
+      "area": "transport",
+      "summary": "A host keeps executing while its save worker encodes a runtime-join dynamic, then sends JoinData for the dynamic's tick; the joiner replays the ticks in between from the control backlog, as it already does for the ticks that pass while it downloads and loads. C++ saves the dynamic synchronously inside ExecSyncControl, so every peer waits for the encode. No synchronized value changes: the joiner starts from the same snapshot tick and executes the same controls.",
+      "cited_in": [
+        "crates/clonk-network/src/session/host_state.rs:1272",
+        "crates/clonk-network/src/session/host_loop.rs:950"
+      ],
+      "cpp_reference": "C4Network2.cpp:1099-1116,1820-1849,1945-1972; C4GameControlNetwork.cpp:45-58",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": false,
+      "owner": "clonk-org/clonk-rs#1278"
+    },
+    {
       "id": "content-system-group-identity",
       "area": "content",
       "summary": "planet/System.c4g carries port-authored files stock LegacyClonk does not, so the group's ContentsCRC differs. Both engines publish System.c4g as a resource the host never sends, so a peer that lacks an identical group cannot obtain one and aborts the join before any script runs; disabling the appends does not close this, because the check compares the group's bytes rather than what it executes. Accepted as permanent: joining a stock LegacyClonk host is out of scope for the profile, which covers matching what a C++ peer computes, not passing its resource negotiation. Nothing the port can compute differently changes the CRC -- only shipping a byte-identical group would, which would mean not shipping the port's own content. The profile is therefore never advertised for joining a stock host, and this entry stays visible rather than being removed so that the limitation is stated where the contract is read.",

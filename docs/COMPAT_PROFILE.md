@@ -316,6 +316,7 @@ restores C++'s definition-transfer default.
 | `transport-lan-failed-ref-backoff` | kept | A failed LAN reference query backs off for the error row's lifetime instead of C++ re-probing a refusing host every pass and stacking duplicate rows and connection attempts. |
 | `transport-announce-burst` | kept | A host repeats its discovery announce on a burst interval after opening; C++ announces once and stays silent until probed, so one lost multicast datagram hides a C++ host until the browser's next probe. |
 | `transport-http-client` | kept | Update and league HTTP runs on a configured `reqwest` client rather than a hand-written libcurl twin. The residual is that `reqwest` cannot emit an HTTP/1.0 request line, so a version-distinguishing server sees HTTP/1.1 with `Connection: close`. |
+| `transport-runtime-join-encode-overlap` | kept | A host keeps executing while its save worker encodes a runtime-join dynamic, then sends JoinData for the dynamic's tick. The joiner replays the ticks in between from the control backlog (`C4GameControlNetwork.cpp:45-58`), as it already does for the ticks that pass while it downloads and loads. C++ saves the dynamic synchronously inside `ExecSyncControl` (`C4Network2.cpp:1099-1116,1945-1972`), so every peer waits for the encode. No synchronized value changes: the joiner starts from the same snapshot tick and executes the same controls. A dynamic is sent only while the backlog can still replay its tick. Owned by clonk-org/clonk-rs#1278. |
 
 ### Presentation
 
