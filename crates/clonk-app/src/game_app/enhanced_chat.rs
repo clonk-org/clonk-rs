@@ -305,6 +305,7 @@ impl GameApp {
                         message,
                         layout.feed.w,
                         self.chat.show_log_timestamps,
+                        self.rendering.display_flags.white_chat,
                     )
                     .len(),
                 )
@@ -526,6 +527,7 @@ impl GameApp {
                 hint: &hint,
                 notice: &notice,
                 timestamps: self.chat.show_log_timestamps,
+                white_text: self.rendering.display_flags.white_chat,
                 now: Instant::now(),
             },
             gamma,

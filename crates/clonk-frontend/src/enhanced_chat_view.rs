@@ -142,6 +142,9 @@ pub struct ChatView<'a> {
     pub hint: &'a str,
     pub notice: &'a str,
     pub timestamps: bool,
+    /// `General.UseWhiteIngameChat`: white message text with only the sender
+    /// in player colour.
+    pub white_text: bool,
     pub now: Instant,
 }
 
@@ -344,27 +347,13 @@ pub fn render_chat(
     let bottom = layout.feed.y + layout.feed.h;
     for (index, line) in lines.iter().enumerate() {
         let y = bottom - (lines.len() - index) as i32 * row_height;
-        let rect = IntRect::new(layout.feed.x, y, layout.feed.w, font.line_height + 2);
-        let prefix_width = font.measure(&line.prefix, false).0
-            + if line.prefix.is_empty() || line.body.is_empty() {
-                0
-            } else {
-                font.h_space
-            };
-        outlined_text(surface, font, rect, &line.prefix, line.color, gamma);
-        outlined_text(
-            surface,
-            font,
-            IntRect::new(
-                rect.x + prefix_width,
-                y,
-                (rect.w - prefix_width).max(0),
-                rect.h,
-            ),
-            &line.body,
-            [237, 242, 248, line.color[3]],
-            gamma,
-        );
+        let right = layout.feed.x + layout.feed.w;
+        let mut x = layout.feed.x;
+        for span in &line.spans {
+            let rect = IntRect::new(x, y, (right - x).max(0), font.line_height + 2);
+            outlined_text(surface, font, rect, &span.text, span.color, gamma);
+            x += font.measure(&span.text, false).0 + font.h_space;
+        }
     }
     if view.expanded && chat.options_open {
         fill(surface, layout.settings, 0x001a2532, gamma);
@@ -414,10 +403,57 @@ fn outlined_text(
     text(surface, font, rect, label, color, gamma);
 }
 
+pub(crate) const TIMESTAMP_COLOR: [u8; 4] = [140, 152, 166, 255];
+pub(crate) const WHITE_TEXT: [u8; 4] = [237, 242, 248, 255];
+pub(crate) const ALLIES_COLOR: [u8; 4] = [120, 220, 150, 255];
+pub(crate) const PRIVATE_COLOR: [u8; 4] = [236, 156, 236, 255];
+const LOG_COLOR: [u8; 4] = [160, 175, 191, 255];
+
+/// A run of one colour within a displayed line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatSpan {
+    pub text: String,
+    pub color: [u8; 4],
+}
+
 pub struct ChatLine {
-    prefix: String,
-    body: String,
-    color: [u8; 4],
+    pub spans: Vec<ChatSpan>,
+}
+
+impl ChatLine {
+    fn text(&self) -> String {
+        self.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    fn set_alpha(&mut self, alpha: u8) {
+        for span in &mut self.spans {
+            span.color[3] = alpha;
+        }
+    }
+
+    /// Shorten the line until it fits `width` with a trailing ellipsis.
+    fn ellipsize(&mut self, font: &ClonkFont, width: i32) {
+        while font.measure(&format!("{}…", self.text()), false).0 > width
+            && self.spans.iter().any(|span| !span.text.is_empty())
+        {
+            if let Some(span) = self
+                .spans
+                .iter_mut()
+                .rev()
+                .find(|span| !span.text.is_empty())
+            {
+                span.text.pop();
+            }
+        }
+        self.spans.retain(|span| !span.text.is_empty());
+        match self.spans.last_mut() {
+            Some(span) => span.text.push('…'),
+            None => self.spans.push(ChatSpan {
+                text: "…".into(),
+                color: WHITE_TEXT,
+            }),
+        }
+    }
 }
 
 fn display_lines(
@@ -441,29 +477,19 @@ fn display_lines(
         {
             continue;
         }
-        let mut lines = message_lines(font, message, feed.w, view.timestamps);
+        let mut lines = message_lines(font, message, feed.w, view.timestamps, view.white_text);
         if !view.expanded {
             let remaining = Duration::from_secs(u64::from(view.preferences.duration_seconds))
                 .saturating_sub(view.now.saturating_duration_since(message.received));
             let opacity = (remaining.as_secs_f32() / 2.0).clamp(0.0, 1.0);
             for line in &mut lines {
-                line.color[3] = (opacity * 255.0).round() as u8;
+                line.set_alpha((opacity * 255.0).round() as u8);
             }
         }
         if !view.expanded && lines.len() > capacity.min(2) {
             lines.truncate(capacity.min(2));
             if let Some(last) = lines.last_mut() {
-                while font
-                    .measure(&format!("{}{}…", last.prefix, last.body), false)
-                    .0
-                    > feed.w
-                    && !(last.body.is_empty() && last.prefix.is_empty())
-                {
-                    if last.body.pop().is_none() {
-                        last.prefix.pop();
-                    }
-                }
-                last.body.push('…');
+                last.ellipsize(font, feed.w);
             }
         }
         if !view.expanded && count + lines.len() > capacity {
@@ -484,54 +510,75 @@ fn display_lines(
     lines
 }
 
-/// Names and bodies share a row, while remaining separate literal-color spans.
+/// One message as coloured spans: a receding timestamp, a channel tag in its
+/// channel's colour, the sender in their player colour, then the message in
+/// white or, without white chat, in the sender's colour as classic chat
+/// shows it.
 pub fn message_lines(
     font: &ClonkFont,
     message: &ChatMessage,
     width: i32,
     timestamps: bool,
+    white_text: bool,
 ) -> Vec<ChatLine> {
-    let channel = match message.channel {
-        ChatChannel::Everyone => "",
-        ChatChannel::Allies => "[Allies] ",
-        ChatChannel::Private => "[Private] ",
-        ChatChannel::Action => "* ",
-        ChatChannel::Log => "[Game] ",
+    let log = message.channel == ChatChannel::Log;
+    let sender_color = if log {
+        LOG_COLOR
+    } else {
+        [message.color[0], message.color[1], message.color[2], 255]
+    };
+    let (tag, tag_color) = match message.channel {
+        ChatChannel::Everyone => ("", sender_color),
+        ChatChannel::Allies => ("[Allies] ", ALLIES_COLOR),
+        ChatChannel::Private => ("[Private] ", PRIVATE_COLOR),
+        ChatChannel::Action => ("* ", sender_color),
+        ChatChannel::Log => ("[Game] ", LOG_COLOR),
     };
     let stamp = if timestamps && !message.timestamp.is_empty() {
         format!("{} ", message.timestamp)
     } else {
         String::new()
     };
-    let header = if message.sender.is_empty() {
-        format!("{stamp}{channel}")
-    } else {
-        format!("{stamp}{channel}{}: ", message.sender)
+    let sender = match (message.sender.is_empty(), &message.channel) {
+        (true, _) => String::new(),
+        // An action reads as a sentence: "* Ada waves".
+        (false, ChatChannel::Action) => format!("{} ", message.sender),
+        (false, _) => format!("{}: ", message.sender),
     };
-    let color = if message.channel == ChatChannel::Log {
-        [160, 175, 191, 255]
-    } else {
-        [
-            160 + (u16::from(message.color[0]) * 95 / 255) as u8,
-            160 + (u16::from(message.color[1]) * 95 / 255) as u8,
-            160 + (u16::from(message.color[2]) * 95 / 255) as u8,
-            255,
-        ]
+    let body_color = match (log, white_text) {
+        (true, _) => LOG_COLOR,
+        (false, true) => WHITE_TEXT,
+        (false, false) => sender_color,
     };
-    let combined = format!("{header}{}", message.text);
+    let segments = [
+        (stamp, TIMESTAMP_COLOR),
+        (tag.to_string(), tag_color),
+        (sender, sender_color),
+        (message.text.clone(), body_color),
+    ];
+    let combined: String = segments.iter().map(|(text, _)| text.as_str()).collect();
     let mut consumed = 0;
     wrap_text(font, &combined, width)
         .into_iter()
         .map(|line| {
             // Wrapping removes the separating space or newline, never player markup.
             let start = consumed + combined[consumed..].find(&line).unwrap_or(0);
-            let prefix_len = header.len().saturating_sub(start).min(line.len());
-            consumed = start + line.len();
-            ChatLine {
-                prefix: line[..prefix_len].into(),
-                body: line[prefix_len..].into(),
-                color,
-            }
+            let end = start + line.len();
+            consumed = end;
+            let mut offset = 0;
+            let spans = segments
+                .iter()
+                .filter_map(|(text, color)| {
+                    let (from, to) = (offset, offset + text.len());
+                    offset = to;
+                    let (from, to) = (from.max(start), to.min(end));
+                    (from < to).then(|| ChatSpan {
+                        text: combined[from..to].into(),
+                        color: *color,
+                    })
+                })
+                .collect();
+            ChatLine { spans }
         })
         .collect()
 }
@@ -594,19 +641,14 @@ mod tests {
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
             now: Instant::now(),
         };
         let lines = display_lines(&fonts.text, &chat, &view, IntRect::new(0, 0, 100, 200));
         assert_eq!(lines.len(), 2);
-        assert!(lines[1].body.ends_with('…'));
+        assert!(lines[1].text().ends_with('…'));
         for line in lines {
-            assert!(
-                fonts
-                    .text
-                    .measure(&format!("{}{}", line.prefix, line.body), false)
-                    .0
-                    <= 100
-            );
+            assert!(fonts.text.measure(&line.text(), false).0 <= 100);
         }
     }
 
@@ -633,28 +675,78 @@ mod tests {
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
             now: start + Duration::from_secs(11),
         };
         let lines = display_lines(&fonts.text, &chat, &view, feed);
         assert_eq!(lines.len(), 6);
-        assert!(lines[0].color[3] > 0 && lines[0].color[3] < lines[1].color[3]);
-        assert_eq!(lines[5].color[3], 255);
+        let alpha = |line: &ChatLine| line.spans[0].color[3];
+        assert!(alpha(&lines[0]) > 0 && alpha(&lines[0]) < alpha(&lines[1]));
+        assert_eq!(alpha(&lines[5]), 255);
         view.now = start + Duration::from_secs(13);
         let lines = display_lines(&fonts.text, &chat, &view, feed);
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].body, "Message 2");
+        assert_eq!(lines[0].text(), "Ada: Message 2");
         view.expanded = true;
         view.now = start + Duration::from_secs(60);
         let lines = display_lines(&fonts.text, &chat, &view, feed);
         assert_eq!(lines.len(), 6);
-        assert!(lines.iter().all(|line| line.color[3] == 255));
+        assert!(lines.iter().all(|line| alpha(line) == 255));
+    }
+
+    #[test]
+    fn sender_channel_and_timestamp_stand_apart_from_the_message() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let mut message = ChatMessage::conversation("Ada", ChatChannel::Allies, "Ready?");
+        message.color = [220, 60, 60, 255];
+        message.timestamp = "[10:53:53]".into();
+        let spans = |white_text| {
+            message_lines(&fonts.text, &message, 500, true, white_text)
+                .remove(0)
+                .spans
+        };
+
+        let white = spans(true);
+        let texts: Vec<_> = white.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(texts, ["[10:53:53] ", "[Allies] ", "Ada: ", "Ready?"]);
+        assert_eq!(white[0].color, TIMESTAMP_COLOR, "timestamps recede");
+        assert_eq!(white[1].color, ALLIES_COLOR, "a channel has one colour");
+        assert_eq!(
+            white[2].color,
+            [220, 60, 60, 255],
+            "the sender keeps their colour"
+        );
+        assert_eq!(white[3].color, WHITE_TEXT);
+        // Without white chat the message takes its sender's colour, as
+        // classic chat does.
+        assert_eq!(spans(false)[3].color, [220, 60, 60, 255]);
+    }
+
+    #[test]
+    fn a_wrapped_message_keeps_its_colour_on_every_line() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let mut message = ChatMessage::conversation(
+            "Ada",
+            ChatChannel::Private,
+            "Meet at the lift and bring a shovel and two flints for the rock",
+        );
+        message.color = [220, 60, 60, 255];
+        let lines = message_lines(&fonts.text, &message, 160, false, true);
+        assert!(lines.len() > 1);
+        assert_eq!(lines[0].spans[0].color, PRIVATE_COLOR);
+        for line in &lines[1..] {
+            assert!(line.spans.iter().all(|span| span.color == WHITE_TEXT));
+        }
     }
 
     #[test]
     fn short_messages_keep_the_sender_and_body_on_one_line() {
         let fonts = crate::test_support::endeavour_font_set();
         let message = ChatMessage::conversation("Ada", ChatChannel::Everyone, "Ready?");
-        assert_eq!(message_lines(&fonts.text, &message, 500, false).len(), 1);
+        assert_eq!(
+            message_lines(&fonts.text, &message, 500, false, true).len(),
+            1
+        );
     }
 
     #[test]
@@ -676,6 +768,7 @@ mod tests {
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
             now: Instant::now(),
         };
         render_chat(&mut surface, &fonts, &chat, &view, None);
@@ -715,6 +808,7 @@ mod tests {
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
             now: Instant::now(),
         };
         let mut latest = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);
