@@ -3600,6 +3600,28 @@ fn pixels_handles_surface_recovery_and_app_handles_renderer_failures() {
     main_assert_eq!(retained_gpu_present_recovery(&oversized_composition) => RetainedGpuPresentRecovery::Fatal);
 }
 
+/// clonk-org/clonk-rs#1838: the renderer's limit error never reaches the
+/// classifier bare. `render_with`'s callback boxes it and the window surface
+/// wraps that box in `SurfaceError::Callback`, so the fallback has to see
+/// through the wrapper or an oversized atlas quits the game.
+#[test]
+fn a_texture_limit_inside_the_surface_callback_falls_back_to_cpu_presentation() {
+    let oversized_atlas = gpu_renderer::GpuRendererError::TextureDimensionExceeded {
+        kind: gpu_renderer::RetainedGpuTextureKind::ShaderLandscapeAtlas,
+        id: None,
+        extent: [256, 17_728],
+        max_texture_dimension_2d: 16_384,
+    };
+    let submitted = retained_gpu_presentation_error(
+        anyhow::Error::new(clonk_surface::SurfaceError::Callback(Box::new(
+            oversized_atlas,
+        )))
+        .context("failed to submit retained GPU frame"),
+        Ok(()),
+    );
+    main_assert_eq!(retained_gpu_present_recovery(&submitted) => RetainedGpuPresentRecovery::CpuFallback);
+}
+
 struct FakeSystemFontProvider {
     family: String,
     bytes: Arc<[u8]>,
