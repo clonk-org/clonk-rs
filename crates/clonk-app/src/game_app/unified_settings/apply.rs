@@ -176,8 +176,8 @@ impl GameApp {
 
     /// Switches language as the options book does
     /// (C4StartupOptionsDlg.cpp:1243-1254): the chosen pack's fallbacks become
-    /// `LanguageEx` and its texts load at once. Both are saved first, since
-    /// the texts are read through the file.
+    /// `LanguageEx` and its texts load at once. The texts are read through the
+    /// file, so both are saved first, and a save that fails changes nothing.
     fn change_unified_language(
         &mut self,
         label: &str,
@@ -199,32 +199,47 @@ impl GameApp {
                 .find(|info| info.code == code)
                 .map(clonk_frontend::startup_options_dlg::compose_language_ex)
         };
-        self.record_unified_general_value("Language", &code);
-        if let Some(fallbacks) = fallbacks {
-            self.record_unified_general_value("LanguageEx", &fallbacks);
-        }
-        if let Some(settings) = self.unified_settings.as_mut() {
-            settings.controller.view.message = format!("{label} · {}", ApplyPolicy::Live.label());
+        let changes: Vec<_> = std::iter::once(("Language", code))
+            .chain(fallbacks.map(|fallbacks| ("LanguageEx", fallbacks)))
+            .collect();
+        let pending: Vec<_> = changes
+            .iter()
+            .map(|(key, _)| self.config.deferred.get("General", key).map(str::to_owned))
+            .collect();
+        for (key, text) in &changes {
+            self.config.deferred.set("General", *key, text);
         }
         if let Err(error) = self.save_unified_settings() {
+            for ((key, _), pending) in changes.iter().zip(pending) {
+                match pending {
+                    Some(text) => self.config.deferred.set("General", *key, text),
+                    None => self.config.deferred.clear("General", key),
+                }
+            }
             if let Some(settings) = self.unified_settings.as_mut() {
-                settings.controller.view.message =
-                    format!("Could not save: {error}. Close again to retry.");
+                settings.controller.view.message = format!("Could not save: {error}.");
             }
             return Ok(());
         }
-        match self.reload_application_language_resources() {
+        for (key, text) in &changes {
+            self.show_unified_general_value(key, text);
+        }
+        let message = match self.reload_application_language_resources() {
             // The loaded table names its charset (C4Language.cpp:311).
             Ok(charset) => {
                 self.record_unified_general_value("LanguageCharset", &charset);
                 if let Err(error) = self.save_unified_settings() {
                     tracing::warn!(%error, "failed to save selected language charset");
                 }
+                format!("{label} · {}", ApplyPolicy::Live.label())
             }
-            Err(error) => tracing::error!(
-                error = %error,
-                "failed to reload selected application language"
-            ),
+            Err(error) => {
+                tracing::error!(error = %error, "failed to reload selected application language");
+                format!("Could not load the language's texts: {error}")
+            }
+        };
+        if let Some(settings) = self.unified_settings.as_mut() {
+            settings.controller.view.message = message;
         }
         Ok(())
     }

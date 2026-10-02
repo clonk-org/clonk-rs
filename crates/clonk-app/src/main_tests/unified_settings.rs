@@ -1338,3 +1338,91 @@ fn unified_settings_system_default_language_still_names_savegame_descriptions() 
         classic_loader_system_language().unwrap_or("US").as_bytes()
     );
 }
+
+#[test]
+fn unified_settings_leave_the_language_as_it_was_when_it_cannot_be_saved() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nLanguage=DE\nLanguageEx=DE,US\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let settings = &app.unified_settings.as_ref().unwrap().controller.settings;
+    let language = settings
+        .iter()
+        .position(|s| s.id.section == "General" && s.id.key == "Language")
+        .unwrap();
+    let AdvancedConfigValue::Choice { choices, .. } = settings[language].value.clone() else {
+        panic!("Language is not a choice");
+    };
+    fs::remove_file(paths.config_file()).test_value();
+    fs::create_dir(paths.config_file()).test_value();
+    let english = AdvancedConfigValue::Choice {
+        value: "US".into(),
+        choices,
+    };
+    app.change_unified_setting(language, english).test_value();
+
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert!(
+        controller.view.message.starts_with("Could not save"),
+        "{}",
+        controller.view.message
+    );
+    assert_eq!(controller.settings[language].value.serialized(), "DE");
+    assert_eq!(app.needed_material_need, "%s|braucht noch");
+    // Nothing is left for a later save to write without loading its texts.
+    assert_eq!(app.config.deferred.get("General", "Language"), None);
+    assert_eq!(app.config.deferred.get("General", "LanguageEx"), None);
+}
+
+#[test]
+fn unified_settings_say_when_a_saved_language_cannot_be_loaded() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguage=XX\n").test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let settings = &app.unified_settings.as_ref().unwrap().controller.settings;
+    let language = settings
+        .iter()
+        .position(|s| s.id.section == "General" && s.id.key == "Language")
+        .unwrap();
+    let AdvancedConfigValue::Choice { choices, .. } = settings[language].value.clone() else {
+        panic!("Language is not a choice");
+    };
+    // A code without a pack keeps the fallbacks on file, and these overrun
+    // C4Config's 1024-byte field, so no table loads from them.
+    fs::write(
+        paths.config_file(),
+        format!("[General]\nLanguage=XX\nLanguageEx={}\n", "XX,".repeat(400)),
+    )
+    .test_value();
+    let unknown = AdvancedConfigValue::Choice {
+        value: "XX".into(),
+        choices,
+    };
+    app.change_unified_setting(language, unknown).test_value();
+
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert!(
+        controller.view.message.starts_with("Could not load"),
+        "{}",
+        controller.view.message
+    );
+}
