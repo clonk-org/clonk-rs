@@ -6,6 +6,7 @@ use clonk_frontend::settings_overlay::{
     SliderScale,
 };
 use clonk_frontend::startup_options_advanced::{AdvancedConfigChoice, AdvancedConfigValue};
+use clonk_resources::language::LanguageInfo;
 
 pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
     let defaults = crate::advanced_config::sections(&Config::new());
@@ -50,35 +51,65 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
         (
             setting.advanced,
             setting.category as usize,
-            match (setting.id.section.as_str(), setting.id.key.as_str()) {
-                ("Sound", "SoundVolume")
-                | ("Graphics", "DisplayMode")
-                | ("General", "GamepadEnabled")
-                | ("Chat", "Enhanced") => 0,
-                ("Sound", "MusicVolume")
-                | ("Graphics", "Scale")
-                | ("Controls", "GamepadGuiControl")
-                | ("Chat", "TextSize") => 1,
-                ("Voice", "Enabled")
-                | ("Graphics", "ResolutionX")
-                | ("General", "ScrollSmooth")
-                | ("Chat", "Opacity") => 2,
-                ("Voice", "Volume")
-                | ("Graphics", "ResolutionY")
-                | ("Settings", "OpenKey")
-                | ("Chat", "Duration") => 3,
-                ("Voice", "InputDevice") | ("General", "FPS") => 4,
-                ("Voice", "OutputDevice") | ("Graphics", "ShowStats") => 5,
-                ("Voice", "ActivationMode") | ("General", "NoCrew") => 6,
-                ("Voice", "PushToTalkKey") | ("General", "DefCrewStrength") => 7,
-                ("Voice", "ActivationThreshold") | ("General", "Record") => 8,
-                ("Voice", "ActivationHangover") | ("General", "CompatProfile") => 9,
-                _ => binding_rank(&setting.id).unwrap_or(10),
-            },
+            display_rank(&setting.id),
             setting.label.clone(),
         )
     });
     settings
+}
+
+/// Curated settings in the order their tab lists them.
+const DISPLAY_ORDER: &[(&str, &str)] = &[
+    // General
+    ("General", "Language"),
+    ("General", "FontName"),
+    ("General", "FontSize"),
+    ("Chat", "Enhanced"),
+    ("Chat", "TextSize"),
+    ("Chat", "Opacity"),
+    ("Chat", "Duration"),
+    ("General", "UseWhiteIngameChat"),
+    ("General", "UseWhiteLobbyChat"),
+    ("General", "ShowLogTimestamps"),
+    ("General", "FPS"),
+    ("Graphics", "ShowStats"),
+    ("General", "NoCrew"),
+    ("General", "DefCrewStrength"),
+    ("General", "Record"),
+    ("General", "Preloading"),
+    ("General", "CompatProfile"),
+    // Graphics
+    ("Graphics", "DisplayMode"),
+    ("Graphics", "Scale"),
+    ("Graphics", "ResolutionX"),
+    ("Graphics", "ResolutionY"),
+    // Audio
+    ("Sound", "SoundVolume"),
+    ("Sound", "MusicVolume"),
+    ("Voice", "Enabled"),
+    ("Voice", "Volume"),
+    ("Voice", "InputDevice"),
+    ("Voice", "OutputDevice"),
+    ("Voice", "ActivationMode"),
+    ("Voice", "PushToTalkKey"),
+    ("Voice", "ActivationThreshold"),
+    ("Voice", "ActivationHangover"),
+    // Controls
+    ("General", "GamepadEnabled"),
+    ("Controls", "GamepadGuiControl"),
+    ("General", "ScrollSmooth"),
+    ("Settings", "OpenKey"),
+];
+
+/// Where a setting sorts within its tab: curated settings in
+/// [`DISPLAY_ORDER`], then the rest by label, then control-set bindings in
+/// game order.
+fn display_rank(id: &SettingId) -> usize {
+    DISPLAY_ORDER
+        .iter()
+        .position(|(section, key)| id.section == *section && id.key == *key)
+        .or_else(|| binding_rank(id))
+        .unwrap_or(99)
 }
 
 pub(crate) fn shortcut_key(paths: Option<&clonk_platform::AppPaths>) -> winit::keyboard::KeyCode {
@@ -323,12 +354,17 @@ fn describe(setting: &mut Setting) {
         (
             "General",
             "FPS" | "UseWhiteIngameChat" | "UseWhiteLobbyChat" | "ShowLogTimestamps"
-            | "ScrollSmooth",
+            | "ScrollSmooth" | "Language" | "FontName" | "FontSize",
         )
         | ("Toasts", _) => Live,
         (
             "General",
-            "NoCrew" | "DefCrewStrength" | "Record" | "DebugMode" | "AllowScriptingInReplays",
+            "NoCrew"
+            | "DefCrewStrength"
+            | "Record"
+            | "DebugMode"
+            | "AllowScriptingInReplays"
+            | "Preloading",
         )
         | ("Lobby", _) => NextGame,
         ("Network", _) | ("IRC", _) => NextConnection,
@@ -499,6 +535,43 @@ fn describe(setting: &mut Setting) {
             "Compatibility profile",
             "Select the profile for the next application launch.",
             "legacy normal restart",
+        )),
+        // The options book's Program sheet (C4StartupOptionsDlg.cpp:675-758),
+        // with its tooltips.
+        ("General", "Language") => Some((
+            "Language",
+            "Language of the game's texts and scenario descriptions.",
+            "translation locale",
+        )),
+        ("General", "FontName") => Some((
+            "Font",
+            "Typeface for menus and text; some lack other languages' letters.",
+            "typeface text letters",
+        )),
+        ("General", "FontSize") => Some((
+            "Font size",
+            "Size of menu and game text.",
+            "text letters bigger smaller",
+        )),
+        ("General", "UseWhiteIngameChat") => Some((
+            "White chat in game",
+            "Shows in-game chat in white, with only the sender in player color.",
+            "chat colour readability",
+        )),
+        ("General", "UseWhiteLobbyChat") => Some((
+            "White chat in lobby",
+            "Shows lobby chat in white, with only the sender in player color.",
+            "chat colour readability",
+        )),
+        ("General", "ShowLogTimestamps") => Some((
+            "Timestamps",
+            "Shows timestamps for chat and log messages.",
+            "chat log time clock",
+        )),
+        ("General", "Preloading") => Some((
+            "Preload game data",
+            "Automatically preloads game data in the lobby.",
+            "lobby loading performance",
         )),
         ("General", "GamepadEnabled") => Some((
             "Use controllers",
@@ -680,6 +753,21 @@ fn describe(setting: &mut Setting) {
             setting.details.policy.label()
         );
     }
+    // C4StartupOptionsDlg.cpp:1265-1284 lists these faces and sizes.
+    if setting.id == SettingId::new("General", "FontName") {
+        offer_listed(
+            setting,
+            clonk_frontend::startup_options_dlg::PROGRAM_FONT_FACES.map(String::from),
+            false,
+        );
+    }
+    if setting.id == SettingId::new("General", "FontSize") {
+        offer_listed(
+            setting,
+            clonk_frontend::startup_options_dlg::PROGRAM_FONT_SIZES.map(|size| size.to_string()),
+            true,
+        );
+    }
     setting.details.heading = (setting.category == Interface).then(|| general_section(setting));
 }
 
@@ -689,7 +777,9 @@ fn general_section(setting: &Setting) -> &'static str {
         return "Advanced";
     }
     match (setting.id.section.as_str(), setting.id.key.as_str()) {
-        ("Chat", _) => "Chat",
+        ("General", "Language" | "FontName" | "FontSize") => "Language and font",
+        ("Chat", _)
+        | ("General", "UseWhiteIngameChat" | "UseWhiteLobbyChat" | "ShowLogTimestamps") => "Chat",
         ("General", "FPS") | ("Graphics", "ShowStats") => "On screen",
         ("General", "NoCrew" | "DefCrewStrength" | "Record") => "New games",
         _ => "Program",
@@ -713,6 +803,75 @@ fn offer_scale_steps(setting: &mut Setting) {
         .map(|step| AdvancedConfigChoice {
             value: step.to_string(),
             label: format!("{step}%"),
+        })
+        .collect();
+    for value in [&mut setting.value, &mut setting.default] {
+        *value = AdvancedConfigValue::Choice {
+            value: value.serialized(),
+            choices: choices.clone(),
+        };
+    }
+}
+
+/// Offers the installed language packs for `General.Language` as the options
+/// book lists them (C4StartupOptionsDlg.cpp:1234-1241), after "System
+/// default": an unset language follows the system's (C4Config.cpp:1461-1470).
+/// A configured code without a pack stays, read as the book reads it
+/// (C4StartupOptionsDlg.cpp:1205-1210).
+pub(crate) fn offer_languages(settings: &mut [Setting], installed: &[LanguageInfo]) {
+    let Some(setting) = settings
+        .iter_mut()
+        .find(|setting| setting.id == SettingId::new("General", "Language"))
+    else {
+        return;
+    };
+    let configured = setting.value.serialized();
+    let current = installed
+        .iter()
+        .find(|info| info.matches_code(&configured))
+        .map_or(configured, |info| info.code.clone());
+    let mut choices = vec![AdvancedConfigChoice {
+        value: String::new(),
+        label: "System default".into(),
+    }];
+    choices.extend(installed.iter().map(|info| AdvancedConfigChoice {
+        value: info.code.clone(),
+        label: format!("{} - {}", info.code, info.name),
+    }));
+    if !choices.iter().any(|choice| choice.value == current) {
+        choices.push(AdvancedConfigChoice {
+            label: format!("unknown ({current})"),
+            value: current.clone(),
+        });
+    }
+    setting.default = AdvancedConfigValue::Choice {
+        value: String::new(),
+        choices: choices.clone(),
+    };
+    setting.value = AdvancedConfigValue::Choice {
+        value: current,
+        choices,
+    };
+}
+
+/// Offers `listed` as the setting's choices, keeping its current and default
+/// values selectable when they are not on the list; a `numeric` list is kept
+/// in numeric order.
+fn offer_listed(setting: &mut Setting, listed: impl IntoIterator<Item = String>, numeric: bool) {
+    let mut values: Vec<String> = listed.into_iter().collect();
+    for extra in [setting.value.serialized(), setting.default.serialized()] {
+        if !extra.is_empty() && !values.contains(&extra) {
+            values.push(extra);
+        }
+    }
+    if numeric {
+        values.sort_by_key(|value| value.parse::<i64>().unwrap_or(i64::MAX));
+    }
+    let choices: Vec<_> = values
+        .into_iter()
+        .map(|value| AdvancedConfigChoice {
+            label: value.clone(),
+            value,
         })
         .collect();
     for value in [&mut setting.value, &mut setting.default] {
@@ -1001,6 +1160,149 @@ mod tests {
     }
 
     #[test]
+    fn unified_catalog_offers_installed_languages_after_the_system_default() {
+        let pack = |code: &str, name: &str| LanguageInfo {
+            code_bytes: [code.as_bytes()[0], code.as_bytes()[1]],
+            code: code.into(),
+            name: name.into(),
+            info: String::new(),
+            fallback: String::new(),
+            charset: String::new(),
+        };
+        let installed = [pack("DE", "Deutsch"), pack("US", "English")];
+        let offered = |configured: &str| {
+            let mut config = Config::new();
+            config.set_in(Some("General"), "Language", configured);
+            let mut rows = catalog(&config);
+            offer_languages(&mut rows, &installed);
+            let row = rows
+                .into_iter()
+                .find(|row| row.id == SettingId::new("General", "Language"))
+                .unwrap();
+            assert!(!row.advanced, "Language is on the General tab");
+            let AdvancedConfigValue::Choice { value, choices } = row.value else {
+                panic!("Language is not a choice");
+            };
+            let labels: Vec<_> = choices.into_iter().map(|choice| choice.label).collect();
+            (value, labels)
+        };
+        let listed = ["System default", "DE - Deutsch", "US - English"];
+        assert_eq!(
+            offered(""),
+            (String::new(), listed.map(String::from).to_vec())
+        );
+        // An unset language is stored as "DE - Deutsch" (C4Config.cpp:1464-1470),
+        // which C4Language::FindInfo matches by its first two letters in any case.
+        assert_eq!(offered("de - Deutsch").0, "DE");
+        // A code without a pack stays, read as the options book reads it
+        // (C4StartupOptionsDlg.cpp:1207).
+        let (value, labels) = offered("FR");
+        assert_eq!(value, "FR");
+        assert_eq!(labels.last().map(String::as_str), Some("unknown (FR)"));
+    }
+
+    #[test]
+    fn unified_catalog_offers_the_options_books_fonts_and_sizes() {
+        use clonk_frontend::startup_options_dlg::{PROGRAM_FONT_FACES, PROGRAM_FONT_SIZES};
+        let mut config = Config::new();
+        config.set_in(Some("General"), "FontName", "Papyrus");
+        config.set_in(Some("General"), "FontSize", "15");
+        let rows = catalog(&config);
+        let row = |key: &str| {
+            rows.iter()
+                .find(|row| row.id.section == "General" && row.id.key == key)
+                .unwrap()
+        };
+        let choices = |setting: &Setting| match &setting.value {
+            AdvancedConfigValue::Choice { value, choices } => (
+                value.clone(),
+                choices
+                    .iter()
+                    .map(|choice| choice.value.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("{} is not a choice: {other:?}", setting.id.key),
+        };
+        let face = row("FontName");
+        assert_eq!(face.label, "Font");
+        // C4StartupOptionsDlg.cpp:1265-1269 offers these faces; a face set
+        // by hand stays selectable.
+        let mut faces: Vec<String> = PROGRAM_FONT_FACES.map(String::from).to_vec();
+        faces.push("Papyrus".into());
+        assert_eq!(choices(face), ("Papyrus".into(), faces));
+        let size = row("FontSize");
+        assert_eq!(size.label, "Font size");
+        // C4StartupOptionsDlg.cpp:1271-1284 offers these sizes.
+        let mut sizes: Vec<i32> = PROGRAM_FONT_SIZES.to_vec();
+        sizes.push(15);
+        sizes.sort_unstable();
+        assert_eq!(
+            choices(size),
+            (
+                "15".into(),
+                sizes.iter().map(i32::to_string).collect::<Vec<_>>()
+            )
+        );
+        for setting in [face, size] {
+            assert!(
+                !setting.advanced,
+                "{} is on the General tab",
+                setting.id.key
+            );
+            assert_eq!(setting.details.heading, Some("Language and font"));
+            assert_eq!(setting.details.policy, ApplyPolicy::Live);
+        }
+    }
+
+    #[test]
+    fn unified_catalog_offers_the_options_books_program_toggles() {
+        let rows = catalog(&Config::new());
+        let general: Vec<_> = rows
+            .iter()
+            .filter(|row| row.category == SettingsCategory::Interface && !row.advanced)
+            .map(|row| row.id.key.as_str())
+            .collect();
+        for (key, label, heading, policy) in [
+            (
+                "UseWhiteIngameChat",
+                "White chat in game",
+                "Chat",
+                ApplyPolicy::Live,
+            ),
+            (
+                "UseWhiteLobbyChat",
+                "White chat in lobby",
+                "Chat",
+                ApplyPolicy::Live,
+            ),
+            ("ShowLogTimestamps", "Timestamps", "Chat", ApplyPolicy::Live),
+            // Read when a lobby is next built (lobby.rs, LobbyPreloadState).
+            (
+                "Preloading",
+                "Preload game data",
+                "Program",
+                ApplyPolicy::NextGame,
+            ),
+        ] {
+            let setting = rows
+                .iter()
+                .find(|row| row.id.section == "General" && row.id.key == key)
+                .unwrap();
+            assert_eq!(setting.label, label);
+            assert!(!setting.advanced, "{key} is on the General tab");
+            assert_eq!(setting.details.heading, Some(heading), "{key}");
+            assert_eq!(setting.details.policy, policy, "{key}");
+            assert!(!setting.details.description.is_empty(), "{key}");
+        }
+        let position = |key: &str| general.iter().position(|candidate| *candidate == key);
+        assert!(
+            position("Duration") < position("UseWhiteIngameChat"),
+            "after the chat's own look"
+        );
+        assert!(position("Preloading") < position("CompatProfile"));
+    }
+
+    #[test]
     fn unified_catalog_lists_general_in_headed_sections() {
         let rows = catalog(&Config::new());
         let heading = |advanced: bool| -> Vec<Option<&str>> {
@@ -1014,10 +1316,11 @@ mod tests {
         assert_eq!(
             heading(false),
             [
-                ["Chat"; 4].as_slice(),
+                ["Language and font"; 3].as_slice(),
+                &["Chat"; 7],
                 &["On screen"; 2],
                 &["New games"; 3],
-                &["Program"],
+                &["Program"; 2],
             ]
             .concat()
             .into_iter()

@@ -3989,6 +3989,23 @@ fn options_language_loads_real_de_and_selection_reloads_and_persists() {
 }
 
 #[test]
+fn options_language_reads_an_empty_language_as_unset() {
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguage=\"\"\n").test_value();
+
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    app.open_options_menu();
+
+    // C4Config gives an empty language its default, as it does an absent one
+    // (C4Config.cpp:1461-1470), so the book never reads "unknown ()".
+    let program = app.startup.options_dialog.test_ref().program();
+    assert_eq!(program.language_text, "US - English");
+}
+
+#[test]
 fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
     use clonk_frontend::startup_options_dlg::{OptionsSheet, SoundCheckboxId};
 

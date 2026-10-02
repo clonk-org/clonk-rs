@@ -22,6 +22,18 @@ impl GameApp {
         if setting.id.section == "Session" {
             return self.change_unified_session_setting(&setting.id.key, &value);
         }
+        if setting.id == SettingId::new("General", "Language") {
+            return self.change_unified_language(&setting.label, value);
+        }
+        if setting.id.section == "General"
+            && matches!(setting.id.key.as_str(), "FontName" | "FontSize")
+        {
+            return self.change_unified_font_with_system_fonts(
+                index,
+                value,
+                system_fonts::installed_system_fonts(),
+            );
+        }
         if setting.details.policy == ApplyPolicy::DisplayPreview {
             self.begin_unified_display_preview(index, value);
             return Ok(());
@@ -89,6 +101,177 @@ impl GameApp {
         }
         self.refresh_unified_binding_labels();
         Ok(())
+    }
+
+    /// Rebuilds the menus' fonts for a new face or size and saves the choice
+    /// at once, as the options book does (C4StartupOptionsDlg.cpp:1286-1306);
+    /// a font that cannot be built keeps the old one.
+    pub(crate) fn change_unified_font_with_system_fonts(
+        &mut self,
+        index: usize,
+        value: AdvancedConfigValue,
+        system_fonts: &dyn system_fonts::SystemFontProvider,
+    ) -> Result<(), EngineError> {
+        let Some(settings) = self.unified_settings.as_ref() else {
+            return Ok(());
+        };
+        let current = |key: &str| {
+            settings
+                .controller
+                .settings
+                .iter()
+                .find(|setting| setting.id.section == "General" && setting.id.key == key)
+                .map(|setting| setting.value.serialized())
+        };
+        let Some(changed) = settings.controller.settings.get(index).cloned() else {
+            return Ok(());
+        };
+        let chosen = value.serialized();
+        let face = if changed.id.key == "FontName" {
+            chosen.clone()
+        } else {
+            current("FontName").unwrap_or_else(|| "Endeavour".into())
+        };
+        let size = if changed.id.key == "FontSize" {
+            Some(chosen.as_str())
+        } else {
+            None
+        }
+        .map(str::to_owned)
+        .or_else(|| current("FontSize"))
+        .and_then(|size| size.trim().parse::<i32>().ok())
+        .unwrap_or(14);
+        let Some((gui, startup)) = self.resolve_font_selection(&face, size, system_fonts) else {
+            let message =
+                self.runtime_resource_text("IDS_ERR_INITFONTS", "Error initializing fonts");
+            if let Some(settings) = self.unified_settings.as_mut() {
+                settings.controller.view.message = message;
+            }
+            return Ok(());
+        };
+        self.config
+            .deferred
+            .set("General", &changed.id.key, &chosen);
+        if let Some(settings) = self.unified_settings.as_mut() {
+            settings
+                .config
+                .set_in(Some("General"), &changed.id.key, &chosen);
+            if let Some(row) = settings.controller.settings.get_mut(index) {
+                row.value = value;
+            }
+            settings.controller.view.message =
+                format!("{} · {}", changed.label, changed.details.policy.label());
+        }
+        // A scenario reads the font from the file when it loads, so the
+        // choice is saved now, as the options book saves it.
+        if let Err(error) = self.save_unified_settings() {
+            if let Some(settings) = self.unified_settings.as_mut() {
+                settings.controller.view.message =
+                    format!("Could not save: {error}. Close again to retry.");
+            }
+        }
+        self.install_font_selection(gui, startup);
+        Ok(())
+    }
+
+    /// Switches language as the options book does
+    /// (C4StartupOptionsDlg.cpp:1243-1254): the chosen pack's fallbacks become
+    /// `LanguageEx` and its texts load at once. The texts are read through the
+    /// file, so both are saved first, and a save that fails changes nothing.
+    fn change_unified_language(
+        &mut self,
+        label: &str,
+        value: AdvancedConfigValue,
+    ) -> Result<(), EngineError> {
+        let code = value.serialized();
+        // System default empties both, which reads as unset: the system's
+        // language applies, as C4Config gives it (C4Config.cpp:1461-1470). A
+        // code without a pack keeps its fallbacks
+        // (C4StartupOptionsDlg.cpp:1205-1210).
+        let fallbacks = if code.is_empty() {
+            Some(String::new())
+        } else {
+            self.app_paths
+                .as_ref()
+                .map(installed_language_infos)
+                .unwrap_or_default()
+                .iter()
+                .find(|info| info.code == code)
+                .map(clonk_frontend::startup_options_dlg::compose_language_ex)
+        };
+        let changes: Vec<_> = std::iter::once(("Language", code))
+            .chain(fallbacks.map(|fallbacks| ("LanguageEx", fallbacks)))
+            .collect();
+        let pending: Vec<_> = changes
+            .iter()
+            .map(|(key, _)| self.config.deferred.get("General", key).map(str::to_owned))
+            .collect();
+        for (key, text) in &changes {
+            self.config.deferred.set("General", *key, text);
+        }
+        if let Err(error) = self.save_unified_settings() {
+            for ((key, _), pending) in changes.iter().zip(pending) {
+                match pending {
+                    Some(text) => self.config.deferred.set("General", *key, text),
+                    None => self.config.deferred.clear("General", key),
+                }
+            }
+            if let Some(settings) = self.unified_settings.as_mut() {
+                settings.controller.view.message = format!("Could not save: {error}.");
+            }
+            return Ok(());
+        }
+        for (key, text) in &changes {
+            self.show_unified_general_value(key, text);
+        }
+        let message = match self.reload_application_language_resources() {
+            // The loaded table names its charset (C4Language.cpp:311).
+            Ok(charset) => {
+                self.record_unified_general_value("LanguageCharset", &charset);
+                if let Err(error) = self.save_unified_settings() {
+                    tracing::warn!(%error, "failed to save selected language charset");
+                }
+                format!("{label} · {}", ApplyPolicy::Live.label())
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "failed to reload selected application language");
+                format!("Could not load the language's texts: {error}")
+            }
+        };
+        if let Some(settings) = self.unified_settings.as_mut() {
+            settings.controller.view.message = message;
+        }
+        Ok(())
+    }
+
+    /// Records a General value in the pending configuration and on the row
+    /// that lists it.
+    fn record_unified_general_value(&mut self, key: &str, text: &str) {
+        self.config.deferred.set("General", key, text);
+        self.show_unified_general_value(key, text);
+    }
+
+    /// Shows a General value in the overlay's configuration and on the row
+    /// that lists it.
+    fn show_unified_general_value(&mut self, key: &str, text: &str) {
+        let Some(settings) = self.unified_settings.as_mut() else {
+            return;
+        };
+        settings.config.set_in(Some("General"), key, text);
+        if let Some(row) = settings
+            .controller
+            .settings
+            .iter_mut()
+            .find(|row| row.id == SettingId::new("General", key))
+        {
+            row.value = match &row.value {
+                AdvancedConfigValue::Choice { choices, .. } => AdvancedConfigValue::Choice {
+                    value: text.into(),
+                    choices: choices.clone(),
+                },
+                _ => AdvancedConfigValue::Text(text.into()),
+            };
+        }
     }
 
     fn apply_unified_preference(

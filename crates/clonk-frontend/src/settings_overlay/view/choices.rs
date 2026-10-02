@@ -79,13 +79,37 @@ impl SettingsController {
         IntRect::new(value.x + value.w - width, y, width, height)
     }
 
+    /// The track and thumb inside an open list that holds more choices than
+    /// it shows, so the ones out of view are not missed.
+    pub(super) fn choice_scrollbar(&self) -> Option<(IntRect, IntRect)> {
+        let picker = self.view.choice.as_ref()?;
+        let hidden = self.choices().len().checked_sub(VISIBLE_ITEMS)?;
+        if hidden == 0 {
+            return None;
+        }
+        let list = self.choice_rect();
+        let track = IntRect::new(list.x + list.w - 9, list.y + 3, 6, list.h - 6);
+        let height = track.h * VISIBLE_ITEMS as i32 / (VISIBLE_ITEMS + hidden) as i32;
+        let top = (track.h - height) * picker.scroll.min(hidden) as i32 / hidden as i32;
+        Some((track, IntRect::new(track.x, track.y + top, track.w, height)))
+    }
+
+    /// The scroll track and thumb when `point` is in the strip they run in,
+    /// beside the list's rows.
+    fn choice_scroll_strip(&self, point: GuiPoint) -> Option<(IntRect, IntRect)> {
+        self.choice_scrollbar()
+            .filter(|(track, _)| point.x >= (track.x - 2) as f32)
+    }
+
     /// The choice under the pointer, if any.
     fn choice_at(&self, point: GuiPoint) -> Option<usize> {
         let rect = self.choice_rect();
         let picker = self.view.choice.as_ref()?;
-        (contains(rect, point) && point.y >= (rect.y + 3) as f32)
-            .then(|| picker.scroll + ((point.y as i32 - rect.y - 3) / ITEM_HEIGHT) as usize)
-            .filter(|index| *index < self.choices().len())
+        (contains(rect, point)
+            && point.y >= (rect.y + 3) as f32
+            && self.choice_scroll_strip(point).is_none())
+        .then(|| picker.scroll + ((point.y as i32 - rect.y - 3) / ITEM_HEIGHT) as usize)
+        .filter(|index| *index < self.choices().len())
     }
 
     /// Highlights the choice under the pointer.
@@ -186,6 +210,18 @@ impl SettingsController {
         if !contains(self.choice_rect(), point) {
             if down {
                 self.view.choice = None;
+            }
+            return Vec::new();
+        }
+        if let Some((_, thumb)) = self.choice_scroll_strip(point) {
+            // A press beside the thumb pages toward it; none chooses a row.
+            if down && point.y < thumb.y as f32 {
+                self.scroll_choices(-(VISIBLE_ITEMS as i32));
+            } else if down && point.y >= (thumb.y + thumb.h) as f32 {
+                self.scroll_choices(VISIBLE_ITEMS as i32);
+            }
+            if let Some(picker) = self.view.choice.as_mut() {
+                picker.pressed = None;
             }
             return Vec::new();
         }

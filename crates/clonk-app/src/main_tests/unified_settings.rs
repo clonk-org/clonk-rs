@@ -1082,6 +1082,10 @@ fn unified_settings_write_changed_settings_in_the_same_ink_as_the_rest() {
         },
     )])
     .unwrap();
+    // Bring the changed row and its unchanged neighbour into view.
+    app.unified_settings.as_mut().unwrap().controller.set_focus(
+        clonk_frontend::settings_overlay::SettingsFocus::Row(duration),
+    );
     let (_, _, plan) = render_ordered_test_frame(&mut app, scale, 800, 600);
     let ink = |needle: &str| {
         plan.batches
@@ -1128,4 +1132,297 @@ fn unified_settings_show_fair_crew_strength_between_weak_and_strong_like_the_opt
         "{texts:?}"
     );
     assert!(texts.iter().all(|text| !text.contains("Rank")), "{texts:?}");
+}
+
+#[test]
+fn unified_settings_apply_a_font_at_once_and_keep_the_old_one_when_it_cannot_be_built() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    struct NoSystemFonts;
+    impl system_fonts::SystemFontProvider for NoSystemFonts {
+        fn resolve(&self, _family: &str, _weight: u32) -> Option<system_fonts::SystemFontFace> {
+            None
+        }
+    }
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nFontName=Endeavour\nFontSize=14\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let row = |app: &GameApp, key: &str| {
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .settings
+            .iter()
+            .position(|s| s.id.section == "General" && s.id.key == key)
+            .unwrap()
+    };
+    let choose = |app: &GameApp, index: usize, chosen: &str| match &app
+        .unified_settings
+        .as_ref()
+        .unwrap()
+        .controller
+        .settings[index]
+        .value
+    {
+        AdvancedConfigValue::Choice { choices, .. } => AdvancedConfigValue::Choice {
+            value: chosen.into(),
+            choices: choices.clone(),
+        },
+        other => panic!("not a choice: {other:?}"),
+    };
+    // Endeavour ships with the game, so no system font is needed for it.
+    let size = row(&app, "FontSize");
+    let sixteen = choose(&app, size, "16");
+    app.change_unified_font_with_system_fonts(size, sixteen, &NoSystemFonts)
+        .test_value();
+    assert_eq!(
+        app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
+        25,
+        "rebuilt at once, as the options book does"
+    );
+    assert_eq!(
+        app.assets
+            .options_book_fonts
+            .as_ref()
+            .unwrap()
+            .book
+            .line_height,
+        25
+    );
+    assert_eq!(
+        Config::load(paths.config_file())
+            .test_value()
+            .get_in(Some("General"), "FontSize"),
+        Some("16"),
+        "saved at once, so the next scenario reads it"
+    );
+    let face = row(&app, "FontName");
+    let before = fs::read(paths.config_file()).test_value();
+    let missing = choose(&app, face, "Comic Sans MS");
+    app.change_unified_font_with_system_fonts(face, missing, &NoSystemFonts)
+        .test_value();
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert_eq!(controller.view.message, "Error initializing fonts");
+    assert_eq!(controller.settings[face].value.serialized(), "Endeavour");
+    assert_eq!(
+        app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
+        25
+    );
+    assert_eq!(fs::read(paths.config_file()).test_value(), before);
+}
+
+#[test]
+fn unified_settings_choose_an_installed_language_and_reload_its_texts_at_once() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::{AdvancedConfigChoice, AdvancedConfigValue};
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nLanguage=DE - Deutsch\nLanguageEx=DE\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    assert_eq!(app.needed_material_need, "%s|braucht noch");
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let row = |app: &GameApp, key: &str| {
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .settings
+            .iter()
+            .position(|s| s.id.section == "General" && s.id.key == key)
+            .unwrap()
+    };
+    let language = row(&app, "Language");
+    let AdvancedConfigValue::Choice { value, choices } =
+        app.unified_settings.as_ref().unwrap().controller.settings[language]
+            .value
+            .clone()
+    else {
+        panic!("Language is not a choice");
+    };
+    // The options book lists every installed pack as "XX - Name"
+    // (C4StartupOptionsDlg.cpp:1234-1241) and stores the two-letter code
+    // (C4StartupOptionsDlg.cpp:1243-1248).
+    assert_eq!(value, "DE");
+    let choice = |value: &str, label: &str| AdvancedConfigChoice {
+        value: value.into(),
+        label: label.into(),
+    };
+    assert_eq!(choices[0], choice("", "System default"));
+    for installed in [choice("DE", "DE - Deutsch"), choice("US", "US - English")] {
+        assert!(choices.contains(&installed), "{installed:?} in {choices:?}");
+    }
+
+    let english = AdvancedConfigValue::Choice {
+        value: "US".into(),
+        choices,
+    };
+    app.change_unified_setting(language, english).test_value();
+
+    assert_eq!(app.needed_material_need, "%s|needs", "texts reload at once");
+    let settings = app.unified_settings.as_ref().unwrap();
+    assert_eq!(settings.controller.view.message, "Language · Applies now");
+    assert_eq!(
+        settings.controller.settings[language].value.serialized(),
+        "US"
+    );
+    let fallbacks = row(&app, "LanguageEx");
+    assert_eq!(
+        app.unified_settings.as_ref().unwrap().controller.settings[fallbacks]
+            .value
+            .serialized(),
+        "US,DE",
+        "fallbacks composed as the options book composes them"
+    );
+    let config = Config::load(paths.config_file()).test_value();
+    assert_eq!(config.get_in(Some("General"), "Language"), Some("US"));
+    assert_eq!(config.get_in(Some("General"), "LanguageEx"), Some("US,DE"));
+    assert_eq!(config.get_in(Some("General"), "LanguageCharset"), Some(""));
+}
+
+#[test]
+fn unified_settings_system_default_language_still_names_savegame_descriptions() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nLanguage=DE\nLanguageEx=DE,US\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    assert_eq!(app.saves.description_language, b"DE");
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let settings = &app.unified_settings.as_ref().unwrap().controller.settings;
+    let language = settings
+        .iter()
+        .position(|s| s.id.section == "General" && s.id.key == "Language")
+        .unwrap();
+    let AdvancedConfigValue::Choice { choices, .. } = settings[language].value.clone() else {
+        panic!("Language is not a choice");
+    };
+    let system_default = AdvancedConfigValue::Choice {
+        value: String::new(),
+        choices,
+    };
+    app.change_unified_setting(language, system_default)
+        .test_value();
+    // An empty language reads as unset, so the system's names a savegame's
+    // description, as C++ names it (C4Config.cpp:1461-1470,
+    // C4GameSave.cpp:285-290).
+    assert_eq!(
+        app.saves.description_language,
+        classic_loader_system_language().unwrap_or("US").as_bytes()
+    );
+}
+
+#[test]
+fn unified_settings_leave_the_language_as_it_was_when_it_cannot_be_saved() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nLanguage=DE\nLanguageEx=DE,US\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let settings = &app.unified_settings.as_ref().unwrap().controller.settings;
+    let language = settings
+        .iter()
+        .position(|s| s.id.section == "General" && s.id.key == "Language")
+        .unwrap();
+    let AdvancedConfigValue::Choice { choices, .. } = settings[language].value.clone() else {
+        panic!("Language is not a choice");
+    };
+    fs::remove_file(paths.config_file()).test_value();
+    fs::create_dir(paths.config_file()).test_value();
+    let english = AdvancedConfigValue::Choice {
+        value: "US".into(),
+        choices,
+    };
+    app.change_unified_setting(language, english).test_value();
+
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert!(
+        controller.view.message.starts_with("Could not save"),
+        "{}",
+        controller.view.message
+    );
+    assert_eq!(controller.settings[language].value.serialized(), "DE");
+    assert_eq!(app.needed_material_need, "%s|braucht noch");
+    // Nothing is left for a later save to write without loading its texts.
+    assert_eq!(app.config.deferred.get("General", "Language"), None);
+    assert_eq!(app.config.deferred.get("General", "LanguageEx"), None);
+}
+
+#[test]
+fn unified_settings_say_when_a_saved_language_cannot_be_loaded() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::AdvancedConfigValue;
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(paths.config_file(), "[General]\nLanguage=XX\n").test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let settings = &app.unified_settings.as_ref().unwrap().controller.settings;
+    let language = settings
+        .iter()
+        .position(|s| s.id.section == "General" && s.id.key == "Language")
+        .unwrap();
+    let AdvancedConfigValue::Choice { choices, .. } = settings[language].value.clone() else {
+        panic!("Language is not a choice");
+    };
+    // A code without a pack keeps the fallbacks on file, and these overrun
+    // C4Config's 1024-byte field, so no table loads from them.
+    fs::write(
+        paths.config_file(),
+        format!("[General]\nLanguage=XX\nLanguageEx={}\n", "XX,".repeat(400)),
+    )
+    .test_value();
+    let unknown = AdvancedConfigValue::Choice {
+        value: "XX".into(),
+        choices,
+    };
+    app.change_unified_setting(language, unknown).test_value();
+
+    let controller = &app.unified_settings.as_ref().unwrap().controller;
+    assert!(
+        controller.view.message.starts_with("Could not load"),
+        "{}",
+        controller.view.message
+    );
 }
