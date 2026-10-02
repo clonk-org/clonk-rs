@@ -132,7 +132,7 @@
       ]
     },
     "content": {
-      "statement": "Bundled content is exactly the pinned content commit, and the eight port-authored planet/System.c4g #appendto scripts are disabled, so definitions and scripts behave exactly as the shipped content specifies. Definition version gating prunes content newer than the engine exactly as C++ does.",
+      "statement": "Bundled content is exactly the pinned content commit, and the port-authored planet/System.c4g content overrides are disabled, so definitions and scripts behave exactly as the shipped content specifies. Definition version gating prunes content newer than the engine exactly as C++ does.",
       "evidence": [
         {
           "kind": "command",
@@ -458,6 +458,20 @@
       "profile_action": "kept",
       "determinism_critical": true,
       "owner": "docs/COMPAT_PROFILE.md (product decision approved 2026-08-26)"
+    },
+    {
+      "id": "content-append-upward-race-spawn",
+      "area": "content",
+      "summary": "UpwardRaceSpawn.c restores a small loam bridge beneath a newly recruited Clonk in Team Downhill Race upwards when the spawn ground is missing, including relaunches and checkpoints.",
+      "cited_in": [
+        "planet/System.c4g/UpwardRaceSpawn.c",
+        "crates/clonk-engine/tests/it/upward_race_spawn.rs"
+      ],
+      "cpp_reference": "Collection.c4f/Races.c4f/AbwaertsFalschrum.c4s/Script.c:88-93, Objects.c4d/Crew.c4d/Clonk.c4d/Script.c:29-34",
+      "disposition": "accepted",
+      "profile_action": "reverted",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#1826"
     },
     {
       "id": "content-append-bird-flight",

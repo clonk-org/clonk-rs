@@ -158,8 +158,8 @@ too.
 
 ### Content and resources
 
-Bundled content is exactly the pinned content commit, and the eight
-port-authored `planet/System.c4g` `#appendto` scripts are disabled, so
+Bundled content is exactly the pinned content commit, and the
+port-authored `planet/System.c4g` content overrides are disabled, so
 definitions and scripts behave exactly as the shipped content specifies.
 That is a claim about behaviour and does not by itself make the group
 interchangeable with a stock one: `System.c4g` is compared as bytes by a
@@ -342,13 +342,13 @@ restores C++'s definition-transfer default.
 
 ## Port content appends
 
-Eight port-authored `#appendto` scripts live in `planet/System.c4g` and change
-what shipped definitions do. They are content, not engine, but they are just as
-visible to a C++ peer — seven of the eight are determinism-critical — so the
-profile disables all eight and the shipped scripts run unmodified.
+Port-authored content overrides live in `planet/System.c4g` and change
+what shipped definitions do. Most affect synchronized state or controls, so
+the profile disables them and the shipped scripts run unmodified.
 
 | Id | Target | What the append changes |
 | --- | --- | --- |
+| `content-append-upward-race-spawn` | `RACE` | Restores a small loam bridge beneath new or relaunched crew in Team Downhill Race upwards when spawn ground is missing, including checkpoints. Intact ground and other races retain their authored behavior. Owned by clonk-org/clonk-rs#1826. |
 | `content-append-bird-flight` | `BIRD` | Replaces the shipped four-coin-flips-per-tick bird steering with a continuous flight controller (separation plus weak alignment). |
 | `content-append-airbike-steering` | `AB5B` | Hold-to-steer airbike handling with a double-integrator float model. Every test has an A/B twin pinning what LegacyClonk does with the append removed. |
 | `content-append-gped-remote` | `SF5B` | Keeps the pilot parked while the GPED steers an airbike, answering the stale single-coms that Jump'n'Run control would otherwise turn into movement. |

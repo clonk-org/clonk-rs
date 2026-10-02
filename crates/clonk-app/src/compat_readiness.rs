@@ -426,6 +426,7 @@ mod tests {
             "GatherTask.c",
             "MarsOrderCapsule.c",
             "MenuRangeRow.c",
+            "UpwardRaceSpawn.c",
         ] {
             assert!(
                 scripts.contains(expected),
