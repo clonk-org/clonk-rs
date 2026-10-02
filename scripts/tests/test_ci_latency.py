@@ -720,6 +720,7 @@ class CiLatencyTests(unittest.TestCase):
         expected_apt = {
             "engine and frontend unit and parity": "libasound2-dev libudev-dev",
             "remaining workspace 2/2": "libasound2-dev libxmp4 mesa-vulkan-drivers",
+            "app 4+9/12": "libasound2-dev libudev-dev mesa-vulkan-drivers",
             "workspace quality": "libasound2-dev libudev-dev python3-pil",
             "presentation captures": "libasound2-dev libudev-dev",
         }

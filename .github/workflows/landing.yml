@@ -294,7 +294,9 @@ jobs:
             command: cargo nextest run -p clonk-app --features app-test-shard-2,app-test-shard-7 --no-fail-fast --locked
             artifact: app-2-7
           - name: app 4+9/12
-            apt: libasound2-dev libudev-dev
+            # The shader-landscape scenario test renders through a real wgpu
+            # device; Mesa's lavapipe provides one on the runner.
+            apt: libasound2-dev libudev-dev mesa-vulkan-drivers
             command: |
               failed=0
               cargo nextest run -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked || failed=1

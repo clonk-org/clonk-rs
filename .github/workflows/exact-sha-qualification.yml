@@ -90,7 +90,7 @@ jobs:
           - name: app 4+9/12
             timeout: 20
             artifact: app-4-9
-            apt: libasound2-dev libudev-dev
+            apt: libasound2-dev libudev-dev mesa-vulkan-drivers
             command: cargo llvm-cov --no-report nextest -p clonk-app --features app-test-shard-4,app-test-shard-9 --no-fail-fast --locked
           - name: app 5/12
             timeout: 30
