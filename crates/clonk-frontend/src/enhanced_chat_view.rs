@@ -6,6 +6,7 @@ use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Surface};
 
 use crate::classic_gui::{draw_clipped_text_with_markup, draw_engine_box, IntRect};
+use crate::clonk_fonts::NativeClonkFontSet;
 use crate::enhanced_chat::{ChatAudience, ChatChannel, ChatMessage, EnhancedChat};
 use crate::{ClonkFontSet, GuiPoint};
 
@@ -180,6 +181,8 @@ pub struct ChatView<'a> {
     /// `General.UseWhiteIngameChat`: white message text with only the sender
     /// in player colour.
     pub white_text: bool,
+    /// The scale-native fonts captured text is replayed with, if any.
+    pub native_fonts: Option<&'a NativeClonkFontSet>,
     pub now: Instant,
 }
 
@@ -325,6 +328,19 @@ pub fn render_chat(
     }
     let row_height = font.line_height + 3;
     let bottom = layout.feed.y + layout.feed.h;
+    // Captured runs are each redrawn alone at the interface scale, so they
+    // are placed by the metrics of the font that will draw them.
+    let native = view
+        .native_fonts
+        .filter(|_| surface.is_capturing_clonk_text())
+        .zip(font.role())
+        .map(|(fonts, role)| fonts.font_for_role(role));
+    let width = |text: &str| {
+        native.map_or_else(
+            || font.measure(text, false).0,
+            |native| native.measure(text, false).0,
+        )
+    };
     for (index, line) in lines.iter().enumerate() {
         let y = bottom - (lines.len() - index) as i32 * row_height;
         let right = layout.feed.x + layout.feed.w;
@@ -332,7 +348,7 @@ pub fn render_chat(
         for span in &line.spans {
             let rect = IntRect::new(x, y, (right - x).max(0), font.line_height + 2);
             outlined_text(surface, font, rect, &span.text, span.color, gamma);
-            x += font.measure(&span.text, false).0 + font.h_space;
+            x += width(&span.text) + font.h_space;
         }
     }
     if view.expanded {
@@ -808,6 +824,7 @@ mod tests {
             notice: "",
             timestamps: false,
             white_text: true,
+            native_fonts: None,
             now: Instant::now(),
         };
         let lines = display_lines(&fonts.text, &chat, &view, IntRect::new(0, 0, 100, 200));
@@ -843,6 +860,7 @@ mod tests {
             notice: "",
             timestamps: false,
             white_text: true,
+            native_fonts: None,
             now: start + Duration::from_secs(11),
         };
         let lines = display_lines(&fonts.text, &chat, &view, feed);
@@ -887,6 +905,54 @@ mod tests {
         // Without white chat the message takes its sender's colour, as
         // classic chat does.
         assert_eq!(spans(false)[3].color, [220, 60, 60, 255]);
+    }
+
+    #[test]
+    fn spans_start_where_the_native_font_ends_the_previous_one() {
+        // At an interface scale every captured run is redrawn alone with the
+        // scale-native font, so a run placed by the 1x metrics overlaps or
+        // drifts from the run before it.
+        let fonts = crate::test_support::endeavour_font_set();
+        let bytes =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour");
+        let native = crate::clonk_fonts::build_native_font_set(&bytes, 3.0).expect("native fonts");
+        let preferences = ChatPreferences::default();
+        let mut chat = EnhancedChat::default();
+        let mut message = ChatMessage::conversation("Ada", ChatChannel::Allies, "Ready?");
+        message.timestamp = "[10:53:53]".into();
+        chat.push(message);
+        let view = ChatView {
+            preferences: &preferences,
+            expanded: false,
+            audience: "Everyone",
+            audience_color: WHITE_TEXT,
+            hint: "",
+            notice: "",
+            timestamps: true,
+            white_text: true,
+            native_fonts: Some(&native),
+            now: Instant::now(),
+        };
+        let mut surface = Surface::new(1152, 745, clonk_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        render_chat(&mut surface, &fonts, &chat, &view, None);
+        let captured = surface.take_clonk_text_capture();
+
+        // Each run is four outline passes, then its fill.
+        let fills: Vec<_> = captured.iter().skip(4).step_by(5).collect();
+        let texts: Vec<_> = fills.iter().map(|command| command.text.as_str()).collect();
+        assert_eq!(texts, ["[10:53:53] ", "[Allies] ", "Ada: ", "Ready?"]);
+        let font = native.font_for_role(fonts.text.role().expect("chat font role"));
+        for pair in fills.windows(2) {
+            assert_eq!(
+                pair[1].x - pair[0].x,
+                font.measure(&pair[0].text, false).0 + fonts.text.h_space,
+                "{:?} must end where {:?} begins",
+                pair[0].text,
+                pair[1].text
+            );
+        }
     }
 
     #[test]
@@ -937,6 +1003,7 @@ mod tests {
             notice: "",
             timestamps: false,
             white_text: true,
+            native_fonts: None,
             now: Instant::now(),
         };
         render_chat(&mut surface, &fonts, &chat, &view, None);
@@ -978,6 +1045,7 @@ mod tests {
             notice: "",
             timestamps: false,
             white_text: true,
+            native_fonts: None,
             now: Instant::now(),
         };
         let mut latest = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);

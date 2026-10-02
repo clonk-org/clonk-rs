@@ -526,6 +526,7 @@ impl GameApp {
                 notice: &notice,
                 timestamps: self.chat.show_log_timestamps,
                 white_text: self.rendering.display_flags.white_chat,
+                native_fonts: self.native_startup_fonts.as_deref(),
                 now: Instant::now(),
             },
             gamma,

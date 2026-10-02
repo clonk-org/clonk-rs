@@ -1440,7 +1440,8 @@ impl NativeClonkFontSet {
         }
     }
 
-    fn font_for_role(&self, role: ClonkFontRole) -> &NativeClonkFont {
+    /// The scale-native counterpart that replays text drawn in `role`.
+    pub fn font_for_role(&self, role: ClonkFontRole) -> &NativeClonkFont {
         match role {
             ClonkFontRole::GuiTitle => &self.title,
             ClonkFontRole::GuiCaption => &self.caption,
