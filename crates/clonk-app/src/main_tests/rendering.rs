@@ -2726,6 +2726,145 @@ fn write_options_gpu_review_capture(frame: &RetainedGpuFrame, path: &Path) {
     .test_value();
 }
 
+/// Apple GPUs' 2D texture limit. A device capped here fails a renderer that
+/// outgrows it on any adapter, not only on the GPUs that have it.
+const APPLE_MAX_TEXTURE_DIMENSION_2D: u32 = 16_384;
+
+fn apple_limited_test_device() -> (wgpu::Device, wgpu::Queue) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .test_value();
+    let instance = crate::gpu_instance::retained_instance(wgpu::Backends::all());
+    let adapter = runtime
+        .block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("the shader landscape test needs a wgpu adapter; CI installs mesa-vulkan-drivers");
+    let mut required_limits = wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits());
+    required_limits.max_texture_dimension_2d = required_limits
+        .max_texture_dimension_2d
+        .min(APPLE_MAX_TEXTURE_DIMENSION_2D);
+    runtime
+        .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("shader landscape scenario test"),
+            required_limits,
+            ..Default::default()
+        }))
+        .test_value()
+}
+
+/// Renders `frame` the way the live window does, composing the landscape in
+/// the fragment shader when `plan` is given.
+fn render_retained_frame_readback(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: &RetainedGpuFrame,
+    plan: Option<(
+        clonk_graphics::GpuTextureId,
+        clonk_graphics::ShaderLandscapePlan,
+    )>,
+) -> (
+    gpu_renderer::GpuReadbackFrame,
+    gpu_renderer::GpuRendererStats,
+) {
+    let extent = frame.layers[0].presentation.physical_extent;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shader landscape scenario test"),
+        size: wgpu::Extent3d {
+            width: extent[0],
+            height: extent[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut renderer =
+        gpu_renderer::RetainedGpuRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
+    renderer.set_shader_landscape(plan.is_some());
+    renderer.set_pending_shader_landscape(plan);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("shader landscape scenario test"),
+    });
+    let layers: Vec<_> = frame
+        .layers
+        .iter()
+        .map(|layer| gpu_renderer::GpuSceneLayer::new(&layer.scene, layer.presentation))
+        .collect();
+    let ticket = renderer
+        .render_layers(device, queue, &mut encoder, &view, &layers, true)
+        .test_value()
+        .test_value();
+    queue.submit(Some(encoder.finish()));
+    (ticket.read(device).test_value(), renderer.last_stats())
+}
+
+/// A real scenario must draw the same through the fragment-shader landscape
+/// (`Graphics.ShaderLandscape`, on with `Graphics.Remaster`) as through the CPU
+/// composition it replaces. Gold Mine covers both ways that path has broken:
+/// the stock `Material.c4g` once stacked an atlas past Apple's 16384-texel
+/// limit and quit the game (clonk-org/clonk-rs#1838), and its map is not a
+/// power-of-two square, whose padded landscape tile the shader once drew as a
+/// stretched corner of the map (clonk-org/clonk-rs#1841). Its hut also puts a
+/// solid mask, which the shader once shaded against instead of the ground
+/// beneath (clonk-org/clonk-rs#1843).
+#[test]
+fn a_real_scenario_draws_the_same_through_the_shader_landscape() {
+    let _lock = env_lock().lock();
+    reset_cached_app_paths();
+    let user_data = tempdir();
+    let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+    configure_test_startup_participant(&paths, user_data.path());
+    let mut app = test_game_app(640, 480, AudioOptions::default(), Some(&paths)).test_value();
+    // The live app enables it at startup (`main.rs`), before any landscape is
+    // composed: a plan is only built when the landscape cache is (re)composed.
+    app.rendering.graphics.set_shader_landscape(true);
+    let scenario = paths.install_root().join("content/Worlds.c4f/Goldmine.c4s");
+    app.start_scenario(FrontendScenario::from_command_line(&scenario))
+        .test_value();
+    wait_for_running_with_attempts(&mut app, 15_000);
+    main_assert!(
+        matches!(app.mode, AppMode::Running),
+        "Gold Mine did not start; status={:?}",
+        app.status_text
+    );
+    app.loader
+        .discard_terminal_loader_frame_for_headless_render();
+
+    let frame = app
+        .render_retained_gpu_frame(GpuPresentation::identity(640, 480))
+        .test_value();
+    let plan = app.rendering.graphics.take_shader_landscape_plan();
+    main_assert!(
+        plan.is_some(),
+        "a single-tile landscape must hand the renderer a shader plan"
+    );
+
+    let (device, queue) = apple_limited_test_device();
+    let (cpu, _) = render_retained_frame_readback(&device, &queue, &frame, None);
+    let (shader, stats) = render_retained_frame_readback(&device, &queue, &frame, plan);
+
+    main_assert!(
+        stats.shader_landscape_composed_texels > 0,
+        "the frame must be composed by the shader, not a CPU fallback"
+    );
+    let mismatch = cpu
+        .rgba
+        .chunks_exact(4)
+        .zip(shader.rgba.chunks_exact(4))
+        .position(|(cpu, shader)| cpu != shader)
+        .map(|index| (index as u32 % cpu.extent[0], index as u32 / cpu.extent[0]));
+    main_assert_eq!(mismatch => None, "the shader landscape must draw Gold Mine exactly as the CPU composition does");
+}
+
 #[test]
 fn speaking_overlay_maps_authenticated_player_to_selected_cursor() {
     let mut app = new_lightweight_running_sandbox_app();

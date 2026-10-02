@@ -6701,12 +6701,26 @@ impl GraphicsSystem {
             {
                 let placement_table: [i32; 128] =
                     std::array::from_fn(|index| placements.get(index).copied().unwrap_or(0));
+                // Compose and shade the landscape beneath each put mask, as
+                // the CPU pass below does (C4Landscape.cpp:2497,2501).
+                let mut index_plane = bytes.to_vec();
+                grid.mask_backgrounds().for_each(|(slot, byte)| {
+                    if let Some(texel) = index_plane.get_mut(slot) {
+                        *texel = byte;
+                    }
+                });
                 let shading_plane = shade_materials.then(|| {
-                    placement_shading_plane(bytes, width, height, &placement_table, border_state)
+                    placement_shading_plane(
+                        &index_plane,
+                        width,
+                        height,
+                        &placement_table,
+                        border_state,
+                    )
                 });
                 let plan = build_shader_landscape_plan(
                     [width, height],
-                    bytes.to_vec(),
+                    index_plane,
                     shading_plane,
                     &slots,
                     &mut self.shader_landscape_catalogue,
