@@ -335,6 +335,12 @@ impl SettingsController {
                 .settings
                 .get(picker.index)
                 .map(|setting| setting.value.serialized());
+            let scrollbar = self.choice_scrollbar();
+            if let Some((track, thumb)) = scrollbar {
+                book.field(surface, track, gamma);
+                box_color(surface, thumb, 0x0094846a, gamma);
+            }
+            let items_w = rect.w - 6 - scrollbar.map_or(0, |(track, _)| track.w + 2);
             for (index, choice) in self
                 .choices()
                 .iter()
@@ -345,7 +351,7 @@ impl SettingsController {
                 let item = IntRect::new(
                     rect.x + 3,
                     rect.y + 3 + (index - picker.scroll) as i32 * choices::ITEM_HEIGHT,
-                    rect.w - 6,
+                    items_w,
                     choices::ITEM_HEIGHT,
                 );
                 if picker.selected == index {

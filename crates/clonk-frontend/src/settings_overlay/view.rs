@@ -2514,6 +2514,45 @@ mod tests {
     }
 
     #[test]
+    fn a_choice_list_longer_than_it_shows_carries_a_thumb_that_follows_it() {
+        let sizes = ["8", "10", "12", "14", "16", "18", "20", "24", "28"];
+        let choices = |count: usize| AdvancedConfigValue::Choice {
+            value: "14".into(),
+            choices: sizes[..count]
+                .iter()
+                .map(
+                    |size| crate::startup_options_advanced::AdvancedConfigChoice {
+                        value: (*size).into(),
+                        label: (*size).into(),
+                    },
+                )
+                .collect(),
+        };
+        let mut controller = SettingsController::new(vec![
+            preference("FontSize", choices(9)),
+            preference("Short", choices(8)),
+        ]);
+        controller.select_category(SettingsCategory::Display);
+        controller.set_focus(SettingsFocus::Row(0));
+        controller.key(KeyCode::Enter, false, false);
+        let list = controller.choice_rect();
+        let (track, thumb) = controller
+            .choice_scrollbar()
+            .expect("nine sizes, eight in view");
+        assert!(track.x + track.w <= list.x + list.w && track.x > list.x + list.w / 2);
+        assert_eq!(thumb.y, track.y, "the list starts at its top");
+        assert!(thumb.h < track.h);
+        controller.key(KeyCode::End, false, false);
+        let (track, thumb) = controller.choice_scrollbar().unwrap();
+        assert_eq!(thumb.y + thumb.h, track.y + track.h, "28 is in view");
+        controller.key(KeyCode::Escape, false, false);
+        controller.set_focus(SettingsFocus::Row(1));
+        controller.key(KeyCode::Enter, false, false);
+        assert!(controller.view.choice.is_some());
+        assert!(controller.choice_scrollbar().is_none(), "all eight in view");
+    }
+
+    #[test]
     fn moving_to_another_setting_or_page_clears_the_last_change_message() {
         let mut controller = SettingsController::new(vec![
             preference("ShowClock", AdvancedConfigValue::Bool(true)),

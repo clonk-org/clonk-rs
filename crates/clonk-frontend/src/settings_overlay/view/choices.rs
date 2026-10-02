@@ -79,6 +79,21 @@ impl SettingsController {
         IntRect::new(value.x + value.w - width, y, width, height)
     }
 
+    /// The track and thumb inside an open list that holds more choices than
+    /// it shows, so the ones out of view are not missed.
+    pub(super) fn choice_scrollbar(&self) -> Option<(IntRect, IntRect)> {
+        let picker = self.view.choice.as_ref()?;
+        let hidden = self.choices().len().checked_sub(VISIBLE_ITEMS)?;
+        if hidden == 0 {
+            return None;
+        }
+        let list = self.choice_rect();
+        let track = IntRect::new(list.x + list.w - 9, list.y + 3, 6, list.h - 6);
+        let height = track.h * VISIBLE_ITEMS as i32 / (VISIBLE_ITEMS + hidden) as i32;
+        let top = (track.h - height) * picker.scroll.min(hidden) as i32 / hidden as i32;
+        Some((track, IntRect::new(track.x, track.y + top, track.w, height)))
+    }
+
     /// The choice under the pointer, if any.
     fn choice_at(&self, point: GuiPoint) -> Option<usize> {
         let rect = self.choice_rect();
