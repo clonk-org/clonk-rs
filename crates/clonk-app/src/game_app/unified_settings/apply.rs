@@ -233,6 +233,12 @@ impl GameApp {
     /// that lists it.
     fn record_unified_general_value(&mut self, key: &str, text: &str) {
         self.config.deferred.set("General", key, text);
+        self.show_unified_general_value(key, text);
+    }
+
+    /// Shows a General value in the overlay's configuration and on the row
+    /// that lists it.
+    fn show_unified_general_value(&mut self, key: &str, text: &str) {
         let Some(settings) = self.unified_settings.as_mut() else {
             return;
         };
