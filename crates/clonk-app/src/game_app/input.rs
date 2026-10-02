@@ -10941,6 +10941,11 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.input_routing.live.primary_left_down = button_state == ElementState::Pressed;
+        if std::mem::take(&mut self.chat.dismiss_pointer_release)
+            && button_state == ElementState::Released
+        {
+            return Ok(());
+        }
         if let Some(point) = self.input_routing.live.window_pointer {
             if self.unified_settings_pointer(point, button_state == ElementState::Pressed)?
                 || self.voice_setup_pointer(point, button_state == ElementState::Pressed)?

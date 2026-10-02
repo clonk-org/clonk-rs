@@ -2153,6 +2153,40 @@ fn enhanced_chat_recipient_keys_submit_existing_controls_and_clear_only_the_sent
 }
 
 #[test]
+fn enhanced_chat_hide_keeps_drafts_and_incoming_history_until_reopened() {
+    let mut app = new_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    app.start_running_chat(RunningChatMode::All);
+    app.replace_enhanced_chat_text("On my way");
+    let layout = app.enhanced_chat_layout(true).test_value();
+    // Hide sits immediately to the left of the close button in the header.
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(layout.header.x + layout.header.w - 60),
+        f64::from(layout.header.y + 8),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    main_assert!(app.chat.running.is_none());
+    main_assert_eq!(app.chat.enhanced.draft() => "On my way");
+    app.chat
+        .enhanced
+        .push(clonk_frontend::enhanced_chat::ChatMessage::conversation(
+            "Ada",
+            clonk_frontend::enhanced_chat::ChatChannel::Everyone,
+            "See you at the bridge.",
+        ));
+    let before = app.rendering.graphics.surface().pixels().to_vec();
+    app.render_enhanced_chat(false, None);
+    main_assert_eq!(app.rendering.graphics.surface().pixels() => before.as_slice());
+    app.start_running_chat(RunningChatMode::All);
+    main_assert_eq!(app.running_chat_text() => Some("On my way"));
+    main_assert_eq!(app.chat.enhanced.matching_messages().len() => 1);
+    app.close_running_chat().test_value();
+    app.render_enhanced_chat(false, None);
+    main_assert!(app.rendering.graphics.surface().pixels() != before.as_slice());
+}
+
+#[test]
 fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients_and_preferences() {
     use clonk_frontend::enhanced_chat::ChatAudience;
     let mut app = new_classic_running_sandbox_app();
@@ -2219,6 +2253,14 @@ fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients_and_prefer
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.chat.enhanced.audience => ChatAudience::Everyone);
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(layout.options.x + 4),
+        f64::from(layout.options.y + 4),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+    main_assert!(app.chat.enhanced.options_open);
+    capture(&mut app, "chat-options");
     let size = layout.setting_cell(0);
     app.test_cursor(PhysicalPosition::new(
         f64::from(size.x + 4),
@@ -2227,12 +2269,20 @@ fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients_and_prefer
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.chat.enhanced_preferences.text_size => 2);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
+    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
+    main_assert!(!app.chat.enhanced.options_open);
+    main_assert!(app.enhanced_chat_active());
     app.resize(640, 480).test_value();
     app.replace_enhanced_chat_text("Ready when you are.");
     capture(&mut app, "chat-large-text");
     app.close_running_chat().test_value();
     app.resize(960, 640).test_value();
+    app.chat.enhanced_preferences.text_size = 1;
     capture(&mut app, "chat-compact");
+    app.resize(320, 200).test_value();
+    app.start_running_chat(RunningChatMode::All);
+    capture(&mut app, "chat-small");
 }
 
 #[test]

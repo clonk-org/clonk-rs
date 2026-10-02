@@ -258,7 +258,7 @@ impl GameApp {
             .take(4)
             .collect::<Vec<_>>();
         if matches.is_empty() {
-            "Enter: send · Esc: keep draft · Ctrl+Tab: recipient".into()
+            "Enter to send · Esc to close".into()
         } else {
             format!("Tab / Shift+Tab: {}", matches.join(" · "))
         }
@@ -327,7 +327,8 @@ impl GameApp {
             VirtualKeyCode::Tab | VirtualKeyCode::PageUp | VirtualKeyCode::PageDown
         ) || key == VirtualKeyCode::End && modifiers.control_key()
             || key == VirtualKeyCode::KeyL && modifiers.control_key()
-            || key == VirtualKeyCode::Escape && self.chat.audience_picker
+            || key == VirtualKeyCode::Escape
+                && (self.chat.audience_picker || self.chat.enhanced.options_open)
             || key == VirtualKeyCode::Backspace
                 && self.running_chat_text().is_none_or(str::is_empty);
         if !handled || modifiers.alt_key() {
@@ -383,35 +384,51 @@ impl GameApp {
             }
             VirtualKeyCode::End => self.chat.enhanced.jump_to_latest(),
             VirtualKeyCode::KeyL => self.chat.enhanced.toggle_logs(),
-            VirtualKeyCode::Escape => self.chat.audience_picker = false,
+            VirtualKeyCode::Escape => {
+                self.chat.audience_picker = false;
+                self.chat.enhanced.options_open = false;
+            }
             _ => {}
         }
         true
     }
 
-    pub(crate) fn handle_enhanced_chat_pointer(&mut self, state: ElementState) -> bool {
+    pub(crate) fn handle_enhanced_chat_pointer(
+        &mut self,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
         if !self.enhanced_chat_active() {
-            return false;
+            return Ok(false);
         }
         let Some((point, layout)) = self
             .dialogs
             .game_option_input_pointer_position
             .zip(self.enhanced_chat_layout(true))
         else {
-            return false;
+            return Ok(false);
         };
         if view::contains(layout.edit, point) {
-            return false;
+            return Ok(false);
         }
         if !view::contains(layout.bounds, point) {
-            return false;
+            return Ok(false);
         }
         if state == ElementState::Released {
-            return true;
+            return Ok(true);
         }
-        if view::contains(layout.audience, point) {
+        if view::contains(layout.hide, point) || view::contains(layout.close, point) {
+            self.chat.enhanced.hidden = view::contains(layout.hide, point);
+            self.close_running_chat()?;
+            self.chat.dismiss_pointer_release = true;
+        } else if view::contains(layout.options, point) {
+            self.chat.enhanced.options_open = !self.chat.enhanced.options_open;
+            self.chat.audience_picker = false;
+        } else if view::contains(layout.audience, point)
+            && !(self.chat.enhanced.options_open && view::contains(layout.settings, point))
+        {
             self.chat.audience_picker = !self.chat.audience_picker;
             self.chat.audience_picker_offset = 0;
+            self.chat.enhanced.options_open = false;
         } else if self.chat.audience_picker && view::contains(layout.feed, point) {
             let row = ((point.y - layout.feed.y as f32) / 22.0) as usize;
             if let Some((audience, _)) = self
@@ -422,9 +439,11 @@ impl GameApp {
             }
         } else if view::contains(layout.filter, point) {
             self.chat.enhanced.toggle_logs();
-        } else if view::contains(layout.latest, point) {
+        } else if view::contains(layout.latest, point)
+            && !(self.chat.enhanced.options_open && view::contains(layout.settings, point))
+        {
             self.chat.enhanced.jump_to_latest();
-        } else if view::contains(layout.settings, point) {
+        } else if self.chat.enhanced.options_open && view::contains(layout.settings, point) {
             let index = (0..4).find(|index| view::contains(layout.setting_cell(*index), point));
             match index {
                 Some(0) => {
@@ -478,7 +497,7 @@ impl GameApp {
                 self.config.deferred.set("Chat", key, value.to_string());
             }
         }
-        true
+        Ok(true)
     }
 
     pub(crate) fn render_enhanced_chat(
