@@ -22,6 +22,9 @@ impl GameApp {
         if setting.id.section == "Session" {
             return self.change_unified_session_setting(&setting.id.key, &value);
         }
+        if setting.id == SettingId::new("General", "Language") {
+            return self.change_unified_language(&setting.label, value);
+        }
         if setting.id.section == "General"
             && matches!(setting.id.key.as_str(), "FontName" | "FontSize")
         {
@@ -169,6 +172,84 @@ impl GameApp {
         }
         self.install_font_selection(gui, startup);
         Ok(())
+    }
+
+    /// Switches language as the options book does
+    /// (C4StartupOptionsDlg.cpp:1243-1254): the chosen pack's fallbacks become
+    /// `LanguageEx` and its texts load at once. Both are saved first, since
+    /// the texts are read through the file.
+    fn change_unified_language(
+        &mut self,
+        label: &str,
+        value: AdvancedConfigValue,
+    ) -> Result<(), EngineError> {
+        let code = value.serialized();
+        // System default leaves both unset, as a fresh configuration does; a
+        // code without a pack keeps its fallbacks
+        // (C4StartupOptionsDlg.cpp:1205-1210).
+        let fallbacks = if code.is_empty() {
+            Some(String::new())
+        } else {
+            self.app_paths
+                .as_ref()
+                .map(installed_language_infos)
+                .unwrap_or_default()
+                .iter()
+                .find(|info| info.code == code)
+                .map(clonk_frontend::startup_options_dlg::compose_language_ex)
+        };
+        self.record_unified_general_value("Language", &code);
+        if let Some(fallbacks) = fallbacks {
+            self.record_unified_general_value("LanguageEx", &fallbacks);
+        }
+        if let Some(settings) = self.unified_settings.as_mut() {
+            settings.controller.view.message = format!("{label} · {}", ApplyPolicy::Live.label());
+        }
+        if let Err(error) = self.save_unified_settings() {
+            if let Some(settings) = self.unified_settings.as_mut() {
+                settings.controller.view.message =
+                    format!("Could not save: {error}. Close again to retry.");
+            }
+            return Ok(());
+        }
+        match self.reload_application_language_resources() {
+            // The loaded table names its charset (C4Language.cpp:311).
+            Ok(charset) => {
+                self.record_unified_general_value("LanguageCharset", &charset);
+                if let Err(error) = self.save_unified_settings() {
+                    tracing::warn!(%error, "failed to save selected language charset");
+                }
+            }
+            Err(error) => tracing::error!(
+                error = %error,
+                "failed to reload selected application language"
+            ),
+        }
+        Ok(())
+    }
+
+    /// Records a General value in the pending configuration and on the row
+    /// that lists it.
+    fn record_unified_general_value(&mut self, key: &str, text: &str) {
+        self.config.deferred.set("General", key, text);
+        let Some(settings) = self.unified_settings.as_mut() else {
+            return;
+        };
+        settings.config.set_in(Some("General"), key, text);
+        if let Some(row) = settings
+            .controller
+            .settings
+            .iter_mut()
+            .find(|row| row.id == SettingId::new("General", key))
+        {
+            row.value = match &row.value {
+                AdvancedConfigValue::Choice { choices, .. } => AdvancedConfigValue::Choice {
+                    value: text.into(),
+                    choices: choices.clone(),
+                },
+                _ => AdvancedConfigValue::Text(text.into()),
+            };
+        }
     }
 
     fn apply_unified_preference(

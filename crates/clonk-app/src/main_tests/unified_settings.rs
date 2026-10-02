@@ -1221,3 +1221,79 @@ fn unified_settings_apply_a_font_at_once_and_keep_the_old_one_when_it_cannot_be_
     );
     assert_eq!(fs::read(paths.config_file()).test_value(), before);
 }
+
+#[test]
+fn unified_settings_choose_an_installed_language_and_reload_its_texts_at_once() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    use clonk_frontend::startup_options_advanced::{AdvancedConfigChoice, AdvancedConfigValue};
+    let _lock = env_lock().lock();
+    let user_data = tempdir();
+    let (_guard, paths) = guarded_test_app_paths(None, user_data.path());
+    paths.ensure_user_dirs().test_value();
+    fs::write(
+        paths.config_file(),
+        "[General]\nLanguage=DE - Deutsch\nLanguageEx=DE\n",
+    )
+    .test_value();
+    let mut app = test_game_app(1280, 720, AudioOptions::default(), Some(&paths)).test_value();
+    wait_for_menu(&mut app);
+    assert_eq!(app.needed_material_need, "%s|braucht noch");
+    app.open_unified_settings(SettingsCategory::Interface)
+        .test_value();
+    let row = |app: &GameApp, key: &str| {
+        app.unified_settings
+            .as_ref()
+            .unwrap()
+            .controller
+            .settings
+            .iter()
+            .position(|s| s.id.section == "General" && s.id.key == key)
+            .unwrap()
+    };
+    let language = row(&app, "Language");
+    let AdvancedConfigValue::Choice { value, choices } =
+        app.unified_settings.as_ref().unwrap().controller.settings[language]
+            .value
+            .clone()
+    else {
+        panic!("Language is not a choice");
+    };
+    // The options book lists every installed pack as "XX - Name"
+    // (C4StartupOptionsDlg.cpp:1234-1241) and stores the two-letter code
+    // (C4StartupOptionsDlg.cpp:1243-1248).
+    assert_eq!(value, "DE");
+    let choice = |value: &str, label: &str| AdvancedConfigChoice {
+        value: value.into(),
+        label: label.into(),
+    };
+    assert_eq!(choices[0], choice("", "System default"));
+    for installed in [choice("DE", "DE - Deutsch"), choice("US", "US - English")] {
+        assert!(choices.contains(&installed), "{installed:?} in {choices:?}");
+    }
+
+    let english = AdvancedConfigValue::Choice {
+        value: "US".into(),
+        choices,
+    };
+    app.change_unified_setting(language, english).test_value();
+
+    assert_eq!(app.needed_material_need, "%s|needs", "texts reload at once");
+    let settings = app.unified_settings.as_ref().unwrap();
+    assert_eq!(settings.controller.view.message, "Language · Applies now");
+    assert_eq!(
+        settings.controller.settings[language].value.serialized(),
+        "US"
+    );
+    let fallbacks = row(&app, "LanguageEx");
+    assert_eq!(
+        app.unified_settings.as_ref().unwrap().controller.settings[fallbacks]
+            .value
+            .serialized(),
+        "US,DE",
+        "fallbacks composed as the options book composes them"
+    );
+    let config = Config::load(paths.config_file()).test_value();
+    assert_eq!(config.get_in(Some("General"), "Language"), Some("US"));
+    assert_eq!(config.get_in(Some("General"), "LanguageEx"), Some("US,DE"));
+    assert_eq!(config.get_in(Some("General"), "LanguageCharset"), Some(""));
+}

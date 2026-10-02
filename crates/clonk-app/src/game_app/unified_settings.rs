@@ -336,6 +336,14 @@ impl GameApp {
         }
         let popup = !self.settings_cover_screen();
         let mut controller = SettingsController::new(crate::settings_catalog::catalog(&config));
+        crate::settings_catalog::offer_languages(
+            &mut controller.settings,
+            &self
+                .app_paths
+                .as_ref()
+                .map(installed_language_infos)
+                .unwrap_or_default(),
+        );
         controller.set_users = self.local_control_set_users();
         // In a game, start on the sets its players use, the first player's
         // device showing.

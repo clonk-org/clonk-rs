@@ -6,6 +6,7 @@ use clonk_frontend::settings_overlay::{
     SliderScale,
 };
 use clonk_frontend::startup_options_advanced::{AdvancedConfigChoice, AdvancedConfigValue};
+use clonk_resources::language::LanguageInfo;
 
 pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
     let defaults = crate::advanced_config::sections(&Config::new());
@@ -353,7 +354,7 @@ fn describe(setting: &mut Setting) {
         (
             "General",
             "FPS" | "UseWhiteIngameChat" | "UseWhiteLobbyChat" | "ShowLogTimestamps"
-            | "ScrollSmooth" | "FontName" | "FontSize",
+            | "ScrollSmooth" | "Language" | "FontName" | "FontSize",
         )
         | ("Toasts", _) => Live,
         (
@@ -535,8 +536,13 @@ fn describe(setting: &mut Setting) {
             "Select the profile for the next application launch.",
             "legacy normal restart",
         )),
-        // The options book's Program sheet (C4StartupOptionsDlg.cpp:700-758),
+        // The options book's Program sheet (C4StartupOptionsDlg.cpp:675-758),
         // with its tooltips.
+        ("General", "Language") => Some((
+            "Language",
+            "Language of the game's texts and scenario descriptions.",
+            "translation locale",
+        )),
         ("General", "FontName") => Some((
             "Font",
             "Typeface for menus and text; some lack other languages' letters.",
@@ -805,6 +811,47 @@ fn offer_scale_steps(setting: &mut Setting) {
             choices: choices.clone(),
         };
     }
+}
+
+/// Offers the installed language packs for `General.Language` as the options
+/// book lists them (C4StartupOptionsDlg.cpp:1234-1241), after "System
+/// default": an unset language follows the system's (C4Config.cpp:1461-1470).
+/// A configured code without a pack stays, read as the book reads it
+/// (C4StartupOptionsDlg.cpp:1205-1210).
+pub(crate) fn offer_languages(settings: &mut [Setting], installed: &[LanguageInfo]) {
+    let Some(setting) = settings
+        .iter_mut()
+        .find(|setting| setting.id == SettingId::new("General", "Language"))
+    else {
+        return;
+    };
+    let configured = setting.value.serialized();
+    let current = installed
+        .iter()
+        .find(|info| info.matches_code(&configured))
+        .map_or(configured, |info| info.code.clone());
+    let mut choices = vec![AdvancedConfigChoice {
+        value: String::new(),
+        label: "System default".into(),
+    }];
+    choices.extend(installed.iter().map(|info| AdvancedConfigChoice {
+        value: info.code.clone(),
+        label: format!("{} - {}", info.code, info.name),
+    }));
+    if !choices.iter().any(|choice| choice.value == current) {
+        choices.push(AdvancedConfigChoice {
+            label: format!("unknown ({current})"),
+            value: current.clone(),
+        });
+    }
+    setting.default = AdvancedConfigValue::Choice {
+        value: String::new(),
+        choices: choices.clone(),
+    };
+    setting.value = AdvancedConfigValue::Choice {
+        value: current,
+        choices,
+    };
 }
 
 /// Offers `listed` as the setting's choices, keeping its current and default
@@ -1113,6 +1160,48 @@ mod tests {
     }
 
     #[test]
+    fn unified_catalog_offers_installed_languages_after_the_system_default() {
+        let pack = |code: &str, name: &str| LanguageInfo {
+            code_bytes: [code.as_bytes()[0], code.as_bytes()[1]],
+            code: code.into(),
+            name: name.into(),
+            info: String::new(),
+            fallback: String::new(),
+            charset: String::new(),
+        };
+        let installed = [pack("DE", "Deutsch"), pack("US", "English")];
+        let offered = |configured: &str| {
+            let mut config = Config::new();
+            config.set_in(Some("General"), "Language", configured);
+            let mut rows = catalog(&config);
+            offer_languages(&mut rows, &installed);
+            let row = rows
+                .into_iter()
+                .find(|row| row.id == SettingId::new("General", "Language"))
+                .unwrap();
+            assert!(!row.advanced, "Language is on the General tab");
+            let AdvancedConfigValue::Choice { value, choices } = row.value else {
+                panic!("Language is not a choice");
+            };
+            let labels: Vec<_> = choices.into_iter().map(|choice| choice.label).collect();
+            (value, labels)
+        };
+        let listed = ["System default", "DE - Deutsch", "US - English"];
+        assert_eq!(
+            offered(""),
+            (String::new(), listed.map(String::from).to_vec())
+        );
+        // An unset language is stored as "DE - Deutsch" (C4Config.cpp:1464-1470),
+        // which C4Language::FindInfo matches by its first two letters in any case.
+        assert_eq!(offered("de - Deutsch").0, "DE");
+        // A code without a pack stays, read as the options book reads it
+        // (C4StartupOptionsDlg.cpp:1207).
+        let (value, labels) = offered("FR");
+        assert_eq!(value, "FR");
+        assert_eq!(labels.last().map(String::as_str), Some("unknown (FR)"));
+    }
+
+    #[test]
     fn unified_catalog_offers_the_options_books_fonts_and_sizes() {
         use clonk_frontend::startup_options_dlg::{PROGRAM_FONT_FACES, PROGRAM_FONT_SIZES};
         let mut config = Config::new();
@@ -1227,7 +1316,7 @@ mod tests {
         assert_eq!(
             heading(false),
             [
-                ["Language and font"; 2].as_slice(),
+                ["Language and font"; 3].as_slice(),
                 &["Chat"; 7],
                 &["On screen"; 2],
                 &["New games"; 3],
