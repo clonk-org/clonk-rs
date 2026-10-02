@@ -258,6 +258,7 @@ objc2	0.6.4	MIT
 objc2-app-kit	0.2.2	MIT
 objc2-app-kit	0.3.2	Zlib OR Apache-2.0 OR MIT
 objc2-audio-toolbox	0.3.2	Zlib OR Apache-2.0 OR MIT
+objc2-av-foundation	0.3.2	Zlib OR Apache-2.0 OR MIT
 objc2-avf-audio	0.3.2	Zlib OR Apache-2.0 OR MIT
 objc2-core-audio	0.3.2	Zlib OR Apache-2.0 OR MIT
 objc2-core-audio-types	0.3.2	Zlib OR Apache-2.0 OR MIT
