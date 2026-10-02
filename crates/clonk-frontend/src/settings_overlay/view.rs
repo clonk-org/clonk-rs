@@ -2553,6 +2553,44 @@ mod tests {
     }
 
     #[test]
+    fn a_press_on_a_choice_lists_scroll_thumb_scrolls_it_without_choosing() {
+        let sizes = ["8", "10", "12", "14", "16", "18", "20", "24", "28"];
+        let mut controller = SettingsController::new(vec![preference(
+            "FontSize",
+            AdvancedConfigValue::Choice {
+                value: "14".into(),
+                choices: sizes
+                    .iter()
+                    .map(
+                        |size| crate::startup_options_advanced::AdvancedConfigChoice {
+                            value: (*size).into(),
+                            label: (*size).into(),
+                        },
+                    )
+                    .collect(),
+            },
+        )]);
+        controller.select_category(SettingsCategory::Display);
+        controller.set_focus(SettingsFocus::Row(0));
+        controller.key(KeyCode::Enter, false, false);
+        let (track, thumb) = controller.choice_scrollbar().unwrap();
+        let centre = |x: i32, y: i32| GuiPoint::new(x as f32, y as f32);
+        let on_thumb = centre(thumb.x + thumb.w / 2, thumb.y + thumb.h / 2);
+        controller.pointer_move(on_thumb);
+        assert!(controller.pointer(on_thumb, true).is_empty());
+        assert!(
+            controller.pointer(on_thumb, false).is_empty(),
+            "the size beside the thumb is not chosen"
+        );
+        assert!(controller.view.choice.is_some(), "the list stays open");
+        let below_thumb = centre(track.x + track.w / 2, track.y + track.h - 2);
+        controller.pointer(below_thumb, true);
+        controller.pointer(below_thumb, false);
+        let picker = controller.view.choice.as_ref().unwrap();
+        assert_eq!(picker.scroll, 1, "a page down brings 28 into view");
+    }
+
+    #[test]
     fn moving_to_another_setting_or_page_clears_the_last_change_message() {
         let mut controller = SettingsController::new(vec![
             preference("ShowClock", AdvancedConfigValue::Bool(true)),
