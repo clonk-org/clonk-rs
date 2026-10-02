@@ -126,44 +126,76 @@ impl GameApp {
             (ChatAudience::Allies, "Allies".into()),
             (ChatAudience::Say, "Say above crew".into()),
         ];
-        choices.extend(self.snapshot.players.iter().map(|player| {
-            (
-                ChatAudience::Private(player.id),
-                format!("Private: {}", player.name),
-            )
-        }));
+        let local = &self.snapshot.hud.local_players;
+        choices.extend(
+            self.snapshot
+                .players
+                .iter()
+                .filter(|player| !local.contains(&player.id))
+                .map(|player| {
+                    (
+                        ChatAudience::Private(player.id),
+                        format!("Private: {}", player.name),
+                    )
+                }),
+        );
         choices
     }
 
-    fn enhanced_chat_audience_label(&self) -> String {
+    /// The composer's chip: where the typed text will actually go. Explicit
+    /// legacy syntax such as `/team` remains usable and the chip follows it.
+    fn enhanced_chat_chip(&self) -> (String, [u8; 4]) {
         let text = self.running_chat_text().unwrap_or_default();
-        // Explicit legacy syntax remains usable and the label shows its actual route.
-        if let Ok(Some(control)) = parse_running_message_control(text, 0, false, &self.snapshot) {
-            match control.message_type {
-                MESSAGE_TYPE_TEAM => return "Allies".into(),
-                MESSAGE_TYPE_PRIVATE => {
-                    return self
-                        .enhanced_chat_audiences()
-                        .into_iter()
-                        .find(|(audience, _)| *audience == ChatAudience::Private(control.to_player))
-                        .map(|(_, label)| label)
-                        .unwrap_or_else(|| "Private recipient unavailable".into())
-                }
-                MESSAGE_TYPE_SAY => return "Say above crew".into(),
+        let routed = match parse_running_message_control(text, 0, false, &self.snapshot) {
+            Ok(Some(control)) => match control.message_type {
+                MESSAGE_TYPE_TEAM => Some(ChatAudience::Allies),
+                MESSAGE_TYPE_PRIVATE => Some(ChatAudience::Private(control.to_player)),
+                MESSAGE_TYPE_SAY => Some(ChatAudience::Say),
                 MESSAGE_TYPE_ME | MESSAGE_TYPE_SOUND | MESSAGE_TYPE_ALERT => {
-                    return "Everyone · command".into()
+                    return ("Command".into(), view::COMMAND_COLOR)
                 }
-                _ => {}
-            }
+                _ => None,
+            },
+            _ => None,
+        };
+        if routed.is_none() && text.starts_with('/') {
+            return ("Command".into(), view::COMMAND_COLOR);
         }
-        if text.starts_with('/') {
-            return "Command".into();
+        let audience = routed.unwrap_or_else(|| self.chat.enhanced.audience.clone());
+        let label = match &audience {
+            ChatAudience::Everyone => "Everyone".into(),
+            ChatAudience::Allies => "Allies".into(),
+            ChatAudience::Say => "Say".into(),
+            ChatAudience::Private(id) => self
+                .enhanced_chat_player_name(*id)
+                .map(|name| format!("To {name}"))
+                .unwrap_or_else(|| "Recipient left".into()),
+        };
+        (label, view::audience_color(&audience))
+    }
+
+    fn enhanced_chat_player_name(&self, id: i32) -> Option<&str> {
+        self.snapshot
+            .players
+            .iter()
+            .find(|player| player.id == id)
+            .map(|player| player.name.as_str())
+    }
+
+    /// Names who the empty composer's message will reach.
+    pub(crate) fn refresh_enhanced_chat_placeholder(&mut self) {
+        let placeholder = match &self.chat.enhanced.audience {
+            ChatAudience::Everyone => "Message everyone".into(),
+            ChatAudience::Allies => "Message your allies".into(),
+            ChatAudience::Say => "Say above your crew".into(),
+            ChatAudience::Private(id) => self
+                .enhanced_chat_player_name(*id)
+                .map(|name| format!("Message {name} privately"))
+                .unwrap_or_else(|| "Choose a recipient".into()),
+        };
+        if let Some(controller) = self.running_chat_controller_mut() {
+            controller.set_placeholder(placeholder);
         }
-        self.enhanced_chat_audiences()
-            .into_iter()
-            .find(|(audience, _)| *audience == self.chat.enhanced.audience)
-            .map(|(_, label)| label)
-            .unwrap_or_else(|| "Private recipient unavailable".into())
     }
 
     pub(crate) fn replace_enhanced_chat_text(&mut self, text: &str) {
@@ -180,6 +212,7 @@ impl GameApp {
         let text = self.running_chat_text().unwrap_or_default().to_string();
         let draft = self.chat.enhanced.switch_audience(audience, &text);
         self.replace_enhanced_chat_text(&draft);
+        self.refresh_enhanced_chat_placeholder();
         self.chat.enhanced.error.clear();
         self.chat.audience_picker = false;
     }
@@ -305,6 +338,7 @@ impl GameApp {
                         message,
                         layout.feed.w,
                         self.chat.show_log_timestamps,
+                        self.rendering.display_flags.white_chat,
                     )
                     .len(),
                 )
@@ -327,8 +361,7 @@ impl GameApp {
             VirtualKeyCode::Tab | VirtualKeyCode::PageUp | VirtualKeyCode::PageDown
         ) || key == VirtualKeyCode::End && modifiers.control_key()
             || key == VirtualKeyCode::KeyL && modifiers.control_key()
-            || key == VirtualKeyCode::Escape
-                && (self.chat.audience_picker || self.chat.enhanced.options_open)
+            || key == VirtualKeyCode::Escape && self.chat.audience_picker
             || key == VirtualKeyCode::Backspace
                 && self.running_chat_text().is_none_or(str::is_empty);
         if !handled || modifiers.alt_key() {
@@ -384,10 +417,7 @@ impl GameApp {
             }
             VirtualKeyCode::End => self.chat.enhanced.jump_to_latest(),
             VirtualKeyCode::KeyL => self.chat.enhanced.toggle_logs(),
-            VirtualKeyCode::Escape => {
-                self.chat.audience_picker = false;
-                self.chat.enhanced.options_open = false;
-            }
+            VirtualKeyCode::Escape => self.chat.audience_picker = false,
             _ => {}
         }
         true
@@ -416,88 +446,56 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
-        if view::contains(layout.hide, point) || view::contains(layout.close, point) {
-            self.chat.enhanced.hidden = view::contains(layout.hide, point);
-            self.close_running_chat()?;
-            self.chat.dismiss_pointer_release = true;
-        } else if view::contains(layout.options, point) {
-            self.chat.enhanced.options_open = !self.chat.enhanced.options_open;
-            self.chat.audience_picker = false;
-        } else if view::contains(layout.audience, point)
-            && !(self.chat.enhanced.options_open && view::contains(layout.settings, point))
-        {
-            self.chat.audience_picker = !self.chat.audience_picker;
-            self.chat.audience_picker_offset = 0;
-            self.chat.enhanced.options_open = false;
-        } else if self.chat.audience_picker && view::contains(layout.feed, point) {
-            let row = ((point.y - layout.feed.y as f32) / 22.0) as usize;
-            if let Some((audience, _)) = self
-                .enhanced_chat_audiences()
-                .get(self.chat.audience_picker_offset + row)
-            {
-                self.select_enhanced_chat_audience(audience.clone());
+        if self.chat.audience_picker {
+            let audiences = self.enhanced_chat_audiences();
+            if view::contains(layout.picker(audiences.len()), point) {
+                if let Some((audience, _)) = self
+                    .enhanced_chat_picker_row_at_pointer(audiences.len())
+                    .and_then(|index| audiences.get(index))
+                {
+                    self.select_enhanced_chat_audience(audience.clone());
+                }
+                return Ok(true);
             }
-        } else if view::contains(layout.filter, point) {
-            self.chat.enhanced.toggle_logs();
-        } else if view::contains(layout.latest, point)
-            && !(self.chat.enhanced.options_open && view::contains(layout.settings, point))
-        {
-            self.chat.enhanced.jump_to_latest();
-        } else if self.chat.enhanced.options_open && view::contains(layout.settings, point) {
-            let index = (0..4).find(|index| view::contains(layout.setting_cell(*index), point));
-            match index {
-                Some(0) => {
-                    self.chat.enhanced_preferences.text_size =
-                        (self.chat.enhanced_preferences.text_size + 1) % 3;
-                    let font =
-                        self.assets.clonk_fonts.as_deref().map(|fonts| {
-                            Arc::new(self.chat.enhanced_preferences.font(fonts).clone())
-                        });
-                    if let (Some(font), Some(controller)) =
-                        (font, self.running_chat_controller_mut())
-                    {
-                        controller.set_enhanced_chat_font(font);
-                    }
-                    self.chat.enhanced.jump_to_latest();
-                }
-                Some(1) => {
-                    self.chat.enhanced_preferences.opacity =
-                        match self.chat.enhanced_preferences.opacity {
-                            0..=64 => 85,
-                            65..=99 => 100,
-                            _ => 60,
-                        }
-                }
-                Some(2) => {
-                    self.chat.enhanced_preferences.duration_seconds =
-                        match self.chat.enhanced_preferences.duration_seconds {
-                            0..=7 => 12,
-                            8..=15 => 30,
-                            _ => 6,
-                        }
-                }
-                Some(3) => {
-                    self.chat.show_log_timestamps = !self.chat.show_log_timestamps;
-                    self.config.deferred.set(
-                        "General",
-                        "ShowLogTimestamps",
-                        i32::from(self.chat.show_log_timestamps).to_string(),
-                    );
-                }
-                _ => {}
-            }
-            for (key, value) in [
-                (
-                    "TextSize",
-                    u32::from(self.chat.enhanced_preferences.text_size),
-                ),
-                ("Opacity", u32::from(self.chat.enhanced_preferences.opacity)),
-                ("Duration", self.chat.enhanced_preferences.duration_seconds),
-            ] {
-                self.config.deferred.set("Chat", key, value.to_string());
+            // A click anywhere else closes the list, as any drop-down does;
+            // the chip below toggles it rather than reopening it.
+            if !view::contains(layout.audience, point) {
+                self.chat.audience_picker = false;
             }
         }
+        if view::contains(layout.close, point) {
+            self.close_running_chat()?;
+            self.chat.dismiss_pointer_release = true;
+        } else if view::contains(layout.settings_button, point) {
+            self.close_running_chat()?;
+            self.chat.dismiss_pointer_release = true;
+            self.open_unified_settings(
+                clonk_frontend::settings_overlay::SettingsCategory::Interface,
+            )?;
+        } else if view::contains(layout.overlay_toggle, point) {
+            self.chat.enhanced.hidden = !self.chat.enhanced.hidden;
+        } else if view::contains(layout.chat_tab, point) || view::contains(layout.all_tab, point) {
+            self.chat
+                .enhanced
+                .show_game_messages(view::contains(layout.all_tab, point));
+            self.chat.audience_picker = false;
+        } else if view::contains(layout.audience, point) {
+            self.chat.audience_picker = !self.chat.audience_picker;
+            self.chat.audience_picker_offset = 0;
+        } else if view::contains(layout.latest, point) {
+            self.chat.enhanced.jump_to_latest();
+        }
         Ok(true)
+    }
+
+    /// The recipient under the pointer, as an index into all recipients.
+    fn enhanced_chat_picker_row_at_pointer(&self, rows: usize) -> Option<usize> {
+        let point = self.dialogs.game_option_input_pointer_position?;
+        let layout = self.enhanced_chat_layout(true)?;
+        (0..layout.picker_capacity(rows))
+            .find(|row| view::contains(layout.picker_row(rows, *row), point))
+            .map(|row| self.chat.audience_picker_offset + row)
+            .filter(|index| *index < rows)
     }
 
     pub(crate) fn render_enhanced_chat(
@@ -509,7 +507,7 @@ impl GameApp {
         let Some(fonts) = assets.clonk_fonts.as_deref() else {
             return;
         };
-        let audience = format!("{} v", self.enhanced_chat_audience_label());
+        let (audience, audience_color) = self.enhanced_chat_chip();
         let hint = self.enhanced_chat_hint();
         let notice = self
             .running_chat_controller()
@@ -523,18 +521,25 @@ impl GameApp {
                 preferences: &self.chat.enhanced_preferences,
                 expanded,
                 audience: &audience,
+                audience_color,
                 hint: &hint,
                 notice: &notice,
                 timestamps: self.chat.show_log_timestamps,
+                white_text: self.rendering.display_flags.white_chat,
+                native_fonts: self.native_startup_fonts.as_deref(),
                 now: Instant::now(),
             },
             gamma,
         );
         if expanded && self.chat.audience_picker {
-            let choices = self
-                .enhanced_chat_audiences()
+            let audiences = self.enhanced_chat_audiences();
+            let selected = audiences
+                .iter()
+                .position(|(audience, _)| *audience == self.chat.enhanced.audience);
+            let hovered = self.enhanced_chat_picker_row_at_pointer(audiences.len());
+            let choices = audiences
                 .into_iter()
-                .map(|(_, label)| label)
+                .map(|(audience, label)| (label, view::audience_color(&audience)))
                 .collect::<Vec<_>>();
             view::render_audience_picker(
                 self.rendering.graphics.surface_mut(),
@@ -542,6 +547,8 @@ impl GameApp {
                 &self.chat.enhanced_preferences,
                 &choices,
                 self.chat.audience_picker_offset,
+                selected,
+                hovered,
                 gamma,
             );
         }

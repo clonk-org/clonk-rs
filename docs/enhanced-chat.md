@@ -16,25 +16,33 @@ messages show a two-line preview, with the full text available in history.
 Opening chat expands the transcript and composer. **Shift+Enter**
 opens allies chat and **Alt+Enter** opens speech above the selected crew.
 
-- Click the recipient label to choose **Everyone**, **Allies**, **Say above crew**,
-  or **Private → name**. **Ctrl+Tab** and **Ctrl+Shift+Tab** cycle recipients.
-  Explicit commands such as `/team` and `/private` also update the label.
+Each message reads timestamp, channel, sender, then text. Timestamps are grey,
+**[Allies]** is green and **[Private]** is pink for every sender, and the sender
+appears in their player colour. With **White chat in game** on, the message
+itself is white; otherwise it takes the sender's colour, as classic chat does.
+
+- The recipient sits at the start of the composer, in its channel's colour.
+  Click it to choose **Everyone**, **Allies**, **Say above crew**, or
+  **Private → name**; the list opens above it and marks the current choice.
+  **Ctrl+Tab** and **Ctrl+Shift+Tab** cycle recipients. Explicit commands such
+  as `/team` and `/private` also update it. An empty composer names who will
+  receive the message.
 - Press **Enter** to send. **Esc** or **×** closes chat and keeps the draft. Each recipient
   has a separate draft. Select and delete the text to discard it.
-- Click **Hide** to close chat and hide incoming message previews. **Enter** or
-  **F2** shows chat again, including messages received while hidden. Hiding chat
-  keeps the transcript and draft; it does not mute other players.
+- Untick **Show over game** to stop recent messages appearing over play while
+  chat is closed. The choice holds until it is ticked again; it keeps the
+  transcript and draft and does not mute other players.
 - **Up/Down** browse messages sent to the selected recipient and restore the
   unfinished draft when returning to the end. Private message bodies stay in
   that recipient's history. **Tab/Shift+Tab** cycle matching player names or commands.
 - Scroll over the transcript or press **Page Up/Page Down** to read history.
   Incoming messages preserve the reading position. Click **new messages ↓** or
   press **Ctrl+End** to return to the latest messages.
-- Click **Log** or press **Ctrl+L** to include game logs. Recipient
-  filtering happens before messages enter the panel.
-- **Options** contains **text size**, **history background opacity**, **message
-  duration**, and **timestamps**. Preferences are saved with the game's
-  configuration. **Esc** first closes Options or the recipient picker.
+- The **Chat** tab shows conversation; **All** adds game messages. **Ctrl+L**
+  switches between them. Recipient filtering happens before messages enter the
+  panel.
+- **Settings** opens Settings → General → Chat, which holds **text size**,
+  **chat opacity**, **message duration**, **white chat** and **timestamps**.
 
 Pasting never sends a message. Pasted line breaks become spaces for review in
 the single-line composer; an oversized paste leaves the current draft intact

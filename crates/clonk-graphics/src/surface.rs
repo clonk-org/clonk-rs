@@ -880,6 +880,11 @@ impl Surface {
         self.clonk_text_capture = Some(Vec::new());
     }
 
+    /// Whether text drawn now is recorded for scale-native replay.
+    pub fn is_capturing_clonk_text(&self) -> bool {
+        self.clonk_text_capture.is_some()
+    }
+
     /// End semantic ClonkFont capture and return commands in draw order.
     /// Returns an empty vector when capture was not active.
     pub fn take_clonk_text_capture(&mut self) -> Vec<CapturedClonkText> {

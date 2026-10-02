@@ -6,7 +6,8 @@ use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
 use clonk_graphics::{GammaRamp, Surface};
 
 use crate::classic_gui::{draw_clipped_text_with_markup, draw_engine_box, IntRect};
-use crate::enhanced_chat::{ChatChannel, ChatMessage, EnhancedChat};
+use crate::clonk_fonts::NativeClonkFontSet;
+use crate::enhanced_chat::{ChatAudience, ChatChannel, ChatMessage, EnhancedChat};
 use crate::{ClonkFontSet, GuiPoint};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,17 +43,25 @@ impl ChatPreferences {
 pub struct ChatLayout {
     pub bounds: IntRect,
     pub header: IntRect,
-    pub filter: IntRect,
-    pub options: IntRect,
-    pub hide: IntRect,
+    /// Conversation only.
+    pub chat_tab: IntRect,
+    /// Conversation and game messages.
+    pub all_tab: IntRect,
+    /// "Show over game": recent messages over play while chat is closed.
+    pub overlay_toggle: IntRect,
+    pub settings_button: IntRect,
     pub close: IntRect,
     pub feed: IntRect,
     pub audience: IntRect,
     pub latest: IntRect,
     pub edit: IntRect,
     pub notice: IntRect,
-    pub settings: IntRect,
 }
+
+/// Width below which the overlay toggle drops to its short label.
+const OVERLAY_LABEL_WIDTH: i32 = 128;
+const CHIP_WIDTH: i32 = 132;
+pub const PICKER_ROW: i32 = 22;
 
 impl ChatLayout {
     pub fn new(width: i32, height: i32, line_height: i32, expanded: bool) -> Self {
@@ -72,58 +81,83 @@ impl ChatLayout {
         let inner_w = (w - 16).max(1);
         let header = IntRect::new(inner_x, y + 6, inner_w, row);
         let right = inner_x + inner_w;
+        let chat_tab = IntRect::new(inner_x, header.y, 44, row);
+        let all_tab = IntRect::new(chat_tab.x + chat_tab.w + 4, header.y, 34, row);
         let close = IntRect::new(right - 24, header.y, 24, row);
-        let hide = IntRect::new(right - 76, header.y, 48, row);
-        let options = IntRect::new(right - 148, header.y, 68, row);
-        let filter = IntRect::new(right - 220, header.y, 68, row);
-        let notice = IntRect::new(inner_x, y + h - row * 2 - 6, inner_w, row * 2);
-        let edit = IntRect::new(inner_x, notice.y - edit_height - 4, inner_w, edit_height);
-        let audience = IntRect::new(inner_x, edit.y - row - 4, inner_w / 2, row);
-        let latest = IntRect::new(
-            inner_x + inner_w / 2,
-            audience.y,
-            inner_w - inner_w / 2,
+        let settings_button = IntRect::new(close.x - 4 - 66, header.y, 66, row);
+        let tabs_end = all_tab.x + all_tab.w + 8;
+        let overlay_width = if settings_button.x - 8 - OVERLAY_LABEL_WIDTH >= tabs_end {
+            OVERLAY_LABEL_WIDTH
+        } else {
+            62
+        };
+        let overlay_toggle = IntRect::new(
+            settings_button.x - 8 - overlay_width,
+            header.y,
+            overlay_width,
             row,
+        );
+        let notice = IntRect::new(inner_x, y + h - row * 2 - 6, inner_w, row * 2);
+        // The recipient leads the message it applies to, in the same row.
+        let chip_width = CHIP_WIDTH.min(inner_w / 3).max(1);
+        let audience = IntRect::new(inner_x, notice.y - edit_height - 4, chip_width, edit_height);
+        let edit = IntRect::new(
+            audience.x + chip_width + 4,
+            audience.y,
+            (inner_w - chip_width - 4).max(1),
+            edit_height,
         );
         let feed_top = if expanded {
             header.y + header.h + 6
         } else {
             y + 8
         };
-        let feed_bottom = if expanded { audience.y - 4 } else { y + h - 6 };
+        let feed_bottom = if expanded { edit.y - 6 } else { y + h - 6 };
         let feed = IntRect::new(inner_x, feed_top, inner_w, (feed_bottom - feed_top).max(0));
-        let settings = IntRect::new(
-            inner_x,
-            feed_top,
-            inner_w,
-            (edit.y - feed_top - 4).clamp(0, 52),
+        let latest_width = 150.min(inner_w);
+        let latest = IntRect::new(
+            inner_x + inner_w - latest_width,
+            feed_bottom - row,
+            latest_width,
+            row,
         );
         Self {
             bounds,
             header,
-            filter,
-            options,
-            hide,
+            chat_tab,
+            all_tab,
+            overlay_toggle,
+            settings_button,
             close,
             feed,
             audience,
             latest,
             edit,
             notice,
-            settings,
         }
     }
 
-    pub fn setting_cell(&self, index: i32) -> IntRect {
-        let column = index % 2;
-        let row = index / 2;
-        let width = self.settings.w / 2;
-        let height = self.settings.h / 2;
+    /// How many of `rows` recipients the picker shows at once.
+    pub fn picker_capacity(&self, rows: usize) -> usize {
+        let room = self.audience.y - 2 - (self.header.y + self.header.h + 4);
+        (((room - 4) / PICKER_ROW).max(1) as usize).min(rows)
+    }
+
+    /// The recipient list, opening upward from the chip it belongs to.
+    pub fn picker(&self, rows: usize) -> IntRect {
+        let height = self.picker_capacity(rows) as i32 * PICKER_ROW + 4;
+        let width = (self.audience.w * 2).max(200).min(self.header.w);
+        IntRect::new(self.audience.x, self.audience.y - 2 - height, width, height)
+    }
+
+    /// The `index`th visible row of the picker.
+    pub fn picker_row(&self, rows: usize, index: usize) -> IntRect {
+        let picker = self.picker(rows);
         IntRect::new(
-            self.settings.x + column * width,
-            self.settings.y + row * height,
-            width - 4,
-            height - 2,
+            picker.x + 2,
+            picker.y + 2 + index as i32 * PICKER_ROW,
+            picker.w - 4,
+            PICKER_ROW,
         )
     }
 }
@@ -138,10 +172,17 @@ pub fn contains(rect: IntRect, point: GuiPoint) -> bool {
 pub struct ChatView<'a> {
     pub preferences: &'a ChatPreferences,
     pub expanded: bool,
+    /// Who the message goes to, and that channel's colour.
     pub audience: &'a str,
+    pub audience_color: [u8; 4],
     pub hint: &'a str,
     pub notice: &'a str,
     pub timestamps: bool,
+    /// `General.UseWhiteIngameChat`: white message text with only the sender
+    /// in player colour.
+    pub white_text: bool,
+    /// The scale-native fonts captured text is replayed with, if any.
+    pub native_fonts: Option<&'a NativeClonkFontSet>,
     pub now: Instant,
 }
 
@@ -233,68 +274,13 @@ pub fn render_chat(
     if view.expanded {
         let alpha = 255 - u32::from(view.preferences.opacity.min(100)) * 255 / 100;
         fill(surface, layout.bounds, (alpha << 24) | 0x101923, gamma);
-        text(
-            surface,
-            ui_font,
-            layout.header,
-            "Chat",
-            [229, 201, 158, 255],
-            gamma,
-        );
-        for (rect, label, selected) in [
-            (
-                layout.filter,
-                if chat.show_logs {
-                    "Log: on"
-                } else {
-                    "Log: off"
-                },
-                chat.show_logs,
-            ),
-            (layout.options, "Options", chat.options_open),
-            (layout.hide, "Hide", false),
-            (layout.close, "×", false),
-        ] {
-            fill(
-                surface,
-                rect,
-                if selected { 0x003e4c5c } else { 0x80304152 },
-                gamma,
-            );
-            text(
-                surface,
-                ui_font,
-                IntRect::new(rect.x + 5, rect.y + 2, rect.w - 10, rect.h - 2),
-                label,
-                [206, 218, 230, 255],
-                gamma,
-            );
-        }
-        fill(surface, layout.audience, 0x00304152, gamma);
-        text(
+        render_header(surface, ui_font, chat, &layout, gamma);
+        render_audience_chip(
             surface,
             ui_font,
             layout.audience,
             view.audience,
-            [255; 4],
-            gamma,
-        );
-        let latest = if chat.unread() > 0 {
-            format!("{} new messages v", chat.unread())
-        } else {
-            if chat.is_scrolled() {
-                "Back to latest ↓"
-            } else {
-                ""
-            }
-            .into()
-        };
-        text(
-            surface,
-            ui_font,
-            layout.latest,
-            &latest,
-            [240, 208, 148, 255],
+            view.audience_color,
             gamma,
         );
         fill(surface, layout.edit, 0x00101a27, gamma);
@@ -342,51 +328,201 @@ pub fn render_chat(
     }
     let row_height = font.line_height + 3;
     let bottom = layout.feed.y + layout.feed.h;
+    // Captured runs are each redrawn alone at the interface scale, so they
+    // are placed by the metrics of the font that will draw them.
+    let native = view
+        .native_fonts
+        .filter(|_| surface.is_capturing_clonk_text())
+        .zip(font.role())
+        .map(|(fonts, role)| fonts.font_for_role(role));
+    let width = |text: &str| {
+        native.map_or_else(
+            || font.measure(text, false).0,
+            |native| native.measure(text, false).0,
+        )
+    };
     for (index, line) in lines.iter().enumerate() {
         let y = bottom - (lines.len() - index) as i32 * row_height;
-        let rect = IntRect::new(layout.feed.x, y, layout.feed.w, font.line_height + 2);
-        let prefix_width = font.measure(&line.prefix, false).0
-            + if line.prefix.is_empty() || line.body.is_empty() {
-                0
-            } else {
-                font.h_space
-            };
-        outlined_text(surface, font, rect, &line.prefix, line.color, gamma);
-        outlined_text(
+        let right = layout.feed.x + layout.feed.w;
+        let mut x = layout.feed.x;
+        for span in &line.spans {
+            let rect = IntRect::new(x, y, (right - x).max(0), font.line_height + 2);
+            outlined_text(surface, font, rect, &span.text, span.color, gamma);
+            x += width(&span.text) + font.h_space;
+        }
+    }
+    if view.expanded {
+        render_latest_pill(surface, ui_font, chat, layout.latest, gamma);
+    }
+}
+
+fn ink(color: [u8; 4]) -> u32 {
+    (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2])
+}
+
+/// `label` shortened with an ellipsis to fit `width`.
+fn fitted(font: &ClonkFont, label: &str, width: i32) -> String {
+    if font.measure(label, false).0 <= width {
+        return label.into();
+    }
+    let mut fitted = label.to_string();
+    while !fitted.is_empty() && font.measure(&format!("{fitted}…"), false).0 > width {
+        fitted.pop();
+    }
+    format!("{fitted}…")
+}
+
+/// Where the message goes, in that channel's colour, ahead of the text.
+fn render_audience_chip(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    rect: IntRect,
+    label: &str,
+    color: [u8; 4],
+    gamma: Option<&GammaRamp>,
+) {
+    fill(surface, rect, 0x001d2836, gamma);
+    fill(
+        surface,
+        IntRect::new(rect.x, rect.y, 3, rect.h),
+        ink(color),
+        gamma,
+    );
+    // A drawn ▾, so no font has to carry the glyph.
+    let arrow_x = rect.x + rect.w - 13;
+    let arrow_y = rect.y + rect.h / 2 - 2;
+    for row in 0..4 {
+        fill(
             surface,
-            font,
-            IntRect::new(
-                rect.x + prefix_width,
-                y,
-                (rect.w - prefix_width).max(0),
-                rect.h,
-            ),
-            &line.body,
-            [237, 242, 248, line.color[3]],
+            IntRect::new(arrow_x + row, arrow_y + row, 7 - row * 2, 1),
+            ink(color),
             gamma,
         );
     }
-    if view.expanded && chat.options_open {
-        fill(surface, layout.settings, 0x001a2532, gamma);
-        let size = ["Small", "Medium", "Large"][usize::from(view.preferences.text_size.min(2))];
-        let labels = [
-            format!("Text: {size}"),
-            format!("History: {}%", view.preferences.opacity),
-            format!("Keep: {}s", view.preferences.duration_seconds),
-            format!("Timestamps: {}", if view.timestamps { "On" } else { "Off" }),
-        ];
-        for (index, label) in labels.iter().enumerate() {
-            let cell = layout.setting_cell(index as i32);
-            fill(surface, cell, 0x00304152, gamma);
-            text(
+    let label_width = (rect.w - 10 - 18).max(1);
+    text(
+        surface,
+        font,
+        IntRect::new(
+            rect.x + 9,
+            rect.y + (rect.h - font.line_height) / 2,
+            label_width,
+            font.line_height + 2,
+        ),
+        &fitted(font, label, label_width),
+        color,
+        gamma,
+    );
+}
+
+/// Unread or scrolled-back history, as a pill over the transcript's corner.
+fn render_latest_pill(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    chat: &EnhancedChat,
+    rect: IntRect,
+    gamma: Option<&GammaRamp>,
+) {
+    let label = match chat.unread() {
+        0 if chat.is_scrolled() => "Back to latest ↓".to_string(),
+        0 => return,
+        1 => "1 new message ↓".to_string(),
+        unread => format!("{unread} new messages ↓"),
+    };
+    let width = font.measure(&label, false).0 + 16;
+    let pill = IntRect::new(rect.x + rect.w - width, rect.y, width, rect.h);
+    fill(surface, pill, 0x002c3b4d, gamma);
+    text(
+        surface,
+        font,
+        IntRect::new(pill.x + 8, pill.y + 2, pill.w - 8, pill.h - 2),
+        &label,
+        [240, 208, 148, 255],
+        gamma,
+    );
+}
+
+/// Tabs choose what the transcript shows; the check box, Settings and
+/// close sit at the right like any window's controls.
+fn render_header(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    chat: &EnhancedChat,
+    layout: &ChatLayout,
+    gamma: Option<&GammaRamp>,
+) {
+    for (rect, label, selected) in [
+        (layout.chat_tab, "Chat", !chat.show_logs),
+        (layout.all_tab, "All", chat.show_logs),
+    ] {
+        let color = if selected {
+            [240, 215, 170, 255]
+        } else {
+            TIMESTAMP_COLOR
+        };
+        text(
+            surface,
+            font,
+            IntRect::new(rect.x + 4, rect.y + 2, rect.w - 4, rect.h - 2),
+            label,
+            color,
+            gamma,
+        );
+        if selected {
+            fill(
                 surface,
-                ui_font,
-                IntRect::new(cell.x + 3, cell.y, cell.w - 6, cell.h),
-                label,
-                [206, 218, 230, 255],
+                IntRect::new(rect.x + 2, rect.y + rect.h - 2, rect.w - 4, 2),
+                0x00e5c99e,
                 gamma,
             );
         }
+    }
+    let toggle = layout.overlay_toggle;
+    let check = IntRect::new(toggle.x, toggle.y + (toggle.h - 11) / 2, 11, 11);
+    fill(surface, check, 0x00aec3d7, gamma);
+    fill(
+        surface,
+        IntRect::new(check.x + 1, check.y + 1, check.w - 2, check.h - 2),
+        0x00101923,
+        gamma,
+    );
+    if !chat.hidden {
+        fill(
+            surface,
+            IntRect::new(check.x + 3, check.y + 3, check.w - 6, check.h - 6),
+            0x00e5c99e,
+            gamma,
+        );
+    }
+    let label = if toggle.w >= OVERLAY_LABEL_WIDTH {
+        "Show over game"
+    } else {
+        "Show"
+    };
+    let label_x = check.x + check.w + 5;
+    text(
+        surface,
+        font,
+        IntRect::new(
+            label_x,
+            toggle.y + 2,
+            toggle.x + toggle.w - label_x,
+            toggle.h - 2,
+        ),
+        label,
+        [206, 218, 230, 255],
+        gamma,
+    );
+    for (rect, label) in [(layout.settings_button, "Settings"), (layout.close, "×")] {
+        fill(surface, rect, 0x80304152, gamma);
+        text(
+            surface,
+            font,
+            IntRect::new(rect.x + 5, rect.y + 2, rect.w - 10, rect.h - 2),
+            label,
+            [206, 218, 230, 255],
+            gamma,
+        );
     }
 }
 
@@ -414,10 +550,71 @@ fn outlined_text(
     text(surface, font, rect, label, color, gamma);
 }
 
+pub(crate) const TIMESTAMP_COLOR: [u8; 4] = [140, 152, 166, 255];
+pub(crate) const WHITE_TEXT: [u8; 4] = [237, 242, 248, 255];
+pub(crate) const ALLIES_COLOR: [u8; 4] = [120, 220, 150, 255];
+pub(crate) const PRIVATE_COLOR: [u8; 4] = [236, 156, 236, 255];
+const SAY_COLOR: [u8; 4] = [240, 215, 170, 255];
+const LOG_COLOR: [u8; 4] = [160, 175, 191, 255];
+
+/// The colour a recipient is shown in wherever it is chosen.
+pub fn audience_color(audience: &ChatAudience) -> [u8; 4] {
+    match audience {
+        ChatAudience::Everyone => WHITE_TEXT,
+        ChatAudience::Allies => ALLIES_COLOR,
+        ChatAudience::Private(_) => PRIVATE_COLOR,
+        ChatAudience::Say => SAY_COLOR,
+    }
+}
+
+/// Neutral ink for a typed command, whose route the label already names.
+pub const COMMAND_COLOR: [u8; 4] = [174, 195, 215, 255];
+
+/// A run of one colour within a displayed line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatSpan {
+    pub text: String,
+    pub color: [u8; 4],
+}
+
 pub struct ChatLine {
-    prefix: String,
-    body: String,
-    color: [u8; 4],
+    pub spans: Vec<ChatSpan>,
+}
+
+impl ChatLine {
+    fn text(&self) -> String {
+        self.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    fn set_alpha(&mut self, alpha: u8) {
+        for span in &mut self.spans {
+            span.color[3] = alpha;
+        }
+    }
+
+    /// Shorten the line until it fits `width` with a trailing ellipsis.
+    fn ellipsize(&mut self, font: &ClonkFont, width: i32) {
+        while font.measure(&format!("{}…", self.text()), false).0 > width
+            && self.spans.iter().any(|span| !span.text.is_empty())
+        {
+            if let Some(span) = self
+                .spans
+                .iter_mut()
+                .rev()
+                .find(|span| !span.text.is_empty())
+            {
+                span.text.pop();
+            }
+        }
+        self.spans.retain(|span| !span.text.is_empty());
+        match self.spans.last_mut() {
+            Some(span) => span.text.push('…'),
+            None => self.spans.push(ChatSpan {
+                text: "…".into(),
+                color: WHITE_TEXT,
+            }),
+        }
+    }
 }
 
 fn display_lines(
@@ -441,29 +638,19 @@ fn display_lines(
         {
             continue;
         }
-        let mut lines = message_lines(font, message, feed.w, view.timestamps);
+        let mut lines = message_lines(font, message, feed.w, view.timestamps, view.white_text);
         if !view.expanded {
             let remaining = Duration::from_secs(u64::from(view.preferences.duration_seconds))
                 .saturating_sub(view.now.saturating_duration_since(message.received));
             let opacity = (remaining.as_secs_f32() / 2.0).clamp(0.0, 1.0);
             for line in &mut lines {
-                line.color[3] = (opacity * 255.0).round() as u8;
+                line.set_alpha((opacity * 255.0).round() as u8);
             }
         }
         if !view.expanded && lines.len() > capacity.min(2) {
             lines.truncate(capacity.min(2));
             if let Some(last) = lines.last_mut() {
-                while font
-                    .measure(&format!("{}{}…", last.prefix, last.body), false)
-                    .0
-                    > feed.w
-                    && !(last.body.is_empty() && last.prefix.is_empty())
-                {
-                    if last.body.pop().is_none() {
-                        last.prefix.pop();
-                    }
-                }
-                last.body.push('…');
+                last.ellipsize(font, feed.w);
             }
         }
         if !view.expanded && count + lines.len() > capacity {
@@ -484,64 +671,90 @@ fn display_lines(
     lines
 }
 
-/// Names and bodies share a row, while remaining separate literal-color spans.
+/// One message as coloured spans: a receding timestamp, a channel tag in its
+/// channel's colour, the sender in their player colour, then the message in
+/// white or, without white chat, in the sender's colour as classic chat
+/// shows it.
 pub fn message_lines(
     font: &ClonkFont,
     message: &ChatMessage,
     width: i32,
     timestamps: bool,
+    white_text: bool,
 ) -> Vec<ChatLine> {
-    let channel = match message.channel {
-        ChatChannel::Everyone => "",
-        ChatChannel::Allies => "[Allies] ",
-        ChatChannel::Private => "[Private] ",
-        ChatChannel::Action => "* ",
-        ChatChannel::Log => "[Game] ",
+    let log = message.channel == ChatChannel::Log;
+    let sender_color = if log {
+        LOG_COLOR
+    } else {
+        [message.color[0], message.color[1], message.color[2], 255]
+    };
+    let (tag, tag_color) = match message.channel {
+        ChatChannel::Everyone => ("", sender_color),
+        ChatChannel::Allies => ("[Allies] ", ALLIES_COLOR),
+        ChatChannel::Private => ("[Private] ", PRIVATE_COLOR),
+        ChatChannel::Action => ("* ", sender_color),
+        ChatChannel::Log => ("[Game] ", LOG_COLOR),
     };
     let stamp = if timestamps && !message.timestamp.is_empty() {
         format!("{} ", message.timestamp)
     } else {
         String::new()
     };
-    let header = if message.sender.is_empty() {
-        format!("{stamp}{channel}")
-    } else {
-        format!("{stamp}{channel}{}: ", message.sender)
+    let sender = match (message.sender.is_empty(), &message.channel) {
+        (true, _) => String::new(),
+        // An action reads as a sentence: "* Ada waves".
+        (false, ChatChannel::Action) => format!("{} ", message.sender),
+        (false, _) => format!("{}: ", message.sender),
     };
-    let color = if message.channel == ChatChannel::Log {
-        [160, 175, 191, 255]
-    } else {
-        [
-            160 + (u16::from(message.color[0]) * 95 / 255) as u8,
-            160 + (u16::from(message.color[1]) * 95 / 255) as u8,
-            160 + (u16::from(message.color[2]) * 95 / 255) as u8,
-            255,
-        ]
+    let body_color = match (log, white_text) {
+        (true, _) => LOG_COLOR,
+        (false, true) => WHITE_TEXT,
+        (false, false) => sender_color,
     };
-    let combined = format!("{header}{}", message.text);
+    let segments = [
+        (stamp, TIMESTAMP_COLOR),
+        (tag.to_string(), tag_color),
+        (sender, sender_color),
+        (message.text.clone(), body_color),
+    ];
+    let combined: String = segments.iter().map(|(text, _)| text.as_str()).collect();
     let mut consumed = 0;
     wrap_text(font, &combined, width)
         .into_iter()
         .map(|line| {
             // Wrapping removes the separating space or newline, never player markup.
             let start = consumed + combined[consumed..].find(&line).unwrap_or(0);
-            let prefix_len = header.len().saturating_sub(start).min(line.len());
-            consumed = start + line.len();
-            ChatLine {
-                prefix: line[..prefix_len].into(),
-                body: line[prefix_len..].into(),
-                color,
-            }
+            let end = start + line.len();
+            consumed = end;
+            let mut offset = 0;
+            let spans = segments
+                .iter()
+                .filter_map(|(text, color)| {
+                    let (from, to) = (offset, offset + text.len());
+                    offset = to;
+                    let (from, to) = (from.max(start), to.min(end));
+                    (from < to).then(|| ChatSpan {
+                        text: combined[from..to].into(),
+                        color: *color,
+                    })
+                })
+                .collect();
+            ChatLine { spans }
         })
         .collect()
 }
 
+/// The recipient list above its chip: the current recipient is marked, the
+/// one under the pointer lit.
+#[allow(clippy::too_many_arguments)]
 pub fn render_audience_picker(
     surface: &mut Surface,
     fonts: &ClonkFontSet,
     preferences: &ChatPreferences,
-    labels: &[String],
+    choices: &[(String, [u8; 4])],
     offset: usize,
+    selected: Option<usize>,
+    hovered: Option<usize>,
     gamma: Option<&GammaRamp>,
 ) {
     let layout = ChatLayout::new(
@@ -550,24 +763,39 @@ pub fn render_audience_picker(
         preferences.font(fonts).line_height,
         true,
     );
-    fill(surface, layout.feed, 0x001b2b3d, gamma);
-    for (row, label) in labels
+    let picker = layout.picker(choices.len());
+    fill(surface, picker, 0x005a6b7e, gamma);
+    fill(
+        surface,
+        IntRect::new(picker.x + 1, picker.y + 1, picker.w - 2, picker.h - 2),
+        0x00141e2a,
+        gamma,
+    );
+    for (row, (index, (label, color))) in choices
         .iter()
+        .enumerate()
         .skip(offset)
-        .take((layout.feed.h / 22).max(0) as usize)
+        .take(layout.picker_capacity(choices.len()))
         .enumerate()
     {
+        let rect = layout.picker_row(choices.len(), row);
+        if Some(index) == selected {
+            fill(surface, rect, 0x00304152, gamma);
+            fill(
+                surface,
+                IntRect::new(rect.x, rect.y, 3, rect.h),
+                ink(*color),
+                gamma,
+            );
+        } else if Some(index) == hovered {
+            fill(surface, rect, 0x00243242, gamma);
+        }
         text(
             surface,
             &fonts.mini,
-            IntRect::new(
-                layout.feed.x + 4,
-                layout.feed.y + row as i32 * 22,
-                layout.feed.w - 8,
-                22,
-            ),
-            label,
-            [230, 237, 245, 255],
+            IntRect::new(rect.x + 9, rect.y + 3, rect.w - 12, rect.h - 3),
+            &fitted(&fonts.mini, label, rect.w - 12),
+            *color,
             gamma,
         );
     }
@@ -591,22 +819,19 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
+            native_fonts: None,
             now: Instant::now(),
         };
         let lines = display_lines(&fonts.text, &chat, &view, IntRect::new(0, 0, 100, 200));
         assert_eq!(lines.len(), 2);
-        assert!(lines[1].body.ends_with('…'));
+        assert!(lines[1].text().ends_with('…'));
         for line in lines {
-            assert!(
-                fonts
-                    .text
-                    .measure(&format!("{}{}", line.prefix, line.body), false)
-                    .0
-                    <= 100
-            );
+            assert!(fonts.text.measure(&line.text(), false).0 <= 100);
         }
     }
 
@@ -630,31 +855,131 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
+            native_fonts: None,
             now: start + Duration::from_secs(11),
         };
         let lines = display_lines(&fonts.text, &chat, &view, feed);
         assert_eq!(lines.len(), 6);
-        assert!(lines[0].color[3] > 0 && lines[0].color[3] < lines[1].color[3]);
-        assert_eq!(lines[5].color[3], 255);
+        let alpha = |line: &ChatLine| line.spans[0].color[3];
+        assert!(alpha(&lines[0]) > 0 && alpha(&lines[0]) < alpha(&lines[1]));
+        assert_eq!(alpha(&lines[5]), 255);
         view.now = start + Duration::from_secs(13);
         let lines = display_lines(&fonts.text, &chat, &view, feed);
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].body, "Message 2");
+        assert_eq!(lines[0].text(), "Ada: Message 2");
         view.expanded = true;
         view.now = start + Duration::from_secs(60);
         let lines = display_lines(&fonts.text, &chat, &view, feed);
         assert_eq!(lines.len(), 6);
-        assert!(lines.iter().all(|line| line.color[3] == 255));
+        assert!(lines.iter().all(|line| alpha(line) == 255));
+    }
+
+    #[test]
+    fn sender_channel_and_timestamp_stand_apart_from_the_message() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let mut message = ChatMessage::conversation("Ada", ChatChannel::Allies, "Ready?");
+        message.color = [220, 60, 60, 255];
+        message.timestamp = "[10:53:53]".into();
+        let spans = |white_text| {
+            message_lines(&fonts.text, &message, 500, true, white_text)
+                .remove(0)
+                .spans
+        };
+
+        let white = spans(true);
+        let texts: Vec<_> = white.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(texts, ["[10:53:53] ", "[Allies] ", "Ada: ", "Ready?"]);
+        assert_eq!(white[0].color, TIMESTAMP_COLOR, "timestamps recede");
+        assert_eq!(white[1].color, ALLIES_COLOR, "a channel has one colour");
+        assert_eq!(
+            white[2].color,
+            [220, 60, 60, 255],
+            "the sender keeps their colour"
+        );
+        assert_eq!(white[3].color, WHITE_TEXT);
+        // Without white chat the message takes its sender's colour, as
+        // classic chat does.
+        assert_eq!(spans(false)[3].color, [220, 60, 60, 255]);
+    }
+
+    #[test]
+    fn spans_start_where_the_native_font_ends_the_previous_one() {
+        // At an interface scale every captured run is redrawn alone with the
+        // scale-native font, so a run placed by the 1x metrics overlaps or
+        // drifts from the run before it.
+        let fonts = crate::test_support::endeavour_font_set();
+        let bytes =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour");
+        let native = crate::clonk_fonts::build_native_font_set(&bytes, 3.0).expect("native fonts");
+        let preferences = ChatPreferences::default();
+        let mut chat = EnhancedChat::default();
+        let mut message = ChatMessage::conversation("Ada", ChatChannel::Allies, "Ready?");
+        message.timestamp = "[10:53:53]".into();
+        chat.push(message);
+        let view = ChatView {
+            preferences: &preferences,
+            expanded: false,
+            audience: "Everyone",
+            audience_color: WHITE_TEXT,
+            hint: "",
+            notice: "",
+            timestamps: true,
+            white_text: true,
+            native_fonts: Some(&native),
+            now: Instant::now(),
+        };
+        let mut surface = Surface::new(1152, 745, clonk_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        render_chat(&mut surface, &fonts, &chat, &view, None);
+        let captured = surface.take_clonk_text_capture();
+
+        // Each run is four outline passes, then its fill.
+        let fills: Vec<_> = captured.iter().skip(4).step_by(5).collect();
+        let texts: Vec<_> = fills.iter().map(|command| command.text.as_str()).collect();
+        assert_eq!(texts, ["[10:53:53] ", "[Allies] ", "Ada: ", "Ready?"]);
+        let font = native.font_for_role(fonts.text.role().expect("chat font role"));
+        for pair in fills.windows(2) {
+            assert_eq!(
+                pair[1].x - pair[0].x,
+                font.measure(&pair[0].text, false).0 + fonts.text.h_space,
+                "{:?} must end where {:?} begins",
+                pair[0].text,
+                pair[1].text
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_message_keeps_its_colour_on_every_line() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let mut message = ChatMessage::conversation(
+            "Ada",
+            ChatChannel::Private,
+            "Meet at the lift and bring a shovel and two flints for the rock",
+        );
+        message.color = [220, 60, 60, 255];
+        let lines = message_lines(&fonts.text, &message, 160, false, true);
+        assert!(lines.len() > 1);
+        assert_eq!(lines[0].spans[0].color, PRIVATE_COLOR);
+        for line in &lines[1..] {
+            assert!(line.spans.iter().all(|span| span.color == WHITE_TEXT));
+        }
     }
 
     #[test]
     fn short_messages_keep_the_sender_and_body_on_one_line() {
         let fonts = crate::test_support::endeavour_font_set();
         let message = ChatMessage::conversation("Ada", ChatChannel::Everyone, "Ready?");
-        assert_eq!(message_lines(&fonts.text, &message, 500, false).len(), 1);
+        assert_eq!(
+            message_lines(&fonts.text, &message, 500, false, true).len(),
+            1
+        );
     }
 
     #[test]
@@ -673,9 +998,12 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
+            native_fonts: None,
             now: Instant::now(),
         };
         render_chat(&mut surface, &fonts, &chat, &view, None);
@@ -712,9 +1040,12 @@ mod tests {
             preferences: &preferences,
             expanded: false,
             audience: "Everyone",
+            audience_color: WHITE_TEXT,
             hint: "",
             notice: "",
             timestamps: false,
+            white_text: true,
+            native_fonts: None,
             now: Instant::now(),
         };
         let mut latest = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);
@@ -729,13 +1060,55 @@ mod tests {
     }
 
     #[test]
+    fn the_recipient_sits_in_the_composer_row() {
+        let layout = ChatLayout::new(1152, 745, 22, true);
+        assert_eq!(layout.audience.y, layout.edit.y);
+        assert_eq!(layout.audience.h, layout.edit.h);
+        assert!(layout.audience.x + layout.audience.w < layout.edit.x);
+        assert!(layout.feed.y + layout.feed.h <= layout.edit.y);
+    }
+
+    #[test]
+    fn the_recipient_picker_opens_above_its_chip_inside_the_panel() {
+        for (width, height) in [(320, 200), (1152, 745)] {
+            let layout = ChatLayout::new(width, height, 22, true);
+            for rows in [4, 12, 40] {
+                let picker = layout.picker(rows);
+                assert!(picker.y + picker.h <= layout.audience.y);
+                assert!(picker.y >= layout.header.y + layout.header.h);
+                assert_eq!(picker.x, layout.audience.x);
+                for index in 0..rows.min(layout.picker_capacity(rows)) {
+                    let row = layout.picker_row(rows, index);
+                    assert!(row.y >= picker.y && row.y + row.h <= picker.y + picker.h);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn composer_and_controls_fit_small_screens_and_large_text() {
         for (width, height) in [(320, 200), (640, 480), (1280, 720)] {
             for line_height in [22, 28, 36] {
                 let layout = ChatLayout::new(width, height, line_height, true);
-                for rect in [layout.bounds, layout.edit, layout.audience, layout.settings] {
+                let header = [
+                    layout.chat_tab,
+                    layout.all_tab,
+                    layout.overlay_toggle,
+                    layout.settings_button,
+                    layout.close,
+                ];
+                for rect in [layout.bounds, layout.edit, layout.audience]
+                    .into_iter()
+                    .chain(header)
+                {
                     assert!(rect.x >= 0 && rect.y >= 0 && rect.w > 0 && rect.h > 0);
                     assert!(rect.x + rect.w <= width && rect.y + rect.h <= height);
+                }
+                for pair in header.windows(2) {
+                    assert!(
+                        pair[0].x + pair[0].w <= pair[1].x,
+                        "header controls overlap at {width}x{height}"
+                    );
                 }
                 assert!(layout.feed.y + layout.feed.h <= layout.audience.y);
                 assert!(layout.edit.y + layout.edit.h <= layout.notice.y);
