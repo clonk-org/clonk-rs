@@ -880,11 +880,21 @@ impl Engine {
             self.player_order
                 .retain(|number| *number != provisional_number);
             let number = state.id;
+            let cursor = state.cursor;
             let mut player = Player::from_state(state);
             player.set_game_join_time(self.game_time);
             self.crew_info_control_counts
                 .retain(|link, _| link.player_id != number);
             self.players.insert(number, player);
+            // LoadRuntimeData restores C4Player::Cursor, so FinalInit keeps it
+            // rather than re-picking one (C4Player.cpp:793-794). crew_cursor
+            // reads the selection, not the player.
+            if let Some(cursor) = cursor {
+                self.crew_selection
+                    .entry(number)
+                    .or_default()
+                    .set_cursor(Some(cursor));
+            }
             self.append_and_recheck_player_order(number);
             self.crew_rosters.insert(number, player_file.crew);
             let roster_len = self.crew_rosters.get(&number).map_or(0, Vec::len);

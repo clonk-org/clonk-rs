@@ -13531,6 +13531,28 @@ fn finalize_runtime_joined_walker(
     app.finalize_network_loaded_scenario(true).test_value();
 }
 
+/// Two of `Walker`'s clonks: one that is not selected, spawned first so every
+/// fallback reaches it before the other, and the selected cursor. Returns the
+/// `Crew=`/`Cursor=` runtime fields that save them.
+fn spawn_walker_crew(app: &mut GameApp) -> (ObjectId, ObjectId, String) {
+    let crew = |selected| {
+        SpawnConfig::new("CLNK")
+            .with_owner(7)
+            .with_crew_member(true)
+            .with_alive(true)
+            .with_selected(selected)
+    };
+    let other = app.engine.spawn_test_object(crew(false));
+    let cursor = app.engine.spawn_test_object(crew(true));
+    let runtime_fields = format!(
+        "Cursor={}\r\nCrew={};{}\r\n",
+        cursor.as_u64(),
+        other.as_u64(),
+        cursor.as_u64(),
+    );
+    (other, cursor, runtime_fields)
+}
+
 #[test]
 fn runtime_join_keeps_the_coms_a_player_held_when_the_host_saved() {
     // Recreating a player ends in InitControl, which zeroes PressedComs
@@ -13549,6 +13571,22 @@ fn runtime_join_keeps_the_coms_a_player_held_when_the_host_saved() {
         app.engine.player(7).test_value().control.pressed_coms => held_right,
         "a runtime joiner must keep the keys the host's players still hold"
     );
+}
+
+#[test]
+fn a_recreated_player_keeps_the_cursor_it_was_saved_with() {
+    // FinalInit re-picks a cursor only for a player that came back without
+    // one (C4Player.cpp:793-794). A joiner that re-picks anyway steers a
+    // different clonk than its peers on the first command
+    // (clonk-org/clonk-rs#1825).
+    let mut app = new_state_only_running_sandbox_app();
+    app.engine.retain_restored_players([]);
+    let (other, cursor, runtime_fields) = spawn_walker_crew(&mut app);
+
+    finalize_runtime_joined_walker(&mut app, 0, &runtime_fields);
+
+    main_assert_eq!(app.engine.crew_cursor(7) => Some(cursor), "FinalInit keeps the saved cursor");
+    main_assert!(!app.engine.test_object_snapshot(other).selected, "the unselected clonk stays unselected");
 }
 
 #[test]
