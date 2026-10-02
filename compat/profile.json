@@ -341,6 +341,20 @@
       "owner": "clonk-org/clonk-rs#1210"
     },
     {
+      "id": "ctrl-runtime-join-held-coms",
+      "area": "control",
+      "summary": "A runtime joiner keeps the PressedComs its players held when the host saved the dynamic. C++ recreates them through C4Player::Init, whose InitControl zeroes PressedComs on the joiner alone while the host and every other peer still hold those keys; the next release then stops the crew everywhere but on the joiner, which desyncs whenever anyone was walking. Only the joiner's own state changes, and it changes to what every peer already holds, so no C++ peer computes anything different. An ordinary savegame, which every peer reloads, still clears them.",
+      "cited_in": [
+        "crates/clonk-engine/src/engine/players.rs:659",
+        "crates/clonk-app/src/game_app/network.rs:11263"
+      ],
+      "cpp_reference": "C4Game.cpp:2809-2823; C4Player.cpp:384-386,1541-1548,1917",
+      "disposition": "accepted",
+      "profile_action": "kept",
+      "determinism_critical": true,
+      "owner": "clonk-org/clonk-rs#1825"
+    },
+    {
       "id": "transport-definition-transfer-limit",
       "area": "transport",
       "summary": "Network.MaxLoadFileSize defaults to 256 MiB in normal mode rather than C++'s 100 MiB so large classic definition families remain transferable; the LegacyClonk profile restores 100 MiB, and any explicitly configured host limit wins in either profile.",
