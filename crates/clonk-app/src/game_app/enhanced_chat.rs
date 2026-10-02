@@ -126,12 +126,19 @@ impl GameApp {
             (ChatAudience::Allies, "Allies".into()),
             (ChatAudience::Say, "Say above crew".into()),
         ];
-        choices.extend(self.snapshot.players.iter().map(|player| {
-            (
-                ChatAudience::Private(player.id),
-                format!("Private: {}", player.name),
-            )
-        }));
+        let local = &self.snapshot.hud.local_players;
+        choices.extend(
+            self.snapshot
+                .players
+                .iter()
+                .filter(|player| !local.contains(&player.id))
+                .map(|player| {
+                    (
+                        ChatAudience::Private(player.id),
+                        format!("Private: {}", player.name),
+                    )
+                }),
+        );
         choices
     }
 

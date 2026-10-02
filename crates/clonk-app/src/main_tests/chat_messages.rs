@@ -2187,6 +2187,23 @@ fn enhanced_chat_hide_keeps_drafts_and_incoming_history_until_reopened() {
 }
 
 #[test]
+fn enhanced_chat_offers_no_private_messages_to_a_local_player() {
+    use clonk_frontend::enhanced_chat::ChatAudience;
+    let mut app = new_running_sandbox_app();
+    install_message_fixture(&mut app);
+    app.snapshot = app.engine.snapshot();
+
+    let audiences: Vec<_> = app
+        .enhanced_chat_audiences()
+        .into_iter()
+        .map(|(audience, _)| audience)
+        .collect();
+
+    main_assert!(audiences.contains(&ChatAudience::Private(7)));
+    main_assert!(!audiences.contains(&ChatAudience::Private(app.players.local_owner)), "nobody whispers to themselves");
+}
+
+#[test]
 fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients_and_preferences() {
     use clonk_frontend::enhanced_chat::ChatAudience;
     let mut app = new_classic_running_sandbox_app();
