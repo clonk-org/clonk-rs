@@ -146,6 +146,7 @@ shard_modules!(
 
 shard_modules!(
     "engine-it-shard-3",
+    upward_race_spawn,
     collection_authored_script_fixes,
     die_neue_welt_goal_initialization,
     dragon_rock_audio,
