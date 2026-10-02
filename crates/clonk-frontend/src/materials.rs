@@ -901,27 +901,33 @@ pub(crate) fn build_shader_landscape_plan(
 
 /// Packs every pattern the texmap references into one atlas and packs each
 /// slot against it. Catalogue work only: nothing here reads the landscape.
-fn pack_material_catalogue(slots: &[MaterialSlot<'_>]) -> PackedMaterialCatalogue {
+fn pack_material_catalogue<'a>(slots: &[MaterialSlot<'a>]) -> PackedMaterialCatalogue {
     // Collect every referenced pattern once, remembering where each slot's
     // primary and overlay landed so the rects can be looked up after packing.
-    let mut patterns: Vec<MaterialPatternRef<'_>> = Vec::new();
-    let mut indices: Vec<Option<(usize, Option<usize>)>> = Vec::with_capacity(slots.len());
-    for slot in slots {
-        match slot {
-            MaterialSlot::Empty => indices.push(None),
+    // Slots resolve out of one texture map, so slots naming the same texture
+    // hold the same surface; the stock texmap names its shared overlay in
+    // nearly every slot.
+    let mut surfaces: Vec<&'a MaterialTextureSurface> = Vec::new();
+    let mut intern = |surface: &'a MaterialTextureSurface| {
+        surfaces
+            .iter()
+            .position(|known| std::ptr::eq(*known, surface))
+            .unwrap_or_else(|| {
+                surfaces.push(surface);
+                surfaces.len() - 1
+            })
+    };
+    let indices: Vec<Option<(usize, Option<usize>)>> = slots
+        .iter()
+        .map(|slot| match slot {
+            MaterialSlot::Empty => None,
             MaterialSlot::Patterns {
                 texture, overlay, ..
-            } => {
-                let primary = patterns.len();
-                patterns.push(MaterialPatternRef::from(*texture));
-                let secondary = overlay.map(|overlay| {
-                    patterns.push(MaterialPatternRef::from(overlay));
-                    patterns.len() - 1
-                });
-                indices.push(Some((primary, secondary)));
-            }
-        }
-    }
+            } => Some((intern(texture), overlay.map(&mut intern))),
+        })
+        .collect();
+    let patterns: Vec<MaterialPatternRef<'_>> =
+        surfaces.into_iter().map(MaterialPatternRef::from).collect();
     let (atlas_width, atlas_height, atlas, rects) = build_material_atlas(&patterns);
 
     let packed: Vec<[u32; 16]> = slots
@@ -1224,6 +1230,51 @@ mod gpu_slot_tests {
             compared += 1;
         }
         assert_eq!(compared, index_plane.len());
+    }
+
+    /// clonk-org/clonk-rs#1838: the stock texmap names about 15 textures
+    /// across 96 primary and overlay references, and one atlas copy per
+    /// reference stacked it past Metal's 16384-texel limit.
+    #[test]
+    fn the_atlas_stores_each_texture_once_however_many_slots_name_it() {
+        let mut render_info = HashMap::new();
+        render_info.insert(
+            clonk_resources::material::c4_name_key("Earth"),
+            MaterialRenderInfo::new(
+                [127, 95, 63, 147, 111, 75, 171, 127, 91],
+                [0, 30, 60, 90, 120, 200],
+                None,
+                MATERIAL_OVERLAY_EXACT,
+                50,
+            ),
+        );
+        let mut textures = HashMap::new();
+        textures.insert(
+            clonk_resources::material::c4_name_key("Smooth"),
+            MaterialTextureSurface::surface32(surface32_pattern()),
+        );
+        textures.insert(
+            clonk_resources::material::c4_name_key("Rough"),
+            surface8_pattern(),
+        );
+        // Every slot takes the Smooth overlay fallback; three also use it as
+        // their primary, so Smooth is named seven times and Rough once.
+        let material_names: Vec<_> = (0..128)
+            .map(|index| (1..=4).contains(&index).then(|| "Earth".to_string()))
+            .collect();
+        let texture_names: Vec<_> = (0..128)
+            .map(|index| match index {
+                1..=3 => Some("Smooth".to_string()),
+                4 => Some("Rough".to_string()),
+                _ => None,
+            })
+            .collect();
+
+        let slots =
+            resolve_material_slots(&material_names, &texture_names, &render_info, &textures);
+
+        // Smooth is 4x3 and Rough 3x5: one copy of each.
+        assert_eq!(pack_material_catalogue(&slots).atlas_extent, [4, 3 + 5]);
     }
 
     /// The packed slot plus the shared atlas must reproduce
