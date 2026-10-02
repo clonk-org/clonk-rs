@@ -11260,7 +11260,7 @@ impl GameApp {
             } else {
                 rebound_local_controls.resolve(control_init)
             };
-            self.engine.reinitialize_player_after_restore(
+            self.engine.reinitialize_player_keeping_held_coms(
                 binding.number,
                 clonk_engine::PlayerAtClient::new(source.client_id),
                 at_client_name,
@@ -11271,6 +11271,12 @@ impl GameApp {
                 saved_pref_control_style,
                 saved_pref_auto_context_menu,
             )?;
+            // Every peer reloads an ordinary network savegame and clears
+            // together; a runtime joiner must keep what its peers still hold.
+            if ordinary_recreation {
+                self.engine
+                    .clear_restored_player_pressed_coms(binding.number)?;
+            }
         }
 
         rebound_local_controls.finalize_restored_mouse_owner(

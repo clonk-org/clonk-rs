@@ -13457,6 +13457,100 @@ fn runtime_join_combined_save_recreates_players_in_save_player_info_order() {
     main_assert_eq!(app.local_controls.assignment(5).expect("second local control").set => 1, "the second row observes the first row's assignment");
 }
 
+/// Runtime-join the host's `Walker` (player 7 of client 0) from a dynamic
+/// whose `[Player11]` section ends in `runtime_fields`, on a peer that is
+/// client `local_client_id`.
+fn finalize_runtime_joined_walker(
+    app: &mut GameApp,
+    local_client_id: clonk_network::ClientId,
+    runtime_fields: &str,
+) {
+    let native =
+        |bytes: &[u8]| clonk_engine::LegacyCString::from_bytes(bytes.to_vec()).test_value();
+    let walker = n2_fixture!(player {
+        id: 11,
+        filename: native(b"Walker.c4p"),
+        name: native(b"Walker"),
+        flags: clonk_engine::PLAYER_INFO_FLAG_JOINED,
+        player_type: clonk_engine::PLAYER_INFO_TYPE_USER,
+    });
+    let mut walker_group = MutableGroup::new("Walker.c4p");
+    walker_group
+        .add_file(
+            "Player.txt",
+            b"[Player]\nName=Walker\n[Preferences]\nControl=0\nMouse=0\nAutoStopControl=1\n"
+                .to_vec(),
+        )
+        .test_value();
+    let game_txt = format!(
+        "[Player11]\r\nStatus=1\r\nAtClient=71\r\nIndex=7\r\nID=11\r\nAutoStopControl=1\r\n{runtime_fields}"
+    );
+    let combined_dir = tempdir();
+    let combined_path = combined_dir.path().join("Combined.c4s");
+    let mut combined = MutableGroup::new("Combined.c4s");
+    combined
+        .add_file("Game.txt", game_txt.into_bytes())
+        .test_value();
+    combined.add_child("Walker.c4p", walker_group).test_value();
+    fs::write(&combined_path, combined.pack().test_value()).test_value();
+
+    let (network, _events) = NetworkManager::test_stub_for_client_id(local_client_id);
+    app.netplay.manager = Some(network);
+    app.netplay.control_clients.replace_snapshot([
+        n2_fixture!(client {
+            client_id: 0,
+            activated: true,
+            name: native(b"Host"),
+        }),
+        n2_fixture!(client {
+            client_id: 1,
+            name: native(b"Joiner"),
+        }),
+    ]);
+    app.players.infos = ControlPlayerInfoRegistry::default();
+    app.players.infos.replace_snapshot(
+        11,
+        [netplay_player_info_data(0, vec![walker.clone()])],
+    );
+    let sources = vec![clonk_engine::RuntimeJoinPlayerSource {
+        client_id: 0,
+        at_client_name: "Host".to_string(),
+        info: walker.clone(),
+        load_unnamed_portraits: false,
+    }];
+    let mut scenario = FrontendScenario::fallback();
+    scenario.path = Some(combined_path);
+    let (_sender, receiver) = mpsc::channel();
+    app.scenario_lifecycle.loading = Some(test_loading_state(
+        scenario,
+        receiver,
+        false,
+        test_prepared_go(0, true, true, true, vec![walker], sources, Vec::new()),
+    ));
+
+    app.finalize_network_loaded_scenario(true).test_value();
+}
+
+#[test]
+fn runtime_join_keeps_the_coms_a_player_held_when_the_host_saved() {
+    // Recreating a player ends in InitControl, which zeroes PressedComs
+    // (C4Player.cpp:384-386,1917). On a runtime join only the joiner
+    // reloads, so the host and every other peer still hold that key: its
+    // release reaches AutoStopUpdateComDir there and is dropped here
+    // (C4Player.cpp:1541-1548; C4Object.cpp:3743-3754), and the joiner
+    // desyncs whenever someone was walking (clonk-org/clonk-rs#1825).
+    let mut app = new_state_only_running_sandbox_app();
+    app.engine.retain_restored_players([]);
+    let held_right = 1 << clonk_engine::COM_RIGHT;
+
+    finalize_runtime_joined_walker(&mut app, 0, &format!("PressedComs={held_right}\r\n"));
+
+    main_assert_eq!(
+        app.engine.player(7).test_value().control.pressed_coms => held_right,
+        "a runtime joiner must keep the keys the host's players still hold"
+    );
+}
+
 #[test]
 fn saved_raw_mouse_control_survives_a_failed_restore_preference_gate() {
     let mut app = new_running_sandbox_app();

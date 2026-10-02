@@ -637,7 +637,7 @@ impl Engine {
 
     /// InitControl's closing `PressedComs = 0` (C4Player.cpp:1917). Unlike
     /// COM_ClearPressedComs it leaves LastCom alone.
-    fn clear_restored_player_pressed_coms(&mut self, number: i32) -> Result<(), EngineError> {
+    pub fn clear_restored_player_pressed_coms(&mut self, number: i32) -> Result<(), EngineError> {
         self.player_mut(number)?.control.pressed_coms = 0;
         Ok(())
     }
@@ -646,7 +646,17 @@ impl Engine {
     /// InitControl's closing `PressedComs = 0`. ApplyForcedControl still
     /// drops the held coms when the control style changes
     /// (C4Player.cpp:2376-2379).
-    fn reinitialize_player_keeping_held_coms(
+    ///
+    /// A runtime joiner recreates its players through this, deliberately
+    /// unlike C++, which runs the whole InitControl there too
+    /// (C4Game.cpp:2809-2823; C4Player.cpp:384-386). Only the joiner reloads:
+    /// the host and every other peer still hold the coms their players were
+    /// pressing when the dynamic was saved. Clearing them on the joiner alone
+    /// makes the next release a no-op there (C4Player.cpp:1541-1548) while it
+    /// stops the crew everywhere else (AutoStopUpdateComDir,
+    /// C4Object.cpp:3743-3754), so joining while anyone walked desynced the
+    /// joiner (clonk-org/clonk-rs#1825).
+    pub fn reinitialize_player_keeping_held_coms(
         &mut self,
         number: i32,
         at_client: PlayerAtClient,
