@@ -55,9 +55,10 @@ pub enum SurfaceError {
     /// The driver rejected the surface.
     #[error("the window surface failed validation")]
     Validation,
-    /// The render callback failed.
+    /// The render callback failed. The callback's error stays reachable as
+    /// the source so a caller can still recover from a typed renderer error.
     #[error("the render callback failed: {0}")]
-    Callback(Box<dyn std::error::Error + Send + Sync + 'static>),
+    Callback(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 impl From<AcquireError> for SurfaceError {
