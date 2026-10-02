@@ -1529,8 +1529,9 @@ fn multicast_send_interface(target: &SocketAddrV6) -> Option<u32> {
     (target.scope_id() != DEFAULT_MULTICAST_INTERFACE).then(|| target.scope_id())
 }
 
-/// Joins the C++ discovery group, preferring the platform default interface and
-/// falling back to every interface that accepts the join when it refuses.
+/// Joins the C++ discovery group on every interface that accepts membership.
+/// A successful default join may select a VPN instead of the LAN, so it is
+/// only a fallback when no explicit interface can be joined.
 ///
 /// Never fails: `C4NetIOSimpleUDP::InitBroadcast` returns false on a refused
 /// join without closing anything (pinned oracle src/C4NetIO.cpp:1626-1632), and
@@ -1544,22 +1545,21 @@ pub(crate) fn join_discovery_multicast(socket: &Socket) -> Vec<u32> {
     })
 }
 
-/// `candidates` stays unevaluated until the default interface has refused the
-/// join, so a host that behaves like C++ never enumerates anything.
 fn joined_discovery_interfaces(
     candidates: &dyn Fn() -> Vec<u32>,
     join: &dyn Fn(u32) -> io::Result<()>,
 ) -> Vec<u32> {
-    if join(DEFAULT_MULTICAST_INTERFACE).is_ok() {
-        return vec![DEFAULT_MULTICAST_INTERFACE];
-    }
-    candidates()
+    let mut joined = candidates()
         .into_iter()
         .filter(|interface| *interface != DEFAULT_MULTICAST_INTERFACE && join(*interface).is_ok())
-        .collect()
+        .collect::<Vec<_>>();
+    if joined.is_empty() && join(DEFAULT_MULTICAST_INTERFACE).is_ok() {
+        joined.push(DEFAULT_MULTICAST_INTERFACE);
+    }
+    joined
 }
 
-/// Interface indices to try once the platform default has refused the join,
+/// Interface indices to join and send discovery datagrams through,
 /// ascending so the joined set does not depend on kernel enumeration order.
 #[cfg(unix)]
 pub(crate) fn multicast_interface_indices() -> Vec<u32> {
@@ -2895,15 +2895,10 @@ Title=Empty\n",
         // ipv6mr_interface=0 and leaves the destination scope unset; it does
         // not enumerate or fan out over interfaces (pristine 9ffa0a5d
         // src/C4NetIO.cpp:1587-1633, under its own `// TODO: do multicast on
-        // all interfaces?` at :1623). Wherever that join succeeds the port
-        // still sends exactly that one datagram; the fan-out below is reached
-        // only once the kernel has refused it, because on a host whose default
-        // multicast route has no IPv6-capable interface -- a Mac with IPv6
-        // switched off on its only LAN NIC is enough -- the C++ join returns
-        // EADDRNOTAVAIL and every send EHOSTUNREACH, so LAN discovery is dead
-        // in both directions (clonk-org/clonk-rs#107). Enumerating cannot
-        // desync: discovery only selects which game to join, before any
-        // control is exchanged.
+        // all interfaces?` at :1623). Keep this destination for platforms
+        // where interface enumeration is unavailable. Otherwise the port
+        // explicitly scopes each send so a VPN default cannot hide the LAN
+        // (clonk-org/clonk-rs#1822); discovery exchanges no simulation state.
         let target = multicast_target(DEFAULT_MULTICAST_INTERFACE);
 
         assert_eq!(
@@ -2942,9 +2937,8 @@ Title=Empty\n",
     #[test]
     fn a_scoped_join_set_sends_one_probe_per_joined_interface() {
         // The unscoped destination only reaches the interface the kernel picks
-        // by default. Once that interface has refused the join there is nothing
-        // left to reach it through, so each joined interface gets its own
-        // destination scope.
+        // by default. Each joined interface needs its own destination scope
+        // so both probes and host announces reach every connected LAN.
         let target = multicast_target(DEFAULT_MULTICAST_INTERFACE);
 
         assert_eq!(
@@ -2980,9 +2974,9 @@ Title=Empty\n",
     #[test]
     fn enumerated_multicast_interfaces_do_not_depend_on_kernel_listing_order() {
         // `if_nameindex` reports interfaces in kernel-list order, which differs
-        // between hosts and across reboots. The fallback drives probe send
-        // order, so it is sorted and deduplicated; index 0 is excluded because
-        // it is the attempt that already failed.
+        // between hosts and across reboots. This drives probe send order, so
+        // it is sorted and deduplicated; index 0 is the default fallback,
+        // not an enumerated interface.
         let interfaces = multicast_interface_indices();
 
         assert!(interfaces.windows(2).all(|pair| pair[0] < pair[1]));
@@ -3008,25 +3002,42 @@ Title=Empty\n",
     }
 
     #[test]
-    fn an_accepted_default_multicast_join_enumerates_no_interfaces() {
-        // The whole fallback is invisible wherever C++ works: the port must not
-        // even ask the kernel for an interface list, so a host that behaves
-        // like the oracle issues exactly the one join the oracle issues
-        // (pinned oracle src/C4NetIO.cpp:1627-1631).
-        let enumerated = std::cell::Cell::new(false);
-        let joined = joined_discovery_interfaces(
-            &|| {
-                enumerated.set(true);
-                vec![3, 11]
-            },
-            &|_| Ok(()),
-        );
+    fn a_working_default_multicast_route_does_not_hide_other_lan_interfaces() {
+        // Deliberate discovery-only divergence from the default-interface join
+        // in pinned oracle src/C4NetIO.cpp:1623-1631. A VPN can accept that
+        // join and every send while the Ethernet/Wi-Fi LAN sees no packets
+        // (clonk-org/clonk-rs#1822). This happens before joining a game and
+        // cannot affect lockstep state or the C++ discovery packet format.
+        let attempted = std::cell::RefCell::new(Vec::new());
+        let joined = joined_discovery_interfaces(&|| vec![3, 7, 11], &|interface| {
+            attempted.borrow_mut().push(interface);
+            if interface == 7 {
+                Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+            } else {
+                Ok(())
+            }
+        });
 
-        assert_eq!(joined, vec![DEFAULT_MULTICAST_INTERFACE]);
-        assert!(
-            !enumerated.get(),
-            "the C++ path must not enumerate interfaces"
-        );
+        assert_eq!(joined, vec![3, 11]);
+        assert_eq!(*attempted.borrow(), vec![3, 7, 11]);
+    }
+
+    #[test]
+    fn discovery_keeps_the_default_route_when_explicit_interfaces_are_unavailable() {
+        for candidates in [vec![], vec![0, 3, 11]] {
+            let joined = joined_discovery_interfaces(&|| candidates.clone(), &|interface| {
+                if interface == DEFAULT_MULTICAST_INTERFACE {
+                    Ok(())
+                } else {
+                    Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+                }
+            });
+            assert_eq!(joined, vec![DEFAULT_MULTICAST_INTERFACE]);
+        }
+        assert!(joined_discovery_interfaces(&|| vec![3], &|_| {
+            Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+        })
+        .is_empty());
     }
 
     #[test]
@@ -3283,6 +3294,64 @@ Build=362\n"
                 assert!(!message.is_empty());
             }
             event => panic!("expected LAN reference failure, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn lan_announcement_resolves_a_host_with_internet_disabled() {
+        // C4Network2Discover.cpp:79-89 supplies the announcement source to the
+        // HTTP reference query. C4StartupNetDlg.cpp:1133-1154 consumes it even
+        // when the Internet/masterserver toggle is off.
+        let advertiser = crate::NetworkGameAdvertiser::start(
+            crate::NetworkGameAdvertiserConfig {
+                discovery_port: 0,
+                reference_port: Some(0),
+                language_charset: String::new(),
+            },
+            NetworkGameReference {
+                title: "Local Wi-Fi game".to_string(),
+                host_name: "LAN host".to_string(),
+                state: "Lobby".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let discovery_port = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let search = local_search(discovery_port);
+        search.initial_refresh().unwrap();
+        wait_for_clear(&search);
+
+        let sender = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let reply = crate::discovery_reply_for_packet(
+            &[DISCOVERY_PROBE],
+            advertiser.reference_addr().port(),
+        )
+        .unwrap();
+        sender
+            .send_to(&reply, (Ipv6Addr::LOCALHOST, discovery_port))
+            .unwrap();
+
+        loop {
+            match recv_event(&search) {
+                StartupGameSearchEvent::GameDiscoveryQueryStarted { .. } => {}
+                StartupGameSearchEvent::GameDiscoveryQueryResolved {
+                    address,
+                    references,
+                    ..
+                } => {
+                    assert_eq!(address.port(), advertiser.reference_addr().port());
+                    assert_eq!(references.len(), 1);
+                    assert_eq!(references[0].title, "Local Wi-Fi game");
+                    assert_eq!(references[0].host_name, "LAN host");
+                    assert!(references[0].is_joinable());
+                    break;
+                }
+                event => panic!("expected a LAN reference without a direct query, got {event:?}"),
+            }
         }
     }
 
