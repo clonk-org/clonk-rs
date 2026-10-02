@@ -4,6 +4,24 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-02
+
+### Bug fixes
+
+- Restore safe spawns in the upward team race (#1834)
+- Keep a runtime joiner in sync while players move (#1831)
+- Make in-game chat unobtrusive and dismissible (#1830)
+- Request microphone permission on macOS (#1829)
+- Discover LAN games across every multicast interface (#1828)
+
+### Features
+
+- Offer language and font choices on the unified settings' General tab (#1824)
+
+### Performance
+
+- Keep players playing while a runtime joiner's snapshot encodes (#1836)
+
 ## [1.2.0] - 2026-10-01
 
 ### Features
