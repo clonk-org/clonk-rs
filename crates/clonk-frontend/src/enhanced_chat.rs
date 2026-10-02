@@ -54,8 +54,8 @@ pub struct EnhancedChat {
     line_offset: usize,
     unread: usize,
     pub show_logs: bool,
+    /// The player unticked "Show over game"; kept until they tick it again.
     pub hidden: bool,
-    pub options_open: bool,
     pub audience: ChatAudience,
     drafts: BTreeMap<ChatAudience, String>,
     sent: BTreeMap<ChatAudience, VecDeque<String>>,
@@ -210,8 +210,14 @@ impl EnhancedChat {
     }
 
     pub fn toggle_logs(&mut self) {
-        self.show_logs = !self.show_logs;
-        self.jump_to_latest();
+        self.show_game_messages(!self.show_logs);
+    }
+
+    pub fn show_game_messages(&mut self, show: bool) {
+        if self.show_logs != show {
+            self.show_logs = show;
+            self.jump_to_latest();
+        }
     }
 
     pub fn visible_messages(&self) -> Vec<&ChatMessage> {

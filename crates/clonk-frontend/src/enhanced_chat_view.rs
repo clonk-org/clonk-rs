@@ -42,17 +42,23 @@ impl ChatPreferences {
 pub struct ChatLayout {
     pub bounds: IntRect,
     pub header: IntRect,
-    pub filter: IntRect,
-    pub options: IntRect,
-    pub hide: IntRect,
+    /// Conversation only.
+    pub chat_tab: IntRect,
+    /// Conversation and game messages.
+    pub all_tab: IntRect,
+    /// "Show over game": recent messages over play while chat is closed.
+    pub overlay_toggle: IntRect,
+    pub settings_button: IntRect,
     pub close: IntRect,
     pub feed: IntRect,
     pub audience: IntRect,
     pub latest: IntRect,
     pub edit: IntRect,
     pub notice: IntRect,
-    pub settings: IntRect,
 }
+
+/// Width below which the overlay toggle drops to its short label.
+const OVERLAY_LABEL_WIDTH: i32 = 128;
 
 impl ChatLayout {
     pub fn new(width: i32, height: i32, line_height: i32, expanded: bool) -> Self {
@@ -72,10 +78,22 @@ impl ChatLayout {
         let inner_w = (w - 16).max(1);
         let header = IntRect::new(inner_x, y + 6, inner_w, row);
         let right = inner_x + inner_w;
+        let chat_tab = IntRect::new(inner_x, header.y, 44, row);
+        let all_tab = IntRect::new(chat_tab.x + chat_tab.w + 4, header.y, 34, row);
         let close = IntRect::new(right - 24, header.y, 24, row);
-        let hide = IntRect::new(right - 76, header.y, 48, row);
-        let options = IntRect::new(right - 148, header.y, 68, row);
-        let filter = IntRect::new(right - 220, header.y, 68, row);
+        let settings_button = IntRect::new(close.x - 4 - 66, header.y, 66, row);
+        let tabs_end = all_tab.x + all_tab.w + 8;
+        let overlay_width = if settings_button.x - 8 - OVERLAY_LABEL_WIDTH >= tabs_end {
+            OVERLAY_LABEL_WIDTH
+        } else {
+            62
+        };
+        let overlay_toggle = IntRect::new(
+            settings_button.x - 8 - overlay_width,
+            header.y,
+            overlay_width,
+            row,
+        );
         let notice = IntRect::new(inner_x, y + h - row * 2 - 6, inner_w, row * 2);
         let edit = IntRect::new(inner_x, notice.y - edit_height - 4, inner_w, edit_height);
         let audience = IntRect::new(inner_x, edit.y - row - 4, inner_w / 2, row);
@@ -92,39 +110,20 @@ impl ChatLayout {
         };
         let feed_bottom = if expanded { audience.y - 4 } else { y + h - 6 };
         let feed = IntRect::new(inner_x, feed_top, inner_w, (feed_bottom - feed_top).max(0));
-        let settings = IntRect::new(
-            inner_x,
-            feed_top,
-            inner_w,
-            (edit.y - feed_top - 4).clamp(0, 52),
-        );
         Self {
             bounds,
             header,
-            filter,
-            options,
-            hide,
+            chat_tab,
+            all_tab,
+            overlay_toggle,
+            settings_button,
             close,
             feed,
             audience,
             latest,
             edit,
             notice,
-            settings,
         }
-    }
-
-    pub fn setting_cell(&self, index: i32) -> IntRect {
-        let column = index % 2;
-        let row = index / 2;
-        let width = self.settings.w / 2;
-        let height = self.settings.h / 2;
-        IntRect::new(
-            self.settings.x + column * width,
-            self.settings.y + row * height,
-            width - 4,
-            height - 2,
-        )
     }
 }
 
@@ -236,43 +235,7 @@ pub fn render_chat(
     if view.expanded {
         let alpha = 255 - u32::from(view.preferences.opacity.min(100)) * 255 / 100;
         fill(surface, layout.bounds, (alpha << 24) | 0x101923, gamma);
-        text(
-            surface,
-            ui_font,
-            layout.header,
-            "Chat",
-            [229, 201, 158, 255],
-            gamma,
-        );
-        for (rect, label, selected) in [
-            (
-                layout.filter,
-                if chat.show_logs {
-                    "Log: on"
-                } else {
-                    "Log: off"
-                },
-                chat.show_logs,
-            ),
-            (layout.options, "Options", chat.options_open),
-            (layout.hide, "Hide", false),
-            (layout.close, "×", false),
-        ] {
-            fill(
-                surface,
-                rect,
-                if selected { 0x003e4c5c } else { 0x80304152 },
-                gamma,
-            );
-            text(
-                surface,
-                ui_font,
-                IntRect::new(rect.x + 5, rect.y + 2, rect.w - 10, rect.h - 2),
-                label,
-                [206, 218, 230, 255],
-                gamma,
-            );
-        }
+        render_header(surface, ui_font, chat, &layout, gamma);
         fill(surface, layout.audience, 0x00304152, gamma);
         text(
             surface,
@@ -355,27 +318,89 @@ pub fn render_chat(
             x += font.measure(&span.text, false).0 + font.h_space;
         }
     }
-    if view.expanded && chat.options_open {
-        fill(surface, layout.settings, 0x001a2532, gamma);
-        let size = ["Small", "Medium", "Large"][usize::from(view.preferences.text_size.min(2))];
-        let labels = [
-            format!("Text: {size}"),
-            format!("History: {}%", view.preferences.opacity),
-            format!("Keep: {}s", view.preferences.duration_seconds),
-            format!("Timestamps: {}", if view.timestamps { "On" } else { "Off" }),
-        ];
-        for (index, label) in labels.iter().enumerate() {
-            let cell = layout.setting_cell(index as i32);
-            fill(surface, cell, 0x00304152, gamma);
-            text(
+}
+
+/// Tabs choose what the transcript shows; the check box, Settings and
+/// close sit at the right like any window's controls.
+fn render_header(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    chat: &EnhancedChat,
+    layout: &ChatLayout,
+    gamma: Option<&GammaRamp>,
+) {
+    for (rect, label, selected) in [
+        (layout.chat_tab, "Chat", !chat.show_logs),
+        (layout.all_tab, "All", chat.show_logs),
+    ] {
+        let color = if selected {
+            [240, 215, 170, 255]
+        } else {
+            TIMESTAMP_COLOR
+        };
+        text(
+            surface,
+            font,
+            IntRect::new(rect.x + 4, rect.y + 2, rect.w - 4, rect.h - 2),
+            label,
+            color,
+            gamma,
+        );
+        if selected {
+            fill(
                 surface,
-                ui_font,
-                IntRect::new(cell.x + 3, cell.y, cell.w - 6, cell.h),
-                label,
-                [206, 218, 230, 255],
+                IntRect::new(rect.x + 2, rect.y + rect.h - 2, rect.w - 4, 2),
+                0x00e5c99e,
                 gamma,
             );
         }
+    }
+    let toggle = layout.overlay_toggle;
+    let check = IntRect::new(toggle.x, toggle.y + (toggle.h - 11) / 2, 11, 11);
+    fill(surface, check, 0x00aec3d7, gamma);
+    fill(
+        surface,
+        IntRect::new(check.x + 1, check.y + 1, check.w - 2, check.h - 2),
+        0x00101923,
+        gamma,
+    );
+    if !chat.hidden {
+        fill(
+            surface,
+            IntRect::new(check.x + 3, check.y + 3, check.w - 6, check.h - 6),
+            0x00e5c99e,
+            gamma,
+        );
+    }
+    let label = if toggle.w >= OVERLAY_LABEL_WIDTH {
+        "Show over game"
+    } else {
+        "Show"
+    };
+    let label_x = check.x + check.w + 5;
+    text(
+        surface,
+        font,
+        IntRect::new(
+            label_x,
+            toggle.y + 2,
+            toggle.x + toggle.w - label_x,
+            toggle.h - 2,
+        ),
+        label,
+        [206, 218, 230, 255],
+        gamma,
+    );
+    for (rect, label) in [(layout.settings_button, "Settings"), (layout.close, "×")] {
+        fill(surface, rect, 0x80304152, gamma);
+        text(
+            surface,
+            font,
+            IntRect::new(rect.x + 5, rect.y + 2, rect.w - 10, rect.h - 2),
+            label,
+            [206, 218, 230, 255],
+            gamma,
+        );
     }
 }
 
@@ -827,9 +852,25 @@ mod tests {
         for (width, height) in [(320, 200), (640, 480), (1280, 720)] {
             for line_height in [22, 28, 36] {
                 let layout = ChatLayout::new(width, height, line_height, true);
-                for rect in [layout.bounds, layout.edit, layout.audience, layout.settings] {
+                let header = [
+                    layout.chat_tab,
+                    layout.all_tab,
+                    layout.overlay_toggle,
+                    layout.settings_button,
+                    layout.close,
+                ];
+                for rect in [layout.bounds, layout.edit, layout.audience]
+                    .into_iter()
+                    .chain(header)
+                {
                     assert!(rect.x >= 0 && rect.y >= 0 && rect.w > 0 && rect.h > 0);
                     assert!(rect.x + rect.w <= width && rect.y + rect.h <= height);
+                }
+                for pair in header.windows(2) {
+                    assert!(
+                        pair[0].x + pair[0].w <= pair[1].x,
+                        "header controls overlap at {width}x{height}"
+                    );
                 }
                 assert!(layout.feed.y + layout.feed.h <= layout.audience.y);
                 assert!(layout.edit.y + layout.edit.h <= layout.notice.y);

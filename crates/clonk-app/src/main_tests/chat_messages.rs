@@ -2152,21 +2152,27 @@ fn enhanced_chat_recipient_keys_submit_existing_controls_and_clear_only_the_sent
     main_assert_eq!(sent[0].message.as_bytes() => b"private reply");
 }
 
+fn click_enhanced_chat(app: &mut GameApp, rect: clonk_frontend::classic_gui::IntRect) {
+    app.test_cursor(PhysicalPosition::new(
+        f64::from(rect.x + rect.w / 2),
+        f64::from(rect.y + rect.h / 2),
+    ));
+    app.test_left_button(ElementState::Pressed);
+    app.test_left_button(ElementState::Released);
+}
+
 #[test]
-fn enhanced_chat_hide_keeps_drafts_and_incoming_history_until_reopened() {
+fn enhanced_chat_show_over_game_box_hides_previews_until_ticked_again() {
     let mut app = new_running_sandbox_app();
     app.resize(640, 480).test_value();
     app.start_running_chat(RunningChatMode::All);
     app.replace_enhanced_chat_text("On my way");
     let layout = app.enhanced_chat_layout(true).test_value();
-    // Hide sits immediately to the left of the close button in the header.
-    app.test_cursor(PhysicalPosition::new(
-        f64::from(layout.header.x + layout.header.w - 60),
-        f64::from(layout.header.y + 8),
-    ));
-    app.test_left_button(ElementState::Pressed);
-    app.test_left_button(ElementState::Released);
-    main_assert!(app.chat.running.is_none());
+
+    click_enhanced_chat(&mut app, layout.overlay_toggle);
+    main_assert!(app.chat.running.is_some(), "a check box does not close the panel");
+    main_assert!(app.chat.enhanced.hidden);
+    app.close_running_chat().test_value();
     main_assert_eq!(app.chat.enhanced.draft() => "On my way");
     app.chat
         .enhanced
@@ -2178,12 +2184,48 @@ fn enhanced_chat_hide_keeps_drafts_and_incoming_history_until_reopened() {
     let before = app.rendering.graphics.surface().pixels().to_vec();
     app.render_enhanced_chat(false, None);
     main_assert_eq!(app.rendering.graphics.surface().pixels() => before.as_slice());
+
     app.start_running_chat(RunningChatMode::All);
+    main_assert!(app.chat.enhanced.hidden, "reopening chat keeps the player's choice");
     main_assert_eq!(app.running_chat_text() => Some("On my way"));
-    main_assert_eq!(app.chat.enhanced.matching_messages().len() => 1);
+    click_enhanced_chat(&mut app, layout.overlay_toggle);
+    main_assert!(!app.chat.enhanced.hidden);
     app.close_running_chat().test_value();
     app.render_enhanced_chat(false, None);
     main_assert!(app.rendering.graphics.surface().pixels() != before.as_slice());
+}
+
+#[test]
+fn enhanced_chat_tabs_switch_between_conversation_and_game_messages() {
+    let mut app = new_running_sandbox_app();
+    app.resize(640, 480).test_value();
+    app.start_running_chat(RunningChatMode::All);
+    let layout = app.enhanced_chat_layout(true).test_value();
+
+    click_enhanced_chat(&mut app, layout.all_tab);
+    main_assert!(app.chat.enhanced.show_logs);
+    click_enhanced_chat(&mut app, layout.all_tab);
+    main_assert!(app.chat.enhanced.show_logs, "a tab selects, it does not toggle");
+    click_enhanced_chat(&mut app, layout.chat_tab);
+    main_assert!(!app.chat.enhanced.show_logs);
+}
+
+#[test]
+fn enhanced_chat_settings_opens_the_general_page_and_keeps_the_draft() {
+    use clonk_frontend::settings_overlay::SettingsCategory;
+    let mut app = new_classic_running_sandbox_app();
+    app.config.compat_profile = crate::settings::CompatProfile::Normal;
+    app.chat.enhanced_preferences.enabled = true;
+    app.resize(640, 480).test_value();
+    app.start_running_chat(RunningChatMode::All);
+    app.replace_enhanced_chat_text("half a thought");
+    let layout = app.enhanced_chat_layout(true).test_value();
+
+    click_enhanced_chat(&mut app, layout.settings_button);
+
+    main_assert!(app.chat.running.is_none());
+    main_assert_eq!(app.chat.enhanced.draft() => "half a thought");
+    main_assert_eq!(app.unified_settings.as_ref().map(|settings| settings.controller.category) => Some(SettingsCategory::Interface));
 }
 
 #[test]
@@ -2204,7 +2246,7 @@ fn enhanced_chat_offers_no_private_messages_to_a_local_player() {
 }
 
 #[test]
-fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients_and_preferences() {
+fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients() {
     use clonk_frontend::enhanced_chat::ChatAudience;
     let mut app = new_classic_running_sandbox_app();
     app.resize(960, 640).test_value();
@@ -2270,27 +2312,12 @@ fn enhanced_chat_panel_renders_and_pointer_controls_select_recipients_and_prefer
     app.test_left_button(ElementState::Pressed);
     app.test_left_button(ElementState::Released);
     main_assert_eq!(app.chat.enhanced.audience => ChatAudience::Everyone);
-    app.test_cursor(PhysicalPosition::new(
-        f64::from(layout.options.x + 4),
-        f64::from(layout.options.y + 4),
-    ));
-    app.test_left_button(ElementState::Pressed);
-    app.test_left_button(ElementState::Released);
-    main_assert!(app.chat.enhanced.options_open);
-    capture(&mut app, "chat-options");
-    let size = layout.setting_cell(0);
-    app.test_cursor(PhysicalPosition::new(
-        f64::from(size.x + 4),
-        f64::from(size.y + 4),
-    ));
-    app.test_left_button(ElementState::Pressed);
-    app.test_left_button(ElementState::Released);
-    main_assert_eq!(app.chat.enhanced_preferences.text_size => 2);
-    app.test_key(VirtualKeyCode::Escape, ElementState::Pressed);
-    app.test_key(VirtualKeyCode::Escape, ElementState::Released);
-    main_assert!(!app.chat.enhanced.options_open);
-    main_assert!(app.enhanced_chat_active());
+    // Text size is a Settings → General → Chat preference.
+    app.close_running_chat().test_value();
+    app.chat.enhanced_preferences.text_size = 2;
     app.resize(640, 480).test_value();
+    app.start_running_chat(RunningChatMode::All);
+    main_assert!(app.enhanced_chat_active());
     app.replace_enhanced_chat_text("Ready when you are.");
     capture(&mut app, "chat-large-text");
     app.close_running_chat().test_value();

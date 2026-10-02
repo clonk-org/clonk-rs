@@ -335,8 +335,7 @@ impl GameApp {
             VirtualKeyCode::Tab | VirtualKeyCode::PageUp | VirtualKeyCode::PageDown
         ) || key == VirtualKeyCode::End && modifiers.control_key()
             || key == VirtualKeyCode::KeyL && modifiers.control_key()
-            || key == VirtualKeyCode::Escape
-                && (self.chat.audience_picker || self.chat.enhanced.options_open)
+            || key == VirtualKeyCode::Escape && self.chat.audience_picker
             || key == VirtualKeyCode::Backspace
                 && self.running_chat_text().is_none_or(str::is_empty);
         if !handled || modifiers.alt_key() {
@@ -392,10 +391,7 @@ impl GameApp {
             }
             VirtualKeyCode::End => self.chat.enhanced.jump_to_latest(),
             VirtualKeyCode::KeyL => self.chat.enhanced.toggle_logs(),
-            VirtualKeyCode::Escape => {
-                self.chat.audience_picker = false;
-                self.chat.enhanced.options_open = false;
-            }
+            VirtualKeyCode::Escape => self.chat.audience_picker = false,
             _ => {}
         }
         true
@@ -424,19 +420,25 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
-        if view::contains(layout.hide, point) || view::contains(layout.close, point) {
-            self.chat.enhanced.hidden = view::contains(layout.hide, point);
+        if view::contains(layout.close, point) {
             self.close_running_chat()?;
             self.chat.dismiss_pointer_release = true;
-        } else if view::contains(layout.options, point) {
-            self.chat.enhanced.options_open = !self.chat.enhanced.options_open;
+        } else if view::contains(layout.settings_button, point) {
+            self.close_running_chat()?;
+            self.chat.dismiss_pointer_release = true;
+            self.open_unified_settings(
+                clonk_frontend::settings_overlay::SettingsCategory::Interface,
+            )?;
+        } else if view::contains(layout.overlay_toggle, point) {
+            self.chat.enhanced.hidden = !self.chat.enhanced.hidden;
+        } else if view::contains(layout.chat_tab, point) || view::contains(layout.all_tab, point) {
+            self.chat
+                .enhanced
+                .show_game_messages(view::contains(layout.all_tab, point));
             self.chat.audience_picker = false;
-        } else if view::contains(layout.audience, point)
-            && !(self.chat.enhanced.options_open && view::contains(layout.settings, point))
-        {
+        } else if view::contains(layout.audience, point) {
             self.chat.audience_picker = !self.chat.audience_picker;
             self.chat.audience_picker_offset = 0;
-            self.chat.enhanced.options_open = false;
         } else if self.chat.audience_picker && view::contains(layout.feed, point) {
             let row = ((point.y - layout.feed.y as f32) / 22.0) as usize;
             if let Some((audience, _)) = self
@@ -445,65 +447,8 @@ impl GameApp {
             {
                 self.select_enhanced_chat_audience(audience.clone());
             }
-        } else if view::contains(layout.filter, point) {
-            self.chat.enhanced.toggle_logs();
-        } else if view::contains(layout.latest, point)
-            && !(self.chat.enhanced.options_open && view::contains(layout.settings, point))
-        {
+        } else if view::contains(layout.latest, point) {
             self.chat.enhanced.jump_to_latest();
-        } else if self.chat.enhanced.options_open && view::contains(layout.settings, point) {
-            let index = (0..4).find(|index| view::contains(layout.setting_cell(*index), point));
-            match index {
-                Some(0) => {
-                    self.chat.enhanced_preferences.text_size =
-                        (self.chat.enhanced_preferences.text_size + 1) % 3;
-                    let font =
-                        self.assets.clonk_fonts.as_deref().map(|fonts| {
-                            Arc::new(self.chat.enhanced_preferences.font(fonts).clone())
-                        });
-                    if let (Some(font), Some(controller)) =
-                        (font, self.running_chat_controller_mut())
-                    {
-                        controller.set_enhanced_chat_font(font);
-                    }
-                    self.chat.enhanced.jump_to_latest();
-                }
-                Some(1) => {
-                    self.chat.enhanced_preferences.opacity =
-                        match self.chat.enhanced_preferences.opacity {
-                            0..=64 => 85,
-                            65..=99 => 100,
-                            _ => 60,
-                        }
-                }
-                Some(2) => {
-                    self.chat.enhanced_preferences.duration_seconds =
-                        match self.chat.enhanced_preferences.duration_seconds {
-                            0..=7 => 12,
-                            8..=15 => 30,
-                            _ => 6,
-                        }
-                }
-                Some(3) => {
-                    self.chat.show_log_timestamps = !self.chat.show_log_timestamps;
-                    self.config.deferred.set(
-                        "General",
-                        "ShowLogTimestamps",
-                        i32::from(self.chat.show_log_timestamps).to_string(),
-                    );
-                }
-                _ => {}
-            }
-            for (key, value) in [
-                (
-                    "TextSize",
-                    u32::from(self.chat.enhanced_preferences.text_size),
-                ),
-                ("Opacity", u32::from(self.chat.enhanced_preferences.opacity)),
-                ("Duration", self.chat.enhanced_preferences.duration_seconds),
-            ] {
-                self.config.deferred.set("Chat", key, value.to_string());
-            }
         }
         Ok(true)
     }
