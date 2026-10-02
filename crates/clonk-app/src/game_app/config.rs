@@ -2599,7 +2599,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        if self.handle_enhanced_chat_pointer(button_state) {
+        if self.handle_enhanced_chat_pointer(button_state)? {
             return Ok(());
         }
         let point = self.dialogs.game_option_input_pointer_position;

@@ -48,6 +48,8 @@ pub(crate) struct ChatState {
     pub(crate) enhanced_preferences: clonk_frontend::enhanced_chat_view::ChatPreferences,
     pub(crate) pending_chat_message: Option<clonk_frontend::enhanced_chat::ChatMessage>,
     pub(crate) audience_picker: bool,
+    /// Dismissing chat on mouse-down consumes its matching mouse-up.
+    pub(crate) dismiss_pointer_release: bool,
     pub(crate) audience_picker_offset: usize,
     /// Process-global C4Network2IRC analogue. Native retains the IRC client
     /// independently of the startup network dialog, so changing startup

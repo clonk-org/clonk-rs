@@ -54,6 +54,8 @@ pub struct EnhancedChat {
     line_offset: usize,
     unread: usize,
     pub show_logs: bool,
+    pub hidden: bool,
+    pub options_open: bool,
     pub audience: ChatAudience,
     drafts: BTreeMap<ChatAudience, String>,
     sent: BTreeMap<ChatAudience, VecDeque<String>>,
@@ -274,6 +276,10 @@ impl EnhancedChat {
         if self.anchor == counts.last().map(|(id, _)| *id) && self.line_offset == 0 && !older {
             self.jump_to_latest();
         }
+    }
+
+    pub fn is_scrolled(&self) -> bool {
+        self.anchor.is_some()
     }
 
     pub fn unread(&self) -> usize {

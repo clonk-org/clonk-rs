@@ -440,6 +440,8 @@ impl GameApp {
                 RunningChatMode::Allies => ChatAudience::Allies,
                 RunningChatMode::Say => ChatAudience::Say,
             };
+            self.chat.enhanced.hidden = false;
+            self.chat.enhanced.options_open = false;
             self.chat.enhanced.reset_history();
             text = self.chat.enhanced.draft();
         }
@@ -649,6 +651,7 @@ impl GameApp {
         if self.enhanced_chat_active() {
             let text = self.running_chat_text().unwrap_or_default().to_string();
             self.chat.enhanced.save_draft(&text);
+            self.chat.enhanced.options_open = false;
             self.chat.audience_picker = false;
         }
         let input = self
