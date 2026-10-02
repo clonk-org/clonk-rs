@@ -332,6 +332,24 @@ fn runtime_join_dynamic_requests_coalesce_until_a_newer_tick() {
 }
 
 #[test]
+fn a_runtime_dynamic_still_encoding_serves_a_newer_join_request() {
+    // The worker's dynamic reaches every client still waiting when it
+    // publishes, and each replays the backlog from its tick. A client that
+    // connects while the host plays on during the encode shares it, rather
+    // than discarding it for a second synchronized capture and pause.
+    let mut pending = PendingRuntimeDynamicRequest::new(7, 23);
+    pending.synchronized_control_tick = Some(23);
+    pending.save_generation = Some(1);
+
+    pending.include(8, 25);
+
+    main_assert_eq!(pending.client_ids => HashSet::from([7, 8]));
+    main_assert_eq!(pending.synchronized_control_tick => Some(23));
+    main_assert_eq!(pending.save_generation => Some(1));
+    main_assert!(!pending.needs_synchronize());
+}
+
+#[test]
 fn delayed_join_data_needed_after_fanout_does_not_request_a_second_capture() {
     let null_dynamic = clonk_engine::NetworkResourceCore::default();
     let published_dynamic = n1_fixture!(resource {
