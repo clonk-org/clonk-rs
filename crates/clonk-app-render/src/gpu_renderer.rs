@@ -3636,8 +3636,7 @@ impl RetainedGpuRenderer {
         let shader_landscape = self
             .pending_shader_landscape
             .as_ref()
-            .filter(|_| self.shader_landscape)
-            .map(|(_, plan)| plan);
+            .filter(|_| self.shader_landscape);
         let limit = device.limits().max_texture_dimension_2d;
         if let Err(error) = validate_retained_texture_limits(
             &resources,
@@ -4089,8 +4088,10 @@ impl RetainedGpuRenderer {
     /// Runs after `sync_textures`, so the texture the plan names already exists
     /// with the CPU composition uploaded. Composing over it keeps every
     /// downstream lookup — bind groups, `base_extent`, the liquid scale —
-    /// working unchanged, and the landscape quad's UVs are normalized, so a
-    /// `detail > 1` plane simply samples finer.
+    /// working unchanged. The landscape quad addresses that texture's layout:
+    /// a C++-sized power-of-two tile with the map in its top-left corner
+    /// (`landscape_sky.rs`). The output keeps that layout at `detail` times
+    /// the tile's extent, so a `detail > 1` plane simply samples finer.
     fn compose_shader_landscape(
         &mut self,
         device: &wgpu::Device,
@@ -4137,11 +4138,12 @@ impl RetainedGpuRenderer {
             slots: &slots,
             detail: self.landscape_detail,
         };
+        let extent = shader_landscape_output_extent(source.extent, self.landscape_detail);
         validate_shader_landscape_texture_limits(
             &inputs,
+            extent,
             device.limits().max_texture_dimension_2d,
         )?;
-        let extent = inputs.composed_extent();
         // The composition pass clears and rewrites every texel of its target,
         // so an output of the right extent can be composed into again. Keeping
         // it also keeps the bind groups that name it valid.
@@ -7050,7 +7052,7 @@ fn texture_upload_plan(
 fn validate_retained_texture_limits(
     resources: &[GpuTextureResource],
     composition_extent: [u32; 2],
-    shader_landscape: Option<&clonk_graphics::ShaderLandscapePlan>,
+    shader_landscape: Option<&(GpuTextureId, clonk_graphics::ShaderLandscapePlan)>,
     landscape_detail: u32,
     max_texture_dimension_2d: u32,
 ) -> Result<(), GpuRendererError> {
@@ -7064,12 +7066,16 @@ fn validate_retained_texture_limits(
         max_texture_dimension_2d,
     )?;
     validate_source_texture_limits(resources, max_texture_dimension_2d)?;
-    if let Some(plan) = shader_landscape {
+    if let Some((id, plan)) = shader_landscape {
+        let replaced = resources
+            .iter()
+            .find(|resource| resource.id == *id)
+            .map_or(plan.extent, |resource| resource.extent);
         validate_shader_landscape_texture_extents(
             plan.extent,
             plan.shading_plane.is_some(),
             plan.atlas_extent,
-            landscape_detail,
+            shader_landscape_output_extent(replaced, landscape_detail),
             max_texture_dimension_2d,
         )?;
     }
@@ -7092,22 +7098,29 @@ fn validate_source_texture_limits(
 
 fn validate_shader_landscape_texture_limits(
     inputs: &ShaderLandscapeInputs<'_>,
+    output_extent: [u32; 2],
     max_texture_dimension_2d: u32,
 ) -> Result<(), GpuRendererError> {
     validate_shader_landscape_texture_extents(
         inputs.extent,
         inputs.shading_plane.is_some(),
         inputs.atlas_extent,
-        inputs.detail,
+        output_extent,
         max_texture_dimension_2d,
     )
+}
+
+/// The texture a shader landscape composes into: the one it replaces,
+/// supersampled by `detail`, so the map keeps that texture's layout.
+fn shader_landscape_output_extent(replaced: [u32; 2], detail: u32) -> [u32; 2] {
+    replaced.map(|axis| axis.saturating_mul(detail.max(1)))
 }
 
 fn validate_shader_landscape_texture_extents(
     extent: [u32; 2],
     has_shading: bool,
     atlas_extent: [u32; 2],
-    detail: u32,
+    output_extent: [u32; 2],
     max_texture_dimension_2d: u32,
 ) -> Result<(), GpuRendererError> {
     validate_texture_extent(
@@ -7133,10 +7146,7 @@ fn validate_shader_landscape_texture_extents(
     validate_texture_extent(
         RetainedGpuTextureKind::ShaderLandscapeOutput,
         None,
-        [
-            extent[0].saturating_mul(detail.max(1)),
-            extent[1].saturating_mul(detail.max(1)),
-        ],
+        output_extent,
         max_texture_dimension_2d,
     )
 }
@@ -8808,8 +8818,9 @@ impl ShaderLandscapeComposer {
         self.last_composed_texels
     }
 
-    /// Composes into `target`, which must be an `Rgba8Unorm` view of exactly
-    /// `inputs.composed_extent()`.
+    /// Composes into `target`, an `Rgba8Unorm` view of at least
+    /// `inputs.composed_extent()`, with the map in its top-left corner. Texels
+    /// past the map compose transparent.
     pub fn compose_into(
         &mut self,
         device: &wgpu::Device,
@@ -9639,7 +9650,13 @@ mod tests {
             slots: Vec::new(),
         };
         assert!(matches!(
-            validate_retained_texture_limits(&resources, [1, 1], Some(&shader_plan), 4, 31,),
+            validate_retained_texture_limits(
+                &resources,
+                [1, 1],
+                Some(&(GpuTextureId::fresh(), shader_plan)),
+                4,
+                31,
+            ),
             Err(GpuRendererError::TextureDimensionExceeded {
                 kind: RetainedGpuTextureKind::ShaderLandscapeOutput,
                 id: None,
@@ -13639,6 +13656,110 @@ mod tests {
         );
     }
 
+    /// The frontend's landscape texture is a C++-sized power-of-two tile with
+    /// the map in its top-left corner, and its landscape quad addresses that
+    /// tile: `(world - tile origin) / tile size` (`landscape_sky.rs`). A
+    /// shader composition that replaces the tile with a map-sized texture
+    /// leaves those UVs sampling only the map's top-left `map / tile`
+    /// fraction, stretched across the view, so it must keep the tile's layout.
+    #[test]
+    fn a_shader_landscape_draws_like_the_padded_tile_it_replaces() {
+        gpu_or_skip!(device, queue, "shader landscape padded tile");
+        let (extent, tile) = ([27_u32, 13_u32], 32_u32);
+        let plan = shader_landscape_plan_fixture(extent);
+        let slots = shader_landscape_slots();
+        let mut reference = vec![0_u8; (tile * tile * 4) as usize];
+        for y in 0..extent[1] {
+            for x in 0..extent[0] {
+                let byte = plan.index_plane[(y * extent[0] + x) as usize];
+                if byte == 0 {
+                    continue;
+                }
+                let offset = ((y * tile + x) * 4) as usize;
+                reference[offset..offset + 4].copy_from_slice(&compose_shader_landscape_reference(
+                    &slots[usize::from(byte & 0x7f)],
+                    byte,
+                    x as i32,
+                    y as i32,
+                    &plan.atlas,
+                    plan.atlas_extent,
+                ));
+            }
+        }
+        let base = GpuTextureId::fresh();
+        let (u, v) = (
+            extent[0] as f32 / tile as f32,
+            extent[1] as f32 / tile as f32,
+        );
+        let scene_with = |pixels: Vec<u8>| {
+            GpuScene::new(
+                extent,
+                Color::transparent(),
+                GpuGammaLut::from_ramp(&GammaRamp::standard()),
+                GpuGammaMode::Disabled,
+                vec![GpuTextureResource::immutable_rgba(
+                    base,
+                    tile,
+                    tile,
+                    pixels.into(),
+                )],
+                vec![GpuCommand::Landscape {
+                    base,
+                    liquid_mask: None,
+                    liquid: None,
+                    vertices: [
+                        corner(0.0, 0.0, 0.0, 0.0),
+                        corner(extent[0] as f32, 0.0, u, 0.0),
+                        corner(0.0, extent[1] as f32, 0.0, v),
+                        corner(extent[0] as f32, extent[1] as f32, u, v),
+                    ],
+                    clip: None,
+                    phase: [0.0; 3],
+                    gamma: false,
+                }],
+            )
+        };
+
+        let mut cpu = test_renderer(&device, &queue);
+        let uploaded = render_extent_readback(
+            &mut cpu,
+            &device,
+            &queue,
+            &scene_with(reference.clone()),
+            extent,
+        );
+        let mut shader = test_renderer(&device, &queue);
+        shader.set_shader_landscape(true);
+        shader.set_pending_shader_landscape(Some((base, plan)));
+        let composed = render_extent_readback(
+            &mut shader,
+            &device,
+            &queue,
+            &scene_with(vec![0_u8; reference.len()]),
+            extent,
+        );
+
+        assert!(
+            uploaded
+                .rgba
+                .chunks_exact(4)
+                .filter(|texel| texel[3] != 0)
+                .count()
+                > 40,
+            "the fixture must draw real material, not an empty view"
+        );
+        let mismatch = uploaded
+            .rgba
+            .chunks_exact(4)
+            .zip(composed.rgba.chunks_exact(4))
+            .position(|(cpu, shader)| cpu != shader)
+            .map(|index| (index as u32 % extent[0], index as u32 / extent[0]));
+        assert_eq!(
+            mismatch, None,
+            "the shader-composed landscape must draw the same view as the CPU tile it replaces"
+        );
+    }
+
     #[test]
     fn shader_landscape_output_lifecycle_survives_revisioned_frames_and_recovery() {
         // This consumes immutable retained scenes and renderer configuration
@@ -13661,9 +13782,9 @@ mod tests {
             assert_eq!(cached.source_extent, source_extent);
             assert_eq!(
                 cached.extent,
-                [extent[0] * detail, extent[1] * detail],
-                "detail {detail}: the composed view extent must remain distinct from its CPU \
-                 source extent"
+                [source_extent[0] * detail, source_extent[1] * detail],
+                "detail {detail}: the composed view must keep the layout of the CPU source tile \
+                 its UVs address, supersampled by the detail"
             );
             assert_eq!(renderer.quad_bind_groups.len(), 1);
             assert_eq!(renderer.landscape_bind_groups.len(), 1);
