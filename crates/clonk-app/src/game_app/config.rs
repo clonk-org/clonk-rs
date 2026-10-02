@@ -1194,35 +1194,8 @@ impl GameApp {
         };
         let face = selected_face.unwrap_or_else(|| current_face.clone());
         let size = selected_size.unwrap_or(current_size);
-        let Some(paths) = self.app_paths.as_ref() else {
+        let Some((gui, startup)) = self.resolve_font_selection(&face, size, system_fonts) else {
             return self.show_options_font_error();
-        };
-        let resources = (|| -> Result<_> {
-            let registrations = startup_loader_registrations(paths)?;
-            let gui = resolve_classic_font_bundle_for_request_with_system_fonts(
-                paths,
-                &face,
-                size,
-                &registrations,
-                &registrations,
-                system_fonts,
-            )?;
-            let startup = resolve_classic_startup_font_bundle_for_request_with_system_fonts(
-                paths,
-                &face,
-                size,
-                &registrations,
-                &registrations,
-                system_fonts,
-            )?;
-            Ok((gui, startup))
-        })();
-        let (gui, startup) = match resources {
-            Ok(resources) => resources,
-            Err(error) => {
-                tracing::warn!(%error, %face, size, "failed to apply selected options font");
-                return self.show_options_font_error();
-            }
         };
 
         if let Some(dialog) = self.startup.options_dialog.as_mut() {
@@ -1246,6 +1219,54 @@ impl GameApp {
         }
 
         self.begin_startup_dialog_fade(StartupDialog::Options);
+        self.install_font_selection(gui, startup);
+        self.open_options_menu();
+        Ok(())
+    }
+
+    /// The GUI and startup fonts for `face` at `size`, as `C4Application::
+    /// SetGameFont` test-builds them before committing to the change
+    /// (C4Application.cpp:553-578); `None` when they cannot be built.
+    pub(crate) fn resolve_font_selection(
+        &self,
+        face: &str,
+        size: i32,
+        system_fonts: &dyn system_fonts::SystemFontProvider,
+    ) -> Option<(ClassicFontBundle, ClassicStartupFontBundle)> {
+        let paths = self.app_paths.as_ref()?;
+        let resources = (|| -> Result<_> {
+            let registrations = startup_loader_registrations(paths)?;
+            let gui = resolve_classic_font_bundle_for_request_with_system_fonts(
+                paths,
+                face,
+                size,
+                &registrations,
+                &registrations,
+                system_fonts,
+            )?;
+            let startup = resolve_classic_startup_font_bundle_for_request_with_system_fonts(
+                paths,
+                face,
+                size,
+                &registrations,
+                &registrations,
+                system_fonts,
+            )?;
+            Ok((gui, startup))
+        })();
+        resources
+            .inspect_err(|error| {
+                tracing::warn!(%error, %face, size, "failed to apply selected options font");
+            })
+            .ok()
+    }
+
+    /// Puts freshly built fonts to use wherever menus and dialogs draw text.
+    pub(crate) fn install_font_selection(
+        &mut self,
+        gui: ClassicFontBundle,
+        startup: ClassicStartupFontBundle,
+    ) {
         let ClassicFontBundle {
             fonts,
             tooltip,
@@ -1270,8 +1291,6 @@ impl GameApp {
         self.rendering.graphics.set_clonk_fonts(Some(fonts.clone()));
         self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
         self.native_startup_fonts = native_fonts;
-        self.open_options_menu();
-        Ok(())
     }
 
     fn show_options_font_error(&mut self) -> Result<(), EngineError> {
