@@ -3044,7 +3044,7 @@ impl TestNetworkCommands {
     }
 
     /// Wait for the host's runtime-dynamic publication, skipping the PreSend
-    /// finalizations a held host keeps submitting meanwhile.
+    /// finalizations and sync checks a playing host submits meanwhile.
     pub fn receive_runtime_dynamic_publication(
         &mut self,
     ) -> (
@@ -3058,7 +3058,9 @@ impl TestNetworkCommands {
                     completion,
                     ..
                 }) => return (synchronized_control_tick, completion),
-                Some(NetworkCommand::FinalizeTick { .. }) => {}
+                Some(
+                    NetworkCommand::FinalizeTick { .. } | NetworkCommand::SubmitSyncCheck { .. },
+                ) => {}
                 Some(command) => {
                     panic!("expected runtime-dynamic publication, got {command:?}")
                 }
@@ -3068,7 +3070,8 @@ impl TestNetworkCommands {
     }
 
     /// Wait for the host to emergency-remove the clients awaiting JoinData,
-    /// skipping the PreSend finalizations a held host keeps submitting.
+    /// skipping the PreSend finalizations and sync checks a playing host
+    /// submits meanwhile.
     pub fn receive_pending_join_data_failure(
         &mut self,
     ) -> (
@@ -3080,7 +3083,9 @@ impl TestNetworkCommands {
                 Some(NetworkCommand::FailPendingJoinData { reason, completion }) => {
                     return (reason, completion)
                 }
-                Some(NetworkCommand::FinalizeTick { .. }) => {}
+                Some(
+                    NetworkCommand::FinalizeTick { .. } | NetworkCommand::SubmitSyncCheck { .. },
+                ) => {}
                 Some(command) => panic!("expected pending-JoinData failure, got {command:?}"),
                 None => panic!("network command channel ended before pending-JoinData failure"),
             }

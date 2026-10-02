@@ -3,7 +3,7 @@
     "cpp": {
       "binary": {
         "path": "builds/cpp/binary",
-        "sha256": "7fe45545fa0d2495feb2872c50d9a015ed24901e279940ed381969b5f13c8d95",
+        "sha256": "3eac6eeda6a0b5d2d2676f90e2f083a7b8cd3fe37f667b9588d3e14b48ee1bb3",
         "size_bytes": 17170280
       },
       "capture_patch_sha256": "96f7a64e3fa2104b0115a9bb24368942dfa26deaf1f2b65b82d921d5b6c6f880",
@@ -68,8 +68,8 @@
     "rust": {
       "binary": {
         "path": "builds/rust/binary",
-        "sha256": "d6894c3911a6428de9f0432b424781d2c48a06d7314be2cfb3b596effb1430c7",
-        "size_bytes": 58225200
+        "sha256": "8b18c71290259477c4fd5377f8fc87ef7aaa69ed0019deb7c2bcc324117e7f96",
+        "size_bytes": 58225024
       },
       "capture_patch_sha256": null,
       "producer": "clonk-rs-capture-driver-v1",
@@ -98,7 +98,7 @@
         ],
         "sha256": "5dd31be0efc425f25b94fa67ac7f908edf76c6d36213b4310c7bad49ac0f55a6"
       },
-      "source_tree": "7916c1ef4b067486069957cb9fac510638666108"
+      "source_tree": "2a115fb6f0faa33e6e14f8ca356b30d352710760"
     }
   },
   "case_specs": [
@@ -1566,7 +1566,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-1/comparisons/startup-main.json",
-            "sha256": "c1a268b38c94fd21f1a2d7f80d838f4dbb9a71ba906c4aaaf398aec3ca1f4f1d",
+            "sha256": "87d59a1647e057f79953b994b692d5f9801574a1dce0f1802b383fbf107810ec",
             "size_bytes": 776
           },
           "reference": {
@@ -1585,7 +1585,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-scenario-selection.json",
-            "sha256": "48c33dd6e7daeabd3a5d72b5ec0318b9480262fef954c65f2be054b8bb642e95",
+            "sha256": "dd980eb8a289e1f37764d903ade9aa0ef73537510bd5d6a89f1ff9eed4e0f2b6",
             "size_bytes": 832
           },
           "reference": {
@@ -1604,7 +1604,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-1/comparisons/startup-network-browser.json",
-            "sha256": "a9a10a3ddc7d7a48ef854c2579409fa9cf328f9b4fda2719a214a3d24c9a348b",
+            "sha256": "39e877b2bbe48fa21d15740d5f02fafdb382a851dcc43feb6f64a496a8ac4bc7",
             "size_bytes": 820
           },
           "reference": {
@@ -1623,7 +1623,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-1/comparisons/startup-player-selection.json",
-            "sha256": "955997a352dcf05e66f7fc8e10d834346442cb8bbdbe0364baa3e7d7a193e6bc",
+            "sha256": "c25de97067157e02a09bf7600199107c57ef8f4f8972f4694f7d75945382adda",
             "size_bytes": 824
           },
           "reference": {
@@ -1642,7 +1642,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-1/comparisons/startup-options.json",
-            "sha256": "cad200a9e3d7360f90ea920f01b9b08088ed847234670fabb04b207e6f0217f3",
+            "sha256": "ab09070008a12ae4268ee221aebd388c4e87a586056a7059dac05ea63554aae3",
             "size_bytes": 788
           },
           "reference": {
@@ -1661,7 +1661,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-1/comparisons/startup-about.json",
-            "sha256": "0c537ebe0fef5942d51305a049347f1ac87064619ce7bb5baab6a4ce5d61168f",
+            "sha256": "f8a23f414afb88d7754511d746db9d97a3b2a044eb227b6e381bfff3ffb8a7c9",
             "size_bytes": 780
           },
           "reference": {
@@ -1680,7 +1680,7 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-1/comparisons/network-lobby.json",
-            "sha256": "9dc367a4473cf47ec9f71fcaa11d30bdaf0e27dc334a4a56f164811640f8a097",
+            "sha256": "d0bb29bbd65a9af2480ece261ea1c18d181d6af6fa4e3bb0ec046125c75d1485",
             "size_bytes": 762
           },
           "reference": {
@@ -1699,7 +1699,7 @@
           "id": "loader",
           "receipt": {
             "path": "run-1/comparisons/loader.json",
-            "sha256": "5c746c7aa105ba8fb164258fee11744a639a325ee2706d886af19cfdc34e6f27",
+            "sha256": "f8171f9e45cdd6bf3025b9eea7e29190e3c2ec8f3cd671aa58629167516498aa",
             "size_bytes": 734
           },
           "reference": {
@@ -1718,7 +1718,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-1/comparisons/hud.json",
-            "sha256": "2e57feeb7cdfaabb062060c76caf2cc8bf64ffd3046001113a0dc77a711d646f",
+            "sha256": "1d49fb618add3cd8f50946b8998703e3cac84565d4f9af5f4df427ba707a5401",
             "size_bytes": 740
           },
           "reference": {
@@ -1737,7 +1737,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-1/comparisons/ingame-menu.json",
-            "sha256": "5d5224df24fb199c560b752ee259d9527e50dcef8a2324fcbe5ffbbd531b100a",
+            "sha256": "8b97e691dc887a98c78b062f1ebf208bda25459875ceeed4a497b5a3d8f7dc39",
             "size_bytes": 772
           },
           "reference": {
@@ -1756,7 +1756,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-1/comparisons/object-menu.json",
-            "sha256": "3d527e4540bc5c72baf09f524b02464eda7dcf1ea91383795b10788c9f787bb3",
+            "sha256": "08dcbb3d9026ffa5dca0b35d38bf92eaae93efe8554f71845a8ede29e56a41c1",
             "size_bytes": 772
           },
           "reference": {
@@ -1775,7 +1775,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-1/comparisons/gameplay.json",
-            "sha256": "0480579eaf7c9a099bf6ef45f396537295c895ee65bb17e424a8a8377dec0c01",
+            "sha256": "488eb141647ca30bb4e5fe5f087d3b21677c1f41658eb6123ba83ebcc37fcc05",
             "size_bytes": 760
           },
           "reference": {
@@ -1794,7 +1794,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-1/comparisons/evaluation.json",
-            "sha256": "136b728c80777ec70ec9ba609983a5e7fdc9b08228d80583df9d1713ca5752ee",
+            "sha256": "1e86d3436a0be7a8db5ee1d6e781fb033cd2fcad7d4ae4fa5172b107965ab9dc",
             "size_bytes": 768
           },
           "reference": {
@@ -1813,7 +1813,7 @@
           "id": "startup-options-scale-initial-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-initial-reference.json",
-            "sha256": "432f25b127b96e8ad61a2645ad2f888cb60b48aab732add8dd62466106e43151",
+            "sha256": "d0a5e32392f729c006d84c5d0aa2ac77d69802f449fb7fb0e7495259289c4eb7",
             "size_bytes": 866
           },
           "reference": {
@@ -1832,7 +1832,7 @@
           "id": "startup-options-scale-decremented-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-decremented-reference.json",
-            "sha256": "978633fdee9f418915b7dd39594d0f50580f9dcbdfa6ede21d059505d72e70d3",
+            "sha256": "2f7799d587df08db00edb5cfeb9f6f2ae4459018a530dcac5f312ef135a959c2",
             "size_bytes": 882
           },
           "reference": {
@@ -1851,7 +1851,7 @@
           "id": "startup-options-scale-initial-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-initial-minimum.json",
-            "sha256": "0888445facf177390851a800fca3128c6005478ad2737a7eefd652772cee218a",
+            "sha256": "96080c683b6daf20fa6811d556722e148e366b644d4b677560836fccfefefe81",
             "size_bytes": 858
           },
           "reference": {
@@ -1870,7 +1870,7 @@
           "id": "startup-options-scale-decremented-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-scale-decremented-minimum.json",
-            "sha256": "acd43c7047500f4a6e54ac8f34a1b472b18e0bd9c0faefb4168839d37bd393d2",
+            "sha256": "5dcf62af81efbfacb11595eb0f5d4e5b6b51769106efb1e25f58397e253e4c6e",
             "size_bytes": 874
           },
           "reference": {
@@ -1889,7 +1889,7 @@
           "id": "startup-options-reset-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-reset-reference.json",
-            "sha256": "7c6b749c8dd3787637836b27a517f5578e5ca1926893374d3a13d9db31b12fa7",
+            "sha256": "71d1ee220413d442f34abec6b55167307a5ef8ab49966d561fb43c65a3343d7d",
             "size_bytes": 834
           },
           "reference": {
@@ -1908,7 +1908,7 @@
           "id": "startup-options-reset-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-reset-minimum.json",
-            "sha256": "86865bee079df25cbecb7e6c5f57798137f5405b96da2e30f529bec89c803132",
+            "sha256": "1d061522176db74861f506d47ab2c9f92f808ad0a5ea77a719ac6d7a7ac85b53",
             "size_bytes": 826
           },
           "reference": {
@@ -1927,7 +1927,7 @@
           "id": "startup-options-key-keyboard-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-keyboard-reference.json",
-            "sha256": "7b7b99a81c315cefdff8ad808ffbc3fe0354b83b5e32c28d614ed885a38def2d",
+            "sha256": "775b32701839ba8f9f667b548589e7c813c05992a681d84c777b130af447f36f",
             "size_bytes": 862
           },
           "reference": {
@@ -1946,7 +1946,7 @@
           "id": "startup-options-key-keyboard-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-keyboard-minimum.json",
-            "sha256": "0f2b0f54e1cb93f51ecdc0a6e669850938a6c6a6c3348e4c164e6f23622fd897",
+            "sha256": "13328773a4fecbf7976e252508ba1f885769136d242731e2a4bcecd8beb922d5",
             "size_bytes": 854
           },
           "reference": {
@@ -1965,7 +1965,7 @@
           "id": "startup-options-key-gamepad-reference",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-gamepad-reference.json",
-            "sha256": "e76144ef2f507b3a1cea1292ae6249d555ccb1bec3bbe8b391595a424e09e4c0",
+            "sha256": "9df908ec71b5969d312ff0643e11f5212de96a49fc8b3ef9d7ae64f107633426",
             "size_bytes": 858
           },
           "reference": {
@@ -1984,7 +1984,7 @@
           "id": "startup-options-key-gamepad-minimum",
           "receipt": {
             "path": "run-1/comparisons/startup-options-key-gamepad-minimum.json",
-            "sha256": "786ceea879c08ca956e369f926e54c29d6f81f7e592e51ed99f00a0546f5c54b",
+            "sha256": "a3fae0d6f463638defe771f7eb11cac6970bae2d347d1b09ac59ab8d5b4b5275",
             "size_bytes": 850
           },
           "reference": {
@@ -2008,7 +2008,7 @@
           "id": "startup-main",
           "receipt": {
             "path": "run-2/comparisons/startup-main.json",
-            "sha256": "f56ca6834dc14be97e1152c465dd9b3e5c51ecde7d7ef073c8f0b76c0960e584",
+            "sha256": "4ad3ab259260561138350cf9c0a36a9e36e96f6770160131468848309bc61a67",
             "size_bytes": 776
           },
           "reference": {
@@ -2027,7 +2027,7 @@
           "id": "startup-scenario-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-scenario-selection.json",
-            "sha256": "a8a67a2866732e15291b7890e04fd1185d02e600b7cf6bcbe680dfd2ce23680b",
+            "sha256": "97c9f6993b24266d1643a1ea695e0f7a84ebb9d65bc202d40d678d70a8cf637c",
             "size_bytes": 832
           },
           "reference": {
@@ -2046,7 +2046,7 @@
           "id": "startup-network-browser",
           "receipt": {
             "path": "run-2/comparisons/startup-network-browser.json",
-            "sha256": "e3a38f4a9f03473f15d1c9581ecefc009328b74e287e415f2210a2c098a53d3c",
+            "sha256": "cedda3a9d90725e418688f233dbcaafbfb51a8bec3167f609f9192a83d978e38",
             "size_bytes": 820
           },
           "reference": {
@@ -2065,7 +2065,7 @@
           "id": "startup-player-selection",
           "receipt": {
             "path": "run-2/comparisons/startup-player-selection.json",
-            "sha256": "5194c5468f1b9c4d3cc388b5c17326d2f99ea0126f0d43eb0536c2000bdd1f8f",
+            "sha256": "2e84f76a417d58c6d017ad6da32561e2ca5dcee7a9834a28788595e63d10dfe0",
             "size_bytes": 824
           },
           "reference": {
@@ -2084,7 +2084,7 @@
           "id": "startup-options",
           "receipt": {
             "path": "run-2/comparisons/startup-options.json",
-            "sha256": "dc84a051c23c197c76f362203deddde9d716cd36a7c32e1b1023f1d20f90d234",
+            "sha256": "28d0262812a05fef427ec1334dc841c71b868d2fb3d5a934eacbf9a5a4ee5b8b",
             "size_bytes": 788
           },
           "reference": {
@@ -2103,7 +2103,7 @@
           "id": "startup-about",
           "receipt": {
             "path": "run-2/comparisons/startup-about.json",
-            "sha256": "0e46c9724534b5c7db517e854bf80085c5dc5696ff7cbccd442fdce163878b82",
+            "sha256": "e870248ba6719bfdbbb00a955ffa7ffce97f50496a4dba261d12f889d88017c2",
             "size_bytes": 780
           },
           "reference": {
@@ -2122,7 +2122,7 @@
           "id": "network-lobby",
           "receipt": {
             "path": "run-2/comparisons/network-lobby.json",
-            "sha256": "32b5804b48252a32e7f0269452754a176acc56062e8967200705361459718a5d",
+            "sha256": "abb431e3754ae343babce3168ac3f1e963b427e53f3f57252b1fff9d585a75a6",
             "size_bytes": 762
           },
           "reference": {
@@ -2141,7 +2141,7 @@
           "id": "loader",
           "receipt": {
             "path": "run-2/comparisons/loader.json",
-            "sha256": "c7db1ca1727bb9d8e2d31bca554c40cc25c2b0997a33fc8a2e12083731ea5db1",
+            "sha256": "88d667465547d582f0c199e8d9a35a6ee968f16b4cfc4a95f9a1e311adc50692",
             "size_bytes": 734
           },
           "reference": {
@@ -2160,7 +2160,7 @@
           "id": "hud",
           "receipt": {
             "path": "run-2/comparisons/hud.json",
-            "sha256": "a1b6bf0ec27d7762dfd7d7bd98cbb52e9db7e19a1dbd06c21b9decf874e06136",
+            "sha256": "c7fbbe1a46f04b379a821d3eadff82579df6ef8abe9ed1c99c78866171362131",
             "size_bytes": 740
           },
           "reference": {
@@ -2179,7 +2179,7 @@
           "id": "ingame-menu",
           "receipt": {
             "path": "run-2/comparisons/ingame-menu.json",
-            "sha256": "51db72fd9db1e2b8b0625da13ba5304d4a95658c8da6604fb603918e808ed16d",
+            "sha256": "58095803a8480dc1efa834552b543a54b63fb41e32d5f577608d3bdbb9b10a39",
             "size_bytes": 772
           },
           "reference": {
@@ -2198,7 +2198,7 @@
           "id": "object-menu",
           "receipt": {
             "path": "run-2/comparisons/object-menu.json",
-            "sha256": "1bd05916336426f063bc0fd6d3833bc8de97e314181cd8653a7142c945b803d2",
+            "sha256": "0363d08192a1a30caf1c6083bfa11b306e9143a08d38283e61da9b9549dd7fe7",
             "size_bytes": 772
           },
           "reference": {
@@ -2217,7 +2217,7 @@
           "id": "gameplay",
           "receipt": {
             "path": "run-2/comparisons/gameplay.json",
-            "sha256": "341a971c4f9908a1c8ae06cf9172d023f0c8bdc940b3957dd19e9db649d8ab3d",
+            "sha256": "ad5c02c55af48174ebd59e63d0b00731c2afeb95432a30bc257855733d3d297a",
             "size_bytes": 760
           },
           "reference": {
@@ -2236,7 +2236,7 @@
           "id": "evaluation",
           "receipt": {
             "path": "run-2/comparisons/evaluation.json",
-            "sha256": "7c15d9e72fc4e8b36e5abe550f41295789996d1788b37e65ee4f886b7c26855b",
+            "sha256": "ac9a277bdb5c767be2a853bba8e86cae2666c478a4e9ada4863ae21d9a6cecc4",
             "size_bytes": 768
           },
           "reference": {
@@ -2255,7 +2255,7 @@
           "id": "startup-options-scale-initial-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-initial-reference.json",
-            "sha256": "8f94e37bbf1d61b4c8f52801bfff1fafdb63a59cd65263b82c9924c1da414afb",
+            "sha256": "531673dd531267766d129ba4de1dbf618fcd37febb87236483f862c0723091b1",
             "size_bytes": 866
           },
           "reference": {
@@ -2274,7 +2274,7 @@
           "id": "startup-options-scale-decremented-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-decremented-reference.json",
-            "sha256": "85741188dea678cf9c77b48d9c9d9a00dbc60c44764df5a7f3c58c1c923c283d",
+            "sha256": "e1042761e61f8afc8b5886a85e54a7b413520fbfdd5f1c9113427fc523d22c6f",
             "size_bytes": 882
           },
           "reference": {
@@ -2293,7 +2293,7 @@
           "id": "startup-options-scale-initial-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-initial-minimum.json",
-            "sha256": "ca77cec0a91a902fe863538b274e02d59402ec3b4e04cfc7415e486940123f97",
+            "sha256": "083813ead12bf35ca4906ce43e0b908e6a2270d6600cff36874f323fd9430408",
             "size_bytes": 858
           },
           "reference": {
@@ -2312,7 +2312,7 @@
           "id": "startup-options-scale-decremented-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-scale-decremented-minimum.json",
-            "sha256": "3e09542990d8edee44e9532650333e9f765143cd59473523e6ce6ad600ef0d2d",
+            "sha256": "398b1f5c8fe66d1497bf38d0e0a16c7ea458f9209e590b41d198a7d2c0769f75",
             "size_bytes": 874
           },
           "reference": {
@@ -2331,7 +2331,7 @@
           "id": "startup-options-reset-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-reset-reference.json",
-            "sha256": "838f5f37ae9e01f3ec04eda55e91ac067e2f6b85abc1968ae19811e3f5a6ef6e",
+            "sha256": "1fc6d846545384bd5b2b3672e89dcba5c28deb2013444ccf5ea73dc1b0b6bd12",
             "size_bytes": 834
           },
           "reference": {
@@ -2350,7 +2350,7 @@
           "id": "startup-options-reset-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-reset-minimum.json",
-            "sha256": "84ece88b2dc2ee6794b72f00eedbabc44c2a00fa0154dd7776b0a5a904d3af49",
+            "sha256": "0f2ba119c3f87d2fb4661250e093e94b9a7427c8b85a450b5219e4d2113e7bdf",
             "size_bytes": 826
           },
           "reference": {
@@ -2369,7 +2369,7 @@
           "id": "startup-options-key-keyboard-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-keyboard-reference.json",
-            "sha256": "9a723ce32e37a8346c2bf9913e6fef53abf57c9d5c93af713c2c85a9d0c2a76e",
+            "sha256": "6bdef1072eedb7da1ebd7fa82c5577bdb8097cd9b6248dd37d14a354fcbb209c",
             "size_bytes": 862
           },
           "reference": {
@@ -2388,7 +2388,7 @@
           "id": "startup-options-key-keyboard-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-keyboard-minimum.json",
-            "sha256": "b976a2d3ffb1403f73141a9e043ab931802a1583d65ea0a127f8203903e246cb",
+            "sha256": "9527f5366bfcaad54d17b108d54bc6b2104b7dad75b7638874d78a8ba090fa57",
             "size_bytes": 854
           },
           "reference": {
@@ -2407,7 +2407,7 @@
           "id": "startup-options-key-gamepad-reference",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-gamepad-reference.json",
-            "sha256": "bfb1e3a7b29454cb49918d65838a67b7403de5d8170860f71dd937849b8b728f",
+            "sha256": "bb4c3d87a9ca2cf512ae6a649d8ea64a97f46405aafe77a9d57e8e951c61d891",
             "size_bytes": 858
           },
           "reference": {
@@ -2426,7 +2426,7 @@
           "id": "startup-options-key-gamepad-minimum",
           "receipt": {
             "path": "run-2/comparisons/startup-options-key-gamepad-minimum.json",
-            "sha256": "465d7e382c0dc4fdd336928c51a873ed8ceb4fc72a98aed65befd70d4c88199e",
+            "sha256": "af1c1e3babc502a6cf1f433572120cedc8dead6e0b4e5bb32b3b1a76fbae8f9b",
             "size_bytes": 850
           },
           "reference": {
@@ -2449,7 +2449,7 @@
       "sha256": "ca4bfcf4c0a36623512baf2e01827dfed9c2e6691bc2da328b775119ef24d61f"
     },
     "compat_profile": {
-      "contract_sha256": "a1547db304032a20bb63e9b7e64f8d9786094acd5dc9f12b715670f0aaa0b248",
+      "contract_sha256": "ec4f1a20292e16ad71f57e000234c70129f36abbd148c4459597590b04193e08",
       "path": "compat/profile.json"
     },
     "geometry": {
@@ -2546,7 +2546,7 @@
     },
     "rust_source_inventory": {
       "path": "inputs/rust-source-inputs.json",
-      "sha256": "bc3bc39841b212f4e30cb12c84e0544096ca72394bf563c4728c74856929af21",
+      "sha256": "e784dda70e5abc1795478a8651c37562bbc7e6e0b2e7ed164a409e7f251f1453",
       "size_bytes": 345965
     }
   },
@@ -2574,7 +2574,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2599,7 +2599,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-main.json",
-                "sha256": "523e7184ca73e579a1315b4e86682d52f43f72c38456a0c1b25e5e927c722d0f",
+                "sha256": "2b6ba88c76556d8c8116bb2aed405e84756af829e498e6d5380fa1cedac6cfbe",
                 "size_bytes": 1846
               }
             },
@@ -2616,7 +2616,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2641,7 +2641,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "2ac799988951c33bde1bd7c4a431b4277bf5ea5939e029d90a4bcf2d5ff51787",
+                "sha256": "7c202b2f1d6b0f64670de05bc8ef2f5b9dbb99c1d2adb6babaebe424c47d0105",
                 "size_bytes": 1902
               }
             },
@@ -2658,7 +2658,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2683,7 +2683,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-network-browser.json",
-                "sha256": "2b910c71edd564c9b5742565aebcd14b7d64aa1afa827713887a6e89c72c4960",
+                "sha256": "87ef43a47bead61bf54decebf4f63ab8b3824d0029dd75c1c9f894c20c0105f0",
                 "size_bytes": 1889
               }
             },
@@ -2700,7 +2700,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2725,7 +2725,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-player-selection.json",
-                "sha256": "a057167f5f61b6b3f3863be4cc009d6f0e2d16f289fcf3cd764f5102f64fd37e",
+                "sha256": "6ccc69cddba6b3a73f773fa310377d65b762085d7855db4d1ddfd1d6b54a1b5d",
                 "size_bytes": 1893
               }
             },
@@ -2742,7 +2742,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2767,7 +2767,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options.json",
-                "sha256": "43076f42503b6cd807668e205ef6d70eaa6ba2403785042da770b6218bcc1d9c",
+                "sha256": "21508ecf33f2ac26e385d77be42bcee3c0a81802673f651a9ed4b9d3627125c3",
                 "size_bytes": 1858
               }
             },
@@ -2784,7 +2784,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2809,7 +2809,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-about.json",
-                "sha256": "cd1f7ed279f5ccce8403deb4df6d9816dcb30355229b9ab0e1953050ab2140f6",
+                "sha256": "4641413869df64189cecad37ef557c9336be5e1ab3f000266d8c380dbd6928bd",
                 "size_bytes": 1851
               }
             },
@@ -2828,7 +2828,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2853,7 +2853,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/network-lobby.json",
-                "sha256": "a5a45685be64f1852cc9ee7c392fd0a7c12f305bcc78ed71b1c49a6ad177891a",
+                "sha256": "d9d5becdbd1f980c2aed00f1e453b3d26fb60dd98265c5ab9e6d6f3e68b3a4cc",
                 "size_bytes": 1730
               }
             },
@@ -2870,7 +2870,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2895,7 +2895,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/loader.json",
-                "sha256": "134a4fe041c81ba9f30212ce33d4f03ed735d44b9439613af3daf0f8b71075c2",
+                "sha256": "b9f7a38438e74b36c1843452abf0f79ba2e521e83db4a49a3e76c5648c591158",
                 "size_bytes": 1716
               }
             },
@@ -2912,7 +2912,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2937,7 +2937,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/hud.json",
-                "sha256": "b2ec47e2338fc2066ae869ce4066f899f853ad120fa0a8fea5c9d0ec4a9d1e0c",
+                "sha256": "aff8a6bcded513c7a4f32e3314f4789879712745e757c1ad6fa9f3e50031a94e",
                 "size_bytes": 1849
               }
             },
@@ -2954,7 +2954,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -2979,7 +2979,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/ingame-menu.json",
-                "sha256": "274cb8ae5ce85b2996f21b2c5b5a344e3496f68edd7d6485af4e649e8e6e14c0",
+                "sha256": "707e62a34e49658397032e73f7756720e64a4498ebee9144a96a12da41eea131",
                 "size_bytes": 1886
               }
             },
@@ -2996,7 +2996,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3021,7 +3021,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/object-menu.json",
-                "sha256": "23c19d751e5ea02918a215904741cf0a2d844c34d9664a1ca515757cab56e796",
+                "sha256": "6aa65ffc8644f9ceaa4cb4a7089ddf2fb725765c05e905aca91d01b00ddb18e6",
                 "size_bytes": 1896
               }
             },
@@ -3038,7 +3038,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3063,7 +3063,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/gameplay.json",
-                "sha256": "490912333aa53c8013e3885ef2ea2a6139bc890aaaf43a4010839ce6c9ea5769",
+                "sha256": "860b398b2ad5f615488846a92a050fc3aa6524f7d4bacf1abf41c9672b16415d",
                 "size_bytes": 1866
               }
             },
@@ -3080,7 +3080,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3105,7 +3105,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/evaluation.json",
-                "sha256": "1604aec1829f4e8c7e9650816fe75fd26e08338802cfe4a06bbbafdbe85198a8",
+                "sha256": "233ecdf9c366c4741334789e7f2f4c2bfd71c00307a318c06ad50d31a4feb1a1",
                 "size_bytes": 1890
               }
             },
@@ -3122,7 +3122,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3147,7 +3147,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "e65de0732fbd75249734ffe37b2ae6697c33aad628ee0ea1d17941bf3eb3209c",
+                "sha256": "4514847ccfde724895db56ef1b0f48eb3703f3c5f89bf4efe9b57eef01cda6f5",
                 "size_bytes": 1786
               }
             },
@@ -3164,7 +3164,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3189,7 +3189,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "d6a3a9d9b30a0f3afd08e467e92bc8292f84ae8a6397d6c752577476db65b37f",
+                "sha256": "239babfc31eed284899e91035b62114f28485944dd6c8848f289de6cd84486fe",
                 "size_bytes": 1798
               }
             },
@@ -3206,7 +3206,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3231,7 +3231,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "d06526da56fb5bb6f5700b87e4fc9ee4539b45ef59bf0c6a6e95aaecfe3e78b5",
+                "sha256": "46332c56932faacbf97046f4869cda6c7eda67ba28b9e36badbdbef135e68d66",
                 "size_bytes": 1780
               }
             },
@@ -3248,7 +3248,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3273,7 +3273,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "c0071deda0371b9378b038005ef7c25df5cece23bc93b7ec86568aeef0c5289c",
+                "sha256": "caba90f6d8450f976b2e7d20f3b1cbbd5c49a59abe319f22f7ea5a7eb149c8d2",
                 "size_bytes": 1792
               }
             },
@@ -3290,7 +3290,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3315,7 +3315,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-reset-reference.json",
-                "sha256": "0273f65fcbef07d38061890a16ad2839ffdb56b308accb1136e8182f506e4f4f",
+                "sha256": "de23215c200423046266524cb0a5c60454563c6167fab13714a6fb90693c56d4",
                 "size_bytes": 1762
               }
             },
@@ -3332,7 +3332,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3357,7 +3357,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-reset-minimum.json",
-                "sha256": "8ad75c69737f5b55d22322e5f208398a9c2563e1ec29a50b9699761b91bb7d94",
+                "sha256": "e8397ea6bc58e1dc6f896f74a37c776125b15375312b62da5a4c86ef5da68f3b",
                 "size_bytes": 1756
               }
             },
@@ -3374,7 +3374,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3399,7 +3399,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "887d0b8fbd92c3d2ee632f998087eadc951ffa765787f139eb987a5cd06a6c14",
+                "sha256": "ce2da688b725a1a99280254c63b5e3decbb27f0926f8979af4520612b5f47aee",
                 "size_bytes": 1776
               }
             },
@@ -3416,7 +3416,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3441,7 +3441,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "2bed0f2d03e48431297320b398e46b8749680900c5d8fe0b674d7fb6f617f08e",
+                "sha256": "796e519c8580bcce841cdefd2bcc637a790d1c4ad7f10779c12b4de7b421ac52",
                 "size_bytes": 1770
               }
             },
@@ -3458,7 +3458,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3483,7 +3483,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "caaf9df6749694e7efa0effb5ee53e23b8de93197f14d63938c6f6c01f4d111e",
+                "sha256": "b049abb9445ba9e15843d70ec0751ac944e5428757d3834e3df28a7354571eba",
                 "size_bytes": 1773
               }
             },
@@ -3500,7 +3500,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/cpp/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3525,7 +3525,7 @@
               },
               "receipt": {
                 "path": "run-1/cpp/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "c103b78a686200c2d0a560b4a0cf2666b717d4255351a8f57b056f4ed683615a",
+                "sha256": "9706cf748622ae1a3caa8c3f57ac8029b5d5fcd19d016f2b2b2716ce7cffcd1b",
                 "size_bytes": 1767
               }
             }
@@ -3548,7 +3548,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3574,7 +3574,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-main.json",
-                "sha256": "9a1a482841ec64983b92d2741f5918a9fb668d3fd4f8d22e43e7642523b1bf59",
+                "sha256": "61e2bd4a4d08aeaca33e086c96e679938345d019229b2844d044ac733d9ecdb1",
                 "size_bytes": 1847
               }
             },
@@ -3593,7 +3593,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3619,7 +3619,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-scenario-selection.json",
-                "sha256": "fb7bea3ac8f3c4490d8b70e8e42c0958222efb908857a870a3655a5c7158d0d7",
+                "sha256": "ed5a7049d82d930471863db65df9a75b2ac296c0acf6d0da481c6a4eb53e8347",
                 "size_bytes": 1903
               }
             },
@@ -3638,7 +3638,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3664,7 +3664,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-network-browser.json",
-                "sha256": "931701db26a2e6e32072e59a1201e2ee7add99eea1205f6c88a3d42026f94a75",
+                "sha256": "e7f2918073136f20c86f4b8e2a0a5c0a6ec6fd1e993768e887a0122a91761597",
                 "size_bytes": 1890
               }
             },
@@ -3683,7 +3683,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3709,7 +3709,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-player-selection.json",
-                "sha256": "76159d33c317d8cd85b80bf890f9541d75a175bda2bc56aabb04c85cebb18dfd",
+                "sha256": "ff014aff009d554e9a458cb8d717760d693de2c4743223b3570cb3e563e69b72",
                 "size_bytes": 1895
               }
             },
@@ -3728,7 +3728,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3754,7 +3754,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options.json",
-                "sha256": "9832ba339a9d50e852e502189f3e9e63fdd6392c14ec9e9f5931f82df78d2e06",
+                "sha256": "1d07ea0c71276a59614aa606edc95d7750251290cd85639887f1c07c20403afa",
                 "size_bytes": 1859
               }
             },
@@ -3773,7 +3773,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3799,7 +3799,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-about.json",
-                "sha256": "fe5b68a8a2d1448daaf056437fa372d3575e4c32bdd3e8613406ea9a1195f809",
+                "sha256": "b15bcd212937d7d168a6a5cad2ef050b408c27cb568de7776edde813d3b12448",
                 "size_bytes": 1852
               }
             },
@@ -3818,7 +3818,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3844,7 +3844,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/network-lobby.json",
-                "sha256": "8d1bade3171e03c2e2ac28ca14019cd94b5a5fa10c473be18e305c4a72790566",
+                "sha256": "aeb62f4241d6c737ced4a2587ee6030e3f1df35918a15840c42e14778f343121",
                 "size_bytes": 1730
               }
             },
@@ -3863,7 +3863,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3889,7 +3889,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/loader.json",
-                "sha256": "2ee8a5f9d6d6c552caeb3c06de6e7c195631c88a47170a8dde979178257401a7",
+                "sha256": "40131739d2b791913bc78f3b7a63bc756e111b4922a6f06df0a61533ae04a1d2",
                 "size_bytes": 1716
               }
             },
@@ -3908,7 +3908,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3934,7 +3934,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/hud.json",
-                "sha256": "fd972bf9acdc476d9a3309bff7276f01d17b72d5bad2893b0c4d3e23c7726ef4",
+                "sha256": "8e679e68cec398159bf77dab7cbad0275aa9eeacb321af0f4619c87cd3180b33",
                 "size_bytes": 1851
               }
             },
@@ -3953,7 +3953,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -3979,7 +3979,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/ingame-menu.json",
-                "sha256": "d4958fbd8b1f1c8ab2bbe2f3d8039830bd90165d84ab2151902c5501cea4b1e6",
+                "sha256": "e6909b4901f3c429eabf42049104299f62580edf3f611b5ef4fcf873e37e4fa3",
                 "size_bytes": 1888
               }
             },
@@ -3998,7 +3998,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4024,7 +4024,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/object-menu.json",
-                "sha256": "ee48d5624baeb5c0e30c72736de9c53839016303035a39a0a64b1a2d65863f2e",
+                "sha256": "fef2f293eaeaccab9d6039b406ec835bfe25e9ffe209611c9682f093b25bfcbe",
                 "size_bytes": 1898
               }
             },
@@ -4043,7 +4043,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4069,7 +4069,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/gameplay.json",
-                "sha256": "fd57e0b99026dbbb816947848075be5e4b7cca7728cc8ce2e4ecb474c5ef3620",
+                "sha256": "62715d908ec5202c2107997d269c779d05f35fc14eefef866989f36d988f2048",
                 "size_bytes": 1868
               }
             },
@@ -4088,7 +4088,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4114,7 +4114,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/evaluation.json",
-                "sha256": "17ee0e4cc5403e0ad46064974a916a9abaae55a2551a968e6b4cf899374f9c49",
+                "sha256": "1c63ce60daec957ca014cf5432533e092772d0d59bc1de5fd65a72046423d231",
                 "size_bytes": 1892
               }
             },
@@ -4133,7 +4133,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4159,7 +4159,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "7929f52e2e70e2dad341ee1d520a457084166b655d8e200dab4c786ca6b7e32c",
+                "sha256": "451438ca63c0cceadfb4513f2d436b4dc7702075c3513bb1075371b252845509",
                 "size_bytes": 1786
               }
             },
@@ -4178,7 +4178,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4204,7 +4204,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "ded971c554db1ed8a7c9fca00395fec0cd00aaad7dde923ebffd378842d72ddf",
+                "sha256": "a6b81d5a1fdb19498c86421054d8079eff43beb4807dbd8b192aaa719d9fb55f",
                 "size_bytes": 1798
               }
             },
@@ -4223,7 +4223,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4249,7 +4249,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "52af7a07825f7e0b6be24e7779446d6af64ee7508f486efe37548925cc652276",
+                "sha256": "4fcdadc54c52a94d05eeaedda91423fb53c48ea3bcb2d41dba86a7ded153b0df",
                 "size_bytes": 1780
               }
             },
@@ -4268,7 +4268,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4294,7 +4294,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "27bcbb311a1d145d80cd0779e11cbfa4ae32fca68602996df8384857b7c91c5e",
+                "sha256": "cd686cd97b76593d80f7b5232dc7dda8229dd9f10def8dc1d36b9276e493a350",
                 "size_bytes": 1792
               }
             },
@@ -4313,7 +4313,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4339,7 +4339,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-reset-reference.json",
-                "sha256": "40cc696673497bb31273c859331b151aea08255f8e912b7acec3190798187b93",
+                "sha256": "1046336c9107ee81740003274c44eb6c33c5eeb2d3c918f9c1380b03248ff145",
                 "size_bytes": 1762
               }
             },
@@ -4358,7 +4358,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4384,7 +4384,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-reset-minimum.json",
-                "sha256": "f6135d7fcc6b494db1534d83961ee4c2db1b2c289e816d983e49b723b81176a7",
+                "sha256": "c8fba68fd71beea3069991da21d4a350515dc351548c644440addcba625a3326",
                 "size_bytes": 1756
               }
             },
@@ -4403,7 +4403,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4429,7 +4429,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "7140af61dbf1bfe04281bb351d0a944bbc687b9e9fd547cf1844448b33430617",
+                "sha256": "9c87b294550f16ddb3ca7df27b7937e92eb4a0068290d89764903b4904fda249",
                 "size_bytes": 1776
               }
             },
@@ -4448,7 +4448,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4474,7 +4474,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "d64661b82a41c6399ecb12bd319f7ed52b7ddbe787343ca7a8e88088ddd91654",
+                "sha256": "8deba80aaf71b56138f1a0c867de771b2f297f7320618d8b2cc9385a5d0bd76a",
                 "size_bytes": 1770
               }
             },
@@ -4493,7 +4493,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4519,7 +4519,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "2e8e1e7f1a87e4d5a20e743c8d5406b864bbd9c1878caf42c004081faa72ccfa",
+                "sha256": "7614e96c36dae89f7cb28b40032abe22116860c12d65aac03bf144cccd9ddc7b",
                 "size_bytes": 1773
               }
             },
@@ -4538,7 +4538,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00",
+                  "CLONK_PRESENTATION_NONCE": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-1/rust/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-1",
@@ -4564,7 +4564,7 @@
               },
               "receipt": {
                 "path": "run-1/rust/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "199f6b9595c74c5b70ce7d3ff2bce05d527cd8a7d51d1c8f45143f040a4ba74e",
+                "sha256": "655a347a8029521a55ba7aa90908a059b39c794adbca97668cfbe2a578c5cf02",
                 "size_bytes": 1767
               }
             }
@@ -4574,10 +4574,10 @@
       "id": "run-1",
       "launcher_receipt": {
         "path": "run-1/launcher-receipt.json",
-        "sha256": "3e4f145d5ce5a69e53d9ba6a7ead023b5bf51b89eaae8c2c2e0006f4021a2ab4",
+        "sha256": "df14a1c8f6909717b22fe8aeca86aa03b104a53e5e95bce431aebb35d07d0ab4",
         "size_bytes": 7327
       },
-      "nonce": "68b5705702992257f4b9a4a0f399a4fb89ea945cb17db87366c585a4821f6a00"
+      "nonce": "140f27bba92296e0bc24b2c74e24a3ff41de9f2f365f3ebd79aa944b1eaf5146"
     },
     {
       "engines": {
@@ -4596,7 +4596,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4621,7 +4621,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-main.json",
-                "sha256": "7599ed84b7d90625283261d74cf48e27a5e54050d7f80d967f8f3bfad33c7eca",
+                "sha256": "a54866fc42cfdfc187d5882858db4999f90b7e46e3c2e64c1beb4fcf48060f7d",
                 "size_bytes": 1846
               }
             },
@@ -4638,7 +4638,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4663,7 +4663,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-scenario-selection.json",
-                "sha256": "249cce1308f8f1d839e87d7aa3902ed812c835351f61387ab50156ba5abfe5d0",
+                "sha256": "e3fe01f22e9a5f95ab515722696b257e5c6733f24951a0dfbda3da36bd2a2996",
                 "size_bytes": 1902
               }
             },
@@ -4680,7 +4680,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4705,7 +4705,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-network-browser.json",
-                "sha256": "e706483921de94dd4ecf20509cf68838d6bc5ae7c9e9c6effa3082a834c8b2f4",
+                "sha256": "4e9091e303990e3774935f8839576644447355f2baf94a6cc5e2e1d9e3ec50cc",
                 "size_bytes": 1889
               }
             },
@@ -4722,7 +4722,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4747,7 +4747,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-player-selection.json",
-                "sha256": "d517c14cd9a82f366717cbebf1b6f0a1a3f44e48e248479264ad4f246224ea2c",
+                "sha256": "d15aea9dfc25a6377e5b6056f185e216ddbda3e9c083ac7a46a18af4fccf396d",
                 "size_bytes": 1893
               }
             },
@@ -4764,7 +4764,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4789,7 +4789,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options.json",
-                "sha256": "68e0703311cc42a6233299dca1b78d2ebf33b2a4191132b237c74a20234478b6",
+                "sha256": "0c483d42bf029b7d8d46395957c720041e29863cedd61eec05cceab8eb08f4d3",
                 "size_bytes": 1858
               }
             },
@@ -4806,7 +4806,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4831,7 +4831,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-about.json",
-                "sha256": "102c7a5fccc805c14e6175159e0e099913b01b0c09ba3c08b3ece457282f59c6",
+                "sha256": "872f4c69b6f934353b3e83c8c51a3f6b398fa2a41c195906c95ea4d39f34134d",
                 "size_bytes": 1851
               }
             },
@@ -4850,7 +4850,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4875,7 +4875,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/network-lobby.json",
-                "sha256": "e96060a3a4913bdd44fae3ba894da68d8c23e1e97b252757185c54bf1bfcb004",
+                "sha256": "ce740537d00f167fa0fca91b82c46f4c5061db1a008d80f7b720159e7272e495",
                 "size_bytes": 1730
               }
             },
@@ -4892,7 +4892,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4917,7 +4917,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/loader.json",
-                "sha256": "d6262459597f4631aecd961cd245df1891a5bb97fd14c8e16c5898ad2e268a76",
+                "sha256": "30cab0ee09fca5dc013367eea13c5b9ed26fe740f93bbae4c6e7567984b98756",
                 "size_bytes": 1716
               }
             },
@@ -4934,7 +4934,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -4959,7 +4959,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/hud.json",
-                "sha256": "c267fff0e7c7278bfbba6b4b6053b01b11f79bc460890dfaf3dcd346600ac69c",
+                "sha256": "f626f6c32ef33a84eb8a7fca5a7fc78aa1814ac9f13b94b4057d1a756f17992e",
                 "size_bytes": 1849
               }
             },
@@ -4976,7 +4976,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5001,7 +5001,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/ingame-menu.json",
-                "sha256": "cd3182d95f19d8dc966034208a4eabbb3f7c73362b1aee8752e7f7d6d160d92b",
+                "sha256": "c3285ffee69da662982f237656e866a400f1a1fe28ca513b544f267e9feaba4e",
                 "size_bytes": 1886
               }
             },
@@ -5018,7 +5018,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5043,7 +5043,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/object-menu.json",
-                "sha256": "bce5a91a70905f273d7c7511c121f9f03aff30e570835355d949058691072762",
+                "sha256": "0e8ca3f426be4a841735df0733069ac0b63ec6ca1761b29769300c45a33df6ee",
                 "size_bytes": 1896
               }
             },
@@ -5060,7 +5060,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5085,7 +5085,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/gameplay.json",
-                "sha256": "662ad5cc996364e98cd6a1b873ab0ad4ca2fd255c0d32cb67295e80c9392eb5b",
+                "sha256": "66397621ef7a37f62c5d49b76dd03b69200543eee5885ed2fda1d67047ad0ea2",
                 "size_bytes": 1866
               }
             },
@@ -5102,7 +5102,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5127,7 +5127,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/evaluation.json",
-                "sha256": "aac3641888760adcf788d48a616749ff4a6eb768c9145d7d1bcc0bfc756a35b9",
+                "sha256": "20a34c7bb84a1e04af7707a07ee6b4b7bbeb0bbb28ff369bac1de5a188de4232",
                 "size_bytes": 1890
               }
             },
@@ -5144,7 +5144,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5169,7 +5169,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "5776a3358ddaf3a6ca8656a75a3b5a95abbb44c6d7461a6b9085e0237c9c251c",
+                "sha256": "9396a09846f8d7211eec5172c9026acdd263ce541f433faa56c1f295e9c3f9fb",
                 "size_bytes": 1786
               }
             },
@@ -5186,7 +5186,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5211,7 +5211,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "4eeb14d971e91883ed107b2cb3077ce90d89539a81398a2951ad18f3a4b4e930",
+                "sha256": "c125078d9df29252c6f52e9a2330e262cbb3429d35741482e913ad204c70db39",
                 "size_bytes": 1798
               }
             },
@@ -5228,7 +5228,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5253,7 +5253,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "fe90444523a8a0ce99e5cd659e5f905f9939a45a400071bffd7de02e6ed49718",
+                "sha256": "003bf10d3bb89ae1c5f96a1890c55d35ae187fea51c1d490de7999ae713ab971",
                 "size_bytes": 1780
               }
             },
@@ -5270,7 +5270,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5295,7 +5295,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "e4a14f4d5a349a39de174e2004f32c33a707267137f3a291129081beb373f78b",
+                "sha256": "d11504bde6eb5318c4b506395141d7fe18f9aa295aba5aa96651927842ed547d",
                 "size_bytes": 1792
               }
             },
@@ -5312,7 +5312,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5337,7 +5337,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-reset-reference.json",
-                "sha256": "8be42ac97ab2e75040da52919b3416777acba1bd9f675fa961c589f0517edf3e",
+                "sha256": "bd66045fcee2020d72ab4539e4c99a950f0e65cc7897fad5e892fe0d7254f63f",
                 "size_bytes": 1762
               }
             },
@@ -5354,7 +5354,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5379,7 +5379,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-reset-minimum.json",
-                "sha256": "8cd0c0a2efb656aef89d626aa30d0f5488acc383f57f4e5edb178cac0919693f",
+                "sha256": "2604537dbfe0ef0f16b522aee671f9c1268db0ef6819963c6ae31a6b1a14d444",
                 "size_bytes": 1756
               }
             },
@@ -5396,7 +5396,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5421,7 +5421,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "bf72ac23c72052840aaa9a7f34de4a653bceb37140393930c64312268fab0e0b",
+                "sha256": "4220955b87174f5399c77599a9bc418215b792c1ba4f3d871ba2bf19d1f9485f",
                 "size_bytes": 1776
               }
             },
@@ -5438,7 +5438,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5463,7 +5463,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "f67a67ca573759e4947707cdddb2c48fd99db9bf89afae5d594d0da738dfdc30",
+                "sha256": "dbf99266c548b7da33b04edb49ec82ee38271254a458d40241657fdb067a8730",
                 "size_bytes": 1770
               }
             },
@@ -5480,7 +5480,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5505,7 +5505,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "0f85ee86191ac27ee40914aedfa025b72804127e24a2569478aafa35756d5a17",
+                "sha256": "30d6dbb9b8b27f74f1309e1488a466a123757c7d74d031b5e79b6aa2ad15a457",
                 "size_bytes": 1773
               }
             },
@@ -5522,7 +5522,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/cpp/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5547,7 +5547,7 @@
               },
               "receipt": {
                 "path": "run-2/cpp/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "fc6972314346f2b0017ee6c572add3c3135e76161228bb1e889bf8a213e85add",
+                "sha256": "a9bf2f35b20085bbb46f421f254c455dc0043ed7a3f4f5a11ece9d548c28d953",
                 "size_bytes": 1767
               }
             }
@@ -5570,7 +5570,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-main",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-main.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5596,7 +5596,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-main.json",
-                "sha256": "26fa19f1c5e5bc0025a53ec9d0b8e9cd642a66e13f85d69bd6e0aac8f08f8783",
+                "sha256": "dbe863ca5a62286ee5dbdae5cac460d69d11cc21940cbefa7ac23f294c2188c5",
                 "size_bytes": 1847
               }
             },
@@ -5615,7 +5615,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-scenario-selection",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-scenario-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5641,7 +5641,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-scenario-selection.json",
-                "sha256": "e9b18a71bbf99887cae9a25127e139e0c24be6db137bb2be344ac341af1c4bbf",
+                "sha256": "afe52068dbae81205e4494b68d34dd97469e9b1f7bb58e26bb3d3b5df2bf0ad1",
                 "size_bytes": 1903
               }
             },
@@ -5660,7 +5660,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-network-browser",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-network-browser.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5686,7 +5686,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-network-browser.json",
-                "sha256": "09c7bdd510dc443bdf17e1551afccf50bed526c9bccc522ab390a526172d3e76",
+                "sha256": "09422397707ad19ad671da90a9318856fb9f8f9de5400402a6efbf38edef137e",
                 "size_bytes": 1890
               }
             },
@@ -5705,7 +5705,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-player-selection",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-player-selection.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5731,7 +5731,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-player-selection.json",
-                "sha256": "c85112a296d2bd1f2266449841b86ec3327c495d4b0ed718963110f0b2cc6d42",
+                "sha256": "99ea894639dd19efa19e34b969af638c9973537fd754a972926bf94fc422b861",
                 "size_bytes": 1895
               }
             },
@@ -5750,7 +5750,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5776,7 +5776,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options.json",
-                "sha256": "1b7205425c75d913fd4723775deefb30f15f160d442f68d6da72f960fd454a31",
+                "sha256": "5d56fcdfce75ae3071aebb86a650204869e186f8398f9a92cd9c43721c2ebf20",
                 "size_bytes": 1859
               }
             },
@@ -5795,7 +5795,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-about",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-about.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5821,7 +5821,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-about.json",
-                "sha256": "28a35f0d91ebe9cb70f964a93d460e97bc8e957acc1b8a36aab4e330f20c1d49",
+                "sha256": "1b90a74f05db471ddd2e1a243338c60fedc943f7649c40ac1554a2b2540268f3",
                 "size_bytes": 1852
               }
             },
@@ -5840,7 +5840,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "network-lobby",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/network-lobby.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5866,7 +5866,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/network-lobby.json",
-                "sha256": "8c566b6c75368bddd3ab155601f7520f8efbc3ceed2d7bccd23a5c92dac55127",
+                "sha256": "546f739e7ca700091aad911600523c37ca013319be45eff92156a5a7e6280d75",
                 "size_bytes": 1730
               }
             },
@@ -5885,7 +5885,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "loader",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/loader.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5911,7 +5911,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/loader.json",
-                "sha256": "5cdd1d54bcb4942dcc4f52fdd753aa8fee6267fc58dd2330278e548dea324888",
+                "sha256": "d3b684a5055f9f6f1c9d44bbe908f580764d68680a518d95e90d62b5ae90c603",
                 "size_bytes": 1716
               }
             },
@@ -5930,7 +5930,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "hud",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/hud.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -5956,7 +5956,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/hud.json",
-                "sha256": "1d33b7810f4847bada6260f61045797d002404a7465d77e4bc06c2077f9de38e",
+                "sha256": "50ee2ad5a063aaa49eec701f4c1d89643cc3c53b9f675d1341bc9813870c8903",
                 "size_bytes": 1851
               }
             },
@@ -5975,7 +5975,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "ingame-menu",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/ingame-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6001,7 +6001,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/ingame-menu.json",
-                "sha256": "f0055a57fef9c5e10d2a929b056ed3167c3c682fef44f82695b4a9a2062e80a0",
+                "sha256": "fe4995974a2422d7c09a1782ed519a03e5a18e050c240e4024355c91f09d14ec",
                 "size_bytes": 1888
               }
             },
@@ -6020,7 +6020,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "object-menu",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/object-menu.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6046,7 +6046,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/object-menu.json",
-                "sha256": "55dd9c10bdf4aa82f8fcbfe924f0d6c572e30e13e486122129737abae2d57cb7",
+                "sha256": "68edae71d4e8b958bd724d75f96005a592a9b2f5b143272d6b4d1ab0a2286d0d",
                 "size_bytes": 1898
               }
             },
@@ -6065,7 +6065,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "gameplay",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/gameplay.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6091,7 +6091,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/gameplay.json",
-                "sha256": "32ea3117242d223a05b32b755c38b599593beeb70e4c7091f30f86603d06728b",
+                "sha256": "ff998423652800d7b6844ff30ffe0af995dd4d37b04b1d4cb6723fefea49ae70",
                 "size_bytes": 1868
               }
             },
@@ -6110,7 +6110,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "evaluation",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/evaluation.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6136,7 +6136,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/evaluation.json",
-                "sha256": "a996615e1b40d96ab8c25e2da83d386b99893e66007d315c5aed7d5e0d84601e",
+                "sha256": "3a0ea899e8f0d1545ee154122343a7fa9016b3b97f2e35d0d3d898ec4ba3df2f",
                 "size_bytes": 1892
               }
             },
@@ -6155,7 +6155,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-scale-initial-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6181,7 +6181,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-initial-reference.json",
-                "sha256": "62d0970add3c4a21e319024e79dee91ea02876727c3526044b8660c99b23becd",
+                "sha256": "976ae90f5d3192ec9262e03f9c4ac71a6c513e4ff3e007e70c7bb6a2dc14afd7",
                 "size_bytes": 1786
               }
             },
@@ -6200,7 +6200,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-scale-decremented-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6226,7 +6226,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-decremented-reference.json",
-                "sha256": "765d2836966b4506cd4c51c401f6d46be64dde7c92981f890d70f44ae57a1e82",
+                "sha256": "d4206303383bdb6475c446490544cf027a1b36d99a2d6ca36eabf6c25c3ed373",
                 "size_bytes": 1798
               }
             },
@@ -6245,7 +6245,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-initial-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-scale-initial-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6271,7 +6271,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-initial-minimum.json",
-                "sha256": "8590ed328d561f1fbca168b8696c02d9985bf11038d961a84f395aea909e9866",
+                "sha256": "f064e122d25a9dad5f6b26fbb69cac5051255984ceeca7c5746cfd80a39a1356",
                 "size_bytes": 1780
               }
             },
@@ -6290,7 +6290,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-scale-decremented-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-scale-decremented-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6316,7 +6316,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-scale-decremented-minimum.json",
-                "sha256": "5906f738dac95c17315656e802746c9ba425ea1c07d62f183fae80d21bd4c329",
+                "sha256": "a621c8aa7f3ba7bcd787df1ce4e8f85366bbae03b1517cfb7ca4daf425cb0a47",
                 "size_bytes": 1792
               }
             },
@@ -6335,7 +6335,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-reset-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6361,7 +6361,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-reset-reference.json",
-                "sha256": "5320c645533fb8718f2bdfbe78a9e3bdd11165661f0965128ff6a23f58580019",
+                "sha256": "b3e84dbd8812088fc8e75f8e022ccbd407499d26e2260848be6d5b0bfe1381b0",
                 "size_bytes": 1762
               }
             },
@@ -6380,7 +6380,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-reset-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-reset-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6406,7 +6406,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-reset-minimum.json",
-                "sha256": "7c2d3fc8a4c81956bff617d0dd290f8e627634120c1bdd963f30487962d6be71",
+                "sha256": "efa661ab13d578cd72a60601cd955c396a4b825e22da76346df66db740d596ec",
                 "size_bytes": 1756
               }
             },
@@ -6425,7 +6425,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-key-keyboard-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6451,7 +6451,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-keyboard-reference.json",
-                "sha256": "d1cff2e22cd1f2b6d9cee6024b33112e650ed9870fc17974db3a0e86a496780f",
+                "sha256": "fb84bb9c7a41f673cb98e37903278b68f83d1e374417eae2d5117e6c1b0212f6",
                 "size_bytes": 1776
               }
             },
@@ -6470,7 +6470,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-keyboard-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-key-keyboard-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6496,7 +6496,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-keyboard-minimum.json",
-                "sha256": "d5c77d4e60cdf34032509c635b4c471a740c18e1de4f7b549692b425d2315387",
+                "sha256": "fc5748f618f60ce07615c61e5b36a16539eaaa569a3c4f8745503e1416539c89",
                 "size_bytes": 1770
               }
             },
@@ -6515,7 +6515,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-reference",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-key-gamepad-reference.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6541,7 +6541,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-gamepad-reference.json",
-                "sha256": "2557bb56cfd1c8ebf420908737395f9e3e75b8f56ac9faa352b5a59a7be822a5",
+                "sha256": "06d37f1bc23c5d4ea886047b78b4c2d9246655a010af676901b1709f143cc10e",
                 "size_bytes": 1773
               }
             },
@@ -6560,7 +6560,7 @@
                   "CARGO_INCREMENTAL": "0",
                   "CLONK_PRESENTATION_CAPTURE": "1",
                   "CLONK_PRESENTATION_CASE": "startup-options-key-gamepad-minimum",
-                  "CLONK_PRESENTATION_NONCE": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93",
+                  "CLONK_PRESENTATION_NONCE": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76",
                   "CLONK_PRESENTATION_OUTPUT_DIR": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/artifacts",
                   "CLONK_PRESENTATION_RECEIPT": "/Users/runner/work/_temp/presentation-acquire/run-2/rust/receipts/startup-options-key-gamepad-minimum.json",
                   "CLONK_PRESENTATION_RUN_ID": "run-2",
@@ -6586,7 +6586,7 @@
               },
               "receipt": {
                 "path": "run-2/rust/receipts/startup-options-key-gamepad-minimum.json",
-                "sha256": "112067cb970705b29186d930873ef4c50701809aaf5ffb5176577e5de31cf386",
+                "sha256": "f9c28943bab38f8c4e0c1d2e4ca16bd151b378cdfa780ab3060771c60745d898",
                 "size_bytes": 1767
               }
             }
@@ -6596,10 +6596,10 @@
       "id": "run-2",
       "launcher_receipt": {
         "path": "run-2/launcher-receipt.json",
-        "sha256": "4f297d317fca358f79c736e46e188bb304d3bcf33d7ae122f76076e4eecdc325",
+        "sha256": "ea415abebc495bc6ad54fa7b0983ab5c9d9a6c44e1556fd363db1694f8d4e534",
         "size_bytes": 7327
       },
-      "nonce": "34c3697cb1388a9c096d3a720ba15492e4def686a46f259e1dbcb81a764d2e93"
+      "nonce": "820f4cfb4ee9b8c9f51c4a7ea1199b3edcc111e5331d460a7fda0b6933d31b76"
     }
   ],
   "schema": "clonk-rs/presentation-oracle/v2",
@@ -6639,10 +6639,10 @@
       }
     },
     "rust": {
-      "commit": "46f85343eadd56a812f17e79c9dcf318769a8fbc",
+      "commit": "8f58d0c122ae909f584cf55b1e627378b1c01245",
       "planet_tree": "1782c67dce1473f5e18ba17efb307325e1e85bb1",
       "system_tree": "a695d03ff344784d01d6807feef7b1d08cb36517",
-      "tree": "7916c1ef4b067486069957cb9fac510638666108"
+      "tree": "2a115fb6f0faa33e6e14f8ca356b30d352710760"
     }
   }
 }

@@ -5908,9 +5908,12 @@ impl PendingRuntimeDynamicRequest {
     pub(crate) fn include(&mut self, client_id: ClientId, requested_control_tick: Tick) {
         self.client_ids.insert(client_id);
         self.requested_control_tick = self.requested_control_tick.max(requested_control_tick);
-        if self
-            .synchronized_control_tick
-            .is_some_and(|tick| tick < self.requested_control_tick)
+        // A dynamic already encoding reaches every client still waiting when
+        // it publishes, and each replays the backlog from its tick.
+        if self.save_generation.is_none()
+            && self
+                .synchronized_control_tick
+                .is_some_and(|tick| tick < self.requested_control_tick)
         {
             self.synchronized_control_tick = None;
             self.save_generation = None;

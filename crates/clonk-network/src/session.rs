@@ -15186,6 +15186,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_dynamic_encoded_while_the_host_played_on_reaches_its_joiner() {
+        // The save worker encodes the dynamic while the host keeps executing,
+        // so it is published at a later ControlTick than it was taken at.
+        // The joiner still starts at the snapshot tick and asks for control
+        // from there (C4GameControlNetwork::Init's PID_ControlReq,
+        // src/C4GameControlNetwork.cpp:45-58), which the backlog still holds.
+        let (addr, listener) = bind_test_listener().await;
+        let directories = SessionResourceDirectories::new();
+        let mut config = host_config!(
+            initial_status: NetworkStatus::new(NETWORK_STATE_GO, 1, 0),
+            resource_directory: Some(directories.host.clone()),
+        );
+        let parameters = config
+            .initial_join_snapshot
+            .as_ref()
+            .test_value()
+            .parameters
+            .clone();
+        config.initial_join_snapshot = None;
+        let mut host = start_host(listener, config).await.test_value();
+        let mut host_events = host.take_event_receiver();
+        let client_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.test_value() {
+                Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before JoinData was requested"),
+            }
+        }
+        for tick in 0..=2 {
+            host.submit_local_control(legacy_packet(HOST_CLIENT_ID, tick, 0x31))
+                .await
+                .test_value();
+            wait_for_host_ready_tick(&mut host_events, tick).await;
+        }
+        host.execute(3).await.test_value();
+
+        let dynamic = host
+            .publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters)
+            .await
+            .test_value();
+        let mut client = timeout(EVENT_WAIT, client_task)
+            .await
+            .test_value()
+            .unwrap()
+            .test_value();
+        let join_data = client.take_join_data().test_value();
+        assert_eq!(join_data.dynamic, dynamic);
+        assert_eq!(join_data.start_control_tick, 0);
+        let mut client_events = client.take_event_receiver();
+        let mut replayed = Vec::new();
+        while replayed.len() < 3 {
+            match timeout(EVENT_WAIT, client_events.recv()).await.test_value() {
+                Some(ClientEvent::Ready { packet }) => replayed.push(packet.tick()),
+                Some(_) => continue,
+                None => panic!("client event stream ended before the backlog was replayed"),
+            }
+        }
+        assert_eq!(
+            replayed,
+            [0, 1, 2],
+            "the joiner replays every tick since the snapshot"
+        );
+
+        shutdown_test_session(client, host).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn delayed_join_data_is_followed_by_prior_lobby_chat() {
         // SendJoinData may wait for OnGameSynchronized to provide a dynamic
         // (src/C4Network2.cpp:1099-1115,1768-1784,1820-1849). The

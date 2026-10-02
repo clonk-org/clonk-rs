@@ -1264,8 +1264,12 @@ pub(crate) fn publish_host_runtime_dynamic(
 ) -> Result<PublishedRuntimeDynamic, String> {
     let dynamic_tick = i32::try_from(synchronized_control_tick)
         .map_err(|_| "synchronized runtime dynamic tick exceeds the C++ wire field".to_string())?;
+    // The save worker encodes while the host plays on, so the dynamic may
+    // arrive ticks after it was taken. Its joiner requests control from the
+    // dynamic's tick (src/C4GameControlNetwork.cpp:45-58), so it is usable
+    // for as long as the backlog can still replay that tick.
     let current_tick = i32::try_from(state.game_control_tick).unwrap_or(i32::MAX);
-    if dynamic_tick < current_tick {
+    if dynamic_tick < current_tick && !state.backlog.can_replay_from(synchronized_control_tick) {
         return Err(format!(
             "runtime dynamic tick {dynamic_tick} is stale at host control tick {current_tick}"
         ));
