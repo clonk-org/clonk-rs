@@ -50,35 +50,58 @@ pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
         (
             setting.advanced,
             setting.category as usize,
-            match (setting.id.section.as_str(), setting.id.key.as_str()) {
-                ("Sound", "SoundVolume")
-                | ("Graphics", "DisplayMode")
-                | ("General", "GamepadEnabled")
-                | ("Chat", "Enhanced") => 0,
-                ("Sound", "MusicVolume")
-                | ("Graphics", "Scale")
-                | ("Controls", "GamepadGuiControl")
-                | ("Chat", "TextSize") => 1,
-                ("Voice", "Enabled")
-                | ("Graphics", "ResolutionX")
-                | ("General", "ScrollSmooth")
-                | ("Chat", "Opacity") => 2,
-                ("Voice", "Volume")
-                | ("Graphics", "ResolutionY")
-                | ("Settings", "OpenKey")
-                | ("Chat", "Duration") => 3,
-                ("Voice", "InputDevice") | ("General", "FPS") => 4,
-                ("Voice", "OutputDevice") | ("Graphics", "ShowStats") => 5,
-                ("Voice", "ActivationMode") | ("General", "NoCrew") => 6,
-                ("Voice", "PushToTalkKey") | ("General", "DefCrewStrength") => 7,
-                ("Voice", "ActivationThreshold") | ("General", "Record") => 8,
-                ("Voice", "ActivationHangover") | ("General", "CompatProfile") => 9,
-                _ => binding_rank(&setting.id).unwrap_or(10),
-            },
+            display_rank(&setting.id),
             setting.label.clone(),
         )
     });
     settings
+}
+
+/// Curated settings in the order their tab lists them.
+const DISPLAY_ORDER: &[(&str, &str)] = &[
+    // General
+    ("Chat", "Enhanced"),
+    ("Chat", "TextSize"),
+    ("Chat", "Opacity"),
+    ("Chat", "Duration"),
+    ("General", "FPS"),
+    ("Graphics", "ShowStats"),
+    ("General", "NoCrew"),
+    ("General", "DefCrewStrength"),
+    ("General", "Record"),
+    ("General", "CompatProfile"),
+    // Graphics
+    ("Graphics", "DisplayMode"),
+    ("Graphics", "Scale"),
+    ("Graphics", "ResolutionX"),
+    ("Graphics", "ResolutionY"),
+    // Audio
+    ("Sound", "SoundVolume"),
+    ("Sound", "MusicVolume"),
+    ("Voice", "Enabled"),
+    ("Voice", "Volume"),
+    ("Voice", "InputDevice"),
+    ("Voice", "OutputDevice"),
+    ("Voice", "ActivationMode"),
+    ("Voice", "PushToTalkKey"),
+    ("Voice", "ActivationThreshold"),
+    ("Voice", "ActivationHangover"),
+    // Controls
+    ("General", "GamepadEnabled"),
+    ("Controls", "GamepadGuiControl"),
+    ("General", "ScrollSmooth"),
+    ("Settings", "OpenKey"),
+];
+
+/// Where a setting sorts within its tab: curated settings in
+/// [`DISPLAY_ORDER`], then the rest by label, then control-set bindings in
+/// game order.
+fn display_rank(id: &SettingId) -> usize {
+    DISPLAY_ORDER
+        .iter()
+        .position(|(section, key)| id.section == *section && id.key == *key)
+        .or_else(|| binding_rank(id))
+        .unwrap_or(99)
 }
 
 pub(crate) fn shortcut_key(paths: Option<&clonk_platform::AppPaths>) -> winit::keyboard::KeyCode {
