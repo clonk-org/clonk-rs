@@ -348,7 +348,7 @@ the profile disables them and the shipped scripts run unmodified.
 
 | Id | Target | What the append changes |
 | --- | --- | --- |
-| `content-append-upward-race-spawn` | `RACE` | Restores a small loam bridge beneath new or relaunched crew in Team Downhill Race upwards when spawn ground is missing, including checkpoints. Intact ground and other races retain their authored behavior. Owned by clonk-org/clonk-rs#1826. |
+| `content-append-upward-race-spawn` | `RACE` | Restores a small loam bridge beneath new or relaunched crew in Team Downhill Race upwards at the fixed starting platform height when its ground is missing. Checkpoints, intact ground and other races retain their authored behavior. Owned by clonk-org/clonk-rs#1826. |
 | `content-append-bird-flight` | `BIRD` | Replaces the shipped four-coin-flips-per-tick bird steering with a continuous flight controller (separation plus weak alignment). |
 | `content-append-airbike-steering` | `AB5B` | Hold-to-steer airbike handling with a double-integrator float model. Every test has an A/B twin pinning what LegacyClonk does with the append removed. |
 | `content-append-gped-remote` | `SF5B` | Keeps the pilot parked while the GPED steers an airbike, answering the stale single-coms that Jump'n'Run control would otherwise turn into movement. |

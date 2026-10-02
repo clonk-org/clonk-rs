@@ -12,6 +12,9 @@ use clonk_script::Value;
 
 const SCENARIO: &str = "Collection.c4f/Races.c4f/AbwaertsFalschrum.c4s";
 const APPEND: &str = "UpwardRaceSpawn.c";
+// The authored starting platform begins at y=3710; JoinPlayer places crew
+// two pixels above their eventual standing position (Script.c:88-93).
+const START_PLATFORM_Y: i32 = 3710;
 
 fn destroy_starting_platform(engine: &mut Engine) {
     let probe = object_with_definition(engine, "BRPR").unwrap_or_else(|| {
@@ -55,7 +58,7 @@ fn joining_upward_race_restores_footing_after_starting_platform_is_destroyed() {
     // LOAM::BridgeMaterial returns Earth (Objects.c4d/Items.c4d/Materials.c4d/Loam.c4d/Script.c:15-18).
     assert_eq!(
         engine
-            .debug_landscape_material_name(start.x, start.y + 10)
+            .debug_landscape_material_name(start.x, START_PLATFORM_Y)
             .as_deref(),
         Some("Earth"),
         "the arriving player gets solid loam beneath their feet"
@@ -65,7 +68,7 @@ fn joining_upward_race_restores_footing_after_starting_platform_is_destroyed() {
     }
     let standing = engine.test_object_snapshot(clonk);
     assert!(standing.alive, "the player survives the destroyed start");
-    assert!((standing.position.y - start.y).abs() <= 1, "{standing:?}");
+    assert_eq!(standing.position.y, START_PLATFORM_Y - 10);
 }
 
 #[test]
@@ -85,7 +88,7 @@ fn upward_race_relaunch_restores_a_destroyed_bridge_without_regrowing_it_midlife
     assert!(!engine
         .landscape()
         .expect("race landscape")
-        .is_solid_at(start.x, start.y + 10));
+        .is_solid_at(start.x, START_PLATFORM_Y));
 
     // The shipped suicide rule calls Kill, then CLNK::Death broadcasts
     // RelaunchPlayer when the last living crew member dies
@@ -104,7 +107,7 @@ fn upward_race_relaunch_restores_a_destroyed_bridge_without_regrowing_it_midlife
         .expect("restore respawn footing");
     assert_eq!(
         engine
-            .debug_landscape_material_name(respawn.x, respawn.y + 10)
+            .debug_landscape_material_name(respawn.x, START_PLATFORM_Y)
             .as_deref(),
         Some("Earth")
     );
@@ -114,9 +117,44 @@ fn upward_race_relaunch_restores_a_destroyed_bridge_without_regrowing_it_midlife
             .expect("stand after relaunch");
     }
     assert!(engine.test_object_snapshot(replacement).alive);
-    assert!((engine.test_object_snapshot(replacement).position.y - respawn.y).abs() <= 1);
+    assert_eq!(
+        engine.test_object_snapshot(replacement).position.y,
+        START_PLATFORM_Y - 10
+    );
 
-    // JoinPlayer gives a player's sign precedence over the default start.
+    // Repeated deaths may choose new x coordinates, but every bridge stays
+    // on the original platform row. None may be built above that row.
+    for _ in 0..4 {
+        destroy_starting_platform(&mut engine);
+        let index = engine.test_object_index(suicide);
+        engine
+            .call_object_function(index, "Activate", vec![Value::Int(player)])
+            .expect("repeat a normal relaunch");
+        let clonk = engine.crew_members(player)[0];
+        let spawn = engine.test_object_snapshot(clonk).position;
+        assert_eq!(spawn.y, 3698);
+        engine
+            .tick_without_snapshot()
+            .expect("restore the same platform row");
+        assert_eq!(
+            engine
+                .debug_landscape_material_name(spawn.x, START_PLATFORM_Y)
+                .as_deref(),
+            Some("Earth")
+        );
+        for y in spawn.y..START_PLATFORM_Y {
+            assert!(
+                !engine
+                    .landscape()
+                    .expect("race landscape")
+                    .is_solid_at(spawn.x, y),
+                "bridge grew above the platform at y={y}"
+            );
+        }
+    }
+
+    // Checkpoints keep their authored behavior; only the starting platform
+    // is repaired, so advancing up the course cannot create higher bridges.
     let sign = engine.spawn_test_object(
         SpawnConfig::new("SGNL")
             .with_owner(player)
@@ -135,13 +173,11 @@ fn upward_race_relaunch_restores_a_destroyed_bridge_without_regrowing_it_midlife
     );
     engine
         .tick_without_snapshot()
-        .expect("restore checkpoint footing");
-    assert_eq!(
-        engine
-            .debug_landscape_material_name(checkpoint.x, checkpoint.y + 10)
-            .as_deref(),
-        Some("Earth")
-    );
+        .expect("leave checkpoint footing unchanged");
+    assert!(!engine
+        .landscape()
+        .expect("race landscape")
+        .is_solid_at(checkpoint.x, checkpoint.y + 10));
 }
 
 #[test]

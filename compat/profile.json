@@ -462,7 +462,7 @@
     {
       "id": "content-append-upward-race-spawn",
       "area": "content",
-      "summary": "UpwardRaceSpawn.c restores a small loam bridge beneath a newly recruited Clonk in Team Downhill Race upwards when the spawn ground is missing, including relaunches and checkpoints.",
+      "summary": "UpwardRaceSpawn.c restores a small loam bridge beneath a newly recruited Clonk in Team Downhill Race upwards at the original starting platform height when its ground is missing, including relaunches. Checkpoints retain their authored behavior.",
       "cited_in": [
         "planet/System.c4g/UpwardRaceSpawn.c",
         "crates/clonk-engine/tests/it/upward_race_spawn.rs"
