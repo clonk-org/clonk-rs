@@ -11,6 +11,7 @@ publish.workspace = true
 
 [features]
 default = ["cpal"]
+cpal = ["dep:cpal", "dep:block2", "dep:objc2", "dep:objc2-av-foundation"]
 test-hooks = []
 
 [dependencies]
@@ -28,3 +29,8 @@ crossbeam-queue = "=0.3.14"
 
 [dev-dependencies]
 hound = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-av-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }

@@ -889,6 +889,9 @@ impl VoiceCaptureBackend for CpalVoiceCaptureBackend {
     ) -> Result<Self::Stream, VoiceCaptureError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+        #[cfg(target_os = "macos")]
+        crate::voice_permission::request_microphone_access(&options.control)?;
+
         let host = self.host.get();
         let device = match target {
             CaptureDeviceTarget::SystemDefault(expected) => {

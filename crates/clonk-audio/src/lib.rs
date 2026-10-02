@@ -11,6 +11,8 @@ mod voice_codec;
 #[cfg_attr(not(feature = "cpal"), allow(dead_code))]
 mod voice_devices;
 mod voice_microphone_test;
+#[cfg(any(all(target_os = "macos", feature = "cpal"), test))]
+mod voice_permission;
 #[cfg(test)]
 mod voice_qualification;
 mod voice_resampling;
