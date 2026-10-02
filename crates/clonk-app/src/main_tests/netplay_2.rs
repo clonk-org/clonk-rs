@@ -13590,6 +13590,35 @@ fn a_recreated_player_keeps_the_cursor_it_was_saved_with() {
 }
 
 #[test]
+fn a_runtime_joiner_without_a_player_leaves_other_players_crew_alone() {
+    // Until its own player joins, a joiner's local owner names no restored
+    // player and owns no crew. Focusing its view on another player's clonk
+    // must not select that clonk or move that player's cursor: neither is
+    // local state, and no other peer does it (clonk-org/clonk-rs#1825).
+    let mut app = new_state_only_running_sandbox_app();
+    app.engine.retain_restored_players([]);
+    app.players.local_owner = 1;
+    let sandbox_crew = app
+        .snapshot
+        .objects
+        .iter()
+        .filter(|object| object.crew_member)
+        .map(|object| object.id)
+        .collect::<Vec<_>>();
+    for id in sandbox_crew {
+        let mut update = ObjectUpdate::new();
+        update.owner = Some(-1); // NO_OWNER
+        app.engine.apply_object_update(id, update).test_value();
+    }
+    let (other, cursor, runtime_fields) = spawn_walker_crew(&mut app);
+
+    finalize_runtime_joined_walker(&mut app, 1, &runtime_fields);
+
+    main_assert_eq!(app.engine.crew_cursor(7) => Some(cursor), "the host's cursor survives the join");
+    main_assert!(!app.engine.test_object_snapshot(other).selected, "the host's unselected clonk stays unselected");
+}
+
+#[test]
 fn saved_raw_mouse_control_survives_a_failed_restore_preference_gate() {
     let mut app = new_running_sandbox_app();
     let owner = app.players.local_owner;

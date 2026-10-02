@@ -9876,7 +9876,12 @@ impl GameApp {
             select_focus_candidate(&self.snapshot, self.players.local_owner)
         {
             self.focus_id = Some(object_id);
-            if crew_member && owner >= 0 {
+            // Selection and cursor are synchronized player state: a peer may
+            // only claim its own crew. A runtime joiner whose player has not
+            // joined yet just looks at someone else's clonk; selecting it
+            // here would steer a different clonk than every other peer
+            // (clonk-org/clonk-rs#1825).
+            if crew_member && owner >= 0 && owner == self.players.local_owner {
                 if let Err(err) = self.engine.select_crew(owner, [object_id]) {
                     tracing::warn!(
                         object_id = %object_id,
