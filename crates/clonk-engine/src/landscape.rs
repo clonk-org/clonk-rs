@@ -1190,6 +1190,15 @@ impl PixelGrid {
         self.mask_background.0.get(&slot).copied().unwrap_or(byte)
     }
 
+    /// Every slot a put mask covers, with the byte [`Self::render_byte_in_slot`]
+    /// composes there, so a whole-plane copy can patch just those slots.
+    pub fn mask_backgrounds(&self) -> impl Iterator<Item = (usize, u8)> + '_ {
+        self.mask_background
+            .0
+            .iter()
+            .map(|(&slot, &byte)| (slot, byte))
+    }
+
     /// Whether any mask is currently put. A composition pass over a landscape
     /// with none can read the plane directly.
     pub fn has_mask_background(&self) -> bool {
