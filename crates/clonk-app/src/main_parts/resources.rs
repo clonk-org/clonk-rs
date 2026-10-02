@@ -3461,10 +3461,7 @@ pub(crate) fn load_options_program_state(
         .unwrap_or(&state.language_ex)
         .to_string();
     let language_infos = paths
-        .map(|paths| {
-            let system = Group::open(paths.system_group_path()).ok();
-            classic_language_packs(paths).language_infos(system.as_ref())
-        })
+        .map(installed_language_infos)
         .unwrap_or_else(|| state.language_infos.clone());
     if let Some(resources) = resources {
         state.no_language_info = resources

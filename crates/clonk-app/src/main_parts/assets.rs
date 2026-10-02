@@ -1993,6 +1993,14 @@ pub(crate) fn classic_language_packs(paths: &AppPaths) -> LanguagePacks {
     LanguagePacks::discover(&[paths.planet_dir().join("Language.c4g")], &logical_roots)
 }
 
+/// The installed language packs, in the order the options book lists them.
+pub(crate) fn installed_language_infos(
+    paths: &AppPaths,
+) -> Vec<clonk_resources::language::LanguageInfo> {
+    let system = Group::open(paths.system_group_path()).ok();
+    classic_language_packs(paths).language_infos(system.as_ref())
+}
+
 pub(crate) fn load_lobby_scenario_description(
     path: &Path,
     languages: &[String],
