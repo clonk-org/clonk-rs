@@ -30,16 +30,21 @@
 //! install. The launcher recreates its staged `System.c4g`/`Graphics.c4g`
 //! copies from the installed `planet/` before starting the runtime.
 //!
-//! The engine component also ships `COPYING`, `README.md`, `credits.txt` and,
-//! inside a bundle, `Contents/Info.plist`. Those are deliberately left alone:
-//! they are not worth the risk of a file-level overwrite that no rename can
-//! make atomic, and a stale copyright notice is not a failure a user can see.
+//! The engine component also ships `COPYING`, `README.md` and `credits.txt`.
+//! Those are deliberately left alone: they are not worth the risk of a
+//! file-level overwrite, and a stale copyright notice is not a failure a user
+//! can see.
 //!
-//! `Contents/Resources/ClonkRust.icns` is the one exception, because a stale
-//! icon *is* a failure a user can see — an install updated in place otherwise
-//! keeps its original icon for ever. It is replaced by a rename within its own
+//! Inside a bundle, two files are exceptions, because staleness there *is* a
+//! failure a user meets. `Contents/Resources/ClonkRust.icns`: an install
+//! updated in place otherwise keeps its original icon for ever.
+//! `Contents/Info.plist`: it declares what macOS lets the app do, and macOS
+//! ends an app that asks for the microphone without the
+//! `NSMicrophoneUsageDescription` a plist from before v0.11.0 lacks
+//! (clonk-org/clonk-rs#1849). Each is replaced by a rename within its own
 //! directory, which is atomic, with the old one moved aside so a rollback can
-//! put it back. See `install_bundle_icon`.
+//! put it back, and before the bundle is re-signed. See `install_bundle_icon`
+//! and `install_bundle_info_plist`.
 //!
 //! # macOS
 //!
@@ -112,6 +117,9 @@ const NESTED_BUNDLE_EXECUTABLES: [&str; 2] = ["clonk-game", "c4group"];
 /// The bundle icon, relative to the `.app`, as `xtask` writes it and
 /// `Info.plist`'s `CFBundleIconFile` names it.
 const BUNDLE_ICON: &str = "Contents/Resources/ClonkRust.icns";
+
+/// The bundle's `Info.plist`, relative to the `.app`.
+const BUNDLE_INFO_PLIST: &str = "Contents/Info.plist";
 
 /// A stable file whose host lock serializes apply and recovery processes.
 ///
@@ -1486,28 +1494,83 @@ fn displaced_bundle_icon(layout: &InstallLayout, nonce: &str) -> PathBuf {
 /// than overwritten so [`roll_back`] can restore it; the rename that replaces it
 /// is within one directory, so no window exists where neither is in place.
 fn install_bundle_icon(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
-    if !journal.steps.iter().any(|step| step.component == "engine") {
-        return Ok(());
-    }
-    let staged = layout
-        .scratch_dir(&journal.nonce)
-        .join("engine")
-        .join(BUNDLE_ICON);
-    if !present(&staged) {
-        return Ok(());
-    }
+    staged_bundle_file(layout, journal, BUNDLE_ICON).map_or(Ok(()), |staged| {
+        replace_bundle_file(
+            &staged,
+            &layout.root().join(BUNDLE_ICON),
+            &displaced_bundle_icon(layout, &journal.nonce),
+        )
+    })
+}
 
-    let installed = layout.root().join(BUNDLE_ICON);
-    if present(&installed) {
-        let displaced = displaced_bundle_icon(layout, &journal.nonce);
+/// Where the displaced `Info.plist` waits for [`roll_back`].
+fn displaced_bundle_info_plist(layout: &InstallLayout, nonce: &str) -> PathBuf {
+    layout.quarantine_dir(nonce).join("Info.plist")
+}
+
+/// Installs the `Info.plist` the engine component ships.
+///
+/// It declares what macOS lets the app do, not only what it is called: an
+/// install made before `NSMicrophoneUsageDescription` shipped kept its original
+/// plist through every update, and macOS ends an app that asks for the
+/// microphone without one (clonk-org/clonk-rs#1849). The bundle is re-signed
+/// afterwards, so the new seal covers it.
+///
+/// Only an existing plist is replaced. The journal records no plist state, so
+/// a displaced copy is all [`roll_back`] has to restore from.
+fn install_bundle_info_plist(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
+    let installed = layout.root().join(BUNDLE_INFO_PLIST);
+    staged_bundle_file(layout, journal, BUNDLE_INFO_PLIST)
+        .filter(|_| present(&installed))
+        .map_or(Ok(()), |staged| {
+            replace_bundle_file(
+                &staged,
+                &installed,
+                &displaced_bundle_info_plist(layout, &journal.nonce),
+            )
+        })
+}
+
+/// The engine component's copy of a file inside the bundle, when this update
+/// ships one. Only `Contents/MacOS` is swapped, so anything else it carries is
+/// extracted here and discarded unless installed on its own.
+fn staged_bundle_file(layout: &InstallLayout, journal: &Journal, path: &str) -> Option<PathBuf> {
+    journal
+        .steps
+        .iter()
+        .any(|step| step.component == "engine")
+        .then(|| layout.scratch_dir(&journal.nonce).join("engine").join(path))
+        .filter(|staged| present(staged))
+}
+
+/// Moves `installed`, if any, aside to `displaced` for [`roll_back`], then
+/// renames `staged` into its place. Both renames stay within one directory, so
+/// no window exists where neither file is in place.
+fn replace_bundle_file(
+    staged: &Path,
+    installed: &Path,
+    displaced: &Path,
+) -> Result<(), ApplyError> {
+    if present(installed) {
         if let Some(parent) = displaced.parent() {
             ensure_dir(parent)?;
         }
-        rename(&installed, &displaced)?;
+        rename(installed, displaced)?;
     } else if let Some(parent) = installed.parent() {
         ensure_dir(parent)?;
     }
-    rename(&staged, &installed)
+    rename(staged, installed)
+}
+
+/// Puts back a file [`replace_bundle_file`] moved aside, reporting whether
+/// there was one.
+fn restore_bundle_file(displaced: &Path, installed: &Path) -> Result<bool, ApplyError> {
+    if !present(displaced) {
+        return Ok(false);
+    }
+    remove_any(installed)?;
+    rename(displaced, installed)?;
+    Ok(true)
 }
 
 /// Re-seals a bundle, in the order `xtask`'s `sign_macos_bundle` uses.
@@ -1536,6 +1599,7 @@ fn prepare_commit(layout: &InstallLayout, journal: &Journal) -> Result<(), Apply
         // Before state is recorded and the bundle is signed, so the new seal
         // covers both changes.
         install_bundle_icon(layout, journal)?;
+        install_bundle_info_plist(layout, journal)?;
     }
     Ok(())
 }
@@ -1700,14 +1764,15 @@ fn roll_back(layout: &InstallLayout, journal: &mut Journal, work: &Path) -> Resu
     // The icon is a file rather than one of the swapped trees, so it needs its
     // own restore: `install_bundle_icon` runs before the bundle is re-signed and
     // therefore has already replaced it by the time a failing seal lands here.
-    let displaced = displaced_bundle_icon(layout, &journal.nonce);
-    if present(&displaced) {
-        let installed = layout.root().join(BUNDLE_ICON);
+    let installed = layout.root().join(BUNDLE_ICON);
+    let restored = restore_bundle_file(&displaced_bundle_icon(layout, &journal.nonce), &installed)?;
+    if !restored && journal.previous_bundle_icon_present == Some(false) {
         remove_any(&installed)?;
-        rename(&displaced, &installed)?;
-    } else if journal.previous_bundle_icon_present == Some(false) {
-        remove_any(&layout.root().join(BUNDLE_ICON))?;
     }
+    restore_bundle_file(
+        &displaced_bundle_info_plist(layout, &journal.nonce),
+        &layout.root().join(BUNDLE_INFO_PLIST),
+    )?;
     Ok(())
 }
 
@@ -2335,6 +2400,7 @@ mod tests {
                     (&format!("{prefix}/c4group"), "new c4group"),
                     ("COPYING", "licence"),
                     (BUNDLE_ICON, "new icon"),
+                    ("Contents/Info.plist", "new plist"),
                 ],
             )
         }
@@ -2539,6 +2605,7 @@ mod tests {
         write_file(&data.join("Clonk-rust-2026-07-28.log"), "launcher log");
         if bundle {
             write_file(&layout.root().join(BUNDLE_ICON), "old icon");
+            write_file(&layout.root().join("Contents/Info.plist"), "old plist");
         }
 
         let downloads = directory.path().join("downloads");
@@ -3175,6 +3242,51 @@ mod tests {
         assert_eq!(read_file(&install.root().join(BUNDLE_ICON)), "new icon");
         // The icon is a single exception, not a wider engine scope.
         assert!(!install.layout.data_dir().join("COPYING").exists());
+    }
+
+    /// clonk-org/clonk-rs#1849: an install made before the release that added
+    /// `NSMicrophoneUsageDescription` kept its `Info.plist` through every update,
+    /// and macOS ends an app that asks for the microphone without one.
+    #[test]
+    fn a_bundle_apply_installs_the_release_info_plist() {
+        let install = install_with(true);
+        install.apply_components(["engine"]);
+
+        assert_eq!(
+            read_file(&install.root().join("Contents/Info.plist")),
+            "new plist"
+        );
+    }
+
+    // Like the icon, the plist is replaced before signing, so a seal that
+    // fails to verify must put the old one back with everything else.
+    #[test]
+    fn a_rolled_back_bundle_apply_restores_the_old_info_plist() {
+        let install = install_with(true);
+
+        install
+            .apply_components_with(
+                ["engine"],
+                &FakePlatform::new().failing_codesign("--verify"),
+            )
+            .expect_err("a bundle whose signature does not verify must not be kept");
+
+        assert_eq!(
+            read_file(&install.root().join("Contents/Info.plist")),
+            "old plist"
+        );
+    }
+
+    // Replaced, never added: the journal records no plist state, so only a
+    // displaced copy can tell a rollback what to restore.
+    #[test]
+    fn a_bundle_without_an_info_plist_is_not_given_one() {
+        let install = install_with(true);
+        std::fs::remove_file(install.root().join("Contents/Info.plist")).expect("remove old plist");
+
+        install.apply_components(["engine"]);
+
+        assert!(!install.root().join("Contents/Info.plist").exists());
     }
 
     // An iconless component keeps the installed icon.

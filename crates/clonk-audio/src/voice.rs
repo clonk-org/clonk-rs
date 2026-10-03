@@ -175,6 +175,10 @@ const MAX_VOICE_CAPTURE_CHANNELS: u16 = 32;
 pub enum VoiceCaptureError {
     #[error("microphone permission was denied: {0}")]
     PermissionDenied(String),
+    /// The app bundle's `Info.plist` lacks `NSMicrophoneUsageDescription`, and
+    /// macOS ends a process that asks for the microphone without one.
+    #[error("this app does not declare microphone use, so macOS would end it for asking")]
+    UndeclaredMicrophoneUse,
     #[error("microphone device is busy: {0}")]
     DeviceBusy(String),
     #[error("microphone capture was cancelled")]
@@ -632,6 +636,9 @@ impl VoiceCaptureOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VoiceCaptureStatus {
     PermissionDenied,
+    /// The app cannot ask macOS for the microphone; see
+    /// [`VoiceCaptureError::UndeclaredMicrophoneUse`].
+    UndeclaredMicrophoneUse,
     DeviceBusy,
     Opening,
     Active,
@@ -644,6 +651,7 @@ impl VoiceCaptureStatus {
     fn from_error(error: &VoiceCaptureError) -> Self {
         match error {
             VoiceCaptureError::PermissionDenied(_) => Self::PermissionDenied,
+            VoiceCaptureError::UndeclaredMicrophoneUse => Self::UndeclaredMicrophoneUse,
             VoiceCaptureError::DeviceBusy(_) => Self::DeviceBusy,
             VoiceCaptureError::Unavailable
             | VoiceCaptureError::NoInputDevice
@@ -1821,6 +1829,17 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// clonk-org/clonk-rs#1849: the remedy is reinstalling the app, which
+    /// neither "allow it in System Settings" (nothing is listed there) nor
+    /// "reconnecting" describes.
+    #[test]
+    fn an_app_that_cannot_declare_microphone_use_reports_its_own_status() {
+        assert_eq!(
+            VoiceCaptureStatus::from_error(&VoiceCaptureError::UndeclaredMicrophoneUse),
+            VoiceCaptureStatus::UndeclaredMicrophoneUse
+        );
     }
 
     #[test]

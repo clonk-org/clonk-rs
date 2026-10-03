@@ -11,7 +11,7 @@ publish.workspace = true
 
 [features]
 default = ["cpal"]
-cpal = ["dep:cpal", "dep:block2", "dep:objc2", "dep:objc2-av-foundation"]
+cpal = ["dep:cpal", "dep:block2", "dep:objc2", "dep:objc2-av-foundation", "dep:objc2-foundation"]
 test-hooks = []
 
 [dependencies]
@@ -34,3 +34,4 @@ hound = "3"
 block2 = { version = "0.6.2", optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-av-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSBundle", "NSPathUtilities", "NSString"] }

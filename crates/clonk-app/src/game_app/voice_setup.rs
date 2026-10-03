@@ -730,11 +730,14 @@ fn start_local_microphone_check(
     }
 }
 
-fn capture_status_text(status: &clonk_audio::VoiceCaptureStatus) -> String {
+pub(crate) fn capture_status_text(status: &clonk_audio::VoiceCaptureStatus) -> String {
     use clonk_audio::VoiceCaptureStatus::*;
     match status {
         PermissionDenied => {
             "Microphone permission denied. Allow access in system settings, then retry.".into()
+        }
+        UndeclaredMicrophoneUse => {
+            "This copy of Clonk Rust can't use the microphone. Reinstall the latest release.".into()
         }
         DeviceBusy => "Microphone is busy. Close the other audio app, then retry.".into(),
         Opening => "Microphone did not open in time. Check the device, then retry.".into(),
