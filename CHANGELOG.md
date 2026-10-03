@@ -4,6 +4,19 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-03
+
+### Bug fixes
+
+- Encode the macOS microphone permission callback (#1847)
+- Draw solid-masked ground like the CPU pass and test the shader landscape on a real scenario (#1844)
+- Compose the shader landscape at the extent of the tile it replaces (#1842)
+- Keep stock-material scenarios running under the shader landscape on Apple GPUs (#1839)
+
+### Features
+
+- Rework the in-game chat around tabs, a recipient chip and readable message colours (#1845)
+
 ## [1.3.0] - 2026-10-02
 
 ### Bug fixes
