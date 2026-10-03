@@ -55,8 +55,6 @@ fn authorize(
 pub(crate) fn request_microphone_access(
     control: &VoiceCaptureControl,
 ) -> Result<(), VoiceCaptureError> {
-    use block2::RcBlock;
-    use objc2::runtime::Bool;
     use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 
     // SAFETY: the framework owns this constant for the process lifetime.
@@ -73,10 +71,7 @@ pub(crate) fn request_microphone_access(
         _ => AuthorizationStatus::Denied,
     };
     authorize(control, status, |reply| {
-        let completion = RcBlock::new(move |granted: Bool| {
-            // Capture may have been cancelled while the system prompt was open.
-            let _ = reply.send(granted.as_bool());
-        });
+        let completion = crate::voice_permission_block::completion(reply);
         // SAFETY: the block owns its sender and has the framework's BOOL ABI.
         // AVFoundation copies the block for its asynchronous completion.
         unsafe {

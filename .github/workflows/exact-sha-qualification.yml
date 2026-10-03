@@ -765,6 +765,9 @@ jobs:
           shared-key: recording-host-oracles
           save-if: ${{ inputs.publish-recording-host-cache }}
 
+      - name: Run native microphone permission callback tests
+        run: cargo nextest run -p clonk-audio --locked -E 'test(voice_permission_block::)'
+
       # scripts/tests/test_rust_ci_recording_host_gate.py requires these
       # material-order oracles to appear here even though they now run on
       # every host (clonk-org/clonk-rs#1455).
