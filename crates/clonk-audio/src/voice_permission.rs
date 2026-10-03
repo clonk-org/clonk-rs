@@ -10,6 +10,29 @@ enum AuthorizationStatus {
     Denied,
 }
 
+/// The running process's main bundle, as macOS's privacy check sees it.
+enum MainBundle {
+    /// A bare executable, such as a terminal run: macOS attributes its
+    /// requests to the app that launched it.
+    Unbundled,
+    App {
+        declares_microphone_use: bool,
+    },
+}
+
+/// macOS terminates an app that asks for the microphone without
+/// `NSMicrophoneUsageDescription` rather than denying it. The in-app updater
+/// keeps an install's original `Info.plist`, so one installed before the key
+/// shipped never gains it.
+fn require_declared_microphone_use(bundle: MainBundle) -> Result<(), VoiceCaptureError> {
+    match bundle {
+        MainBundle::App {
+            declares_microphone_use: false,
+        } => Err(VoiceCaptureError::UndeclaredMicrophoneUse),
+        MainBundle::App { .. } | MainBundle::Unbundled => Ok(()),
+    }
+}
+
 fn permission_denied() -> VoiceCaptureError {
     VoiceCaptureError::PermissionDenied(
         "allow microphone access in System Settings > Privacy & Security > Microphone".into(),
@@ -52,10 +75,36 @@ fn authorize(
 }
 
 #[cfg(all(target_os = "macos", feature = "cpal"))]
+fn main_bundle() -> MainBundle {
+    use objc2_foundation::{ns_string, NSBundle, NSString};
+
+    let bundle = NSBundle::mainBundle();
+    if !bundle
+        .bundlePath()
+        .pathExtension()
+        .to_string()
+        .eq_ignore_ascii_case("app")
+    {
+        return MainBundle::Unbundled;
+    }
+    let declares_microphone_use = bundle
+        .objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription"))
+        .and_then(|value| value.downcast::<NSString>().ok())
+        .is_some_and(|description| !description.to_string().trim().is_empty());
+    MainBundle::App {
+        declares_microphone_use,
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "cpal"))]
 pub(crate) fn request_microphone_access(
     control: &VoiceCaptureControl,
 ) -> Result<(), VoiceCaptureError> {
     use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
+
+    // Before anything reaches AVFoundation or the device: asking is what
+    // macOS punishes (clonk-org/clonk-rs#1849).
+    require_declared_microphone_use(main_bundle())?;
 
     // SAFETY: the framework owns this constant for the process lifetime.
     let media_type = unsafe { AVMediaTypeAudio }.ok_or_else(|| {
@@ -84,6 +133,40 @@ pub(crate) fn request_microphone_access(
 mod tests {
     use super::*;
     use crate::VoiceCaptureControl;
+
+    /// clonk-org/clonk-rs#1849: macOS ends an app that asks for the microphone
+    /// without `NSMicrophoneUsageDescription`, and an install updated in place
+    /// from before v0.11.0 still has such an `Info.plist`.
+    #[test]
+    fn an_app_that_does_not_declare_microphone_use_never_asks_macos() {
+        let result = require_declared_microphone_use(MainBundle::App {
+            declares_microphone_use: false,
+        });
+        assert!(matches!(
+            result,
+            Err(VoiceCaptureError::UndeclaredMicrophoneUse)
+        ));
+    }
+
+    #[test]
+    fn a_declaring_app_or_a_bare_executable_may_ask_macos() {
+        for bundle in [
+            MainBundle::Unbundled,
+            MainBundle::App {
+                declares_microphone_use: true,
+            },
+        ] {
+            assert!(require_declared_microphone_use(bundle).is_ok());
+        }
+    }
+
+    /// A terminal or `cargo` run is a bare executable whose requests macOS
+    /// attributes to the terminal, so the guard must not refuse it.
+    #[cfg(all(target_os = "macos", feature = "cpal"))]
+    #[test]
+    fn a_bare_executable_is_not_mistaken_for_an_app_bundle() {
+        assert!(matches!(main_bundle(), MainBundle::Unbundled));
+    }
 
     #[test]
     fn undetermined_microphone_access_requests_authorization() {

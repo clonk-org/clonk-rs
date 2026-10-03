@@ -949,6 +949,7 @@ dependencies = [
  "midly",
  "objc2 0.6.4",
  "objc2-av-foundation",
+ "objc2-foundation 0.3.2",
  "opus",
  "symphonia-bundle-mp3",
  "symphonia-core",

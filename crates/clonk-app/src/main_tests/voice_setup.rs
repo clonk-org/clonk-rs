@@ -318,3 +318,15 @@ fn a_client_negotiates_voice_before_microphone_opt_in() {
         "local microphone opt-in must not require reconnecting to negotiate UDP voice"
     );
 }
+
+/// clonk-org/clonk-rs#1849: an install whose `Info.plist` cannot declare
+/// microphone use is fixed by reinstalling, not by a System Settings page that
+/// lists nothing for it.
+#[test]
+fn an_install_that_cannot_ask_for_the_microphone_is_told_to_reinstall() {
+    let text = crate::game_app_voice_setup::capture_status_text(
+        &clonk_audio::VoiceCaptureStatus::UndeclaredMicrophoneUse,
+    );
+    assert!(text.contains("Reinstall"), "{text}");
+    assert!(!text.contains("settings"), "{text}");
+}
