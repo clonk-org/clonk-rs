@@ -13,6 +13,8 @@ mod voice_devices;
 mod voice_microphone_test;
 #[cfg(any(all(target_os = "macos", feature = "cpal"), test))]
 mod voice_permission;
+#[cfg(all(target_os = "macos", feature = "cpal"))]
+mod voice_permission_block;
 #[cfg(test)]
 mod voice_qualification;
 mod voice_resampling;
