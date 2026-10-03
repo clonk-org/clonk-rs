@@ -1486,28 +1486,55 @@ fn displaced_bundle_icon(layout: &InstallLayout, nonce: &str) -> PathBuf {
 /// than overwritten so [`roll_back`] can restore it; the rename that replaces it
 /// is within one directory, so no window exists where neither is in place.
 fn install_bundle_icon(layout: &InstallLayout, journal: &Journal) -> Result<(), ApplyError> {
-    if !journal.steps.iter().any(|step| step.component == "engine") {
-        return Ok(());
-    }
-    let staged = layout
-        .scratch_dir(&journal.nonce)
-        .join("engine")
-        .join(BUNDLE_ICON);
-    if !present(&staged) {
-        return Ok(());
-    }
+    staged_bundle_file(layout, journal, BUNDLE_ICON).map_or(Ok(()), |staged| {
+        replace_bundle_file(
+            &staged,
+            &layout.root().join(BUNDLE_ICON),
+            &displaced_bundle_icon(layout, &journal.nonce),
+        )
+    })
+}
 
-    let installed = layout.root().join(BUNDLE_ICON);
-    if present(&installed) {
-        let displaced = displaced_bundle_icon(layout, &journal.nonce);
+/// The engine component's copy of a file inside the bundle, when this update
+/// ships one. Only `Contents/MacOS` is swapped, so anything else it carries is
+/// extracted here and discarded unless installed on its own.
+fn staged_bundle_file(layout: &InstallLayout, journal: &Journal, path: &str) -> Option<PathBuf> {
+    journal
+        .steps
+        .iter()
+        .any(|step| step.component == "engine")
+        .then(|| layout.scratch_dir(&journal.nonce).join("engine").join(path))
+        .filter(|staged| present(staged))
+}
+
+/// Moves `installed`, if any, aside to `displaced` for [`roll_back`], then
+/// renames `staged` into its place. Both renames stay within one directory, so
+/// no window exists where neither file is in place.
+fn replace_bundle_file(
+    staged: &Path,
+    installed: &Path,
+    displaced: &Path,
+) -> Result<(), ApplyError> {
+    if present(installed) {
         if let Some(parent) = displaced.parent() {
             ensure_dir(parent)?;
         }
-        rename(&installed, &displaced)?;
+        rename(installed, displaced)?;
     } else if let Some(parent) = installed.parent() {
         ensure_dir(parent)?;
     }
-    rename(&staged, &installed)
+    rename(staged, installed)
+}
+
+/// Puts back a file [`replace_bundle_file`] moved aside, reporting whether
+/// there was one.
+fn restore_bundle_file(displaced: &Path, installed: &Path) -> Result<bool, ApplyError> {
+    if !present(displaced) {
+        return Ok(false);
+    }
+    remove_any(installed)?;
+    rename(displaced, installed)?;
+    Ok(true)
 }
 
 /// Re-seals a bundle, in the order `xtask`'s `sign_macos_bundle` uses.
@@ -1700,13 +1727,10 @@ fn roll_back(layout: &InstallLayout, journal: &mut Journal, work: &Path) -> Resu
     // The icon is a file rather than one of the swapped trees, so it needs its
     // own restore: `install_bundle_icon` runs before the bundle is re-signed and
     // therefore has already replaced it by the time a failing seal lands here.
-    let displaced = displaced_bundle_icon(layout, &journal.nonce);
-    if present(&displaced) {
-        let installed = layout.root().join(BUNDLE_ICON);
+    let installed = layout.root().join(BUNDLE_ICON);
+    let restored = restore_bundle_file(&displaced_bundle_icon(layout, &journal.nonce), &installed)?;
+    if !restored && journal.previous_bundle_icon_present == Some(false) {
         remove_any(&installed)?;
-        rename(&displaced, &installed)?;
-    } else if journal.previous_bundle_icon_present == Some(false) {
-        remove_any(&layout.root().join(BUNDLE_ICON))?;
     }
     Ok(())
 }
