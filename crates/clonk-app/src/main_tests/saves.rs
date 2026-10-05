@@ -2633,7 +2633,7 @@ fn advanced_options_click_save_and_cancel_round_trip_typed_config() {
     main_assert!(controller.set_value("General", "MissionAccess", AdvancedConfigValue::Text("Secret;Beta".to_string()),));
     main_assert!(controller.set_value("Graphics", "ShowFolderMaps", AdvancedConfigValue::Bool(false),));
     main_assert!(controller.set_value("Sound", "MenuMusic", AdvancedConfigValue::Bool(false),));
-    let replacement_key = input::advanced_config_default_raw_keyboard_keys()[0][1];
+    let replacement_key = input::advanced_config_default_raw_keyboard_keys(crate::settings::CompatProfile::LegacyClonk)[0][1];
     main_assert!(controller.set_value("Controls", "Kbd1Key1", AdvancedConfigValue::Integer {value: i128::from(replacement_key), min: i128::MIN, max: i128::MAX,},));
     main_assert!(!controller.set_value("General", "Version", AdvancedConfigValue::ReadOnly("999".to_string()),));
     app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])

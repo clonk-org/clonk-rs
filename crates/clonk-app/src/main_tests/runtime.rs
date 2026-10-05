@@ -2278,6 +2278,7 @@ fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
         test_runtime_config_with("Fresh player".to_string(), false),
     )
     .test_value();
+    app.bindings = KeyboardBindings::load(None, crate::settings::CompatProfile::LegacyClonk);
     install_classic_test_assets(&mut app);
 
     let mut definition = test_definition("JMPR", "Jumper", walker_script());
@@ -2707,7 +2708,7 @@ fn collect_player_overlay_marks_focus_and_energy() {
         ..PlayerState::default()
     });
 
-    let mut bindings = KeyboardBindings::load(None);
+    let mut bindings = KeyboardBindings::load(None, crate::settings::CompatProfile::LegacyClonk);
     assert!(bindings.rebind_for_set(2, ControlBindingId::PlayerMenu, VirtualKeyCode::F8,));
     let mut gamepad_bindings = GamepadBindings::default();
     for (binding, button) in [
@@ -2866,7 +2867,7 @@ fn command_key_label_uses_the_owning_players_keyboard_set() {
         control_set: 2,
         ..PlayerState::default()
     });
-    let mut bindings = KeyboardBindings::load(None);
+    let mut bindings = KeyboardBindings::load(None, crate::settings::CompatProfile::LegacyClonk);
     assert!(bindings.rebind_for_set(
         2,
         ControlBindingId::PlayerMenu,
@@ -2902,7 +2903,7 @@ fn command_key_label_uses_the_owning_players_gamepad_set() {
         control_set: 6,
         ..PlayerState::default()
     });
-    let bindings = KeyboardBindings::load(None);
+    let bindings = KeyboardBindings::load(None, crate::settings::CompatProfile::LegacyClonk);
     let mut gamepad_bindings = GamepadBindings::default();
     gamepad_bindings.rebind_raw(
         2,

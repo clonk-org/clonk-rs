@@ -425,7 +425,8 @@ fn focus_loss_clears_controls_repeat_tracking_and_pointer_state() {
         screen: GuiPoint::new(30.0, 40.0),
     });
 
-    AppVirtualKeyboard::new(&mut app).press(VirtualKeyCode::KeyX);
+    let down = app.bindings.key_for(ControlBindingId::Down).test_value();
+    AppVirtualKeyboard::new(&mut app).press(down);
     main_assert!(!app.input_routing.live.pressed_engine_keys.is_empty());
     main_assert_ne!(app.engine.snapshot().players.into_iter().find(|player| player.id == app.players.local_owner).expect("local player").control.pressed_coms => 0);
 

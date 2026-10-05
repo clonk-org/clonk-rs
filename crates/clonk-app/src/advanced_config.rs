@@ -385,7 +385,9 @@ fn general(config: &Config) -> AdvancedConfigSection {
 fn controls(config: &Config) -> AdvancedConfigSection {
     let section = "Controls";
     let mut rows = Vec::with_capacity(50);
-    let defaults = advanced_config_default_raw_keyboard_keys();
+    let defaults = advanced_config_default_raw_keyboard_keys(
+        crate::settings::resolve_compat_profile(Some(config), None),
+    );
     for keyboard in 1..=4 {
         for key in 1..=12 {
             rows.push(i32_row(

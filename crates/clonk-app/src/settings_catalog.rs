@@ -9,7 +9,20 @@ use clonk_frontend::startup_options_advanced::{AdvancedConfigChoice, AdvancedCon
 use clonk_resources::language::LanguageInfo;
 
 pub(crate) fn catalog(config: &Config) -> Vec<Setting> {
-    let defaults = crate::advanced_config::sections(&Config::new());
+    let mut default_config = Config::new();
+    let keyboard_defaults = crate::input::advanced_config_default_raw_keyboard_keys(
+        crate::settings::resolve_compat_profile(Some(config), None),
+    );
+    for (set, keys) in keyboard_defaults.into_iter().enumerate() {
+        for (control, key) in keys.into_iter().enumerate() {
+            default_config.set_in(
+                Some("Controls"),
+                format!("Kbd{}Key{}", set + 1, control + 1),
+                key.to_string(),
+            );
+        }
+    }
+    let defaults = crate::advanced_config::sections(&default_config);
     let mut settings: Vec<_> = crate::advanced_config::sections(config)
         .into_iter()
         .flat_map(|section| {

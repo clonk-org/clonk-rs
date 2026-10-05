@@ -833,11 +833,14 @@ impl PreparedRealInstalledScenario {
         let paths = test_app_paths();
         paths.ensure_user_dirs().test_value();
         // The production launcher adapts an empty config before clonk-app.
-        fs::write(
-            paths.config_file(),
+        let mut config = Config::from_reader(&mut std::io::Cursor::new(
             b"[General]\nVersion=362\n[Graphics]\nShader=true\nDisableGamma=false\n",
-        )
+        ))
         .test_value();
+        // These oracle routes pin C4Config.cpp:624-635's physical keys.
+        KeyboardBindings::load(None, crate::settings::CompatProfile::LegacyClonk)
+            .write_to_config(&mut config);
+        config.save(paths.config_file()).test_value();
         let audio_options = AudioOptions {
             sound_enabled: false,
             music_enabled: false,
@@ -2733,6 +2736,10 @@ fn new_running_sandbox_app_with_definitions_and_assets(
         Some(Vec::new()),
     )
     .test_value();
+    // Native input/GUI contracts pin C4Config.cpp:624-635's physical keys.
+    app.bindings = KeyboardBindings::load(None, crate::settings::CompatProfile::LegacyClonk);
+    app.engine
+        .set_control_key_names(configured_control_key_names(&app.bindings));
     match fixture_assets {
         SandboxFixtureAssets::StateOnly => {}
         SandboxFixtureAssets::Synthetic => install_synthetic_classic_test_assets(&mut app),
@@ -3057,7 +3064,12 @@ fn test_game_app(
     audio_options: AudioOptions,
     paths: Option<&AppPaths>,
 ) -> Result<GameApp> {
-    GameApp::new(width, height, audio_options, paths, test_runtime_config())
+    let mut app = GameApp::new(width, height, audio_options, paths, test_runtime_config())?;
+    // Native input/GUI contracts pin C4Config.cpp:624-635's physical keys.
+    app.bindings = KeyboardBindings::load(paths, crate::settings::CompatProfile::LegacyClonk);
+    app.engine
+        .set_control_key_names(configured_control_key_names(&app.bindings));
+    Ok(app)
 }
 
 #[cfg(any(not(feature = "app-test-shard-mode"), feature = "app-test-shard-5"))]

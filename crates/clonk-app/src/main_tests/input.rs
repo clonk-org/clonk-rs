@@ -3001,7 +3001,7 @@ fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         ..PlayerState::default()
     });
 
-    let bindings = KeyboardBindings::load(None);
+    let bindings = KeyboardBindings::load(None, crate::settings::CompatProfile::LegacyClonk);
     let mut overlays = collect_player_overlays(
         &mut engine,
         &snapshot,
