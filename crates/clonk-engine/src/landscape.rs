@@ -9363,7 +9363,10 @@ mod tests {
             materials.clone(),
             textures.clone(),
         );
-        let previous = grid.clone();
+        // Built from its own allocations rather than cloned: a clone shares the
+        // name tables' `Arc`s, and `Arc<T: Eq>` equality short-circuits on the
+        // pointer, so the compare below would never read a single name.
+        let previous = PixelGrid::new(2, 2, vec![0; 4], vec![0; SLOTS], materials, textures);
 
         // Worst case for the compare it replaces: equal tables, so every one
         // of the 2 x 128 entries is examined before it can answer "same".
